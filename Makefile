@@ -1,40 +1,37 @@
-.PHONY: test fmt fmt-check clippy coverage coverage-lcov test-ci ci build build-no-cache run run-local push pull clean help
+.PHONY: test fmt fmt-check clippy coverage ci build build-no-cache run run-local push pull clean help
 
 IMAGE_NAME := ci-tui
 VERSION ?= latest
 LOCAL_IMAGE := $(IMAGE_NAME):local
-REGISTRY ?= ghcr.io/lendable
+REGISTRY ?= docker.io
 FULL_IMAGE := $(REGISTRY)/$(IMAGE_NAME):$(VERSION)
+
+# Docker image for running cargo commands (matches CI toolchain)
+RUST_IMAGE := rust:latest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-# === Development ===
+# === Development (runs in Docker) ===
 
 test: ## Run tests with nextest
-	cargo nextest run
-
-test-ci: ## Run tests with nextest (CI profile)
-	cargo nextest run --profile ci
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "cargo install cargo-nextest --locked && cargo nextest run"
 
 fmt: ## Format code
-	cargo fmt
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "rustup component add rustfmt && cargo fmt"
 
 fmt-check: ## Check formatting without fixing
-	cargo fmt -- --check
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "rustup component add rustfmt && cargo fmt -- --check"
 
 clippy: ## Run clippy lints
-	cargo clippy -- -D warnings
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "rustup component add clippy && cargo clippy -- -D warnings"
 
-coverage: ## Generate HTML coverage report
-	cargo llvm-cov nextest --html --open
+coverage: ## Generate LCOV coverage report
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov cargo-nextest --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
 
-coverage-lcov: ## Generate LCOV coverage report
-	cargo llvm-cov nextest --lcov --output-path lcov.info
+# === CI (mirrors GitHub Actions) ===
 
-# === CI ===
-
-ci: fmt-check clippy test ## Run all CI checks locally
+ci: fmt-check clippy test ## Run all CI checks locally (in Docker)
 
 # === Docker Image ===
 
