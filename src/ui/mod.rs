@@ -29,10 +29,6 @@ use tokio::task::JoinHandle;
 const STATS_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 /// Keyboard poll timeout - responsive enough for shutdown, not too CPU intensive
 const KEYBOARD_POLL_TIMEOUT: Duration = Duration::from_millis(50);
-/// Maximum runner events to process per frame to prevent UI starvation
-const MAX_RUNNER_EVENTS_PER_FRAME: usize = 50;
-/// Frame duration for ~60fps rendering
-const FRAME_DURATION: Duration = Duration::from_millis(16);
 /// Channel capacity for system stats
 const STATS_CHANNEL_CAPACITY: usize = 4;
 /// Channel capacity for runner events
@@ -44,6 +40,17 @@ pub struct SystemStats {
     pub cpu_usage: f32,
     pub mem_used: u64,
     pub mem_total: u64,
+}
+
+/// Messages for the event loop - all state transitions go through explicit Message variants
+#[derive(Debug)]
+enum Message {
+    KeyPress(KeyEvent),
+    RunnerEvent(RunnerEvent),
+    SystemStats(SystemStats),
+    FixResult(CheckResult),
+    FixAllResult(CheckResult, bool),  // (result, is_last)
+    RetryResult(CheckResult),
 }
 
 /// Spawn a dedicated OS thread for keyboard input handling
@@ -58,9 +65,9 @@ pub struct SystemStats {
 /// keyboard events due to backpressure.
 fn spawn_keyboard_thread(
     shutdown: Arc<AtomicBool>,
-) -> (std::sync::mpsc::Receiver<KeyEvent>, thread::JoinHandle<()>) {
-    // Use std::sync::mpsc (unbounded) to never drop keyboard events
-    let (tx, rx) = std::sync::mpsc::channel();
+) -> (mpsc::UnboundedReceiver<KeyEvent>, thread::JoinHandle<()>) {
+    // Use tokio mpsc unbounded channel for async/await compatibility
+    let (tx, rx) = mpsc::unbounded_channel();
 
     let handle = thread::Builder::new()
         .name("keyboard-input".to_string())
@@ -71,6 +78,7 @@ fn spawn_keyboard_thread(
                         // Filter for Press events only (Windows sends Press+Release)
                         if key.kind == KeyEventKind::Press {
                             // If send fails, receiver is dropped - exit thread
+                            // Use blocking_send from std::thread context
                             if tx.send(key).is_err() {
                                 break;
                             }
@@ -128,6 +136,16 @@ enum KeyAction {
     Quit,
     /// Retry all checks with refreshed git state
     RetryAll {
+        new_changed_files: ChangedFiles,
+        new_checks: Vec<CheckToRun>,
+    },
+}
+
+/// Action result from handle_message
+enum Action {
+    Continue,
+    Quit,
+    RestartRunner {
         new_changed_files: ChangedFiles,
         new_checks: Vec<CheckToRun>,
     },
@@ -359,6 +377,66 @@ fn handle_key_event(
     }
 }
 
+/// Handle a message from the event loop and update app state
+/// All state changes go through this function via &mut App
+fn handle_message(
+    app: &mut App,
+    msg: Message,
+    channels: &EventChannels,
+    config: &CiConfig,
+) -> Result<Action> {
+    match msg {
+        Message::KeyPress(key) => {
+            // Clear status message on any key press
+            if app.status_message.is_some() {
+                app.status_message = None;
+                app.needs_redraw = true;
+                return Ok(Action::Continue);
+            }
+
+            // Dispatch to key handler
+            match handle_key_event(app, key, channels, config) {
+                KeyAction::Quit => Ok(Action::Quit),
+                KeyAction::RetryAll { new_changed_files, new_checks } => {
+                    Ok(Action::RestartRunner { new_changed_files, new_checks })
+                }
+                KeyAction::None => {
+                    app.needs_redraw = true;
+                    Ok(Action::Continue)
+                }
+            }
+        }
+        Message::RunnerEvent(event) => {
+            app.handle_runner_event(event);
+            app.needs_redraw = true;
+            Ok(Action::Continue)
+        }
+        Message::SystemStats(stats) => {
+            app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
+            app.needs_redraw = true;
+            Ok(Action::Continue)
+        }
+        Message::FixResult(result) => {
+            app.finish_fix(result);
+            app.needs_redraw = true;
+            Ok(Action::Continue)
+        }
+        Message::FixAllResult(result, is_last) => {
+            app.add_fix_all_result(result);
+            if is_last {
+                app.finish_fix_all();
+            }
+            app.needs_redraw = true;
+            Ok(Action::Continue)
+        }
+        Message::RetryResult(result) => {
+            app.results.insert(result.check_id.clone(), result);
+            app.needs_redraw = true;
+            Ok(Action::Continue)
+        }
+    }
+}
+
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
@@ -410,116 +488,62 @@ pub async fn run(
     // CRITICAL: Using std::thread ensures keyboard events are processed by the OS
     // scheduler even when Tokio is starved of CPU time by Docker containers.
     let keyboard_shutdown = Arc::new(AtomicBool::new(false));
-    let (keyboard_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
+    let (mut keyboard_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
 
-    // Main event loop - KEYBOARD INPUT IS PROCESSED FIRST FOR RESPONSIVENESS
+    // Main event loop - uses tokio::select! for event-driven responsiveness
     //
     // Architecture for responsive keyboard handling under high CPU load:
-    // 1. Drain ALL pending keyboard events from OS thread (highest priority)
-    // 2. Process channel messages (non-blocking try_recv)
-    // 3. Render only if state changed (dirty flag)
-    // 4. Sleep briefly to yield CPU time
+    // 1. biased; ensures keyboard events are checked first (highest priority)
+    // 2. Each channel becomes a select! branch - wakes on any event
+    // 3. All state transitions go through handle_message with explicit Message enum
+    // 4. Render only if state changed (dirty flag)
     loop {
-        // ═══════════════════════════════════════════════════════════════════
-        // PHASE 1: KEYBOARD INPUT (HIGHEST PRIORITY)
-        // ═══════════════════════════════════════════════════════════════════
-        // Drain ALL pending keyboard events from the dedicated input thread.
-        // The keyboard thread runs on a real OS thread, so events are captured
-        // even when Tokio is starved. We process all buffered events immediately.
-        let mut quit_requested = false;
-        let mut retry_all_data: Option<(ChangedFiles, Vec<CheckToRun>)> = None;
+        // Wait for the next event from any channel
+        // biased; ensures keyboard is checked first for immediate responsiveness
+        let msg = tokio::select! {
+            biased;
 
-        // Drain all pending keyboard events (non-blocking)
-        while let Ok(key) = keyboard_rx.try_recv() {
-            // Clear status message on any key press
-            if app.status_message.is_some() {
-                app.status_message = None;
-                app.needs_redraw = true;
-                continue; // Consume the key press
+            // Keyboard events have highest priority
+            Some(key) = keyboard_rx.recv() => Message::KeyPress(key),
+
+            // Runner events (check output, status changes)
+            Some(event) = event_rx.recv() => Message::RunnerEvent(event),
+
+            // System stats from background worker
+            Some(stats) = stats_rx.recv() => Message::SystemStats(stats),
+
+            // Fix command results
+            Some(result) = fix_rx.recv() => Message::FixResult(result),
+
+            // Fix-all command results
+            Some((result, is_last)) = fix_all_rx.recv() => Message::FixAllResult(result, is_last),
+
+            // Retry command results
+            Some(result) = retry_rx.recv() => Message::RetryResult(result),
+
+            // All channels closed - exit
+            else => break,
+        };
+
+        // Handle the message and get the action
+        match handle_message(&mut app, msg, &channels, &config)? {
+            Action::Quit => break,
+            Action::RestartRunner { new_changed_files, new_checks } => {
+                // Abort old runner and start new one
+                runner_handle.abort();
+                app.reset_for_retry(new_changed_files, new_checks.clone());
+                let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
+                runner_handle = new_handle;
+                event_rx = new_rx;
             }
-
-            // Dispatch to key handler
-            match handle_key_event(&mut app, key, &channels, &config) {
-                KeyAction::Quit => {
-                    quit_requested = true;
-                    break;
-                }
-                KeyAction::RetryAll { new_changed_files, new_checks } => {
-                    retry_all_data = Some((new_changed_files, new_checks));
-                }
-                KeyAction::None => {}
-            }
+            Action::Continue => {}
         }
 
-        // Handle quit after draining all events
-        if quit_requested {
-            break;
-        }
-
-        // Handle retry-all (needs to restart runner)
-        if let Some((new_changed_files, new_checks)) = retry_all_data {
-            runner_handle.abort();
-            app.reset_for_retry(new_changed_files, new_checks.clone());
-            let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
-            runner_handle = new_handle;
-            event_rx = new_rx;
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // PHASE 2: CHANNEL MESSAGES (NON-BLOCKING)
-        // ═══════════════════════════════════════════════════════════════════
-        // Process channel messages with try_recv (never blocks).
-        // Limit runner events per frame to prevent UI starvation during
-        // high output bursts.
-
-        // Handle runner events (limit per frame to stay responsive)
-        for _ in 0..MAX_RUNNER_EVENTS_PER_FRAME {
-            match event_rx.try_recv() {
-                Ok(runner_event) => app.handle_runner_event(runner_event),
-                Err(_) => break,
-            }
-        }
-
-        // Handle stats updates from background worker (non-blocking)
-        while let Ok(stats) = stats_rx.try_recv() {
-            app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
-        }
-
-        // Handle fix result (non-blocking)
-        if let Ok(fix_result) = fix_rx.try_recv() {
-            app.finish_fix(fix_result);
-        }
-
-        // Handle fix-all results (non-blocking)
-        while let Ok((result, is_last)) = fix_all_rx.try_recv() {
-            app.add_fix_all_result(result);
-            if is_last {
-                app.finish_fix_all();
-            }
-        }
-
-        // Handle retry single results (non-blocking)
-        if let Ok(result) = retry_rx.try_recv() {
-            app.results.insert(result.check_id.clone(), result);
-            app.needs_redraw = true;
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // PHASE 3: RENDER (ONLY WHEN NEEDED)
-        // ═══════════════════════════════════════════════════════════════════
-        // Only redraw when state has changed. This saves CPU cycles and
-        // ensures the rendering doesn't block input processing.
+        // Render if state changed
         if app.needs_redraw {
             terminal.draw(|f| dashboard::render(&app, f))?;
             app.needs_redraw = false;
         }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // PHASE 4: YIELD CPU TIME
-        // ═══════════════════════════════════════════════════════════════════
-        // Brief sleep to prevent busy-spinning and allow other tasks to run.
-        // 16ms = ~60fps which is more than enough for TUI responsiveness.
-        tokio::time::sleep(FRAME_DURATION).await;
     }
 
     // Cleanup - signal keyboard thread to shutdown and wait for it
