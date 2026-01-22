@@ -1,0 +1,1186 @@
+use crate::checks::CheckToRun;
+use crate::config::CiConfig;
+use crate::git::ChangedFiles;
+use crate::runner::{CheckResult, CheckStatus, RunnerEvent};
+use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
+
+/// Maximum number of samples to keep in history for sparklines
+const MAX_HISTORY_SAMPLES: usize = 60;
+
+/// Filter for which checks to display in the UI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    /// Show all checks
+    All,
+    /// Show only failed checks
+    Failed,
+}
+
+/// Status of a pre-command
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreCommandStatus {
+    Pending,
+    Running,
+    Passed,
+    Failed,
+}
+
+/// State of a pre-command for UI display
+#[derive(Debug, Clone)]
+pub struct PreCommandState {
+    pub group: String,
+    pub name: String,
+    pub status: PreCommandStatus,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+/// Represents an item that can be selected in the checks list
+#[derive(Debug, Clone)]
+pub enum SelectableItem<'a> {
+    PreCommand(&'a PreCommandState),
+    Check(&'a CheckToRun),
+}
+
+/// Application state for the TUI
+///
+/// Contains all data needed to render the UI and track check execution,
+/// including check results, system stats, and UI state.
+pub struct App {
+    /// CI configuration loaded from YAML
+    pub config: CiConfig,
+    /// Files changed compared to base branch
+    pub changed_files: ChangedFiles,
+    /// Checks to be executed
+    pub checks: Vec<CheckToRun>,
+    /// Results indexed by check ID
+    pub results: HashMap<String, CheckResult>,
+    /// Current git branch name
+    pub current_branch: String,
+    /// Project root directory path
+    pub project_root: String,
+
+    // UI state
+    /// Index of currently selected check in filtered list
+    pub selected_check: usize,
+    /// Scroll position in output panel
+    pub output_scroll: usize,
+    /// Current filter for check list
+    pub status_filter: StatusFilter,
+
+    // Runner state
+    /// Currently executing group name
+    pub current_group: Option<String>,
+    /// True when all checks have completed
+    pub all_finished: bool,
+    /// When the run started
+    pub run_started_at: Option<Instant>,
+    /// When the run finished
+    pub run_finished_at: Option<Instant>,
+
+    // Pre-command state
+    /// Pre-commands and their status (group, name, status, output)
+    pub pre_commands: Vec<PreCommandState>,
+    /// Currently running pre-command index
+    pub current_pre_command: Option<usize>,
+
+    // Fix state
+    /// True while a fix command is running
+    pub fix_running: bool,
+    /// Result of the last fix command
+    pub fix_result: Option<CheckResult>,
+    /// True while fix-all is running
+    pub fix_all_running: bool,
+    /// Results from fix-all operation
+    pub fix_all_results: Vec<CheckResult>,
+    /// Total number of fixes in fix-all
+    pub fix_all_total: usize,
+
+    // System monitoring (updated by background task)
+    /// CPU usage history for sparkline (percentage values)
+    pub cpu_history: VecDeque<f32>,
+    /// Memory usage history for sparkline (percentage values)
+    pub mem_history: VecDeque<f32>,
+    /// Current memory usage in bytes
+    pub mem_used_bytes: u64,
+    /// Total memory in bytes
+    pub mem_total_bytes: u64,
+
+    /// Status message shown to user (clears on next keypress)
+    pub status_message: Option<String>,
+
+    /// Whether to show full command in output panel
+    pub show_full_command: bool,
+
+    /// Dirty flag - set when state changes, cleared after render
+    /// Used to avoid unnecessary re-renders for better responsiveness
+    pub needs_redraw: bool,
+}
+
+impl App {
+    pub fn new(config: CiConfig, changed_files: ChangedFiles, checks: Vec<CheckToRun>, current_branch: String, project_root: String) -> Self {
+        // Initialize results - pending for auto-run, on_demand for manual triggers
+        let mut results = HashMap::new();
+        for check in &checks {
+            if check.on_demand {
+                results.insert(check.id().to_string(), CheckResult::on_demand(check.id()));
+            } else {
+                results.insert(check.id().to_string(), CheckResult::pending(check.id()));
+            }
+        }
+
+        // Build pre-commands list from config (only for groups that have checks)
+        let active_groups: std::collections::HashSet<&str> = checks.iter().map(|c| c.group()).collect();
+        let mut pre_commands = Vec::new();
+        for (group_name, group_config) in config.groups() {
+            if active_groups.contains(group_name) {
+                for pre_cmd in &group_config.pre_commands {
+                    pre_commands.push(PreCommandState {
+                        group: group_name.to_string(),
+                        name: pre_cmd.name.clone(),
+                        status: PreCommandStatus::Pending,
+                        output: String::new(),
+                        duration_ms: 0,
+                    });
+                }
+            }
+        }
+
+        Self {
+            config,
+            changed_files,
+            checks,
+            results,
+            current_branch,
+            project_root,
+            selected_check: 0,
+            output_scroll: 0,
+            status_filter: StatusFilter::All,
+            current_group: None,
+            all_finished: false,
+            run_started_at: Some(Instant::now()),
+            run_finished_at: None,
+            pre_commands,
+            current_pre_command: None,
+            fix_running: false,
+            fix_result: None,
+            fix_all_running: false,
+            fix_all_results: Vec::new(),
+            fix_all_total: 0,
+            cpu_history: VecDeque::with_capacity(64),
+            mem_history: VecDeque::with_capacity(64),
+            mem_used_bytes: 0,
+            mem_total_bytes: 1, // Avoid division by zero
+            status_message: None,
+            show_full_command: false,
+            needs_redraw: true, // Initial render needed
+        }
+    }
+
+    /// Reset for retry - update changed files and checks, reset results
+    pub fn reset_for_retry(&mut self, changed_files: ChangedFiles, checks: Vec<CheckToRun>) {
+        self.changed_files = changed_files;
+        self.checks = checks.clone();
+
+        // Reset results - pending for auto-run, on_demand for manual triggers
+        self.results.clear();
+        for check in &checks {
+            if check.on_demand {
+                self.results.insert(check.id().to_string(), CheckResult::on_demand(check.id()));
+            } else {
+                self.results.insert(check.id().to_string(), CheckResult::pending(check.id()));
+            }
+        }
+
+        // Reset pre-commands
+        let active_groups: std::collections::HashSet<&str> = checks.iter().map(|c| c.group()).collect();
+        self.pre_commands.clear();
+        for (group_name, group_config) in self.config.groups() {
+            if active_groups.contains(group_name) {
+                for pre_cmd in &group_config.pre_commands {
+                    self.pre_commands.push(PreCommandState {
+                        group: group_name.to_string(),
+                        name: pre_cmd.name.clone(),
+                        status: PreCommandStatus::Pending,
+                        output: String::new(),
+                        duration_ms: 0,
+                    });
+                }
+            }
+        }
+
+        // Reset state
+        self.selected_check = 0;
+        self.output_scroll = 0;
+        self.current_group = None;
+        self.all_finished = false;
+        self.run_started_at = Some(Instant::now());
+        self.run_finished_at = None;
+        self.current_pre_command = None;
+        self.fix_running = false;
+        self.fix_result = None;
+        self.fix_all_running = false;
+        self.fix_all_results = Vec::new();
+        self.fix_all_total = 0;
+        self.status_message = None;
+        self.show_full_command = false;
+        self.needs_redraw = true;
+    }
+
+    /// Get total elapsed time
+    pub fn elapsed_time(&self) -> std::time::Duration {
+        if let Some(started) = self.run_started_at {
+            if let Some(finished) = self.run_finished_at {
+                finished.duration_since(started)
+            } else {
+                started.elapsed()
+            }
+        } else {
+            std::time::Duration::ZERO
+        }
+    }
+
+    /// Check if selected check can be fixed
+    pub fn can_fix_selected(&self) -> bool {
+        if self.fix_running {
+            return false;
+        }
+        if let Some(check) = self.selected_check() {
+            if let Some(result) = self.results.get(check.id()) {
+                return result.status == CheckStatus::Failed && check.has_fix();
+            }
+        }
+        false
+    }
+
+    /// Get fix command and service for selected check
+    pub fn get_selected_fix_command(&self) -> Option<(String, String)> {
+        self.selected_check()
+            .and_then(|check| {
+                check.resolved_fix_command.as_ref().map(|cmd| {
+                    (cmd.clone(), check.service.clone())
+                })
+            })
+    }
+
+    /// Mark fix as started
+    pub fn start_fix(&mut self) {
+        self.fix_running = true;
+        self.fix_result = None;
+        self.needs_redraw = true;
+    }
+
+    /// Store fix result
+    pub fn finish_fix(&mut self, result: CheckResult) {
+        self.fix_running = false;
+        self.fix_result = Some(result);
+        self.needs_redraw = true;
+    }
+
+    /// Get all failed checks that can be fixed
+    pub fn get_fixable_checks(&self) -> Vec<&CheckToRun> {
+        self.checks
+            .iter()
+            .filter(|check| {
+                if let Some(result) = self.results.get(check.id()) {
+                    result.status == CheckStatus::Failed && check.has_fix()
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    /// Check if there are any checks that can be fixed
+    pub fn can_fix_all(&self) -> bool {
+        if self.fix_running || self.fix_all_running {
+            return false;
+        }
+        !self.get_fixable_checks().is_empty()
+    }
+
+    /// Get fix commands for all fixable checks (check_id, fix_command, service)
+    pub fn get_all_fix_commands(&self) -> Vec<(String, String, String)> {
+        self.get_fixable_checks()
+            .iter()
+            .filter_map(|check| {
+                check.resolved_fix_command.as_ref().map(|cmd| {
+                    (check.id().to_string(), cmd.clone(), check.service.clone())
+                })
+            })
+            .collect()
+    }
+
+    /// Start fix-all operation
+    pub fn start_fix_all(&mut self, total: usize) {
+        self.fix_all_running = true;
+        self.fix_all_results = Vec::new();
+        self.fix_all_total = total;
+        self.fix_result = None;
+        self.needs_redraw = true;
+    }
+
+    /// Add a result from fix-all
+    pub fn add_fix_all_result(&mut self, result: CheckResult) {
+        self.fix_all_results.push(result);
+        self.needs_redraw = true;
+    }
+
+    /// Finish fix-all operation
+    pub fn finish_fix_all(&mut self) {
+        self.fix_all_running = false;
+        self.needs_redraw = true;
+    }
+
+    /// Check if selected check can be retried
+    pub fn can_retry_selected(&self) -> bool {
+        if self.fix_running || self.fix_all_running {
+            return false;
+        }
+        if let Some(check) = self.selected_check() {
+            if let Some(result) = self.results.get(check.id()) {
+                // Can retry if finished (passed or failed)
+                return result.status == CheckStatus::Passed || result.status == CheckStatus::Failed;
+            }
+        }
+        false
+    }
+
+    /// Check if selected check is on-demand and can be triggered
+    pub fn can_trigger_selected(&self) -> bool {
+        if self.fix_running || self.fix_all_running {
+            return false;
+        }
+        if let Some(check) = self.selected_check() {
+            if let Some(result) = self.results.get(check.id()) {
+                return result.status == CheckStatus::OnDemand;
+            }
+        }
+        false
+    }
+
+    /// Check if selected check can be run with all files (no filtering)
+    pub fn can_run_all_files(&self) -> bool {
+        if self.fix_running || self.fix_all_running {
+            return false;
+        }
+        if let Some(check) = self.selected_check() {
+            if let Some(result) = self.results.get(check.id()) {
+                // Can run all files if check is finished (passed/failed) or on-demand
+                return result.status == CheckStatus::Passed
+                    || result.status == CheckStatus::Failed
+                    || result.status == CheckStatus::OnDemand;
+            }
+        }
+        false
+    }
+
+    /// Mark an on-demand check as running (preparing to execute)
+    pub fn trigger_on_demand_check(&mut self, check_id: &str) {
+        if let Some(result) = self.results.get_mut(check_id) {
+            result.status = CheckStatus::Running;
+            result.output.clear();
+            result.error_output.clear();
+            result.duration_ms = 0;
+            result.started_at = Some(chrono::Local::now());
+            result.finished_at = None;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Reset a single check to pending for retry
+    pub fn reset_check_for_retry(&mut self, check_id: &str) {
+        if let Some(result) = self.results.get_mut(check_id) {
+            result.status = CheckStatus::Running;
+            result.output.clear();
+            result.error_output.clear();
+            result.duration_ms = 0;
+            result.started_at = Some(chrono::Local::now());
+            result.finished_at = None;
+        }
+        // Clear any fix results
+        self.fix_result = None;
+        self.fix_all_results.clear();
+        self.needs_redraw = true;
+    }
+
+    /// Update system stats from background task data
+    ///
+    /// This is called when the stats background worker sends new data.
+    /// The actual sysinfo queries happen in a separate task to avoid
+    /// blocking the UI thread.
+    pub fn update_stats(&mut self, cpu_usage: f32, mem_used: u64, mem_total: u64) {
+        self.mem_used_bytes = mem_used;
+        self.mem_total_bytes = mem_total;
+
+        // Memory usage percentage
+        let mem_usage = if mem_total > 0 {
+            (mem_used as f32 / mem_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        // Add to history (keep last 60 samples) - VecDeque for O(1) pop_front
+        self.cpu_history.push_back(cpu_usage);
+        if self.cpu_history.len() > MAX_HISTORY_SAMPLES {
+            self.cpu_history.pop_front();
+        }
+
+        self.mem_history.push_back(mem_usage);
+        if self.mem_history.len() > MAX_HISTORY_SAMPLES {
+            self.mem_history.pop_front();
+        }
+
+        self.needs_redraw = true;
+    }
+
+    pub fn cpu_usage(&self) -> f32 {
+        self.cpu_history.back().copied().unwrap_or(0.0)
+    }
+
+    pub fn mem_usage(&self) -> f32 {
+        self.mem_history.back().copied().unwrap_or(0.0)
+    }
+
+    pub fn mem_used_gb(&self) -> f64 {
+        self.mem_used_bytes as f64 / 1_073_741_824.0
+    }
+
+    pub fn mem_total_gb(&self) -> f64 {
+        self.mem_total_bytes as f64 / 1_073_741_824.0
+    }
+
+    pub fn handle_runner_event(&mut self, event: RunnerEvent) {
+        self.needs_redraw = true;
+        match event {
+            RunnerEvent::CheckStarted { check_id } => {
+                if let Some(result) = self.results.get_mut(&check_id) {
+                    result.status = CheckStatus::Running;
+                    result.started_at = Some(chrono::Local::now());
+                }
+            }
+            RunnerEvent::CheckOutput { check_id, line } => {
+                if let Some(result) = self.results.get_mut(&check_id) {
+                    result.output.push_str(&line);
+                    result.output.push('\n');
+                }
+            }
+            RunnerEvent::CheckFinished { result } => {
+                self.results.insert(result.check_id.clone(), result);
+            }
+            RunnerEvent::GroupStarted { group } => {
+                self.current_group = Some(group);
+            }
+            RunnerEvent::GroupFinished { .. } => {
+                // Group finished, will start next
+            }
+            RunnerEvent::PreCommandStarted { group, name } => {
+                // Find and update the pre-command status
+                if let Some(idx) = self.pre_commands.iter().position(|p| p.group == group && p.name == name) {
+                    self.pre_commands[idx].status = PreCommandStatus::Running;
+                    self.current_pre_command = Some(idx);
+                }
+            }
+            RunnerEvent::PreCommandFinished { group, name, success, output, duration_ms } => {
+                // Find and update the pre-command status
+                if let Some(idx) = self.pre_commands.iter().position(|p| p.group == group && p.name == name) {
+                    self.pre_commands[idx].status = if success { PreCommandStatus::Passed } else { PreCommandStatus::Failed };
+                    self.pre_commands[idx].output = output;
+                    self.pre_commands[idx].duration_ms = duration_ms;
+                }
+                self.current_pre_command = None;
+            }
+            RunnerEvent::AllFinished => {
+                self.all_finished = true;
+                self.current_group = None;
+                self.status_message = None; // Clear pre-command status
+                self.run_finished_at = Some(Instant::now());
+            }
+        }
+    }
+
+    pub fn filtered_checks(&self) -> Vec<&CheckToRun> {
+        // Pre-allocate with capacity hint based on filter type
+        let capacity = match self.status_filter {
+            StatusFilter::All => self.checks.len(),
+            StatusFilter::Failed => self.checks.len() / 4, // Usually fewer failures
+        };
+
+        let mut result = Vec::with_capacity(capacity);
+        for check in &self.checks {
+            let status = self.results.get(check.id());
+            let include = match self.status_filter {
+                StatusFilter::All => true,
+                StatusFilter::Failed => {
+                    status.map(|r| r.status == CheckStatus::Failed).unwrap_or(false)
+                }
+            };
+            if include {
+                result.push(check);
+            }
+        }
+        result
+    }
+
+    pub fn selected_check(&self) -> Option<&CheckToRun> {
+        match self.selected_item() {
+            Some(SelectableItem::Check(check)) => {
+                // Return reference from self, not from temporary
+                self.checks.iter().find(|c| c.id() == check.id())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn selected_result(&self) -> Option<&CheckResult> {
+        self.selected_check()
+            .and_then(|check| self.results.get(check.id()))
+    }
+
+    // Navigation - all methods set needs_redraw for immediate visual feedback
+    pub fn next_check(&mut self) {
+        // Clear fix results and reset command view when navigating
+        self.fix_result = None;
+        self.fix_all_results.clear();
+        self.output_scroll = 0;
+        self.show_full_command = false;
+
+        let max = self.get_selectable_items().len().saturating_sub(1);
+        if self.selected_check < max {
+            self.selected_check += 1;
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn previous_check(&mut self) {
+        // Clear fix results and reset command view when navigating
+        self.fix_result = None;
+        self.fix_all_results.clear();
+        self.output_scroll = 0;
+        self.show_full_command = false;
+
+        if self.selected_check > 0 {
+            self.selected_check -= 1;
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn scroll_up(&mut self, n: usize) {
+        self.output_scroll = self.output_scroll.saturating_sub(n);
+        self.needs_redraw = true;
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        // Get max scroll based on output content length (check or pre-command)
+        let max_scroll = match self.selected_item() {
+            Some(SelectableItem::Check(check)) => {
+                self.results.get(check.id())
+                    .map(|result| result.output.lines().count().saturating_sub(5))
+                    .unwrap_or(0)
+            }
+            Some(SelectableItem::PreCommand(pc)) => {
+                pc.output.lines().count().saturating_sub(5)
+            }
+            None => 0,
+        };
+
+        self.output_scroll = (self.output_scroll + n).min(max_scroll);
+        self.needs_redraw = true;
+    }
+
+    pub fn toggle_failed_filter(&mut self) {
+        self.status_filter = match self.status_filter {
+            StatusFilter::All => StatusFilter::Failed,
+            StatusFilter::Failed => StatusFilter::All,
+        };
+        self.selected_check = 0;
+        self.needs_redraw = true;
+    }
+
+    pub fn show_all(&mut self) {
+        self.status_filter = StatusFilter::All;
+        self.selected_check = 0;
+        self.needs_redraw = true;
+    }
+
+    pub fn toggle_full_command(&mut self) {
+        self.show_full_command = !self.show_full_command;
+        self.needs_redraw = true;
+    }
+
+    // Stats
+    pub fn count_by_status(&self) -> (usize, usize, usize, usize) {
+        let mut passed = 0;
+        let mut failed = 0;
+        let mut pending = 0;
+        let mut on_demand = 0;
+
+        for result in self.results.values() {
+            match result.status {
+                CheckStatus::Passed => passed += 1,
+                CheckStatus::Failed => failed += 1,
+                CheckStatus::Pending | CheckStatus::Running => pending += 1,
+                CheckStatus::Skipped => {}
+                CheckStatus::OnDemand => on_demand += 1,
+            }
+        }
+
+        (passed, failed, pending, on_demand)
+    }
+
+    pub fn groups(&self) -> Vec<&str> {
+        // Get groups that have checks, in config order (IndexMap preserves YAML order)
+        let active_groups: std::collections::HashSet<&str> = self.checks
+            .iter()
+            .map(|c| c.group())
+            .collect();
+
+        // Return groups in config order, filtered to only those with checks
+        self.config.groups()
+            .map(|(key, _)| key)
+            .filter(|g| active_groups.contains(g))
+            .collect()
+    }
+
+    pub fn checks_in_group(&self, group: &str) -> Vec<&CheckToRun> {
+        self.checks.iter().filter(|c| c.group() == group).collect()
+    }
+
+    /// Get the display name for a group (uses custom name if set, otherwise the key)
+    pub fn group_display_name<'a>(&'a self, group_key: &'a str) -> &'a str {
+        self.config.get_group(group_key)
+            .map(|g| g.display_name(group_key))
+            .unwrap_or(group_key)
+    }
+
+    /// Get all selectable items in display order (pre-commands + checks, grouped)
+    pub fn get_selectable_items(&self) -> Vec<SelectableItem<'_>> {
+        let mut items = Vec::new();
+        let groups = self.groups();
+
+        for group in groups {
+            // Add pre-commands for this group
+            for pre_cmd in self.pre_commands.iter().filter(|p| p.group == group) {
+                items.push(SelectableItem::PreCommand(pre_cmd));
+            }
+            // Add checks for this group (respecting filter)
+            for check in self.checks_in_group(group) {
+                let status = self.results.get(check.id());
+                let include = match self.status_filter {
+                    StatusFilter::All => true,
+                    StatusFilter::Failed => {
+                        status.map(|r| r.status == CheckStatus::Failed).unwrap_or(false)
+                    }
+                };
+                if include {
+                    items.push(SelectableItem::Check(check));
+                }
+            }
+        }
+
+        items
+    }
+
+    /// Get the currently selected item (pre-command or check)
+    pub fn selected_item(&self) -> Option<SelectableItem<'_>> {
+        self.get_selectable_items().into_iter().nth(self.selected_check)
+    }
+
+    /// Get the selected pre-command, if one is selected
+    pub fn selected_pre_command(&self) -> Option<&PreCommandState> {
+        match self.selected_item() {
+            Some(SelectableItem::PreCommand(pc)) => {
+                // Need to return reference from self, not from the temporary
+                self.pre_commands.iter().find(|p| p.group == pc.group && p.name == pc.name)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::CheckToRun;
+    use crate::config::{CiConfig, CheckDefinition};
+    use crate::git::ChangedFiles;
+    use crate::runner::{CheckResult, CheckStatus};
+
+    fn minimal_config_yaml() -> &'static str {
+        r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  fast:
+    name: Fast Checks
+    parallel: true
+    checks:
+      php-lint:
+        name: PHP syntax check
+        command: php-lint {files}
+        triggers:
+          file_pattern: php
+
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        fix_command: phpunit --fix {files}
+        triggers:
+          file_pattern: php
+"#
+    }
+
+    fn parse_config() -> CiConfig {
+        serde_yaml::from_str(minimal_config_yaml()).expect("Failed to parse config")
+    }
+
+    fn make_check(id: &str, group: &str, name: &str, has_fix: bool, on_demand: bool) -> CheckToRun {
+        CheckToRun {
+            id: id.to_string(),
+            group: group.to_string(),
+            definition: CheckDefinition {
+                name: name.to_string(),
+                command: format!("{} {{files}}", id),
+                service: None,
+                fix_command: if has_fix { Some(format!("{} --fix {{files}}", id)) } else { None },
+                triggers: None,
+                on_demand: false,
+                env: std::collections::HashMap::new(),
+            },
+            service: "php".to_string(),
+            files: vec!["test.php".to_string()],
+            resolved_command: format!("{} test.php", id),
+            resolved_fix_command: if has_fix { Some(format!("{} --fix test.php", id)) } else { None },
+            on_demand,
+        }
+    }
+
+    fn make_app() -> App {
+        let config = parse_config();
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        let checks = vec![
+            make_check("php-lint", "fast", "PHP Lint", false, false),
+            make_check("phpunit", "tests", "PHPUnit", true, false),
+            make_check("behat", "tests", "Behat", false, true),
+        ];
+        App::new(config, changed_files, checks, "main".to_string(), "/project".to_string())
+    }
+
+    #[test]
+    fn test_new_initializes_results() {
+        let app = make_app();
+
+        // All checks should have results
+        assert_eq!(app.results.len(), 3);
+
+        // Non-on-demand checks should be pending
+        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Pending);
+        assert_eq!(app.results.get("phpunit").unwrap().status, CheckStatus::Pending);
+
+        // On-demand checks should be on_demand
+        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::OnDemand);
+    }
+
+    #[test]
+    fn test_new_initial_state() {
+        let app = make_app();
+
+        assert_eq!(app.selected_check, 0);
+        assert_eq!(app.output_scroll, 0);
+        assert_eq!(app.status_filter, StatusFilter::All);
+        assert!(!app.all_finished);
+        assert!(!app.fix_running);
+        assert!(app.needs_redraw);
+    }
+
+    #[test]
+    fn test_navigation_next() {
+        let mut app = make_app();
+
+        assert_eq!(app.selected_check, 0);
+        app.next_check();
+        assert_eq!(app.selected_check, 1);
+        app.next_check();
+        assert_eq!(app.selected_check, 2);
+
+        // Should not go past last item
+        app.next_check();
+        assert_eq!(app.selected_check, 2);
+    }
+
+    #[test]
+    fn test_navigation_previous() {
+        let mut app = make_app();
+        app.selected_check = 2;
+
+        app.previous_check();
+        assert_eq!(app.selected_check, 1);
+        app.previous_check();
+        assert_eq!(app.selected_check, 0);
+
+        // Should not go below 0
+        app.previous_check();
+        assert_eq!(app.selected_check, 0);
+    }
+
+    #[test]
+    fn test_navigation_clears_fix_result() {
+        let mut app = make_app();
+        app.fix_result = Some(CheckResult::pending("test"));
+
+        app.next_check();
+
+        assert!(app.fix_result.is_none());
+    }
+
+    #[test]
+    fn test_toggle_failed_filter() {
+        let mut app = make_app();
+
+        assert_eq!(app.status_filter, StatusFilter::All);
+        app.toggle_failed_filter();
+        assert_eq!(app.status_filter, StatusFilter::Failed);
+        app.toggle_failed_filter();
+        assert_eq!(app.status_filter, StatusFilter::All);
+    }
+
+    #[test]
+    fn test_show_all_resets_filter() {
+        let mut app = make_app();
+        app.status_filter = StatusFilter::Failed;
+        app.selected_check = 5;
+
+        app.show_all();
+
+        assert_eq!(app.status_filter, StatusFilter::All);
+        assert_eq!(app.selected_check, 0);
+    }
+
+    #[test]
+    fn test_count_by_status() {
+        let mut app = make_app();
+
+        // Initial state: 2 pending, 1 on-demand
+        let (passed, failed, pending, on_demand) = app.count_by_status();
+        assert_eq!(passed, 0);
+        assert_eq!(failed, 0);
+        assert_eq!(pending, 2);
+        assert_eq!(on_demand, 1);
+
+        // Mark one as passed
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+
+        let (passed, failed, pending, on_demand) = app.count_by_status();
+        assert_eq!(passed, 1);
+        assert_eq!(failed, 0);
+        assert_eq!(pending, 1);
+        assert_eq!(on_demand, 1);
+
+        // Mark one as failed
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        let (passed, failed, pending, on_demand) = app.count_by_status();
+        assert_eq!(passed, 1);
+        assert_eq!(failed, 1);
+        assert_eq!(pending, 0);
+        assert_eq!(on_demand, 1);
+    }
+
+    #[test]
+    fn test_can_fix_selected_requires_failed_and_fix_command() {
+        let mut app = make_app();
+
+        // Check phpunit which has fix command
+        app.selected_check = 1; // phpunit
+
+        // Not failed yet - can't fix
+        assert!(!app.can_fix_selected());
+
+        // Mark as failed
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        // Now can fix
+        assert!(app.can_fix_selected());
+    }
+
+    #[test]
+    fn test_can_fix_selected_no_fix_command() {
+        let mut app = make_app();
+
+        // Select php-lint which has no fix command
+        app.selected_check = 0; // php-lint
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+
+        // Can't fix because no fix command
+        assert!(!app.can_fix_selected());
+    }
+
+    #[test]
+    fn test_can_fix_selected_disabled_during_fix() {
+        let mut app = make_app();
+        app.selected_check = 1; // phpunit
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        app.fix_running = true;
+
+        assert!(!app.can_fix_selected());
+    }
+
+    #[test]
+    fn test_can_trigger_selected() {
+        let mut app = make_app();
+
+        // Select behat which is on-demand
+        app.selected_check = 2;
+
+        assert!(app.can_trigger_selected());
+
+        // Select php-lint which is pending
+        app.selected_check = 0;
+        assert!(!app.can_trigger_selected());
+    }
+
+    #[test]
+    fn test_can_retry_selected() {
+        let mut app = make_app();
+        app.selected_check = 0; // php-lint
+
+        // Can't retry pending
+        assert!(!app.can_retry_selected());
+
+        // Can retry passed
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        assert!(app.can_retry_selected());
+
+        // Can retry failed
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        assert!(app.can_retry_selected());
+    }
+
+    #[test]
+    fn test_start_and_finish_fix() {
+        let mut app = make_app();
+
+        app.start_fix();
+        assert!(app.fix_running);
+        assert!(app.fix_result.is_none());
+
+        let result = CheckResult {
+            check_id: "phpunit".to_string(),
+            status: CheckStatus::Passed,
+            output: "Fixed!".to_string(),
+            error_output: String::new(),
+            duration_ms: 100,
+            started_at: None,
+            finished_at: None,
+        };
+
+        app.finish_fix(result);
+        assert!(!app.fix_running);
+        assert!(app.fix_result.is_some());
+    }
+
+    #[test]
+    fn test_get_fixable_checks() {
+        let mut app = make_app();
+
+        // No failed checks - empty
+        assert!(app.get_fixable_checks().is_empty());
+
+        // phpunit failed with fix command
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        let fixable = app.get_fixable_checks();
+        assert_eq!(fixable.len(), 1);
+        assert_eq!(fixable[0].id(), "phpunit");
+
+        // php-lint failed but no fix command
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+
+        let fixable = app.get_fixable_checks();
+        assert_eq!(fixable.len(), 1); // Still just phpunit
+    }
+
+    #[test]
+    fn test_update_stats() {
+        let mut app = make_app();
+
+        app.update_stats(50.0, 8_000_000_000, 16_000_000_000);
+
+        assert_eq!(app.cpu_usage(), 50.0);
+        assert_eq!(app.mem_usage(), 50.0); // 8/16 = 50%
+        assert_eq!(app.mem_used_bytes, 8_000_000_000);
+        assert_eq!(app.mem_total_bytes, 16_000_000_000);
+    }
+
+    #[test]
+    fn test_update_stats_history_limit() {
+        let mut app = make_app();
+
+        // Add more samples than MAX_HISTORY_SAMPLES
+        for i in 0..70 {
+            app.update_stats(i as f32, 1000, 2000);
+        }
+
+        // Should be capped at MAX_HISTORY_SAMPLES
+        assert_eq!(app.cpu_history.len(), MAX_HISTORY_SAMPLES);
+        assert_eq!(app.mem_history.len(), MAX_HISTORY_SAMPLES);
+
+        // Most recent should be 69
+        assert_eq!(app.cpu_usage(), 69.0);
+    }
+
+    #[test]
+    fn test_handle_runner_event_check_started() {
+        let mut app = make_app();
+
+        app.handle_runner_event(RunnerEvent::CheckStarted { check_id: "php-lint".to_string() });
+
+        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Running);
+    }
+
+    #[test]
+    fn test_handle_runner_event_check_output() {
+        let mut app = make_app();
+
+        app.handle_runner_event(RunnerEvent::CheckOutput {
+            check_id: "php-lint".to_string(),
+            line: "Checking file...".to_string(),
+        });
+
+        assert!(app.results.get("php-lint").unwrap().output.contains("Checking file..."));
+    }
+
+    #[test]
+    fn test_handle_runner_event_check_finished() {
+        let mut app = make_app();
+
+        let result = CheckResult {
+            check_id: "php-lint".to_string(),
+            status: CheckStatus::Passed,
+            output: "OK".to_string(),
+            error_output: String::new(),
+            duration_ms: 500,
+            started_at: None,
+            finished_at: None,
+        };
+
+        app.handle_runner_event(RunnerEvent::CheckFinished { result });
+
+        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Passed);
+        assert_eq!(app.results.get("php-lint").unwrap().duration_ms, 500);
+    }
+
+    #[test]
+    fn test_handle_runner_event_all_finished() {
+        let mut app = make_app();
+        assert!(!app.all_finished);
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert!(app.all_finished);
+        assert!(app.run_finished_at.is_some());
+    }
+
+    #[test]
+    fn test_groups_returns_config_order() {
+        let app = make_app();
+        let groups = app.groups();
+
+        // Should be in config order: fast, tests
+        assert_eq!(groups, vec!["fast", "tests"]);
+    }
+
+    #[test]
+    fn test_checks_in_group() {
+        let app = make_app();
+
+        let fast_checks = app.checks_in_group("fast");
+        assert_eq!(fast_checks.len(), 1);
+        assert_eq!(fast_checks[0].id(), "php-lint");
+
+        let test_checks = app.checks_in_group("tests");
+        assert_eq!(test_checks.len(), 2);
+    }
+
+    #[test]
+    fn test_trigger_on_demand_check() {
+        let mut app = make_app();
+
+        // behat is on-demand
+        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::OnDemand);
+
+        app.trigger_on_demand_check("behat");
+
+        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::Running);
+    }
+
+    #[test]
+    fn test_reset_check_for_retry() {
+        let mut app = make_app();
+
+        // Mark as passed with output
+        {
+            let result = app.results.get_mut("php-lint").unwrap();
+            result.status = CheckStatus::Passed;
+            result.output = "Previous output".to_string();
+            result.duration_ms = 500;
+        }
+
+        app.reset_check_for_retry("php-lint");
+
+        let result = app.results.get("php-lint").unwrap();
+        assert_eq!(result.status, CheckStatus::Running);
+        assert!(result.output.is_empty());
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[test]
+    fn test_toggle_full_command() {
+        let mut app = make_app();
+
+        assert!(!app.show_full_command);
+        app.toggle_full_command();
+        assert!(app.show_full_command);
+        app.toggle_full_command();
+        assert!(!app.show_full_command);
+    }
+
+    #[test]
+    fn test_scroll_down_and_up() {
+        let mut app = make_app();
+
+        // Add some output so we can scroll
+        app.results.get_mut("php-lint").unwrap().output = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10".to_string();
+
+        assert_eq!(app.output_scroll, 0);
+
+        app.scroll_down(3);
+        assert_eq!(app.output_scroll, 3);
+
+        app.scroll_up(2);
+        assert_eq!(app.output_scroll, 1);
+
+        // Can't scroll below 0
+        app.scroll_up(10);
+        assert_eq!(app.output_scroll, 0);
+    }
+}

@@ -1,0 +1,50 @@
+[package]
+name = "ci-tui"
+version = "0.1.0"
+edition = "2021"
+description = "TUI for running and monitoring CI checks"
+
+[lib]
+name = "ci_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ci-tui"
+path = "src/main.rs"
+
+[dependencies]
+# TUI framework
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ansi-to-tui = "8"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+indexmap = { version = "2", features = ["serde"] }  # Preserves YAML key order
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+color-eyre = "0.6"
+
+# Utilities
+regex = "1"
+chrono = "0.4"
+base64 = "0.22"
+
+# System monitoring
+sysinfo = "0.32"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

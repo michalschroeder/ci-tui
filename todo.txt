@@ -1,0 +1,7 @@
+- r button should refresh hit changes and run single check using latest list of changes
+- move cs fixer to static analysis
+- f (failed) mode allows to select pre commands finished successfully
+- simple mode messes with db container
+- test list for run have duplicates? probably because of many sources
+- allow select text?
+- output shows Files and +5 more, not sure if that is needed we have e-expand to see it

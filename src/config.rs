@@ -1,0 +1,433 @@
+use anyhow::{Context, Result};
+use indexmap::IndexMap;
+use regex::Regex;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::OnceLock;
+
+#[derive(Debug, Deserialize)]
+pub struct CiConfig {
+    pub version: u32,
+    pub docker: DockerConfig,
+    pub git: GitConfig,
+    pub file_patterns: HashMap<String, FilePattern>,
+    /// Check groups in execution order (YAML key order preserved)
+    pub checks: IndexMap<String, GroupConfig>,
+    #[serde(default)]
+    pub ignore_patterns: Vec<String>,
+    /// Cached compiled ignore patterns (lazily initialized)
+    #[serde(skip)]
+    compiled_ignore_patterns: OnceLock<Vec<Regex>>,
+}
+
+/// File pattern definition with optional color for UI display
+#[derive(Debug, Clone, Deserialize)]
+pub struct FilePattern {
+    /// Regex pattern for matching files
+    pub pattern: String,
+    /// Optional color for files matching this pattern (e.g., "blue", "green")
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+impl Clone for CiConfig {
+    fn clone(&self) -> Self {
+        Self {
+            version: self.version,
+            docker: self.docker.clone(),
+            git: self.git.clone(),
+            file_patterns: self.file_patterns.clone(),
+            checks: self.checks.clone(),
+            ignore_patterns: self.ignore_patterns.clone(),
+            // Reset cache on clone - will be lazily recomputed
+            compiled_ignore_patterns: OnceLock::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DockerConfig {
+    pub project_dir: String,
+    /// Default Docker service name (defaults to "app" if not specified)
+    #[serde(default = "default_service")]
+    pub service: String,
+    /// Environment variables to pass to all docker exec commands
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+fn default_service() -> String {
+    "app".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitConfig {
+    pub base_branch: String,
+    pub fallback_branch: String,
+}
+
+/// Configuration for an execution group
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupConfig {
+    /// Optional display name for the group (uses key name if not set)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Run checks in this group in parallel
+    #[serde(default)]
+    pub parallel: bool,
+    /// Stop all execution if any check in this group fails
+    #[serde(default)]
+    pub stop_on_failure: bool,
+    /// Commands to run before checks in this group (e.g., DB init)
+    #[serde(default)]
+    pub pre_commands: Vec<PreCommand>,
+    /// Checks in this group (key is check ID)
+    pub checks: IndexMap<String, CheckDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckDefinition {
+    pub name: String,
+    pub command: String,
+    /// Docker service to run this check in (overrides group/global default)
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub fix_command: Option<String>,
+    #[serde(default)]
+    pub triggers: Option<CheckTriggers>,
+    /// If true, check requires manual trigger when source files change but no specific tests found
+    #[serde(default)]
+    pub on_demand: bool,
+    /// Additional environment variables for this check (merged with global env)
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CheckTriggers {
+    #[serde(default)]
+    pub file_pattern: Option<String>,
+    #[serde(default)]
+    pub test_discovery: Option<TestDiscoveryConfig>,
+}
+
+/// Inline test discovery configuration for a check
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestDiscoveryConfig {
+    /// Source file pattern key that triggers discovery (references file_patterns)
+    pub source_pattern: String,
+    /// Strategies to find related tests
+    pub strategies: Vec<TestDiscoveryStrategy>,
+}
+
+/// Strategy for discovering related test files
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum TestDiscoveryStrategy {
+    /// Map source paths to test paths by pattern
+    #[serde(rename = "path_mapping")]
+    PathMapping {
+        rules: Vec<PathMappingRule>,
+    },
+    /// Search test files for content matching a pattern
+    #[serde(rename = "grep_search")]
+    GrepSearch {
+        /// Directories to search in
+        search_dirs: Vec<String>,
+        /// Regex pattern with placeholders: {basename}, {filename}, {extension}, {dirname}, {path}
+        pattern: String,
+    },
+}
+
+/// Rule for mapping source paths to test paths
+#[derive(Debug, Clone, Deserialize)]
+pub struct PathMappingRule {
+    /// Source file pattern with {path} placeholder (e.g., "src/{path}.php")
+    pub source: String,
+    /// Test file patterns with {path} placeholder (e.g., "tests/{path}Test.php")
+    pub tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreCommand {
+    /// Display name for the command
+    pub name: String,
+    /// The command to execute
+    pub command: String,
+    /// Docker service to run in (uses group/global default if not specified)
+    #[serde(default)]
+    pub service: Option<String>,
+    /// If true, use `docker compose exec` (existing container) instead of `run` (new container)
+    #[serde(default)]
+    pub exec: bool,
+    /// Additional environment variables for this command (merged with global env)
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+
+pub fn load_config(path: &Path) -> Result<CiConfig> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+    serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))
+}
+
+impl CiConfig {
+    /// Get the regex pattern for a file pattern key
+    pub fn get_file_pattern(&self, key: &str) -> Option<&str> {
+        self.file_patterns.get(key).map(|fp| fp.pattern.as_str())
+    }
+
+    /// Check if a file should be ignored based on ignore_patterns
+    pub fn should_ignore_file(&self, path: &str) -> bool {
+        let patterns = self.compiled_ignore_patterns.get_or_init(|| {
+            self.ignore_patterns
+                .iter()
+                .filter_map(|p| Regex::new(p).ok())
+                .collect()
+        });
+        patterns.iter().any(|re| re.is_match(path))
+    }
+
+    /// Get color name for a file based on file_patterns
+    pub fn get_file_color(&self, path: &str) -> &str {
+        // Check if any file_pattern with a color matches this file
+        for fp in self.file_patterns.values() {
+            if let Some(ref color) = fp.color {
+                if let Ok(re) = Regex::new(&fp.pattern) {
+                    if re.is_match(path) {
+                        return color.as_str();
+                    }
+                }
+            }
+        }
+        "white"
+    }
+
+    /// Get the default Docker service (from docker config)
+    pub fn default_service(&self) -> &str {
+        &self.docker.service
+    }
+
+    /// Get group config by name
+    pub fn get_group(&self, group_name: &str) -> Option<&GroupConfig> {
+        self.checks.get(group_name)
+    }
+
+    /// Iterate over groups in execution order
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &GroupConfig)> {
+        self.checks.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+impl GroupConfig {
+    /// Get display name (uses provided name or falls back to key)
+    pub fn display_name<'a>(&'a self, key: &'a str) -> &'a str {
+        self.name.as_deref().unwrap_or(key)
+    }
+}
+
+impl CheckDefinition {
+    /// Get the service for this check, with fallback to default
+    pub fn service_or_default<'a>(&'a self, default: &'a str) -> &'a str {
+        self.service.as_deref().unwrap_or(default)
+    }
+
+    /// Check if this check should always run (no triggers defined)
+    pub fn always_run(&self) -> bool {
+        self.triggers.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config_yaml() -> &'static str {
+        r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+  php_src:
+    pattern: '^src/'
+    color: blue
+  tests:
+    pattern: 'tests/.*\.php$'
+    color: green
+
+ignore_patterns:
+  - '\.md$'
+  - '\.github/'
+
+checks:
+  fast:
+    name: Fast Checks
+    parallel: true
+    checks:
+      php-lint:
+        name: PHP syntax check
+        command: php-lint {files}
+        triggers:
+          file_pattern: php
+
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        service: custom-service
+        triggers:
+          file_pattern: tests
+"#
+    }
+
+    fn parse_test_config() -> CiConfig {
+        serde_yaml::from_str(minimal_config_yaml()).expect("Failed to parse test config")
+    }
+
+    #[test]
+    fn test_get_file_pattern() {
+        let config = parse_test_config();
+
+        assert_eq!(config.get_file_pattern("php"), Some(r"\.php$"));
+        assert_eq!(config.get_file_pattern("php_src"), Some("^src/"));
+        assert_eq!(config.get_file_pattern("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_should_ignore_file() {
+        let config = parse_test_config();
+
+        // Should ignore markdown files
+        assert!(config.should_ignore_file("README.md"));
+        assert!(config.should_ignore_file("docs/CONTRIBUTING.md"));
+
+        // Should ignore .github directory
+        assert!(config.should_ignore_file(".github/workflows/ci.yml"));
+
+        // Should not ignore other files
+        assert!(!config.should_ignore_file("src/Service/Foo.php"));
+        assert!(!config.should_ignore_file("tests/FooTest.php"));
+    }
+
+    #[test]
+    fn test_get_file_color() {
+        let config = parse_test_config();
+
+        // Files matching patterns with colors
+        assert_eq!(config.get_file_color("src/Service/Foo.php"), "blue");
+        assert_eq!(config.get_file_color("tests/Unit/FooTest.php"), "green");
+
+        // Files not matching any color pattern
+        assert_eq!(config.get_file_color("composer.json"), "white");
+    }
+
+    #[test]
+    fn test_default_service() {
+        let config = parse_test_config();
+        assert_eq!(config.default_service(), "php");
+    }
+
+    #[test]
+    fn test_get_group() {
+        let config = parse_test_config();
+
+        let fast = config.get_group("fast");
+        assert!(fast.is_some());
+        assert_eq!(fast.unwrap().name, Some("Fast Checks".to_string()));
+
+        let tests = config.get_group("tests");
+        assert!(tests.is_some());
+        assert_eq!(tests.unwrap().name, None);
+
+        assert!(config.get_group("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_groups_preserves_order() {
+        let config = parse_test_config();
+
+        let group_names: Vec<&str> = config.groups().map(|(name, _)| name).collect();
+        assert_eq!(group_names, vec!["fast", "tests"]);
+    }
+
+    #[test]
+    fn test_group_display_name() {
+        let config = parse_test_config();
+
+        let fast = config.get_group("fast").unwrap();
+        assert_eq!(fast.display_name("fast"), "Fast Checks");
+
+        let tests = config.get_group("tests").unwrap();
+        assert_eq!(tests.display_name("tests"), "tests"); // Falls back to key
+    }
+
+    #[test]
+    fn test_check_service_or_default() {
+        let config = parse_test_config();
+
+        let fast = config.get_group("fast").unwrap();
+        let php_lint = fast.checks.get("php-lint").unwrap();
+        assert_eq!(php_lint.service_or_default("default"), "default");
+
+        let tests = config.get_group("tests").unwrap();
+        let phpunit = tests.checks.get("phpunit").unwrap();
+        assert_eq!(phpunit.service_or_default("default"), "custom-service");
+    }
+
+    #[test]
+    fn test_check_always_run() {
+        let config = parse_test_config();
+
+        let fast = config.get_group("fast").unwrap();
+        let php_lint = fast.checks.get("php-lint").unwrap();
+        assert!(!php_lint.always_run()); // Has triggers
+
+        // Create a check without triggers to test always_run = true
+        let yaml = r#"
+version: 2
+docker:
+  project_dir: ./infrastructure
+git:
+  base_branch: dev
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks:
+  warmup:
+    checks:
+      cache-warmup:
+        name: Cache warmup
+        command: bin/console cache:warmup
+"#;
+        let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+        let warmup = config.get_group("warmup").unwrap();
+        let cache = warmup.checks.get("cache-warmup").unwrap();
+        assert!(cache.always_run()); // No triggers
+    }
+
+    #[test]
+    fn test_parallel_and_stop_on_failure() {
+        let config = parse_test_config();
+
+        let fast = config.get_group("fast").unwrap();
+        assert!(fast.parallel);
+        assert!(!fast.stop_on_failure);
+
+        let tests = config.get_group("tests").unwrap();
+        assert!(!tests.parallel);
+    }
+}
