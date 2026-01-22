@@ -11,28 +11,28 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 ## Current Position
 
 Phase: 1 of 5 (Foundation)
-Plan: 2 of TBD in current phase
-Status: In progress
-Last activity: 2026-01-22 — Completed 01-02-PLAN.md (Testing Infrastructure)
+Plan: 3 of 3 in current phase
+Status: Phase complete
+Last activity: 2026-01-22 — Completed 01-01-PLAN.md (Responsive Event Loop)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [███░░░░░░░] 30%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 2.5m
-- Total execution time: 0.08 hours
+- Total plans completed: 3
+- Average duration: 4.2m
+- Total execution time: 0.21 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-foundation | 2 | 5m | 2.5m |
+| 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (1m), 01-02 (4m)
-- Trend: Varying by plan complexity
+- Last 5 plans: 01-01 (8.5m), 01-03 (1m), 01-02 (4m)
+- Trend: Event loop refactoring took longer than infrastructure setup
 
 *Updated after each plan completion*
 
@@ -46,6 +46,9 @@ Recent decisions affecting current work:
 - Initialization: Focus on DX before features (AI-generated code needs audit)
 - Initialization: Skip copy/paste for now (responsiveness is more critical)
 - Initialization: Prioritize testability (enables confident future changes)
+- 01-01: tokio::select! with biased; instead of async priority channels (compile-time priority)
+- 01-01: Keep std::thread for keyboard (OS scheduler beats Tokio under CPU load)
+- 01-01: handle_message with &mut App for explicit state mutation (no interior mutability)
 - 01-03: Use cargo-nextest for CI test execution (faster, better CI integration)
 - 01-03: Three parallel CI jobs (test, lint, coverage) for faster feedback
 - 01-03: Make Codecov optional (fail_ci_if_error: false) to unblock CI usage
@@ -63,6 +66,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-22 22:56 UTC
-Stopped at: Completed 01-02-PLAN.md (Testing Infrastructure)
+Last session: 2026-01-22 23:11 UTC
+Stopped at: Completed 01-01-PLAN.md (Responsive Event Loop) - Phase 1 complete
 Resume file: None
