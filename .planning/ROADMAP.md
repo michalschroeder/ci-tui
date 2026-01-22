@@ -34,10 +34,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Developer runs `cargo nextest run` and sees 3x faster test execution than cargo test
   5. CI pipeline runs tests, lints, and coverage reporting on every commit
 
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 01-01: TBD during planning
+- [ ] 01-01-PLAN.md — Refactor event loop to tokio::select! with Message enum
+- [ ] 01-02-PLAN.md — Add test dependencies and configure nextest
+- [ ] 01-03-PLAN.md — Create CI pipeline with tests, linting, coverage
 
 ### Phase 2: Code Quality Baseline
 **Goal**: Codebase follows idiomatic Rust patterns with no Clippy warnings, all dead code removed, and proper error handling throughout
@@ -119,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/TBD | Not started | - |
+| 1. Foundation | 0/3 | Ready to execute | - |
 | 2. Code Quality Baseline | 0/TBD | Not started | - |
 | 3. Unit Test Coverage | 0/TBD | Not started | - |
 | 4. Mock-Based Tests | 0/TBD | Not started | - |
