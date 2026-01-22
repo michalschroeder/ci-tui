@@ -13,7 +13,7 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 001: Refactor Makefile for consistent cargo approach
+Last activity: 2026-01-23 — Completed quick task 002: Add version display showing git hash + build date
 
 Progress: [██░░░░░░░░] 20%
 
@@ -69,9 +69,10 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 001 | Refactor Makefile for consistent cargo approach | 2026-01-23 | b961357 | [001-refactor-makefile](./quick/001-refactor-makefile-for-consistent-cargo-a/) |
+| 002 | Add version display showing git hash + build date | 2026-01-23 | dc4016f | [002-add-version-display](./quick/002-add-version-display-git-hash-and-build-d/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Phase 1 verified and complete, ready for Phase 2 planning
+Stopped at: Completed quick task 002, ready for Phase 2 planning
 Resume file: None
