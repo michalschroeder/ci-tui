@@ -1,4 +1,4 @@
-.PHONY: test fmt fmt-check clippy coverage ci build build-no-cache run run-local push pull clean help
+.PHONY: test fmt fmt-check clippy coverage ci build build-no-cache push pull clean help
 
 IMAGE_NAME := ci-tui
 VERSION ?= latest
@@ -50,16 +50,6 @@ build-no-cache: ## Build Docker image without cache
 		--build-arg CI_TUI_GIT_HASH=$(GIT_HASH) \
 		--build-arg CI_TUI_BUILD_DATE=$(BUILD_DATE) \
 		-t $(LOCAL_IMAGE) .
-
-run: ## Run the TUI (pulls from registry or builds locally)
-	./run.sh
-
-run-local: build ## Build locally and run
-	docker run -it --rm \
-		-v $(PWD):/app \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-w /app \
-		$(LOCAL_IMAGE)
 
 push: build ## Build and push to registry
 	docker tag $(LOCAL_IMAGE) $(FULL_IMAGE)
