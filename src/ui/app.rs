@@ -119,7 +119,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: CiConfig, changed_files: ChangedFiles, checks: Vec<CheckToRun>, current_branch: String, project_root: String) -> Self {
+    pub fn new(
+        config: CiConfig,
+        changed_files: ChangedFiles,
+        checks: Vec<CheckToRun>,
+        current_branch: String,
+        project_root: String,
+    ) -> Self {
         // Initialize results - pending for auto-run, on_demand for manual triggers
         let mut results = HashMap::new();
         for check in &checks {
@@ -131,7 +137,8 @@ impl App {
         }
 
         // Build pre-commands list from config (only for groups that have checks)
-        let active_groups: std::collections::HashSet<&str> = checks.iter().map(|c| c.group()).collect();
+        let active_groups: std::collections::HashSet<&str> =
+            checks.iter().map(|c| c.group()).collect();
         let mut pre_commands = Vec::new();
         for (group_name, group_config) in config.groups() {
             if active_groups.contains(group_name) {
@@ -187,14 +194,17 @@ impl App {
         self.results.clear();
         for check in &checks {
             if check.on_demand {
-                self.results.insert(check.id().to_string(), CheckResult::on_demand(check.id()));
+                self.results
+                    .insert(check.id().to_string(), CheckResult::on_demand(check.id()));
             } else {
-                self.results.insert(check.id().to_string(), CheckResult::pending(check.id()));
+                self.results
+                    .insert(check.id().to_string(), CheckResult::pending(check.id()));
             }
         }
 
         // Reset pre-commands
-        let active_groups: std::collections::HashSet<&str> = checks.iter().map(|c| c.group()).collect();
+        let active_groups: std::collections::HashSet<&str> =
+            checks.iter().map(|c| c.group()).collect();
         self.pre_commands.clear();
         for (group_name, group_config) in self.config.groups() {
             if active_groups.contains(group_name) {
@@ -256,12 +266,12 @@ impl App {
 
     /// Get fix command and service for selected check
     pub fn get_selected_fix_command(&self) -> Option<(String, String)> {
-        self.selected_check()
-            .and_then(|check| {
-                check.resolved_fix_command.as_ref().map(|cmd| {
-                    (cmd.clone(), check.service.clone())
-                })
-            })
+        self.selected_check().and_then(|check| {
+            check
+                .resolved_fix_command
+                .as_ref()
+                .map(|cmd| (cmd.clone(), check.service.clone()))
+        })
     }
 
     /// Mark fix as started
@@ -305,9 +315,10 @@ impl App {
         self.get_fixable_checks()
             .iter()
             .filter_map(|check| {
-                check.resolved_fix_command.as_ref().map(|cmd| {
-                    (check.id().to_string(), cmd.clone(), check.service.clone())
-                })
+                check
+                    .resolved_fix_command
+                    .as_ref()
+                    .map(|cmd| (check.id().to_string(), cmd.clone(), check.service.clone()))
             })
             .collect()
     }
@@ -341,7 +352,8 @@ impl App {
         if let Some(check) = self.selected_check() {
             if let Some(result) = self.results.get(check.id()) {
                 // Can retry if finished (passed or failed)
-                return result.status == CheckStatus::Passed || result.status == CheckStatus::Failed;
+                return result.status == CheckStatus::Passed
+                    || result.status == CheckStatus::Failed;
             }
         }
         false
@@ -477,15 +489,33 @@ impl App {
             }
             RunnerEvent::PreCommandStarted { group, name } => {
                 // Find and update the pre-command status
-                if let Some(idx) = self.pre_commands.iter().position(|p| p.group == group && p.name == name) {
+                if let Some(idx) = self
+                    .pre_commands
+                    .iter()
+                    .position(|p| p.group == group && p.name == name)
+                {
                     self.pre_commands[idx].status = PreCommandStatus::Running;
                     self.current_pre_command = Some(idx);
                 }
             }
-            RunnerEvent::PreCommandFinished { group, name, success, output, duration_ms } => {
+            RunnerEvent::PreCommandFinished {
+                group,
+                name,
+                success,
+                output,
+                duration_ms,
+            } => {
                 // Find and update the pre-command status
-                if let Some(idx) = self.pre_commands.iter().position(|p| p.group == group && p.name == name) {
-                    self.pre_commands[idx].status = if success { PreCommandStatus::Passed } else { PreCommandStatus::Failed };
+                if let Some(idx) = self
+                    .pre_commands
+                    .iter()
+                    .position(|p| p.group == group && p.name == name)
+                {
+                    self.pre_commands[idx].status = if success {
+                        PreCommandStatus::Passed
+                    } else {
+                        PreCommandStatus::Failed
+                    };
                     self.pre_commands[idx].output = output;
                     self.pre_commands[idx].duration_ms = duration_ms;
                 }
@@ -512,9 +542,9 @@ impl App {
             let status = self.results.get(check.id());
             let include = match self.status_filter {
                 StatusFilter::All => true,
-                StatusFilter::Failed => {
-                    status.map(|r| r.status == CheckStatus::Failed).unwrap_or(false)
-                }
+                StatusFilter::Failed => status
+                    .map(|r| r.status == CheckStatus::Failed)
+                    .unwrap_or(false),
             };
             if include {
                 result.push(check);
@@ -574,14 +604,12 @@ impl App {
     pub fn scroll_down(&mut self, n: usize) {
         // Get max scroll based on output content length (check or pre-command)
         let max_scroll = match self.selected_item() {
-            Some(SelectableItem::Check(check)) => {
-                self.results.get(check.id())
-                    .map(|result| result.output.lines().count().saturating_sub(5))
-                    .unwrap_or(0)
-            }
-            Some(SelectableItem::PreCommand(pc)) => {
-                pc.output.lines().count().saturating_sub(5)
-            }
+            Some(SelectableItem::Check(check)) => self
+                .results
+                .get(check.id())
+                .map(|result| result.output.lines().count().saturating_sub(5))
+                .unwrap_or(0),
+            Some(SelectableItem::PreCommand(pc)) => pc.output.lines().count().saturating_sub(5),
             None => 0,
         };
 
@@ -631,13 +659,12 @@ impl App {
 
     pub fn groups(&self) -> Vec<&str> {
         // Get groups that have checks, in config order (IndexMap preserves YAML order)
-        let active_groups: std::collections::HashSet<&str> = self.checks
-            .iter()
-            .map(|c| c.group())
-            .collect();
+        let active_groups: std::collections::HashSet<&str> =
+            self.checks.iter().map(|c| c.group()).collect();
 
         // Return groups in config order, filtered to only those with checks
-        self.config.groups()
+        self.config
+            .groups()
             .map(|(key, _)| key)
             .filter(|g| active_groups.contains(g))
             .collect()
@@ -649,7 +676,8 @@ impl App {
 
     /// Get the display name for a group (uses custom name if set, otherwise the key)
     pub fn group_display_name<'a>(&'a self, group_key: &'a str) -> &'a str {
-        self.config.get_group(group_key)
+        self.config
+            .get_group(group_key)
             .map(|g| g.display_name(group_key))
             .unwrap_or(group_key)
     }
@@ -669,9 +697,9 @@ impl App {
                 let status = self.results.get(check.id());
                 let include = match self.status_filter {
                     StatusFilter::All => true,
-                    StatusFilter::Failed => {
-                        status.map(|r| r.status == CheckStatus::Failed).unwrap_or(false)
-                    }
+                    StatusFilter::Failed => status
+                        .map(|r| r.status == CheckStatus::Failed)
+                        .unwrap_or(false),
                 };
                 if include {
                     items.push(SelectableItem::Check(check));
@@ -684,7 +712,9 @@ impl App {
 
     /// Get the currently selected item (pre-command or check)
     pub fn selected_item(&self) -> Option<SelectableItem<'_>> {
-        self.get_selectable_items().into_iter().nth(self.selected_check)
+        self.get_selectable_items()
+            .into_iter()
+            .nth(self.selected_check)
     }
 
     /// Get the selected pre-command, if one is selected
@@ -692,7 +722,9 @@ impl App {
         match self.selected_item() {
             Some(SelectableItem::PreCommand(pc)) => {
                 // Need to return reference from self, not from the temporary
-                self.pre_commands.iter().find(|p| p.group == pc.group && p.name == pc.name)
+                self.pre_commands
+                    .iter()
+                    .find(|p| p.group == pc.group && p.name == pc.name)
             }
             _ => None,
         }
@@ -703,7 +735,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::checks::CheckToRun;
-    use crate::config::{CiConfig, CheckDefinition};
+    use crate::config::{CheckDefinition, CiConfig};
     use crate::git::ChangedFiles;
     use crate::runner::{CheckResult, CheckStatus};
 
@@ -757,7 +789,11 @@ checks:
                 name: name.to_string(),
                 command: format!("{} {{files}}", id),
                 service: None,
-                fix_command: if has_fix { Some(format!("{} --fix {{files}}", id)) } else { None },
+                fix_command: if has_fix {
+                    Some(format!("{} --fix {{files}}", id))
+                } else {
+                    None
+                },
                 triggers: None,
                 on_demand: false,
                 env: std::collections::HashMap::new(),
@@ -765,7 +801,11 @@ checks:
             service: "php".to_string(),
             files: vec!["test.php".to_string()],
             resolved_command: format!("{} test.php", id),
-            resolved_fix_command: if has_fix { Some(format!("{} --fix test.php", id)) } else { None },
+            resolved_fix_command: if has_fix {
+                Some(format!("{} --fix test.php", id))
+            } else {
+                None
+            },
             on_demand,
         }
     }
@@ -781,7 +821,13 @@ checks:
             make_check("phpunit", "tests", "PHPUnit", true, false),
             make_check("behat", "tests", "Behat", false, true),
         ];
-        App::new(config, changed_files, checks, "main".to_string(), "/project".to_string())
+        App::new(
+            config,
+            changed_files,
+            checks,
+            "main".to_string(),
+            "/project".to_string(),
+        )
     }
 
     #[test]
@@ -792,11 +838,20 @@ checks:
         assert_eq!(app.results.len(), 3);
 
         // Non-on-demand checks should be pending
-        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Pending);
-        assert_eq!(app.results.get("phpunit").unwrap().status, CheckStatus::Pending);
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            CheckStatus::Pending
+        );
+        assert_eq!(
+            app.results.get("phpunit").unwrap().status,
+            CheckStatus::Pending
+        );
 
         // On-demand checks should be on_demand
-        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::OnDemand);
+        assert_eq!(
+            app.results.get("behat").unwrap().status,
+            CheckStatus::OnDemand
+        );
     }
 
     #[test]
@@ -1052,9 +1107,14 @@ checks:
     fn test_handle_runner_event_check_started() {
         let mut app = make_app();
 
-        app.handle_runner_event(RunnerEvent::CheckStarted { check_id: "php-lint".to_string() });
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
 
-        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Running);
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            CheckStatus::Running
+        );
     }
 
     #[test]
@@ -1066,7 +1126,12 @@ checks:
             line: "Checking file...".to_string(),
         });
 
-        assert!(app.results.get("php-lint").unwrap().output.contains("Checking file..."));
+        assert!(app
+            .results
+            .get("php-lint")
+            .unwrap()
+            .output
+            .contains("Checking file..."));
     }
 
     #[test]
@@ -1085,7 +1150,10 @@ checks:
 
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
-        assert_eq!(app.results.get("php-lint").unwrap().status, CheckStatus::Passed);
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            CheckStatus::Passed
+        );
         assert_eq!(app.results.get("php-lint").unwrap().duration_ms, 500);
     }
 
@@ -1126,11 +1194,17 @@ checks:
         let mut app = make_app();
 
         // behat is on-demand
-        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::OnDemand);
+        assert_eq!(
+            app.results.get("behat").unwrap().status,
+            CheckStatus::OnDemand
+        );
 
         app.trigger_on_demand_check("behat");
 
-        assert_eq!(app.results.get("behat").unwrap().status, CheckStatus::Running);
+        assert_eq!(
+            app.results.get("behat").unwrap().status,
+            CheckStatus::Running
+        );
     }
 
     #[test]
@@ -1169,7 +1243,8 @@ checks:
         let mut app = make_app();
 
         // Add some output so we can scroll
-        app.results.get_mut("php-lint").unwrap().output = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10".to_string();
+        app.results.get_mut("php-lint").unwrap().output =
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10".to_string();
 
         assert_eq!(app.output_scroll, 0);
 

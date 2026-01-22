@@ -56,10 +56,10 @@ pub fn render(app: &App, frame: &mut Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header with progress
-            Constraint::Length(6),  // System stats (taller for better graphs)
-            Constraint::Min(10),    // Main content (checks + output)
-            Constraint::Length(2),  // Footer/help
+            Constraint::Length(3), // Header with progress
+            Constraint::Length(6), // System stats (taller for better graphs)
+            Constraint::Min(10),   // Main content (checks + output)
+            Constraint::Length(2), // Footer/help
         ])
         .split(frame.area());
 
@@ -77,7 +77,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let ratio = if auto_run_total > 0 {
         completed as f64 / auto_run_total as f64
     } else {
-        1.0  // All checks are on-demand, show as complete
+        1.0 // All checks are on-demand, show as complete
     };
 
     // Format elapsed time
@@ -92,12 +92,22 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         elapsed_str
     );
 
-    let on_demand_text = if on_demand > 0 { format!(" +{} on-demand", on_demand) } else { String::new() };
+    let on_demand_text = if on_demand > 0 {
+        format!(" +{} on-demand", on_demand)
+    } else {
+        String::new()
+    };
     let status_text = if app.all_finished {
         if failed == 0 {
-            format!("✓ All {} checks passed in {}{}", auto_run_total, elapsed_str, on_demand_text)
+            format!(
+                "✓ All {} checks passed in {}{}",
+                auto_run_total, elapsed_str, on_demand_text
+            )
         } else {
-            format!("✗ {}/{} passed, {} failed in {}{}", passed, auto_run_total, failed, elapsed_str, on_demand_text)
+            format!(
+                "✗ {}/{} passed, {} failed in {}{}",
+                passed, auto_run_total, failed, elapsed_str, on_demand_text
+            )
         }
     } else if pending > 0 {
         format!(
@@ -105,19 +115,24 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             completed, auto_run_total, pending, on_demand_text
         )
     } else {
-        format!("Preparing... {}/{}{}", completed, auto_run_total, on_demand_text)
+        format!(
+            "Preparing... {}/{}{}",
+            completed, auto_run_total, on_demand_text
+        )
     };
 
     let color = if app.all_finished {
-        if failed == 0 { Color::Green } else { Color::Red }
+        if failed == 0 {
+            Color::Green
+        } else {
+            Color::Red
+        }
     } else {
         Color::Yellow
     };
 
     let gauge = Gauge::default()
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .title(branch_info))
+        .block(Block::default().borders(Borders::ALL).title(branch_info))
         .gauge_style(Style::default().fg(color).bg(Color::DarkGray))
         .ratio(ratio)
         .label(status_text);
@@ -128,20 +143,19 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     // Create blocks first to calculate inner width
     let cpu_block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" CPU {:.0}% ", app.cpu_usage()));
-    let mem_block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" MEM {:.1}/{:.1}GB ({:.0}%) ",
-            app.mem_used_gb(), app.mem_total_gb(), app.mem_usage()));
+    let mem_block = Block::default().borders(Borders::ALL).title(format!(
+        " MEM {:.1}/{:.1}GB ({:.0}%) ",
+        app.mem_used_gb(),
+        app.mem_total_gb(),
+        app.mem_usage()
+    ));
 
     // Get actual inner width (after borders)
     let cpu_inner = cpu_block.inner(chunks[0]);
@@ -172,7 +186,7 @@ fn render_main(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(40),  // Wider left panel
+            Constraint::Percentage(40), // Wider left panel
             Constraint::Percentage(60),
         ])
         .split(area);
@@ -190,8 +204,8 @@ fn render_main(app: &App, frame: &mut Frame, area: Rect) {
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(checks_height),  // Dynamic checks height
-            Constraint::Min(5),                 // Files get remaining space
+            Constraint::Length(checks_height), // Dynamic checks height
+            Constraint::Min(5),                // Files get remaining space
         ])
         .split(chunks[0]);
 
@@ -208,9 +222,13 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
 
     for group in groups {
         let group_style = if Some(group.to_string()) == app.current_group {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         };
 
         let display_name = app.group_display_name(group);
@@ -235,14 +253,19 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             };
 
             // Check if this pre-command is selected
-            let is_selected = app.selected_pre_command()
+            let is_selected = app
+                .selected_pre_command()
                 .map(|p| p.group == pre_cmd.group && p.name == pre_cmd.name)
                 .unwrap_or(false);
 
             let name_style = if is_selected {
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC | Modifier::REVERSED)
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::ITALIC | Modifier::REVERSED)
             } else {
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::ITALIC)
             };
 
             items.push(ListItem::new(Line::from(vec![
@@ -268,13 +291,19 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
                 })
                 .unwrap_or_default();
 
-            let is_selected = app.selected_check()
+            let is_selected = app
+                .selected_check()
                 .map(|c| c.id() == check.id())
                 .unwrap_or(false);
 
-            let is_on_demand = result.map(|r| r.status == CheckStatus::OnDemand).unwrap_or(false);
-            let is_passed = result.map(|r| r.status == CheckStatus::Passed).unwrap_or(false);
-            let is_filtered_out = matches!(app.status_filter, super::app::StatusFilter::Failed) && is_passed;
+            let is_on_demand = result
+                .map(|r| r.status == CheckStatus::OnDemand)
+                .unwrap_or(false);
+            let is_passed = result
+                .map(|r| r.status == CheckStatus::Passed)
+                .unwrap_or(false);
+            let is_filtered_out =
+                matches!(app.status_filter, super::app::StatusFilter::Failed) && is_passed;
 
             // Fade out checks that are not relevant in current context
             let should_fade = is_on_demand || is_filtered_out;
@@ -283,7 +312,9 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else if should_fade {
                 // Muted/dim style for on-demand or filtered-out checks
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)
             } else {
                 Style::default()
             };
@@ -319,10 +350,11 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
         super::app::StatusFilter::Failed => " [failed]",
     };
 
-    let list = List::new(items)
-        .block(Block::default()
+    let list = List::new(items).block(
+        Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Checks{} ", filter_info)));
+            .title(format!(" Checks{} ", filter_info)),
+    );
 
     frame.render_widget(list, area);
 }
@@ -331,7 +363,9 @@ fn render_files_list(app: &App, frame: &mut Frame, area: Rect) {
     // Calculate available width (subtract 2 for borders, 1 for padding)
     let available_width = area.width.saturating_sub(3) as usize;
 
-    let items: Vec<ListItem> = app.changed_files.files
+    let items: Vec<ListItem> = app
+        .changed_files
+        .files
         .iter()
         .map(|f| {
             // Color by file type from config
@@ -349,11 +383,12 @@ fn render_files_list(app: &App, frame: &mut Frame, area: Rect) {
     // Build legend from extensions actually present in changed files
     let legend_line = build_file_color_legend(app);
 
-    let list = List::new(items)
-        .block(Block::default()
+    let list = List::new(items).block(
+        Block::default()
             .borders(Borders::ALL)
             .title(format!(" Files ({}) ", app.changed_files.len()))
-            .title_bottom(legend_line));
+            .title_bottom(legend_line),
+    );
 
     frame.render_widget(list, area);
 }
@@ -363,11 +398,11 @@ fn build_file_color_legend(app: &App) -> Line<'static> {
     use std::collections::BTreeSet;
 
     // Collect unique extensions from changed files
-    let extensions: BTreeSet<String> = app.changed_files.files
+    let extensions: BTreeSet<String> = app
+        .changed_files
+        .files
         .iter()
-        .filter_map(|f| {
-            f.rsplit('.').next().map(|ext| ext.to_lowercase())
-        })
+        .filter_map(|f| f.rsplit('.').next().map(|ext| ext.to_lowercase()))
         .filter(|ext| !ext.contains('/')) // Skip files without extensions
         .collect();
 
@@ -378,7 +413,10 @@ fn build_file_color_legend(app: &App) -> Line<'static> {
         let fake_path = format!("file.{}", ext);
         let color_name = app.config.get_file_color(&fake_path);
         let color = color_from_name(color_name);
-        spans.push(Span::styled(format!(".{}", ext), Style::default().fg(color)));
+        spans.push(Span::styled(
+            format!(".{}", ext),
+            Style::default().fg(color),
+        ));
         spans.push(Span::raw(" "));
     }
 
@@ -442,7 +480,10 @@ fn truncate_path(path: &str, max_width: usize) -> String {
 
         // If filename alone is too long, truncate it
         if filename.len() >= max_width {
-            return format!("…{}", &filename[filename.len().saturating_sub(max_width - 1)..]);
+            return format!(
+                "…{}",
+                &filename[filename.len().saturating_sub(max_width - 1)..]
+            );
         }
 
         // Calculate space for directory (max_width - filename - "/" - "…")
@@ -471,17 +512,37 @@ fn truncate_path(path: &str, max_width: usize) -> String {
 fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
     let mut raw_output = String::with_capacity(512);
 
-    let passed = app.fix_all_results.iter().filter(|r| r.status == CheckStatus::Passed).count();
-    let failed = app.fix_all_results.iter().filter(|r| r.status == CheckStatus::Failed).count();
+    let passed = app
+        .fix_all_results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Passed)
+        .count();
+    let failed = app
+        .fix_all_results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Failed)
+        .count();
 
     if failed == 0 {
-        raw_output.push_str(&format!("\x1b[32m✓ All {} fixes completed successfully!\x1b[0m\n\n", passed));
+        raw_output.push_str(&format!(
+            "\x1b[32m✓ All {} fixes completed successfully!\x1b[0m\n\n",
+            passed
+        ));
     } else {
-        raw_output.push_str(&format!("\x1b[33m● {}/{} fixes completed, {} failed\x1b[0m\n\n", passed, app.fix_all_results.len(), failed));
+        raw_output.push_str(&format!(
+            "\x1b[33m● {}/{} fixes completed, {} failed\x1b[0m\n\n",
+            passed,
+            app.fix_all_results.len(),
+            failed
+        ));
     }
 
     for result in &app.fix_all_results {
-        let status_icon = if result.status == CheckStatus::Passed { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+        let status_icon = if result.status == CheckStatus::Passed {
+            "\x1b[32m✓\x1b[0m"
+        } else {
+            "\x1b[31m✗\x1b[0m"
+        };
         raw_output.push_str(&format!("{} {}\n", status_icon, result.check_id));
 
         if result.status == CheckStatus::Failed && !result.error_output.is_empty() {
@@ -492,7 +553,11 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(" Fix All Results "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Fix All Results "),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
@@ -504,13 +569,21 @@ fn render_fix_all_running(app: &App, frame: &mut Frame, area: Rect) {
     let mut raw_output = format!("\x1b[33m● Running fix all... {}\x1b[0m\n\n", progress);
 
     for result in &app.fix_all_results {
-        let status_icon = if result.status == CheckStatus::Passed { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+        let status_icon = if result.status == CheckStatus::Passed {
+            "\x1b[32m✓\x1b[0m"
+        } else {
+            "\x1b[31m✗\x1b[0m"
+        };
         raw_output.push_str(&format!("{} {}\n", status_icon, result.check_id));
     }
     raw_output.push_str("\n\x1b[90mPlease wait...\x1b[0m");
 
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(" Running Fix All "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Running Fix All "),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
@@ -542,9 +615,17 @@ fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render fix running status
 fn render_fix_running(frame: &mut Frame, area: Rect) {
-    let paragraph = Paragraph::new("\x1b[33m● Running fix command...\x1b[0m\n\nPlease wait...".into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(" Running Fix "))
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(
+        "\x1b[33m● Running fix command...\x1b[0m\n\nPlease wait..."
+            .into_text()
+            .unwrap_or_default(),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Running Fix "),
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -590,13 +671,20 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
             raw_output.push_str("\n\n");
 
             // Files (collapsed style)
-            if let Some(files) = app.checks.iter().find(|c| c.id() == check.id()).map(|c| &c.files) {
+            if let Some(files) = app
+                .checks
+                .iter()
+                .find(|c| c.id() == check.id())
+                .map(|c| &c.files)
+            {
                 if !files.is_empty() && !files[0].starts_with('(') {
                     let file_count = files.len();
                     if file_count <= 3 {
-                        raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", files.join(", ")));
+                        raw_output
+                            .push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", files.join(", ")));
                     } else {
-                        raw_output.push_str(&format!("\x1b[90mFiles: {} (+{} more)\x1b[0m\n\n",
+                        raw_output.push_str(&format!(
+                            "\x1b[90mFiles: {} (+{} more)\x1b[0m\n\n",
                             files.iter().take(2).cloned().collect::<Vec<_>>().join(", "),
                             file_count - 2
                         ));
@@ -644,12 +732,20 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 /// Render pre-command output details
-fn render_pre_command_output(app: &App, pre_cmd: &super::app::PreCommandState, frame: &mut Frame, area: Rect) {
+fn render_pre_command_output(
+    app: &App,
+    pre_cmd: &super::app::PreCommandState,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let title = format!(" {} ", pre_cmd.name);
     let mut raw_output = String::with_capacity(512);
 
     // Command info
-    raw_output.push_str(&format!("\x1b[90mPre-command for group:\x1b[0m \x1b[93m{}\x1b[0m\n\n", pre_cmd.group));
+    raw_output.push_str(&format!(
+        "\x1b[90mPre-command for group:\x1b[0m \x1b[93m{}\x1b[0m\n\n",
+        pre_cmd.group
+    ));
 
     // Status header
     let status_line = match pre_cmd.status {
@@ -662,7 +758,10 @@ fn render_pre_command_output(app: &App, pre_cmd: &super::app::PreCommandState, f
 
     // Duration
     if pre_cmd.duration_ms > 0 {
-        raw_output.push_str(&format!(" \x1b[90m({})\x1b[0m", format_duration(pre_cmd.duration_ms)));
+        raw_output.push_str(&format!(
+            " \x1b[90m({})\x1b[0m",
+            format_duration(pre_cmd.duration_ms)
+        ));
     }
     raw_output.push_str("\n\n");
 
@@ -699,7 +798,11 @@ fn render_output(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     // Show expand hint dynamically based on state
-    let expand_label = if app.show_full_command { "collapse" } else { "expand" };
+    let expand_label = if app.show_full_command {
+        "collapse"
+    } else {
+        "expand"
+    };
 
     // Show filter toggle based on current state
     let filter_spans = if app.status_filter == crate::ui::app::StatusFilter::Failed {
@@ -730,7 +833,12 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 
     // Show trigger option if selected check is on-demand
     if app.can_trigger_selected() {
-        spans.push(Span::styled("t", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "t",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::styled(" run test", Style::default().fg(Color::Cyan)));
         spans.push(Span::raw("  "));
     }
@@ -743,17 +851,32 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 
     // Show "run all files" option if selected check can be run for all files
     if app.can_run_all_files() {
-        spans.push(Span::styled("A", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "A",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" all files  "));
     }
 
     // Always show retry all option
-    spans.push(Span::styled("R", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(
+        "R",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::raw(" RETRY ALL  "));
 
     // Show fix option if available
     if app.can_fix_selected() {
-        spans.push(Span::styled("x", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "x",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::styled(" fix", Style::default().fg(Color::Green)));
         spans.push(Span::raw("  "));
     }
@@ -761,24 +884,40 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     // Show fix-all option if there are multiple fixable checks
     let fixable_count = app.get_fixable_checks().len();
     if fixable_count > 0 && !app.fix_running && !app.fix_all_running {
-        spans.push(Span::styled("X", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(format!(" FIX ALL({})", fixable_count), Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            "X",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" FIX ALL({})", fixable_count),
+            Style::default().fg(Color::Magenta),
+        ));
         spans.push(Span::raw("  "));
     }
 
     // Add version info at the end
     spans.push(Span::styled(
         format!("  {} (built {})", GIT_HASH, BUILD_DATE),
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::DarkGray),
     ));
 
     // If there's a status message, show it prominently instead of shortcuts
     if let Some(ref msg) = app.status_message {
         let status_line = Line::from(vec![
-            Span::styled(" ℹ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ℹ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(msg.clone(), Style::default().fg(Color::White)),
             Span::raw("  "),
-            Span::styled("[press any key to dismiss]", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[press any key to dismiss]",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         let paragraph = Paragraph::new(status_line);
         frame.render_widget(paragraph, area);

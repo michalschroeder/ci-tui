@@ -111,7 +111,13 @@ pub enum RunnerEvent {
     /// A pre-command has started
     PreCommandStarted { group: String, name: String },
     /// A pre-command has finished
-    PreCommandFinished { group: String, name: String, success: bool, output: String, duration_ms: u64 },
+    PreCommandFinished {
+        group: String,
+        name: String,
+        success: bool,
+        output: String,
+        duration_ms: u64,
+    },
     /// All checks have completed
     AllFinished,
 }
@@ -153,9 +159,11 @@ impl CheckRunner {
         let grouped = group_checks(&checks);
 
         for (group_name, group_checks) in grouped {
-            let _ = event_tx.send(RunnerEvent::GroupStarted {
-                group: group_name.to_string(),
-            }).await;
+            let _ = event_tx
+                .send(RunnerEvent::GroupStarted {
+                    group: group_name.to_string(),
+                })
+                .await;
 
             // Get group config
             let group_config = self.config.get_group(group_name);
@@ -167,26 +175,32 @@ impl CheckRunner {
             if has_runnable_checks {
                 if let Some(config) = group_config {
                     for pre_cmd in &config.pre_commands {
-                        let _ = event_tx.send(RunnerEvent::PreCommandStarted {
-                            group: group_name.to_string(),
-                            name: pre_cmd.name.clone(),
-                        }).await;
+                        let _ = event_tx
+                            .send(RunnerEvent::PreCommandStarted {
+                                group: group_name.to_string(),
+                                name: pre_cmd.name.clone(),
+                            })
+                            .await;
 
                         let (success, output, duration_ms) = self.run_pre_command(pre_cmd).await;
 
-                        let _ = event_tx.send(RunnerEvent::PreCommandFinished {
-                            group: group_name.to_string(),
-                            name: pre_cmd.name.clone(),
-                            success,
-                            output,
-                            duration_ms,
-                        }).await;
+                        let _ = event_tx
+                            .send(RunnerEvent::PreCommandFinished {
+                                group: group_name.to_string(),
+                                name: pre_cmd.name.clone(),
+                                success,
+                                output,
+                                duration_ms,
+                            })
+                            .await;
 
                         // Stop if pre-command failed
                         if !success {
-                            let _ = event_tx.send(RunnerEvent::GroupFinished {
-                                group: group_name.to_string(),
-                            }).await;
+                            let _ = event_tx
+                                .send(RunnerEvent::GroupFinished {
+                                    group: group_name.to_string(),
+                                })
+                                .await;
                             let _ = event_tx.send(RunnerEvent::AllFinished).await;
                             return Ok(());
                         }
@@ -202,9 +216,11 @@ impl CheckRunner {
                 self.run_sequential(group_checks, &event_tx).await?;
             }
 
-            let _ = event_tx.send(RunnerEvent::GroupFinished {
-                group: group_name.to_string(),
-            }).await;
+            let _ = event_tx
+                .send(RunnerEvent::GroupFinished {
+                    group: group_name.to_string(),
+                })
+                .await;
         }
 
         let _ = event_tx.send(RunnerEvent::AllFinished).await;
@@ -246,7 +262,14 @@ impl CheckRunner {
             let global_env = self.config.docker.env.clone();
 
             let handle = tokio::spawn(async move {
-                let result = run_docker_check(&check, &project_root, &docker_project_dir, &global_env, &event_tx).await;
+                let result = run_docker_check(
+                    &check,
+                    &project_root,
+                    &docker_project_dir,
+                    &global_env,
+                    &event_tx,
+                )
+                .await;
                 let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
             });
 
@@ -265,13 +288,23 @@ impl CheckRunner {
         check: &CheckToRun,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> CheckResult {
-        run_docker_check(check, &self.project_root, &self.docker_project_dir, &self.config.docker.env, event_tx).await
+        run_docker_check(
+            check,
+            &self.project_root,
+            &self.docker_project_dir,
+            &self.config.docker.env,
+            event_tx,
+        )
+        .await
     }
 
     /// Run a pre-command for a group (e.g., DB initialization)
     /// Returns (success, output, duration_ms)
     async fn run_pre_command(&self, pre_cmd: &crate::config::PreCommand) -> (bool, String, u64) {
-        let service = pre_cmd.service.as_deref().unwrap_or_else(|| self.config.default_service());
+        let service = pre_cmd
+            .service
+            .as_deref()
+            .unwrap_or_else(|| self.config.default_service());
         let start = std::time::Instant::now();
 
         // Merge global env with pre-command-specific env (command env takes precedence)
@@ -345,9 +378,11 @@ async fn run_docker_check(
     let mut env = global_env.clone();
     env.extend(check.definition.env.clone());
 
-    let _ = event_tx.send(RunnerEvent::CheckStarted {
-        check_id: check_id.clone(),
-    }).await;
+    let _ = event_tx
+        .send(RunnerEvent::CheckStarted {
+            check_id: check_id.clone(),
+        })
+        .await;
 
     execute_docker_command(
         check_id,
@@ -356,7 +391,8 @@ async fn run_docker_check(
         docker_project_dir,
         service,
         &env,
-    ).await
+    )
+    .await
 }
 
 /// Format duration in human readable format
@@ -472,7 +508,8 @@ pub async fn run_single_check(
         docker_project_dir,
         service,
         &merged_env,
-    ).await
+    )
+    .await
 }
 
 /// Run a fix command for a check
@@ -490,7 +527,8 @@ pub async fn run_fix_command(
         docker_project_dir,
         docker_service,
         env,
-    ).await
+    )
+    .await
 }
 
 /// Run a check with a custom command (e.g., for running without file filtering)
@@ -512,5 +550,6 @@ pub async fn run_check_with_command(
         docker_project_dir,
         service,
         &merged_env,
-    ).await
+    )
+    .await
 }

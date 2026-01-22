@@ -128,9 +128,7 @@ pub struct TestDiscoveryConfig {
 pub enum TestDiscoveryStrategy {
     /// Map source paths to test paths by pattern
     #[serde(rename = "path_mapping")]
-    PathMapping {
-        rules: Vec<PathMappingRule>,
-    },
+    PathMapping { rules: Vec<PathMappingRule> },
     /// Search test files for content matching a pattern
     #[serde(rename = "grep_search")]
     GrepSearch {
@@ -166,7 +164,6 @@ pub struct PreCommand {
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }
-
 
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)

@@ -130,22 +130,10 @@ fn grep_search(
 fn expand_placeholders(pattern: &str, source_file: &str) -> String {
     let path = Path::new(source_file);
 
-    let basename = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let filename = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let extension = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let dirname = path
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
+    let basename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let dirname = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     let full_path = path
         .with_extension("")
         .to_str()

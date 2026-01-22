@@ -4,11 +4,17 @@ mod dashboard;
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
-use crate::runner::{run_check_with_command, run_fix_command, run_single_check, CheckResult, CheckRunner, RunnerEvent};
+use crate::runner::{
+    run_check_with_command, run_fix_command, run_single_check, CheckResult, CheckRunner,
+    RunnerEvent,
+};
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -49,7 +55,7 @@ enum Message {
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
     FixResult(CheckResult),
-    FixAllResult(CheckResult, bool),  // (result, is_last)
+    FixAllResult(CheckResult, bool), // (result, is_last)
     RetryResult(CheckResult),
 }
 
@@ -109,9 +115,8 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
             system.refresh_cpu_usage();
             system.refresh_memory();
 
-            let cpu_usage: f32 = system.cpus().iter()
-                .map(|cpu| cpu.cpu_usage())
-                .sum::<f32>() / system.cpus().len().max(1) as f32;
+            let cpu_usage: f32 = system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>()
+                / system.cpus().len().max(1) as f32;
 
             let stats = SystemStats {
                 cpu_usage,
@@ -175,7 +180,7 @@ fn restore_terminal() {
 /// Copy text to clipboard using OSC 52 escape sequence
 /// Works in most modern terminals: iTerm2, kitty, alacritty, Windows Terminal, etc.
 fn copy_to_clipboard(text: &str) {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     let encoded = STANDARD.encode(text);
     // OSC 52 sequence: \x1b]52;c;{base64}\x07
     print!("\x1b]52;c;{}\x07", encoded);
@@ -200,9 +205,7 @@ fn start_runner(
     let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>(RUNNER_CHANNEL_CAPACITY);
     let runner = CheckRunner::new(config.clone(), project_root);
 
-    let handle = tokio::spawn(async move {
-        runner.run_checks(checks, event_tx).await
-    });
+    let handle = tokio::spawn(async move { runner.run_checks(checks, event_tx).await });
 
     (handle, event_rx)
 }
@@ -216,9 +219,7 @@ fn handle_key_event(
 ) -> KeyAction {
     match (key.code, key.modifiers) {
         // Quit
-        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            KeyAction::Quit
-        }
+        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyAction::Quit,
         // Navigation
         (KeyCode::Up | KeyCode::Char('k'), _) => {
             app.previous_check();
@@ -256,7 +257,8 @@ fn handle_key_event(
                     let docker_dir = Arc::clone(&channels.docker_project_dir);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        let result = run_single_check(&check, &project_root, &docker_dir, &global_env).await;
+                        let result =
+                            run_single_check(&check, &project_root, &docker_dir, &global_env).await;
                         let _ = retry_tx.send(result).await;
                     });
                 }
@@ -274,7 +276,8 @@ fn handle_key_event(
                     let docker_dir = Arc::clone(&channels.docker_project_dir);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        let result = run_single_check(&check, &project_root, &docker_dir, &global_env).await;
+                        let result =
+                            run_single_check(&check, &project_root, &docker_dir, &global_env).await;
                         let _ = retry_tx.send(result).await;
                     });
                 }
@@ -294,7 +297,14 @@ fn handle_key_event(
                     let docker_dir = Arc::clone(&channels.docker_project_dir);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        let result = run_check_with_command(&check, &all_files_cmd, &project_root, &docker_dir, &global_env).await;
+                        let result = run_check_with_command(
+                            &check,
+                            &all_files_cmd,
+                            &project_root,
+                            &docker_dir,
+                            &global_env,
+                        )
+                        .await;
                         let _ = retry_tx.send(result).await;
                     });
                 }
@@ -344,7 +354,14 @@ fn handle_key_event(
                     let docker_dir = Arc::clone(&channels.docker_project_dir);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        let result = run_fix_command(&fix_cmd, &project_root, &docker_dir, &service, &global_env).await;
+                        let result = run_fix_command(
+                            &fix_cmd,
+                            &project_root,
+                            &docker_dir,
+                            &service,
+                            &global_env,
+                        )
+                        .await;
                         let _ = fix_tx.send(result).await;
                     });
                 }
@@ -363,8 +380,17 @@ fn handle_key_event(
                     let docker_dir = Arc::clone(&channels.docker_project_dir);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        for (i, (_check_id, fix_cmd, service)) in fix_commands.into_iter().enumerate() {
-                            let result = run_fix_command(&fix_cmd, &project_root, &docker_dir, &service, &global_env).await;
+                        for (i, (_check_id, fix_cmd, service)) in
+                            fix_commands.into_iter().enumerate()
+                        {
+                            let result = run_fix_command(
+                                &fix_cmd,
+                                &project_root,
+                                &docker_dir,
+                                &service,
+                                &global_env,
+                            )
+                            .await;
                             let is_last = i == total - 1;
                             let _ = fix_all_tx.send((result, is_last)).await;
                         }
@@ -410,9 +436,13 @@ fn handle_message(
             // Dispatch to key handler
             let result = match handle_key_event(app, key, channels, config) {
                 KeyAction::Quit => Ok(Action::Quit),
-                KeyAction::RetryAll { new_changed_files, new_checks } => {
-                    Ok(Action::RestartRunner { new_changed_files, new_checks })
-                }
+                KeyAction::RetryAll {
+                    new_changed_files,
+                    new_checks,
+                } => Ok(Action::RestartRunner {
+                    new_changed_files,
+                    new_checks,
+                }),
                 KeyAction::None => {
                     app.needs_redraw = true;
                     Ok(Action::Continue)
@@ -481,7 +511,13 @@ pub async fn run(
     let project_root_str = project_root.to_string_lossy().to_string();
 
     // Create app state
-    let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name, project_root_str);
+    let mut app = App::new(
+        config.clone(),
+        changed_files,
+        checks.clone(),
+        branch_name,
+        project_root_str,
+    );
 
     // Start the runner in background
     let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);
@@ -492,7 +528,8 @@ pub async fn run(
     let (retry_tx, mut retry_rx) = mpsc::channel::<CheckResult>(1);
     let project_root = Arc::new(project_root);
     let docker_project_dir: Arc<str> = config.docker.project_dir.clone().into();
-    let global_env: Arc<std::collections::HashMap<String, String>> = Arc::new(config.docker.env.clone());
+    let global_env: Arc<std::collections::HashMap<String, String>> =
+        Arc::new(config.docker.env.clone());
 
     let channels = EventChannels {
         fix_tx,
@@ -551,7 +588,10 @@ pub async fn run(
         // Handle the message and get the action
         match handle_message(&mut app, msg, &channels, &config)? {
             Action::Quit => break,
-            Action::RestartRunner { new_changed_files, new_checks } => {
+            Action::RestartRunner {
+                new_changed_files,
+                new_checks,
+            } => {
                 // Abort old runner and start new one
                 runner_handle.abort();
                 app.reset_for_retry(new_changed_files, new_checks.clone());
@@ -595,9 +635,15 @@ fn print_summary(app: &App) {
     let elapsed_str = dashboard::format_elapsed(elapsed);
 
     if failed == 0 {
-        println!("\n\x1b[32m✓ All {} checks passed in {}\x1b[0m", total, elapsed_str);
+        println!(
+            "\n\x1b[32m✓ All {} checks passed in {}\x1b[0m",
+            total, elapsed_str
+        );
     } else {
-        println!("\n\x1b[31m✗ {} of {} checks failed in {}\x1b[0m", failed, total, elapsed_str);
+        println!(
+            "\n\x1b[31m✗ {} of {} checks failed in {}\x1b[0m",
+            failed, total, elapsed_str
+        );
 
         // Show failed checks
         for (id, result) in &app.results {

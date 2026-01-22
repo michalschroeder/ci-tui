@@ -17,7 +17,8 @@ pub async fn run(
     let docker_project_dir = &config.docker.project_dir;
 
     // Print header
-    println!("\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
+    println!(
+        "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
         changed_files.len(),
         changed_files.base_ref
     );
@@ -33,13 +34,15 @@ pub async fn run(
     let mut has_failures = false;
 
     for (group_name, group_checks) in grouped {
-        let display_name = config.get_group(group_name)
+        let display_name = config
+            .get_group(group_name)
             .map(|g| g.display_name(group_name))
             .unwrap_or(group_name);
         println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
         // Check if group runs in parallel
-        let parallel = config.get_group(group_name)
+        let parallel = config
+            .get_group(group_name)
             .map(|g| g.parallel)
             .unwrap_or(false);
 
@@ -62,13 +65,24 @@ pub async fn run(
     // Print summary
     let elapsed = start_time.elapsed();
     let elapsed_str = format_duration(elapsed);
-    let passed = all_results.iter().filter(|r| r.status == CheckStatus::Passed).count();
-    let failed = all_results.iter().filter(|r| r.status == CheckStatus::Failed).count();
+    let passed = all_results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Passed)
+        .count();
+    let failed = all_results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Failed)
+        .count();
 
     println!("\x1b[1m── Summary ──\x1b[0m");
     if has_failures {
-        println!("\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
-            passed, all_results.len(), failed, elapsed_str);
+        println!(
+            "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
+            passed,
+            all_results.len(),
+            failed,
+            elapsed_str
+        );
 
         // Show failed checks with details
         println!();
@@ -114,7 +128,11 @@ pub async fn run(
 
         std::process::exit(1);
     } else {
-        println!("\x1b[32m✓ All {} checks passed in {}\x1b[0m", all_results.len(), elapsed_str);
+        println!(
+            "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
+            all_results.len(),
+            elapsed_str
+        );
     }
 
     Ok(())
@@ -125,22 +143,40 @@ fn print_result(result: &CheckResult) {
 
     match result.status {
         CheckStatus::Passed => {
-            println!("  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m", result.check_id, duration);
+            println!(
+                "  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m",
+                result.check_id, duration
+            );
         }
         CheckStatus::Failed => {
-            println!("  \x1b[31m✗\x1b[0m {} \x1b[90m{}\x1b[0m", result.check_id, duration);
+            println!(
+                "  \x1b[31m✗\x1b[0m {} \x1b[90m{}\x1b[0m",
+                result.check_id, duration
+            );
         }
         CheckStatus::Running => {
-            println!("  \x1b[33m●\x1b[0m {} \x1b[90m(running)\x1b[0m", result.check_id);
+            println!(
+                "  \x1b[33m●\x1b[0m {} \x1b[90m(running)\x1b[0m",
+                result.check_id
+            );
         }
         CheckStatus::Pending => {
-            println!("  \x1b[90m○\x1b[0m {} \x1b[90m(pending)\x1b[0m", result.check_id);
+            println!(
+                "  \x1b[90m○\x1b[0m {} \x1b[90m(pending)\x1b[0m",
+                result.check_id
+            );
         }
         CheckStatus::Skipped => {
-            println!("  \x1b[90m⊘\x1b[0m {} \x1b[90m(skipped)\x1b[0m", result.check_id);
+            println!(
+                "  \x1b[90m⊘\x1b[0m {} \x1b[90m(skipped)\x1b[0m",
+                result.check_id
+            );
         }
         CheckStatus::OnDemand => {
-            println!("  \x1b[36m◇\x1b[0m {} \x1b[90m(on-demand)\x1b[0m", result.check_id);
+            println!(
+                "  \x1b[36m◇\x1b[0m {} \x1b[90m(on-demand)\x1b[0m",
+                result.check_id
+            );
         }
     }
 }
@@ -179,9 +215,8 @@ async fn run_parallel(
         let project_root = project_root.clone();
         let docker_dir = docker_project_dir.to_string();
 
-        let handle = tokio::spawn(async move {
-            run_check(&check, &project_root, &docker_dir).await
-        });
+        let handle =
+            tokio::spawn(async move { run_check(&check, &project_root, &docker_dir).await });
         handles.push((check_id, handle));
     }
 

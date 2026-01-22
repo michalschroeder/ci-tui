@@ -55,7 +55,8 @@ impl CheckToRun {
     /// This returns the command with {files} replaced by empty string, trimmed.
     /// Useful for running a check against all files instead of just changed ones.
     pub fn get_command_for_all_files(&self) -> String {
-        self.definition.command
+        self.definition
+            .command
             .replace("{files}", "")
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -66,7 +67,11 @@ impl CheckToRun {
 /// Determine which checks should run based on changed files
 /// Returns ALL checks from config - those that match are set to run,
 /// those that don't match are marked as skipped (can be run on-demand)
-pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project_root: &Path) -> Vec<CheckToRun> {
+pub fn determine_checks(
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    project_root: &Path,
+) -> Vec<CheckToRun> {
     let mut checks_to_run = Vec::new();
     let default_service = config.default_service();
 
@@ -79,9 +84,10 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
             // Always run checks with no triggers
             if check.always_run() {
                 let resolved = resolve_command(config, check, &[], false);
-                let resolved_fix = check.fix_command.as_ref().map(|_| {
-                    resolve_command(config, check, &[], true)
-                });
+                let resolved_fix = check
+                    .fix_command
+                    .as_ref()
+                    .map(|_| resolve_command(config, check, &[], true));
                 checks_to_run.push(CheckToRun {
                     id: check_id.clone(),
                     group: group_name.to_string(),
@@ -128,9 +134,10 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
                                 if check.on_demand {
                                     // Check is configured as on-demand - add but require manual trigger
                                     let resolved = resolve_command(config, check, &[], false);
-                                    let resolved_fix = check.fix_command.as_ref().map(|_| {
-                                        resolve_command(config, check, &[], true)
-                                    });
+                                    let resolved_fix = check
+                                        .fix_command
+                                        .as_ref()
+                                        .map(|_| resolve_command(config, check, &[], true));
                                     checks_to_run.push(CheckToRun {
                                         id: check_id.clone(),
                                         group: group_name.to_string(),
@@ -144,7 +151,8 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
                                     continue;
                                 } else {
                                     // Fall back to running all when no related tests found
-                                    matched_files.push("(source files changed - running all)".to_string());
+                                    matched_files
+                                        .push("(source files changed - running all)".to_string());
                                 }
                             }
                         }
@@ -155,9 +163,10 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
                 if !matched_files.is_empty() {
                     let file_list: Vec<&str> = matched_files.iter().map(|s| s.as_str()).collect();
                     let resolved = resolve_command(config, check, &file_list, false);
-                    let resolved_fix = check.fix_command.as_ref().map(|_| {
-                        resolve_command(config, check, &file_list, true)
-                    });
+                    let resolved_fix = check
+                        .fix_command
+                        .as_ref()
+                        .map(|_| resolve_command(config, check, &file_list, true));
                     checks_to_run.push(CheckToRun {
                         id: check_id.clone(),
                         group: group_name.to_string(),
@@ -174,9 +183,10 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
                     let has_file_trigger = triggers.file_pattern.is_some();
                     if has_file_trigger || has_source_trigger {
                         let resolved = resolve_command(config, check, &[], false);
-                        let resolved_fix = check.fix_command.as_ref().map(|_| {
-                            resolve_command(config, check, &[], true)
-                        });
+                        let resolved_fix = check
+                            .fix_command
+                            .as_ref()
+                            .map(|_| resolve_command(config, check, &[], true));
                         checks_to_run.push(CheckToRun {
                             id: check_id.clone(),
                             group: group_name.to_string(),
@@ -185,7 +195,7 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
                             files: vec!["(skipped - no matching files)".to_string()],
                             resolved_command: resolved,
                             resolved_fix_command: resolved_fix,
-                            on_demand: true,  // Can be run on-demand
+                            on_demand: true, // Can be run on-demand
                         });
                     }
                 }
@@ -200,9 +210,17 @@ pub fn determine_checks(config: &CiConfig, changed_files: &ChangedFiles, project
 ///
 /// Supported placeholders:
 /// - `{files}` - replaced with space-separated list of matched files
-fn resolve_command(_config: &CiConfig, check: &CheckDefinition, files: &[&str], use_fix: bool) -> String {
+fn resolve_command(
+    _config: &CiConfig,
+    check: &CheckDefinition,
+    files: &[&str],
+    use_fix: bool,
+) -> String {
     let mut command = if use_fix {
-        check.fix_command.clone().unwrap_or_else(|| check.command.clone())
+        check
+            .fix_command
+            .clone()
+            .unwrap_or_else(|| check.command.clone())
     } else {
         check.command.clone()
     };
@@ -223,8 +241,7 @@ fn resolve_command(_config: &CiConfig, check: &CheckDefinition, files: &[&str], 
 /// Returns groups in the order they appear in checks (which is config order)
 pub fn group_checks(checks: &[CheckToRun]) -> Vec<(&str, Vec<&CheckToRun>)> {
     // Use IndexMap to preserve insertion order
-    let mut groups: indexmap::IndexMap<&str, Vec<&CheckToRun>> =
-        indexmap::IndexMap::new();
+    let mut groups: indexmap::IndexMap<&str, Vec<&CheckToRun>> = indexmap::IndexMap::new();
 
     for check in checks {
         groups.entry(check.group()).or_default().push(check);
@@ -359,16 +376,15 @@ checks:
         assert!(yaml_lint.is_some());
         let yaml_lint = yaml_lint.unwrap();
         assert!(!yaml_lint.on_demand);
-        assert!(yaml_lint.files.contains(&"config/services.yaml".to_string()));
+        assert!(yaml_lint
+            .files
+            .contains(&"config/services.yaml".to_string()));
     }
 
     #[test]
     fn test_resolve_command_with_files() {
         let config = parse_config();
-        let changed_files = make_changed_files(vec![
-            "src/Service/Foo.php",
-            "src/Service/Bar.php",
-        ]);
+        let changed_files = make_changed_files(vec!["src/Service/Foo.php", "src/Service/Bar.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
         let checks = determine_checks(&config, &changed_files, &project_root);

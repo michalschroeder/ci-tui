@@ -61,9 +61,8 @@ impl ChangedFiles {
             return;
         }
 
-        self.files.retain(|file| {
-            !compiled.iter().any(|re| re.is_match(file))
-        });
+        self.files
+            .retain(|file| !compiled.iter().any(|re| re.is_match(file)));
     }
 }
 
@@ -245,10 +244,7 @@ mod tests {
             "tests/Unit/FooTest.php",
         ]);
 
-        let ignore_patterns = vec![
-            r"\.md$".to_string(),
-            r"\.github/".to_string(),
-        ];
+        let ignore_patterns = vec![r"\.md$".to_string(), r"\.github/".to_string()];
 
         files.apply_ignore_patterns(&ignore_patterns);
 
@@ -259,10 +255,7 @@ mod tests {
 
     #[test]
     fn test_apply_ignore_patterns_empty_patterns() {
-        let mut files = make_changed_files(vec![
-            "src/Foo.php",
-            "README.md",
-        ]);
+        let mut files = make_changed_files(vec!["src/Foo.php", "README.md"]);
 
         files.apply_ignore_patterns(&[]);
 
@@ -272,10 +265,7 @@ mod tests {
 
     #[test]
     fn test_apply_ignore_patterns_invalid_regex() {
-        let mut files = make_changed_files(vec![
-            "src/Foo.php",
-            "README.md",
-        ]);
+        let mut files = make_changed_files(vec!["src/Foo.php", "README.md"]);
 
         let ignore_patterns = vec![
             r"[invalid".to_string(), // Invalid regex - should be skipped
