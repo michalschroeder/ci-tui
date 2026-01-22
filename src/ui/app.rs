@@ -58,8 +58,6 @@ pub struct App {
     pub results: HashMap<String, CheckResult>,
     /// Current git branch name
     pub current_branch: String,
-    /// Project root directory path
-    pub project_root: String,
 
     // UI state
     /// Index of currently selected check in filtered list
@@ -124,7 +122,6 @@ impl App {
         changed_files: ChangedFiles,
         checks: Vec<CheckToRun>,
         current_branch: String,
-        project_root: String,
     ) -> Self {
         // Initialize results - pending for auto-run, on_demand for manual triggers
         let mut results = HashMap::new();
@@ -160,7 +157,6 @@ impl App {
             checks,
             results,
             current_branch,
-            project_root,
             selected_check: 0,
             output_scroll: 0,
             status_filter: StatusFilter::All,
@@ -530,29 +526,6 @@ impl App {
         }
     }
 
-    pub fn filtered_checks(&self) -> Vec<&CheckToRun> {
-        // Pre-allocate with capacity hint based on filter type
-        let capacity = match self.status_filter {
-            StatusFilter::All => self.checks.len(),
-            StatusFilter::Failed => self.checks.len() / 4, // Usually fewer failures
-        };
-
-        let mut result = Vec::with_capacity(capacity);
-        for check in &self.checks {
-            let status = self.results.get(check.id());
-            let include = match self.status_filter {
-                StatusFilter::All => true,
-                StatusFilter::Failed => status
-                    .map(|r| r.status == CheckStatus::Failed)
-                    .unwrap_or(false),
-            };
-            if include {
-                result.push(check);
-            }
-        }
-        result
-    }
-
     pub fn selected_check(&self) -> Option<&CheckToRun> {
         match self.selected_item() {
             Some(SelectableItem::Check(check)) => {
@@ -561,11 +534,6 @@ impl App {
             }
             _ => None,
         }
-    }
-
-    pub fn selected_result(&self) -> Option<&CheckResult> {
-        self.selected_check()
-            .and_then(|check| self.results.get(check.id()))
     }
 
     // Navigation - all methods set needs_redraw for immediate visual feedback
@@ -821,13 +789,7 @@ checks:
             make_check("phpunit", "tests", "PHPUnit", true, false),
             make_check("behat", "tests", "Behat", false, true),
         ];
-        App::new(
-            config,
-            changed_files,
-            checks,
-            "main".to_string(),
-            "/project".to_string(),
-        )
+        App::new(config, changed_files, checks, "main".to_string())
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use std::io::{self, stdout};
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -199,7 +199,7 @@ fn install_panic_hook() {
 /// Start a new check runner and return its handle and event receiver
 fn start_runner(
     config: &CiConfig,
-    project_root: &PathBuf,
+    project_root: &Path,
     checks: Vec<CheckToRun>,
 ) -> (JoinHandle<Result<()>>, mpsc::Receiver<RunnerEvent>) {
     let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>(RUNNER_CHANNEL_CAPACITY);
@@ -508,16 +508,9 @@ pub async fn run(
 
     // Get current branch name
     let branch_name = current_branch(&project_root).unwrap_or_else(|_| "unknown".to_string());
-    let project_root_str = project_root.to_string_lossy().to_string();
 
     // Create app state
-    let mut app = App::new(
-        config.clone(),
-        changed_files,
-        checks.clone(),
-        branch_name,
-        project_root_str,
-    );
+    let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
 
     // Start the runner in background
     let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);

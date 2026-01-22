@@ -3,7 +3,7 @@ use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -183,7 +183,7 @@ fn print_result(result: &CheckResult) {
 
 async fn run_sequential(
     checks: Vec<&CheckToRun>,
-    project_root: &PathBuf,
+    project_root: &Path,
     docker_project_dir: &str,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
@@ -200,7 +200,7 @@ async fn run_sequential(
 
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
-    project_root: &PathBuf,
+    project_root: &Path,
     docker_project_dir: &str,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
@@ -212,7 +212,7 @@ async fn run_parallel(
         }
         let check_id = check.id().to_string();
         let check = check.clone();
-        let project_root = project_root.clone();
+        let project_root = project_root.to_path_buf();
         let docker_dir = docker_project_dir.to_string();
 
         let handle =
@@ -231,7 +231,7 @@ async fn run_parallel(
 
 async fn run_check(
     check: &CheckToRun,
-    project_root: &PathBuf,
+    project_root: &Path,
     docker_project_dir: &str,
 ) -> CheckResult {
     let check_id = check.id().to_string();
