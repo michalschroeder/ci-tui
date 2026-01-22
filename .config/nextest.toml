@@ -1,0 +1,26 @@
+# nextest configuration
+# Docs: https://nexte.st/docs/configuration/
+
+[profile.default]
+# Local development profile - fast feedback
+retries = 0
+test-threads = "num-cpus"
+fail-fast = true
+slow-timeout = { period = "60s" }
+
+[profile.ci]
+# CI profile - thorough testing with retries
+retries = 2
+test-threads = "num-cpus"
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+# JUnit XML output for CI test reporting
+[profile.ci.junit]
+path = "target/nextest/junit.xml"
+
+# Override for integration tests (if any) - may need more time
+[[profile.default.overrides]]
+filter = 'test(integration_)'
+retries = 1
+slow-timeout = { period = "120s" }
