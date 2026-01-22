@@ -11,6 +11,9 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 
+const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
+const BUILD_DATE: &str = env!("CI_TUI_BUILD_DATE");
+
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
     let history_len = history.len();
@@ -762,6 +765,12 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(format!(" FIX ALL({})", fixable_count), Style::default().fg(Color::Magenta)));
         spans.push(Span::raw("  "));
     }
+
+    // Add version info at the end
+    spans.push(Span::styled(
+        format!("  {} (built {})", GIT_HASH, BUILD_DATE),
+        Style::default().fg(Color::DarkGray)
+    ));
 
     // If there's a status message, show it prominently instead of shortcuts
     if let Some(ref msg) = app.status_message {
