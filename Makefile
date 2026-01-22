@@ -1,4 +1,4 @@
-.PHONY: build build-no-cache run run-local push pull dev check fmt clippy test clean help
+.PHONY: build build-no-cache run run-local push pull dev check fmt clippy test clean help ci test-local test-ci fmt-check coverage coverage-lcov
 
 IMAGE_NAME := ci-tui
 VERSION ?= latest
@@ -45,6 +45,25 @@ clippy: ## Run clippy lints (in Docker)
 
 test: ## Run tests (in Docker)
 	docker run --rm -v $(PWD):/build -w /build rust:alpine cargo test
+
+# Local CI commands (mirrors GitHub Actions)
+
+ci: fmt-check clippy test-local  ## Run all CI checks locally
+
+test-local:  ## Run tests with nextest (local)
+	cargo nextest run
+
+test-ci:  ## Run tests with nextest (CI profile)
+	cargo nextest run --profile ci
+
+fmt-check:  ## Check formatting without fixing
+	cargo fmt -- --check
+
+coverage:  ## Generate HTML coverage report
+	cargo llvm-cov nextest --html --open
+
+coverage-lcov:  ## Generate LCOV coverage report
+	cargo llvm-cov nextest --lcov --output-path lcov.info
 
 build-no-cache: ## Build Docker image without cache
 	docker build --no-cache -t $(LOCAL_IMAGE) .
