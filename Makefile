@@ -29,6 +29,9 @@ clippy: ## Run clippy lints
 coverage: ## Generate LCOV coverage report
 	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov cargo-nextest --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
 
+update-lock: ## Update Cargo.lock with latest compatible versions
+	docker run --rm -v $(PWD):/build -w /build $(RUST_IMAGE) cargo update
+
 # === CI (mirrors GitHub Actions) ===
 
 ci: fmt-check clippy test ## Run all CI checks locally (in Docker)
