@@ -1,34 +1,45 @@
+use std::env;
 use std::process::Command;
 
 fn main() {
-    // Capture git commit hash (short, 7 chars)
-    let git_hash = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    // Try environment variable first (set by Docker build args), then fall back to git command
+    let git_hash = env::var("CI_TUI_GIT_HASH")
         .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
+        .filter(|s| !s.is_empty() && s != "unknown")
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        String::from_utf8(output.stdout).ok()
+                    } else {
+                        None
+                    }
+                })
+                .map(|s| s.trim().to_string())
         })
-        .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Capture build date in YYYY-MM-DD format using date command
-    let build_date = Command::new("date")
-        .args(["+%Y-%m-%d"])
-        .output()
+    // Try environment variable first (set by Docker build args), then fall back to date command
+    let build_date = env::var("CI_TUI_BUILD_DATE")
         .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
+        .filter(|s| !s.is_empty() && s != "unknown")
+        .or_else(|| {
+            Command::new("date")
+                .args(["+%Y-%m-%d"])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        String::from_utf8(output.stdout).ok()
+                    } else {
+                        None
+                    }
+                })
+                .map(|s| s.trim().to_string())
         })
-        .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
     // Set environment variables for compile-time access

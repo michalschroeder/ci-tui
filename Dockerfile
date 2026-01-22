@@ -1,18 +1,25 @@
 # syntax=docker/dockerfile:1.4
 # Version arguments (global scope)
 ARG ALPINE_VERSION=3.21
+ARG CI_TUI_GIT_HASH=unknown
+ARG CI_TUI_BUILD_DATE=unknown
 
 # Build stage - use Alpine for static musl build
 FROM rust:alpine AS builder
 
+# Re-declare ARGs after FROM (Docker scope rules)
+ARG CI_TUI_GIT_HASH
+ARG CI_TUI_BUILD_DATE
+
 WORKDIR /build
 
 # Install build dependencies for Alpine
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev git
 
-# Copy manifest and lockfile first (for dependency caching)
+# Copy manifest, lockfile, and build script
 COPY Cargo.toml ./
 COPY Cargo.lock* ./
+COPY build.rs ./
 
 # Create dummy src to build dependencies (will be replaced)
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -30,8 +37,10 @@ RUN touch src/main.rs src/lib.rs 2>/dev/null || touch src/main.rs
 
 # Build the actual application
 # NOTE: NOT using cache mount for /build/target to ensure source changes are detected
+# Pass version info as env vars for build.rs to use when git is unavailable
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
+    CI_TUI_GIT_HASH=${CI_TUI_GIT_HASH} CI_TUI_BUILD_DATE=${CI_TUI_BUILD_DATE} \
     cargo build --release && \
     cp /build/target/release/ci-tui /tmp/ci-tui
 
