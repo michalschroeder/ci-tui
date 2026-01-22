@@ -9,19 +9,19 @@ Requirements for code quality milestone. Each maps to roadmap phases.
 
 ### Event Loop & Responsiveness
 
-- [ ] **EVNT-01**: Refactor event loop to use `tokio::select!` instead of sleep-based pattern
-- [ ] **EVNT-02**: Convert keyboard channel from `std::sync::mpsc` to `tokio::sync::mpsc`
-- [ ] **EVNT-03**: Introduce Message enum for explicit state transitions
-- [ ] **EVNT-04**: Keyboard input responds within 1ms during check execution (was 16ms+)
+- [x] **EVNT-01**: Refactor event loop to use `tokio::select!` instead of sleep-based pattern
+- [x] **EVNT-02**: Convert keyboard channel from `std::sync::mpsc` to `tokio::sync::mpsc`
+- [x] **EVNT-03**: Introduce Message enum for explicit state transitions
+- [x] **EVNT-04**: Keyboard input responds within 1ms during check execution (was 16ms+)
 
 ### Testing Infrastructure
 
-- [ ] **TEST-01**: Install and configure cargo-nextest as test runner
-- [ ] **TEST-02**: Add mockall to dev-dependencies for trait-based mocking
-- [ ] **TEST-03**: Add rstest for test fixtures and parameterized tests
-- [ ] **TEST-04**: Add pretty_assertions for better assertion output
-- [ ] **TEST-05**: Install cargo-llvm-cov for code coverage measurement
-- [ ] **TEST-06**: Configure CI pipeline with test, lint, and coverage reporting
+- [x] **TEST-01**: Install and configure cargo-nextest as test runner
+- [x] **TEST-02**: Add mockall to dev-dependencies for trait-based mocking
+- [x] **TEST-03**: Add rstest for test fixtures and parameterized tests
+- [x] **TEST-04**: Add pretty_assertions for better assertion output
+- [x] **TEST-05**: Install cargo-llvm-cov for code coverage measurement
+- [x] **TEST-06**: Configure CI pipeline with test, lint, and coverage reporting
 
 ### Code Quality
 
@@ -90,16 +90,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EVNT-01 | Phase 1 | Pending |
-| EVNT-02 | Phase 1 | Pending |
-| EVNT-03 | Phase 1 | Pending |
-| EVNT-04 | Phase 1 | Pending |
-| TEST-01 | Phase 1 | Pending |
-| TEST-02 | Phase 1 | Pending |
-| TEST-03 | Phase 1 | Pending |
-| TEST-04 | Phase 1 | Pending |
-| TEST-05 | Phase 1 | Pending |
-| TEST-06 | Phase 1 | Pending |
+| EVNT-01 | Phase 1 | Complete |
+| EVNT-02 | Phase 1 | Complete |
+| EVNT-03 | Phase 1 | Complete |
+| EVNT-04 | Phase 1 | Complete |
+| TEST-01 | Phase 1 | Complete |
+| TEST-02 | Phase 1 | Complete |
+| TEST-03 | Phase 1 | Complete |
+| TEST-04 | Phase 1 | Complete |
+| TEST-05 | Phase 1 | Complete |
+| TEST-06 | Phase 1 | Complete |
 | QUAL-01 | Phase 2 | Pending |
 | QUAL-02 | Phase 2 | Pending |
 | QUAL-03 | Phase 2 | Pending |
@@ -126,4 +126,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-22*
-*Last updated: 2026-01-22 after roadmap creation*
+*Last updated: 2026-01-23 after Phase 1 completion*

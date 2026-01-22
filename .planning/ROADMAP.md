@@ -12,7 +12,7 @@ This milestone transforms CI-TUI from AI-generated code into a maintainable, wel
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation** - Event loop refactoring + testing infrastructure
+- [x] **Phase 1: Foundation** - Event loop refactoring + testing infrastructure
 - [ ] **Phase 2: Code Quality Baseline** - Clean up codebase to idiomatic Rust
 - [ ] **Phase 3: Unit Test Coverage** - Tests for business logic modules
 - [ ] **Phase 4: Mock-Based Tests** - Tests for external dependencies
@@ -37,9 +37,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 3 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Refactor event loop to tokio::select! with Message enum
-- [ ] 01-02-PLAN.md — Add test dependencies and configure nextest
-- [ ] 01-03-PLAN.md — Create CI pipeline with tests, linting, coverage
+- [x] 01-01-PLAN.md — Refactor event loop to tokio::select! with Message enum
+- [x] 01-02-PLAN.md — Add test dependencies and configure nextest
+- [x] 01-03-PLAN.md — Create CI pipeline with tests, linting, coverage
 
 ### Phase 2: Code Quality Baseline
 **Goal**: Codebase follows idiomatic Rust patterns with no Clippy warnings, all dead code removed, and proper error handling throughout
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/3 | Ready to execute | - |
+| 1. Foundation | 3/3 | ✓ Complete | 2026-01-23 |
 | 2. Code Quality Baseline | 0/TBD | Not started | - |
 | 3. Unit Test Coverage | 0/TBD | Not started | - |
 | 4. Mock-Based Tests | 0/TBD | Not started | - |
@@ -129,4 +129,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 ---
 *Roadmap created: 2026-01-22*
-*Last updated: 2026-01-22*
+*Last updated: 2026-01-23*
