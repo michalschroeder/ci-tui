@@ -345,7 +345,13 @@ impl CheckRunner {
             let check = check.clone();
             let event_tx = event_tx.clone();
             let project_root = self.project_root.clone();
-            let container_name = self.container_name.clone();
+            // Use per-check container if specified, otherwise use default
+            let container_name: Arc<str> = check
+                .definition
+                .container
+                .clone()
+                .unwrap_or_else(|| self.container_name.to_string())
+                .into();
             let docker_config = self.config.docker.clone();
             let global_env = self.config.docker.env.clone();
 
@@ -377,10 +383,16 @@ impl CheckRunner {
         check: &CheckToRun,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> CheckResult {
+        // Use per-check container if specified, otherwise use default
+        let container_name = check
+            .definition
+            .container
+            .as_deref()
+            .unwrap_or(&self.container_name);
         run_docker_check(
             check,
             &self.project_root,
-            &self.container_name,
+            container_name,
             &self.config.docker,
             &self.config.docker.env,
             event_tx,
@@ -401,9 +413,11 @@ impl CheckRunner {
         let mut env = self.config.docker.env.clone();
         env.extend(pre_cmd.env.clone());
 
-        // Get container name for this service
-        // For service-specific pre-commands, derive container from service name
-        let container_name = if service != self.config.default_service() {
+        // Get container name: explicit container > service-based derivation > default
+        let container_name = if let Some(ref container) = pre_cmd.container {
+            // Explicit container name specified
+            container.clone()
+        } else if service != self.config.default_service() {
             // Different service, derive container name
             let project_name = std::path::Path::new(&self.config.docker.project_dir)
                 .file_name()
@@ -555,10 +569,16 @@ async fn execute_docker_command(
 pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    container_name: &str,
+    default_container: &str,
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
+    // Use per-check container if specified, otherwise use default
+    let container_name = check
+        .definition
+        .container
+        .as_deref()
+        .unwrap_or(default_container);
     // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());
@@ -597,10 +617,16 @@ pub async fn run_check_with_command(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
+    default_container: &str,
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
+    // Use per-check container if specified, otherwise use default
+    let container_name = check
+        .definition
+        .container
+        .as_deref()
+        .unwrap_or(default_container);
     // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());

@@ -188,6 +188,9 @@ pub struct CheckDefinition {
     /// Docker service to run this check in (overrides group/global default)
     #[serde(default)]
     pub service: Option<String>,
+    /// Explicit container name (overrides service-based derivation)
+    #[serde(default)]
+    pub container: Option<String>,
     #[serde(default)]
     pub fix_command: Option<String>,
     #[serde(default)]
@@ -252,6 +255,9 @@ pub struct PreCommand {
     /// Docker service to run in (uses group/global default if not specified)
     #[serde(default)]
     pub service: Option<String>,
+    /// Explicit container name (overrides service-based derivation)
+    #[serde(default)]
+    pub container: Option<String>,
     /// If true, use `docker compose exec` (existing container) instead of `run` (new container)
     #[serde(default)]
     pub exec: bool,

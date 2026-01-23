@@ -425,18 +425,19 @@ fn handle_key_event(
         // Run fix for selected check
         (KeyCode::Char('x'), KeyModifiers::NONE) => {
             if app.can_fix_selected() {
-                if let Some((fix_cmd, _service)) = app.get_selected_fix_command() {
+                if let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() {
                     app.start_fix();
                     let fix_tx = channels.fix_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.container_name);
+                    let default_container = Arc::clone(&channels.container_name);
                     let docker_config = Arc::clone(&channels.docker_config);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
+                        let container_name = container.as_deref().unwrap_or(&default_container);
                         let result = run_fix_command(
                             &fix_cmd,
                             &project_root,
-                            &docker_dir,
+                            container_name,
                             &docker_config,
                             &global_env,
                         )
@@ -456,17 +457,18 @@ fn handle_key_event(
                     app.start_fix_all(total);
                     let fix_all_tx = channels.fix_all_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.container_name);
+                    let default_container = Arc::clone(&channels.container_name);
                     let docker_config = Arc::clone(&channels.docker_config);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        for (i, (_check_id, fix_cmd, _service)) in
+                        for (i, (_check_id, fix_cmd, _service, container)) in
                             fix_commands.into_iter().enumerate()
                         {
+                            let container_name = container.as_deref().unwrap_or(&default_container);
                             let result = run_fix_command(
                                 &fix_cmd,
                                 &project_root,
-                                &docker_dir,
+                                container_name,
                                 &docker_config,
                                 &global_env,
                             )

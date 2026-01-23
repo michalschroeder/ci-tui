@@ -265,12 +265,13 @@ impl App {
     }
 
     /// Get fix command and service for selected check
-    pub fn get_selected_fix_command(&self) -> Option<(String, String)> {
+    /// Returns (fix_command, service, container) for the selected check
+    pub fn get_selected_fix_command(&self) -> Option<(String, String, Option<String>)> {
         self.selected_check().and_then(|check| {
             check
                 .resolved_fix_command
                 .as_ref()
-                .map(|cmd| (cmd.clone(), check.service.clone()))
+                .map(|cmd| (cmd.clone(), check.service.clone(), check.definition.container.clone()))
         })
     }
 
@@ -311,14 +312,15 @@ impl App {
     }
 
     /// Get fix commands for all fixable checks (check_id, fix_command, service)
-    pub fn get_all_fix_commands(&self) -> Vec<(String, String, String)> {
+    /// Returns Vec of (check_id, fix_command, service, container) for all fixable checks
+    pub fn get_all_fix_commands(&self) -> Vec<(String, String, String, Option<String>)> {
         self.get_fixable_checks()
             .iter()
             .filter_map(|check| {
                 check
                     .resolved_fix_command
                     .as_ref()
-                    .map(|cmd| (check.id().to_string(), cmd.clone(), check.service.clone()))
+                    .map(|cmd| (check.id().to_string(), cmd.clone(), check.service.clone(), check.definition.container.clone()))
             })
             .collect()
     }
@@ -575,12 +577,23 @@ impl App {
 
     pub fn scroll_down(&mut self, n: usize) {
         // Get max scroll based on output content length and visible area
+        // Must count both stdout and stderr since both are rendered in the output panel
         let visible_lines = self.output_visible_lines;
         let max_scroll = match self.selected_item() {
             Some(SelectableItem::Check(check)) => self
                 .results
                 .get(check.id())
-                .map(|result| result.output.lines().count().saturating_sub(visible_lines))
+                .map(|result| {
+                    let stdout_lines = result.output.lines().count();
+                    let stderr_lines = result.error_output.lines().count();
+                    // Add 2 for stderr header if stderr is present
+                    let total = if stderr_lines > 0 {
+                        stdout_lines + stderr_lines + 2
+                    } else {
+                        stdout_lines
+                    };
+                    total.saturating_sub(visible_lines)
+                })
                 .unwrap_or(0),
             Some(SelectableItem::PreCommand(pc)) => {
                 pc.output.lines().count().saturating_sub(visible_lines)

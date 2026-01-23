@@ -244,11 +244,7 @@ fn is_container_running(container_name: &str) -> bool {
     }
 }
 
-async fn run_check(
-    check: &CheckToRun,
-    project_root: &Path,
-    container_name: &str,
-) -> CheckResult {
+async fn run_check(check: &CheckToRun, project_root: &Path, container_name: &str) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
 
