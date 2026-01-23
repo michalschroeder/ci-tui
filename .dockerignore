@@ -1,0 +1,30 @@
+# Build artifacts (3.5GB+)
+target/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git directory (not needed in build)
+.git/
+
+# Documentation and planning
+*.md
+.planning/
+docs/
+
+# CI configuration
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Test fixtures that aren't needed for build
+tests/fixtures/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
