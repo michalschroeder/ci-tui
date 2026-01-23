@@ -743,7 +743,8 @@ checks:
         let test_file_path = temp_dir.path().join("tests/Unit/FooTest.php");
         std::fs::create_dir_all(test_file_path.parent().unwrap())
             .expect("Failed to create test dir");
-        std::fs::write(&test_file_path, "<?php // test content").expect("Failed to write test file");
+        std::fs::write(&test_file_path, "<?php // test content")
+            .expect("Failed to write test file");
 
         // Changed files: BOTH the test file AND its source file
         // - tests/Unit/FooTest.php matches file_pattern "phpunit"
