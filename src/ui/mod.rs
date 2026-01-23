@@ -246,21 +246,63 @@ fn handle_key_event(
             app.show_all();
             KeyAction::None
         }
-        // Retry selected check only
+        // Retry selected check only (with git refresh)
         (KeyCode::Char('r'), KeyModifiers::NONE) => {
             if app.can_retry_selected() {
                 if let Some(check) = app.selected_check() {
-                    let check = check.clone();
-                    app.reset_check_for_retry(check.id());
-                    let retry_tx = channels.retry_tx.clone();
-                    let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.docker_project_dir);
-                    let global_env = Arc::clone(&channels.global_env);
-                    tokio::spawn(async move {
-                        let result =
-                            run_single_check(&check, &project_root, &docker_dir, &global_env).await;
-                        let _ = retry_tx.send(result).await;
-                    });
+                    let check_id = check.id().to_string();
+
+                    // Refresh git changes using same pattern as 'R' handler
+                    let base_ref = app.changed_files.base_ref.clone();
+                    match get_changed_files(&channels.project_root, &base_ref) {
+                        Ok(mut new_changed_files) => {
+                            // Apply ignore patterns
+                            new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
+
+                            // Re-determine checks with fresh git state
+                            let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+
+                            // Find the matching check by ID
+                            if let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) {
+                                let new_check = new_check.clone();
+
+                                // Update app state with new git state and check info
+                                app.changed_files = new_changed_files;
+
+                                // Update the check in app.checks with the new version
+                                if let Some(idx) = app.checks.iter().position(|c| c.id() == check_id) {
+                                    app.checks[idx] = new_check.clone();
+                                }
+
+                                // Reset and run the check with updated state
+                                app.reset_check_for_retry(&check_id);
+                                let retry_tx = channels.retry_tx.clone();
+                                let project_root = Arc::clone(&channels.project_root);
+                                let docker_dir = Arc::clone(&channels.docker_project_dir);
+                                let global_env = Arc::clone(&channels.global_env);
+                                tokio::spawn(async move {
+                                    let result = run_single_check(&new_check, &project_root, &docker_dir, &global_env).await;
+                                    let _ = retry_tx.send(result).await;
+                                });
+                            } else {
+                                // Check no longer applicable after git refresh
+                                app.status_message = Some("Check no longer applicable after git refresh".to_string());
+                            }
+                        }
+                        Err(_) => {
+                            // Git refresh failed - fall back to running with existing check
+                            let check = check.clone();
+                            app.reset_check_for_retry(check.id());
+                            let retry_tx = channels.retry_tx.clone();
+                            let project_root = Arc::clone(&channels.project_root);
+                            let docker_dir = Arc::clone(&channels.docker_project_dir);
+                            let global_env = Arc::clone(&channels.global_env);
+                            tokio::spawn(async move {
+                                let result = run_single_check(&check, &project_root, &docker_dir, &global_env).await;
+                                let _ = retry_tx.send(result).await;
+                            });
+                        }
+                    }
                 }
             }
             KeyAction::None
