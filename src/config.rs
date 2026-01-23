@@ -56,6 +56,18 @@ pub struct DockerConfig {
     /// If not set, derived from project_dir + service using compose naming convention
     #[serde(default)]
     pub container: Option<String>,
+    /// Docker image for standalone run (e.g., "rust:latest")
+    /// If set, use this image directly instead of deriving from container name
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Volume mount string for standalone run (e.g., ".:/build")
+    /// Full volume specification including source:dest
+    #[serde(default)]
+    pub volume_mount: Option<String>,
+    /// Working directory inside container (e.g., "/build")
+    /// Overrides the default /app workdir
+    #[serde(default)]
+    pub work_dir: Option<String>,
     /// Environment variables to pass to all docker exec commands
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
@@ -78,6 +90,31 @@ impl DockerConfig {
 
         // Docker Compose naming convention: {project}-{service}-1
         format!("{}-{}-1", project_name, self.service)
+    }
+
+    /// Get the Docker image name to use
+    /// Returns explicit image if set, otherwise derives from container_name by stripping -1 suffix
+    pub fn image_name(&self) -> String {
+        if let Some(ref image) = self.image {
+            return image.clone();
+        }
+
+        // Derive image from container name (strip -1 suffix)
+        self.container_name().trim_end_matches("-1").to_string()
+    }
+
+    /// Get volume mount arguments for docker run
+    /// Returns "-v {volume_mount}" if volume_mount is set, None otherwise
+    pub fn volume_args(&self) -> Option<String> {
+        self.volume_mount
+            .as_ref()
+            .map(|mount| format!("-v {}", mount))
+    }
+
+    /// Get the working directory inside container
+    /// Returns work_dir if set, otherwise "/app"
+    pub fn working_dir(&self) -> &str {
+        self.work_dir.as_deref().unwrap_or("/app")
     }
 }
 
