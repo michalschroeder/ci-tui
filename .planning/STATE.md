@@ -13,7 +13,7 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 018: TDD test for duplicate test file detection
+Last activity: 2026-01-23 — Completed quick task 019: Add --fix parameter to run only fix commands
 
 Progress: [██░░░░░░░░] 25%
 
@@ -98,9 +98,10 @@ None yet.
 | 016 | Skip checks with {files} placeholder when no matches | 2026-01-23 | c469cd4 | [016-skip-checks-with-files-placeholder-when](./quick/016-skip-checks-with-files-placeholder-when/) |
 | 017 | Optimize Docker builds with native ARM64 runners | 2026-01-23 | 2c9be2a | [017-optimize-docker-build-with-matrix-strat](./quick/017-optimize-docker-build-with-matrix-strat/) |
 | 018 | TDD test for duplicate test file detection | 2026-01-23 | 96dca68 | [018-tdd-test-for-duplicate-test-file-detecti](./quick/018-tdd-test-for-duplicate-test-file-detecti/) |
+| 019 | Add --fix parameter to run only fix commands | 2026-01-23 | c4c47f5 | [019-add-fix-parameter-to-run-only-fix-comman](./quick/019-add-fix-parameter-to-run-only-fix-comman/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 018 (TDD test for duplicate test file detection)
+Stopped at: Completed quick task 019 (Add --fix parameter to run only fix commands)
 Resume file: None
