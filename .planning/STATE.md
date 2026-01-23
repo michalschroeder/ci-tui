@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 011: Create CI-TUI config for self-hosting
+Last activity: 2026-01-23 — Completed quick task 012: Fix check output panel scrolling
 
-Progress: [██░░░░░░░░] 22%
+Progress: [██░░░░░░░░] 24%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
-- Average duration: 5.5m
-- Total execution time: 0.92 hours
+- Total plans completed: 12
+- Average duration: 6.0m
+- Total execution time: 1.12 hours
 
 **By Phase:**
 
@@ -31,8 +31,8 @@ Progress: [██░░░░░░░░] 22%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 011 (8m), 010 (2m), 009 (12m), 008 (2m), 007 (4m)
-- Trend: Quick tasks range from 1-12m depending on complexity
+- Last 5 plans: 012 (12m), 011 (8m), 010 (2m), 009 (12m), 008 (2m)
+- Trend: Quick tasks range from 2-12m depending on complexity
 
 *Updated after each plan completion*
 
@@ -62,6 +62,8 @@ Recent decisions affecting current work:
 - quick-009: Derive container name from project_dir + service by default (backward compatibility)
 - quick-011: Add image/volume_mount/work_dir as optional fields (maintains backward compatibility)
 - quick-011: Derive image name from container_name if not explicit (preserves docker-compose behavior)
+- quick-012: Track output_visible_lines in App state and update during render (dynamic scroll bounds)
+- quick-012: Show scroll position indicator only when content exceeds visible area (avoid clutter)
 
 ### Pending Todos
 
@@ -87,9 +89,10 @@ None yet.
 | 009 | Replace docker-compose exec with docker exec/run | 2026-01-23 | a3859bf | [009-replace-docker-compose-exec-with-docker-](./quick/009-replace-docker-compose-exec-with-docker-/) |
 | 010 | Remove docker-compose from Docker image | 2026-01-23 | 76ac35b | [010-remove-docker-compose-from-docker-image](./quick/010-remove-docker-compose-from-docker-image/) |
 | 011 | Create CI-TUI config for self-hosting | 2026-01-23 | e42634c | [011-create-ci-tui-config-for-self-hosting](./quick/011-create-ci-tui-config-for-self-hosting/) |
+| 012 | Fix check output panel scrolling | 2026-01-23 | e59c0f4 | [012-fix-check-output-panel-scrolling](./quick/012-fix-check-output-panel-scrolling/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 011 (Create CI-TUI config for self-hosting), ready for Phase 2 planning
+Stopped at: Completed quick task 012 (Fix check output panel scrolling), ready for Phase 2 planning
 Resume file: None
