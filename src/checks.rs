@@ -686,4 +686,89 @@ checks:
             "Files should indicate running all"
         );
     }
+
+    #[test]
+    fn test_no_duplicate_test_files_from_multiple_triggers() {
+        // Test scenario: A test file changes directly (matches file_pattern)
+        // AND its corresponding source file also changes (triggers test_discovery which finds same test file)
+        // Result: CheckToRun.files should contain NO duplicates
+
+        let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  phpunit:
+    pattern: 'tests/.*Test\.php$'
+  php_src:
+    pattern: '^src/.*\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        triggers:
+          file_pattern: phpunit
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/Unit/{path}Test.php
+"#;
+        let config: CiConfig =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+        // Create temporary directory with actual test files (test_discovery checks file existence)
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let test_file_path = temp_dir.path().join("tests/Unit/FooTest.php");
+        std::fs::create_dir_all(test_file_path.parent().unwrap())
+            .expect("Failed to create test dir");
+        std::fs::write(&test_file_path, "<?php // test content").expect("Failed to write test file");
+
+        // Changed files: BOTH the test file AND its source file
+        // - tests/Unit/FooTest.php matches file_pattern "phpunit"
+        // - src/Foo.php matches php_src and test_discovery finds tests/Unit/FooTest.php
+        let changed_files = make_changed_files(vec!["tests/Unit/FooTest.php", "src/Foo.php"]);
+
+        let checks = determine_checks(&config, &changed_files, temp_dir.path());
+
+        // Should have exactly one phpunit check
+        let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+        assert!(!phpunit.on_demand, "Check should not be on-demand");
+        assert!(!phpunit.skipped_no_files, "Check should not be skipped");
+
+        // The key assertion: files should contain NO duplicates
+        let files = &phpunit.files;
+        let unique_files: std::collections::HashSet<_> = files.iter().collect();
+
+        assert_eq!(
+            files.len(),
+            unique_files.len(),
+            "CheckToRun.files contains duplicates! Files: {:?}",
+            files
+        );
+
+        // Should contain the test file exactly once
+        let test_file_count = files
+            .iter()
+            .filter(|f| f.contains("tests/Unit/FooTest.php"))
+            .count();
+        assert_eq!(
+            test_file_count, 1,
+            "Expected 'tests/Unit/FooTest.php' to appear exactly once, but found {} occurrences in {:?}",
+            test_file_count, files
+        );
+    }
 }

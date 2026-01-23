@@ -54,6 +54,7 @@ panic = "abort"
 mockall = "0.14"              # Trait-based mocking with #[automock]
 rstest = "0.26"               # Test fixtures and parameterized tests
 pretty_assertions = "1.4"     # Colorful assertion diffs
+tempfile = "3"                # Temporary directories for testing
 
 # Async testing support (mockall needs this for async traits)
 tokio-test = "0.4"            # tokio testing utilities
