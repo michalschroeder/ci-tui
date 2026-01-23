@@ -814,6 +814,7 @@ checks:
                 None
             },
             on_demand,
+            skipped_no_files: false,
         }
     }
 

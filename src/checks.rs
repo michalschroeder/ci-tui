@@ -22,6 +22,8 @@ pub struct CheckToRun {
     pub resolved_fix_command: Option<String>,
     /// If true, this check won't run automatically - user must trigger it manually
     pub on_demand: bool,
+    /// If true, this check was skipped because it uses {files} placeholder but no files matched
+    pub skipped_no_files: bool,
 }
 
 impl CheckToRun {
@@ -97,6 +99,7 @@ pub fn determine_checks(
                     resolved_command: resolved,
                     resolved_fix_command: resolved_fix,
                     on_demand: false,
+                    skipped_no_files: false,
                 });
                 continue;
             }
@@ -147,6 +150,7 @@ pub fn determine_checks(
                                         resolved_command: resolved,
                                         resolved_fix_command: resolved_fix,
                                         on_demand: true,
+                                        skipped_no_files: false,
                                     });
                                     continue;
                                 } else {
@@ -176,6 +180,7 @@ pub fn determine_checks(
                         resolved_command: resolved,
                         resolved_fix_command: resolved_fix,
                         on_demand: false,
+                        skipped_no_files: false,
                     });
                 } else {
                     // No files matched - add as skipped (on-demand)
@@ -187,6 +192,8 @@ pub fn determine_checks(
                             .fix_command
                             .as_ref()
                             .map(|_| resolve_command(config, check, &[], true));
+                        // Check if command uses {files} placeholder
+                        let has_files_placeholder = check.command.contains("{files}");
                         checks_to_run.push(CheckToRun {
                             id: check_id.clone(),
                             group: group_name.to_string(),
@@ -196,6 +203,7 @@ pub fn determine_checks(
                             resolved_command: resolved,
                             resolved_fix_command: resolved_fix,
                             on_demand: true, // Can be run on-demand
+                            skipped_no_files: has_files_placeholder,
                         });
                     }
                 }
@@ -322,6 +330,37 @@ checks:
         ChangedFiles {
             files: files.into_iter().map(String::from).collect(),
             base_ref: "development".to_string(),
+        }
+    }
+
+    // Helper to create CheckToRun for tests
+    fn make_check(
+        id: &str,
+        group: &str,
+        name: &str,
+        command: &str,
+        on_demand: bool,
+        skipped_no_files: bool,
+    ) -> CheckToRun {
+        CheckToRun {
+            id: id.to_string(),
+            group: group.to_string(),
+            definition: crate::config::CheckDefinition {
+                name: name.to_string(),
+                command: command.to_string(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: std::collections::HashMap::new(),
+            },
+            service: "php".to_string(),
+            files: vec![],
+            resolved_command: command.to_string(),
+            resolved_fix_command: None,
+            on_demand,
+            skipped_no_files,
         }
     }
 
