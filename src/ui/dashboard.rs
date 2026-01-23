@@ -670,7 +670,7 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
             }
             raw_output.push_str("\n\n");
 
-            // Files (collapsed style)
+            // Files - truncated by default, full on 'e' toggle
             if let Some(files) = app
                 .checks
                 .iter()
@@ -678,16 +678,22 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
                 .map(|c| &c.files)
             {
                 if !files.is_empty() && !files[0].starts_with('(') {
-                    let file_count = files.len();
-                    if file_count <= 3 {
-                        raw_output
-                            .push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", files.join(", ")));
+                    if app.show_full_command {
+                        // Expanded: show all files, one per line
+                        raw_output.push_str("\x1b[90mFiles:\x1b[0m\n");
+                        for file in files {
+                            raw_output.push_str(&format!("\x1b[90m  - {}\x1b[0m\n", file));
+                        }
+                        raw_output.push('\n');
                     } else {
-                        raw_output.push_str(&format!(
-                            "\x1b[90mFiles: {} (+{} more)\x1b[0m\n\n",
-                            files.iter().take(2).cloned().collect::<Vec<_>>().join(", "),
-                            file_count - 2
-                        ));
+                        // Collapsed: show first 3 files (no "+N more")
+                        let display_files = if files.len() <= 3 {
+                            files.join(", ")
+                        } else {
+                            files.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                        };
+                        raw_output
+                            .push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
                     }
                 }
             }
