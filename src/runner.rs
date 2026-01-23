@@ -67,7 +67,7 @@ fn build_docker_exec_command(
 
 /// Build a docker run command with environment variables
 fn build_docker_run_command(
-    container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
     command: &str,
 ) -> String {
@@ -78,25 +78,31 @@ fn build_docker_run_command(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Use container name as image name (Docker Compose convention)
-    // Strip the -1 suffix to get the image name (e.g., "myproject-app-1" -> "myproject-app")
-    let image_name = container_name.trim_end_matches("-1");
+    // Get image name from config (explicit or derived from container name)
+    let image_name = docker_config.image_name();
 
-    // Build docker run command with --rm flag and /app workdir
-    if env_flags.is_empty() {
-        format!(
-            "docker run --rm -w /app {} bash -c '{}'",
-            image_name,
-            command.replace('\'', "'\\''")
-        )
-    } else {
-        format!(
-            "docker run --rm {} -w /app {} bash -c '{}'",
-            env_flags,
-            image_name,
-            command.replace('\'', "'\\''")
-        )
+    // Get working directory from config (default: /app)
+    let work_dir = docker_config.working_dir();
+
+    // Get volume mount args if configured
+    let volume_args = docker_config.volume_args().unwrap_or_default();
+
+    // Build docker run command with --rm flag
+    let mut parts = vec!["docker run --rm".to_string()];
+
+    if !volume_args.is_empty() {
+        parts.push(volume_args);
     }
+
+    if !env_flags.is_empty() {
+        parts.push(env_flags);
+    }
+
+    parts.push(format!("-w {}", work_dir));
+    parts.push(image_name);
+    parts.push(format!("bash -c '{}'", command.replace('\'', "'\\''")));
+
+    parts.join(" ")
 }
 
 /// Status of a CI check during execution
@@ -340,6 +346,7 @@ impl CheckRunner {
             let event_tx = event_tx.clone();
             let project_root = self.project_root.clone();
             let container_name = self.container_name.clone();
+            let docker_config = self.config.docker.clone();
             let global_env = self.config.docker.env.clone();
 
             let handle = tokio::spawn(async move {
@@ -347,6 +354,7 @@ impl CheckRunner {
                     &check,
                     &project_root,
                     &container_name,
+                    &docker_config,
                     &global_env,
                     &event_tx,
                 )
@@ -373,6 +381,7 @@ impl CheckRunner {
             check,
             &self.project_root,
             &self.container_name,
+            &self.config.docker,
             &self.config.docker.env,
             event_tx,
         )
@@ -409,7 +418,7 @@ impl CheckRunner {
         let docker_cmd = if is_container_running(&container_name) {
             build_docker_exec_command(&container_name, &env, &pre_cmd.command)
         } else {
-            build_docker_run_command(&container_name, &env, &pre_cmd.command)
+            build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
         };
 
         let output = tokio::process::Command::new("sh")
@@ -441,6 +450,7 @@ async fn run_docker_check(
     check: &CheckToRun,
     project_root: &Path,
     container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     global_env: &std::collections::HashMap<String, String>,
     event_tx: &mpsc::Sender<RunnerEvent>,
 ) -> CheckResult {
@@ -461,6 +471,7 @@ async fn run_docker_check(
         &check.resolved_command,
         project_root,
         container_name,
+        docker_config,
         &env,
     )
     .await
@@ -485,6 +496,7 @@ async fn execute_docker_command(
     command: &str,
     project_root: &std::path::Path,
     container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
@@ -494,7 +506,7 @@ async fn execute_docker_command(
     let docker_cmd = if is_container_running(container_name) {
         build_docker_exec_command(container_name, env, command)
     } else {
-        build_docker_run_command(container_name, env, command)
+        build_docker_run_command(docker_config, env, command)
     };
 
     let output = tokio::process::Command::new("sh")
@@ -544,6 +556,7 @@ pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
     container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     // Merge global env with check-specific env (check env takes precedence)
@@ -554,6 +567,7 @@ pub async fn run_single_check(
         &check.resolved_command,
         project_root,
         container_name,
+        docker_config,
         &merged_env,
     )
     .await
@@ -564,6 +578,7 @@ pub async fn run_fix_command(
     fix_command: &str,
     project_root: &std::path::Path,
     container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     execute_docker_command(
@@ -571,6 +586,7 @@ pub async fn run_fix_command(
         fix_command,
         project_root,
         container_name,
+        docker_config,
         env,
     )
     .await
@@ -582,6 +598,7 @@ pub async fn run_check_with_command(
     command: &str,
     project_root: &std::path::Path,
     container_name: &str,
+    docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     // Merge global env with check-specific env (check env takes precedence)
@@ -592,6 +609,7 @@ pub async fn run_check_with_command(
         command,
         project_root,
         container_name,
+        docker_config,
         &merged_env,
     )
     .await
