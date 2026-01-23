@@ -1226,4 +1226,45 @@ checks:
         app.scroll_up(10);
         assert_eq!(app.output_scroll, 0);
     }
+
+    #[test]
+    fn test_failed_filter_excludes_passed_pre_commands() {
+        let mut app = make_app();
+
+        // Add a pre-command that passed
+        app.pre_commands.push(PreCommandState {
+            group: "fast".to_string(),
+            name: "init-db".to_string(),
+            status: PreCommandStatus::Passed,
+            output: String::new(),
+            duration_ms: 100,
+        });
+
+        // Add a pre-command that failed
+        app.pre_commands.push(PreCommandState {
+            group: "fast".to_string(),
+            name: "setup-env".to_string(),
+            status: PreCommandStatus::Failed,
+            output: "Error".to_string(),
+            duration_ms: 50,
+        });
+
+        // Mark a check as failed so we have something to filter
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+
+        // With All filter, both pre-commands should be visible
+        app.status_filter = StatusFilter::All;
+        let items = app.get_selectable_items();
+        let pre_cmd_count = items.iter().filter(|i| matches!(i, SelectableItem::PreCommand(_))).count();
+        assert_eq!(pre_cmd_count, 2, "All filter should show all pre-commands");
+
+        // With Failed filter, only the failed pre-command should be visible
+        app.status_filter = StatusFilter::Failed;
+        let items = app.get_selectable_items();
+        let pre_cmds: Vec<_> = items.iter().filter_map(|i| {
+            if let SelectableItem::PreCommand(pc) = i { Some(pc) } else { None }
+        }).collect();
+        assert_eq!(pre_cmds.len(), 1, "Failed filter should only show failed pre-commands");
+        assert_eq!(pre_cmds[0].name, "setup-env", "Should only show the failed pre-command");
+    }
 }
