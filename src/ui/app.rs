@@ -1226,6 +1226,9 @@ checks:
         app.results.get_mut("php-lint").unwrap().output =
             "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10".to_string();
 
+        // Set visible lines smaller than output to allow scrolling (10 lines, 5 visible)
+        app.set_output_visible_lines(5);
+
         assert_eq!(app.output_scroll, 0);
 
         app.scroll_down(3);
