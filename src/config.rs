@@ -52,9 +52,33 @@ pub struct DockerConfig {
     /// Default Docker service name (defaults to "app" if not specified)
     #[serde(default = "default_service")]
     pub service: String,
+    /// Container name for docker exec (e.g., "myproject-app-1")
+    /// If not set, derived from project_dir + service using compose naming convention
+    #[serde(default)]
+    pub container: Option<String>,
     /// Environment variables to pass to all docker exec commands
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+}
+
+impl DockerConfig {
+    /// Get the container name to use for docker exec
+    /// Returns explicit container name if set, otherwise derives from project_dir + service
+    pub fn container_name(&self) -> String {
+        if let Some(ref container) = self.container {
+            return container.clone();
+        }
+
+        // Derive container name from project_dir and service
+        // Extract project name from project_dir (last path component)
+        let project_name = std::path::Path::new(&self.project_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project");
+
+        // Docker Compose naming convention: {project}-{service}-1
+        format!("{}-{}-1", project_name, self.service)
+    }
 }
 
 fn default_service() -> String {
@@ -251,6 +275,7 @@ version: 2
 docker:
   project_dir: ./infrastructure
   service: php
+  # container: myproject-php-1  # Optional: explicit container name for docker exec
 
 git:
   base_branch: development
