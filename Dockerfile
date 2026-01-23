@@ -44,9 +44,20 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     cargo build --release && \
     cp /build/target/release/ci-tui /tmp/ci-tui
 
+# Dev stage - full Rust toolchain for running checks
+FROM rust:latest AS dev
+
+# Install dev tools
+RUN rustup component add rustfmt clippy && \
+    cargo install cargo-nextest --locked
+
+WORKDIR /build
+
+# Dev stage is used with volume mounts, no COPY needed
+
 # Runtime stage - Alpine is small and has musl
 ARG ALPINE_VERSION
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:${ALPINE_VERSION} AS runtime
 
 # OCI labels
 LABEL org.opencontainers.image.title="CI TUI"
