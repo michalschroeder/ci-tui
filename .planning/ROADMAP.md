@@ -13,7 +13,7 @@ This milestone transforms CI-TUI from AI-generated code into a maintainable, wel
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation** - Event loop refactoring + testing infrastructure
-- [ ] **Phase 2: Code Quality Baseline** - Clean up codebase to idiomatic Rust
+- [x] **Phase 2: Code Quality Baseline** - Clean up codebase to idiomatic Rust
 - [ ] **Phase 3: Unit Test Coverage** - Tests for business logic modules
 - [ ] **Phase 4: Mock-Based Tests** - Tests for external dependencies
 - [ ] **Phase 5: Widget Tests & Architecture** - UI tests + architectural polish
@@ -58,8 +58,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Configure Clippy deny level and fix all warnings
-- [ ] 02-02-PLAN.md — Fix production unwrap calls and enhance documentation
+- [x] 02-01-PLAN.md — Configure Clippy deny level and fix all warnings
+- [x] 02-02-PLAN.md — Fix production unwrap calls and enhance documentation
 
 ### Phase 3: Unit Test Coverage
 **Goal**: Business logic modules (checks, test_discovery, config) have comprehensive unit tests with fast feedback loop
@@ -123,7 +123,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 3/3 | Complete | 2026-01-23 |
-| 2. Code Quality Baseline | 0/2 | Ready | - |
+| 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
 | 3. Unit Test Coverage | 0/TBD | Not started | - |
 | 4. Mock-Based Tests | 0/TBD | Not started | - |
 | 5. Widget Tests & Architecture | 0/TBD | Not started | - |
