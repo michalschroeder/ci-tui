@@ -1,0 +1,55 @@
+version: 2
+
+docker:
+  project_dir: .
+  service: rust
+  image: rust:latest
+  volume_mount: ".:/build"
+  work_dir: /build
+
+git:
+  base_branch: master
+  fallback_branch: HEAD~1
+
+file_patterns:
+  rust:
+    pattern: '\.rs$'
+    color: yellow
+  toml:
+    pattern: '\.toml$'
+    color: blue
+  yaml:
+    pattern: '\.ya?ml$'
+    color: green
+
+ignore_patterns:
+  - '\.md$'
+  - '\.github/'
+  - 'target/'
+
+checks:
+  quality:
+    name: Code Quality
+    parallel: true
+    checks:
+      fmt:
+        name: Format Check
+        command: rustup component add rustfmt && cargo fmt -- --check
+        fix_command: rustup component add rustfmt && cargo fmt
+        triggers:
+          file_pattern: rust
+
+      clippy:
+        name: Clippy Lints
+        command: rustup component add clippy && cargo clippy -- -D warnings
+        triggers:
+          file_pattern: rust
+
+  tests:
+    name: Tests
+    checks:
+      test:
+        name: Unit Tests
+        command: cargo install cargo-nextest --locked 2>/dev/null || true && cargo nextest run
+        triggers:
+          file_pattern: rust
