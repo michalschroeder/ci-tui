@@ -13,14 +13,14 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 009: Replace docker-compose exec with docker exec/run
+Last activity: 2026-01-23 — Completed quick task 010: Remove docker-compose from Docker image
 
 Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: 5.3m
 - Total execution time: 0.78 hours
 
@@ -83,9 +83,10 @@ None yet.
 | 007 | Remove '+N more' from files section, use 'e' to expand | 2026-01-23 | a6a2498 | [007-remove-n-more](./quick/007-remove-n-more-from-files-section-use-e-h/) |
 | 008 | Research CI-TUI self-hosting requirement | 2026-01-23 | 05aa45e | [008-research-ci-tui-self-hosting-requirement](./quick/008-research-ci-tui-self-hosting-requirement/) |
 | 009 | Replace docker-compose exec with docker exec/run | 2026-01-23 | a3859bf | [009-replace-docker-compose-exec-with-docker-](./quick/009-replace-docker-compose-exec-with-docker-/) |
+| 010 | Remove docker-compose from Docker image | 2026-01-23 | 76ac35b | [010-remove-docker-compose-from-docker-image](./quick/010-remove-docker-compose-from-docker-image/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 009 (Replace docker-compose exec with docker exec/run), ready for Phase 2 planning
+Stopped at: Completed quick task 010 (Remove docker-compose from Docker image), ready for Phase 2 planning
 Resume file: None
