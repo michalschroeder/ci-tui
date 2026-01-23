@@ -658,7 +658,13 @@ impl App {
         for group in groups {
             // Add pre-commands for this group
             for pre_cmd in self.pre_commands.iter().filter(|p| p.group == group) {
-                items.push(SelectableItem::PreCommand(pre_cmd));
+                let include = match self.status_filter {
+                    StatusFilter::All => true,
+                    StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
+                };
+                if include {
+                    items.push(SelectableItem::PreCommand(pre_cmd));
+                }
             }
             // Add checks for this group (respecting filter)
             for check in self.checks_in_group(group) {
