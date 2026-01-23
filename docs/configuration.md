@@ -677,11 +677,12 @@ ci-tui --simple
 
 ## Complete Example
 
-See `docs/examples/php-laravel.yaml` for a complete working configuration demonstrating:
+See `docs/examples/php-symfony.yaml` for a complete working configuration demonstrating:
 - Multi-group execution (lint → analysis → tests)
-- Parallel linting with fix commands
-- Pre-commands for database setup
+- Parallel linting with fix commands (PHP CS Fixer)
+- Pre-commands for Doctrine migrations and fixtures
 - Advanced test discovery with both strategies
+- Symfony-specific patterns (src/, bin/console, Twig templates)
 - Proper use of file patterns and colors
 
 ## Schema Validation
