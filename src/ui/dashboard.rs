@@ -552,12 +552,18 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // Calculate scroll indicator
+    let total_lines = raw_output.lines().count();
+    let visible_lines = app.output_visible_lines;
+    let title = if total_lines > visible_lines && visible_lines > 0 {
+        let current_line = app.output_scroll + 1;
+        format!(" Fix All Results [{}/{}] ", current_line, total_lines)
+    } else {
+        " Fix All Results ".to_string()
+    };
+
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Fix All Results "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
@@ -606,8 +612,18 @@ fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
         raw_output.push_str(fix_result.error_output.trim_end());
     }
 
+    // Calculate scroll indicator
+    let total_lines = raw_output.lines().count();
+    let visible_lines = app.output_visible_lines;
+    let title = if total_lines > visible_lines && visible_lines > 0 {
+        let current_line = app.output_scroll + 1;
+        format!(" Fix Result [{}/{}] ", current_line, total_lines)
+    } else {
+        " Fix Result ".to_string()
+    };
+
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(" Fix Result "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
@@ -633,7 +649,7 @@ fn render_fix_running(frame: &mut Frame, area: Rect) {
 fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
     let (title, content_widget) = if let Some(check) = app.selected_check() {
         let result = app.results.get(check.id());
-        let title = format!(" {} ", check.name());
+        let base_title = check.name();
 
         if let Some(result) = result {
             let mut raw_output = String::with_capacity(1024);
@@ -713,8 +729,20 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
                 raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
             }
 
+            // Calculate scroll indicator
+            let total_lines = raw_output.lines().count();
+            let visible_lines = app.output_visible_lines;
+            let title = if total_lines > visible_lines && visible_lines > 0 {
+                // Show scroll position: current top line / total lines
+                let current_line = app.output_scroll + 1;
+                format!(" {} [{}/{}] ", base_title, current_line, total_lines)
+            } else {
+                format!(" {} ", base_title)
+            };
+
             (title, Some(raw_output.into_text().unwrap_or_default()))
         } else {
+            let title = format!(" {} ", base_title);
             (title, None)
         }
     } else {
@@ -744,7 +772,7 @@ fn render_pre_command_output(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let title = format!(" {} ", pre_cmd.name);
+    let base_title = &pre_cmd.name;
     let mut raw_output = String::with_capacity(512);
 
     // Command info
@@ -777,6 +805,16 @@ fn render_pre_command_output(
     } else if pre_cmd.status == super::app::PreCommandStatus::Pending {
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
     }
+
+    // Calculate scroll indicator
+    let total_lines = raw_output.lines().count();
+    let visible_lines = app.output_visible_lines;
+    let title = if total_lines > visible_lines && visible_lines > 0 {
+        let current_line = app.output_scroll + 1;
+        format!(" {} [{}/{}] ", base_title, current_line, total_lines)
+    } else {
+        format!(" {} ", base_title)
+    };
 
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
         .block(Block::default().borders(Borders::ALL).title(title))
