@@ -51,7 +51,7 @@ panic = "abort"
 
 [dev-dependencies]
 # Test framework extensions
-mockall = "0.13"              # Trait-based mocking with #[automock]
+mockall = "0.14"              # Trait-based mocking with #[automock]
 rstest = "0.26"               # Test fixtures and parameterized tests
 pretty_assertions = "1.4"     # Colorful assertion diffs
 
