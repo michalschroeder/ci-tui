@@ -41,18 +41,13 @@ ci: fmt-check clippy test ## Run all CI checks locally (in Docker)
 # Capture version info for Docker builds
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date "+%Y-%m-%d %H:%M")
+DOCKER_BUILD := docker build --build-arg CI_TUI_GIT_HASH=$(GIT_HASH) --build-arg "CI_TUI_BUILD_DATE=$(BUILD_DATE)" -t $(LOCAL_IMAGE)
 
 build: ## Build the Docker image locally
-	docker build \
-		--build-arg CI_TUI_GIT_HASH=$(GIT_HASH) \
-		--build-arg "CI_TUI_BUILD_DATE=$(BUILD_DATE)" \
-		-t $(LOCAL_IMAGE) .
+	$(DOCKER_BUILD) .
 
 build-no-cache: ## Build Docker image without cache
-	docker build --no-cache \
-		--build-arg CI_TUI_GIT_HASH=$(GIT_HASH) \
-		--build-arg "CI_TUI_BUILD_DATE=$(BUILD_DATE)" \
-		-t $(LOCAL_IMAGE) .
+	$(DOCKER_BUILD) --no-cache .
 
 push: build ## Build and push to registry
 	docker tag $(LOCAL_IMAGE) $(FULL_IMAGE)
