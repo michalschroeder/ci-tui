@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 006: r-hotkey refresh git changes before retry
+Last activity: 2026-01-23 — Completed quick task 007: Remove '+N more' from files section
 
 Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Average duration: 4.8m
-- Total execution time: 0.50 hours
+- Total plans completed: 7
+- Average duration: 4.7m
+- Total execution time: 0.55 hours
 
 **By Phase:**
 
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 20%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 006 (7m), 005 (1m), 01-03 (1m), 01-02 (4m), 002 (1m)
+- Last 5 plans: 007 (4m), 006 (7m), 005 (1m), 01-03 (1m), 01-02 (4m)
 - Trend: Quick tasks range from 1-9m depending on Docker build requirements
 
 *Updated after each plan completion*
@@ -56,6 +56,7 @@ Recent decisions affecting current work:
 - 01-02: Use mockall for trait-based mocking (enables isolated unit tests)
 - 01-02: Use rstest for parameterized tests (cleaner than test loops)
 - quick-001: Add .dockerignore to exclude build artifacts (build speed over image size)
+- quick-007: Reuse show_full_command flag for both command and files expansion ('e' hotkey)
 
 ### Pending Todos
 
@@ -76,9 +77,10 @@ None yet.
 | 004 | Fix f-hotkey to only select failed items | 2026-01-23 | ac2ea17 | [004-fix-f-hotkey](./quick/004-fix-f-hotkey-to-only-select-failed-check/) |
 | 005 | Show full datetime in build footer | 2026-01-23 | 255aeec | [005-show-full-datetime](./quick/005-show-full-datetime-in-build-footer/) |
 | 006 | r-hotkey refresh git changes before retry | 2026-01-23 | c02b7fe | [006-r-hotkey-refresh](./quick/006-r-hotkey-refresh-git-changes-before-retr/) |
+| 007 | Remove '+N more' from files section, use 'e' to expand | 2026-01-23 | a6a2498 | [007-remove-n-more](./quick/007-remove-n-more-from-files-section-use-e-h/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 006 (r-hotkey refresh git changes before retry), ready for Phase 2 planning
+Stopped at: Completed quick task 007 (Remove '+N more' from files section, use 'e' to expand), ready for Phase 2 planning
 Resume file: None
