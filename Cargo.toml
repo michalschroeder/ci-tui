@@ -58,3 +58,10 @@ tempfile = "3"                # Temporary directories for testing
 
 # Async testing support (mockall needs this for async traits)
 tokio-test = "0.4"            # tokio testing utilities
+
+[lints.clippy]
+all = "deny"
+
+[lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
