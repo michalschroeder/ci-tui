@@ -2,8 +2,8 @@ version: 2
 
 docker:
   project_dir: .
-  service: rust
-  image: rust:latest
+  service: dev
+  image: ci-tui-dev:latest
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
 
@@ -34,14 +34,14 @@ checks:
     checks:
       fmt:
         name: Format Check
-        command: rustup component add rustfmt && cargo fmt -- --check
-        fix_command: rustup component add rustfmt && cargo fmt
+        command: cargo fmt -- --check {files}
+        fix_command: cargo fmt -- {files}
         triggers:
           file_pattern: rust
 
       clippy:
         name: Clippy Lints
-        command: rustup component add clippy && cargo clippy -- -D warnings
+        command: cargo clippy -- -D warnings
         triggers:
           file_pattern: rust
 
@@ -50,6 +50,6 @@ checks:
     checks:
       test:
         name: Unit Tests
-        command: cargo install cargo-nextest --locked 2>/dev/null || true && cargo nextest run
+        command: script -q -c "cargo nextest run --status-level all --color always" /dev/null
         triggers:
           file_pattern: rust
