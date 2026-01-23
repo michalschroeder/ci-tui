@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.4](https://github.com/michalschroeder/ci-tui/compare/v0.1.3...v0.1.4) (2026-01-23)
+
+
+### Features
+
+* **quick-016:** add skipped_no_files detection in checks.rs ([5ff2006](https://github.com/michalschroeder/ci-tui/commit/5ff20061ae9711f6d7276dc50c5c955db0c551c6))
+* **quick-016:** initialize skipped checks in UI with proper status ([eec3e13](https://github.com/michalschroeder/ci-tui/commit/eec3e13593dff175176d3409b709f90b671295b2))
+
+
+### Bug Fixes
+
+* **ci:** chain release workflow from release-please ([186e682](https://github.com/michalschroeder/ci-tui/commit/186e68261f83feebd716fba279c8452b36254cb0))
+
+
+### Documentation
+
+* **quick-016:** update STATE.md after completing quick task 016 ([7f00380](https://github.com/michalschroeder/ci-tui/commit/7f00380dd22d671e037f69a9bcf27d8b4e0d16e0))
+
 ## [0.1.3](https://github.com/michalschroeder/ci-tui/compare/v0.1.2...v0.1.3) (2026-01-23)
 
 
