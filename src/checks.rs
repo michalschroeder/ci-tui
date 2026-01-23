@@ -1,3 +1,18 @@
+//! Logic for determining which CI checks to run based on changed files.
+//!
+//! This module analyzes the configuration and changed files to build a list
+//! of checks that should be executed. It handles file pattern matching,
+//! test discovery, and on-demand check logic.
+//!
+//! # Key Types
+//!
+//! - [`CheckToRun`]: A check prepared for execution with resolved commands
+//!
+//! # Key Functions
+//!
+//! - [`determine_checks`]: Main entry point for determining which checks to run
+//! - [`group_checks`]: Groups checks by their execution group for ordered execution
+
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
@@ -67,9 +82,11 @@ impl CheckToRun {
     }
 }
 
-/// Determine which checks should run based on changed files
+/// Determine which checks should run based on changed files.
+///
 /// Returns ALL checks from config - those that match are set to run,
-/// those that don't match are marked as skipped (can be run on-demand)
+/// those that don't match are marked as skipped (can be run on-demand).
+/// Checks are returned in config order for predictable execution.
 pub fn determine_checks(
     config: &CiConfig,
     changed_files: &ChangedFiles,

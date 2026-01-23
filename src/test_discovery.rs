@@ -1,3 +1,19 @@
+//! Finding related test files when source files change.
+//!
+//! This module implements test discovery strategies to automatically find which
+//! test files should run when source files are modified. It supports path mapping
+//! (e.g., `src/Foo.php` -> `tests/FooTest.php`) and grep-based content search.
+//!
+//! # Strategies
+//!
+//! - **Path Mapping**: Maps source paths to test paths using configurable rules
+//! - **Grep Search**: Searches test directories for files containing references
+//!   to the changed source files
+//!
+//! # Key Functions
+//!
+//! - [`find_related_tests`]: Main entry point for test discovery
+
 use crate::config::{PathMappingRule, TestDiscoveryStrategy};
 use std::collections::HashSet;
 use std::path::Path;

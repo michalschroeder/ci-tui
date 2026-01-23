@@ -1,3 +1,17 @@
+//! Rendering logic for the TUI dashboard using ratatui widgets.
+//!
+//! This module contains all the rendering functions that draw the UI
+//! components: header with progress, system stats sparklines, check list,
+//! file list, output panel, and footer with keyboard shortcuts.
+//!
+//! # Layout
+//!
+//! The UI is divided into four horizontal sections:
+//! 1. **Header**: Progress gauge with branch info and elapsed time
+//! 2. **System stats**: CPU and memory sparklines
+//! 3. **Main content**: Split into checks list, files list, and output panel
+//! 4. **Footer**: Keyboard shortcuts and version info
+
 use super::app::App;
 use crate::runner::{format_duration, CheckStatus};
 use ansi_to_tui::IntoText;

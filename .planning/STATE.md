@@ -11,9 +11,9 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 ## Current Position
 
 Phase: 2 of 5 (Code Quality Baseline)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 021: Replace Laravel example with Symfony example
+Plan: 1 of TBD in current phase
+Status: In progress
+Last activity: 2026-01-24 — Completed 02-01-PLAN.md (Clippy Lints)
 
 Progress: [██░░░░░░░░] 25%
 
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 25%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 021 (3.5m), 020 (3m), 019 (12m), 018 (4m), 017 (2m)
+- Last 5 plans: 02-01 (2m), 021 (3.5m), 020 (3m), 019 (12m), 018 (4m)
 - Trend: Quick tasks range from 1-12m depending on complexity
 
 *Updated after each plan completion*
@@ -67,6 +67,8 @@ Recent decisions affecting current work:
 - quick-016: Auto-skip checks with {files} placeholder when no matches (prevents accidental full-codebase runs)
 - quick-016: Keep skipped checks visible with on-demand trigger capability (user awareness + manual override)
 - quick-020: Single comprehensive reference file over multiple small files (easier to search/browse)
+- 02-01: Use default Clippy lints only, no pedantic (balanced strictness)
+- 02-01: All warnings denied, no allow attributes (zero tolerance for lint violations)
 
 ### Pending Todos
 
@@ -105,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-23
-Stopped at: Completed quick task 021 (Replace Laravel example with Symfony example)
+Last session: 2026-01-24
+Stopped at: Completed 02-01-PLAN.md (Clippy Lints)
 Resume file: None

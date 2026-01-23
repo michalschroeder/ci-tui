@@ -1,3 +1,18 @@
+//! Git operations for detecting changed files.
+//!
+//! This module provides functionality to detect which files have changed compared
+//! to a base branch or commit reference. It supports multiple fallback strategies
+//! for determining the comparison base.
+//!
+//! # Key Types
+//!
+//! - [`ChangedFiles`]: Collection of changed file paths with filtering methods
+//!
+//! # Key Functions
+//!
+//! - [`detect_changes`]: Main entry point for change detection with fallback logic
+//! - [`current_branch`]: Get the current git branch name
+
 use crate::config::GitConfig;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -66,10 +81,14 @@ impl ChangedFiles {
     }
 }
 
-/// Detect changed files by trying multiple base references in order of preference
+/// Detect changed files by trying multiple base references in order of preference.
 ///
-/// Tries: origin/{base_branch}, {base_branch}, {fallback_branch}
-/// Returns empty list if all references fail
+/// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`.
+/// Returns empty list if all references fail.
+///
+/// # Errors
+///
+/// Returns an error if git operations fail unexpectedly.
 pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<ChangedFiles> {
     // Try different base refs in order
     let base_refs = [
@@ -94,7 +113,11 @@ pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<Cha
     })
 }
 
-/// Get list of files changed compared to a specific git reference
+/// Get list of files changed compared to a specific git reference.
+///
+/// # Errors
+///
+/// Returns an error if the git command fails or the reference doesn't exist.
 pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedFiles> {
     let output = Command::new("git")
         .args(["diff", "--name-only", base_ref])
@@ -121,7 +144,11 @@ pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedF
     })
 }
 
-/// Get the current branch name
+/// Get the current branch name.
+///
+/// # Errors
+///
+/// Returns an error if the git command fails.
 pub fn current_branch(project_root: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -132,7 +159,11 @@ pub fn current_branch(project_root: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Get short commit hash
+/// Get short commit hash.
+///
+/// # Errors
+///
+/// Returns an error if the git command fails.
 pub fn short_commit(project_root: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

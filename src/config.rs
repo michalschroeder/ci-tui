@@ -1,3 +1,25 @@
+//! Configuration loading and parsing from YAML files.
+//!
+//! This module handles all configuration-related types and loading logic for CI-TUI.
+//! The configuration defines Docker settings, git base branches, file patterns for
+//! triggering checks, and the checks themselves organized into execution groups.
+//!
+//! # Key Types
+//!
+//! - [`CiConfig`]: Root configuration type containing all settings
+//! - [`GroupConfig`]: Configuration for a group of checks
+//! - [`CheckDefinition`]: Definition of a single CI check
+//! - [`TestDiscoveryConfig`]: Settings for automatic test file discovery
+//!
+//! # Example
+//!
+//! ```ignore
+//! let config = load_config(Path::new("ci-tui.yaml"))?;
+//! for (group_name, group) in config.groups() {
+//!     println!("Group: {}", group.display_name(group_name));
+//! }
+//! ```
+
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
@@ -6,6 +28,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// Root configuration type for CI-TUI.
+///
+/// Contains all settings needed to run CI checks including Docker configuration,
+/// git settings, file patterns, and check definitions organized into groups.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
@@ -48,6 +74,10 @@ impl Clone for CiConfig {
     }
 }
 
+/// Docker configuration for running checks in containers.
+///
+/// Supports both `docker exec` (for running containers) and `docker run`
+/// (for standalone execution).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DockerConfig {
@@ -159,6 +189,7 @@ fn expand_env_vars(input: &str) -> String {
     result
 }
 
+/// Git configuration for change detection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitConfig {
@@ -186,6 +217,10 @@ pub struct GroupConfig {
     pub checks: IndexMap<String, CheckDefinition>,
 }
 
+/// Definition of a single CI check.
+///
+/// Contains the command to run, optional fix command, triggers for when
+/// to run, and other configuration options.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckDefinition {
@@ -209,6 +244,7 @@ pub struct CheckDefinition {
     pub env: std::collections::HashMap<String, String>,
 }
 
+/// Triggers that determine when a check should run.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CheckTriggers {
@@ -255,6 +291,7 @@ pub struct PathMappingRule {
     pub tests: Vec<String>,
 }
 
+/// A command to run before checks in a group (e.g., database initialization).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreCommand {
@@ -276,6 +313,11 @@ pub struct PreCommand {
     pub env: std::collections::HashMap<String, String>,
 }
 
+/// Load configuration from a YAML file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed.
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;

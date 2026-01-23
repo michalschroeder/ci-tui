@@ -1,3 +1,21 @@
+//! Terminal UI using ratatui for interactive check execution.
+//!
+//! This module implements the main TUI event loop and coordinates between
+//! user input, check execution, and rendering. It provides real-time
+//! feedback during check execution with keyboard-driven navigation.
+//!
+//! # Architecture
+//!
+//! - **Keyboard input**: Handled on dedicated OS thread for responsiveness
+//! - **Check execution**: Runs in Tokio tasks with event streaming
+//! - **System stats**: Collected in background task to avoid UI blocking
+//! - **Event loop**: Uses `tokio::select!` with `biased;` for keyboard priority
+//!
+//! # Submodules
+//!
+//! - [`app`]: Application state management
+//! - [`dashboard`]: Rendering logic using ratatui widgets
+
 mod app;
 mod dashboard;
 

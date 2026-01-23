@@ -1,3 +1,15 @@
+//! Application state management for the TUI.
+//!
+//! This module contains the [`App`] struct which holds all state needed to
+//! render the UI and track check execution. It handles navigation, filtering,
+//! fix operations, and system stats tracking.
+//!
+//! # Key Types
+//!
+//! - [`App`]: Main application state container
+//! - [`StatusFilter`]: Filter for displaying checks by status
+//! - [`PreCommandState`]: State tracking for pre-commands
+
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;

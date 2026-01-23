@@ -1,3 +1,19 @@
+//! Fix mode for running auto-fix commands on changed files.
+//!
+//! This module provides functionality to run fix commands (like `cargo fmt`,
+//! `php-cs-fixer`, etc.) on files that have changed. It iterates through all
+//! checks with `fix_command` defined and executes them.
+//!
+//! # Usage
+//!
+//! Invoked via `--fix` CLI flag. Runs fix commands sequentially and reports
+//! success/failure for each.
+//!
+//! # Exit Codes
+//!
+//! - `0`: All fix commands passed
+//! - `1`: One or more fix commands failed
+
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
 use anyhow::Result;

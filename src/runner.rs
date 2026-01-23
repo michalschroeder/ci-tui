@@ -1,3 +1,22 @@
+//! Check execution in Docker containers with event streaming.
+//!
+//! This module handles the actual execution of CI checks via Docker. It supports
+//! both `docker exec` (for running containers) and `docker run` (for standalone
+//! execution), with real-time output streaming through async channels.
+//!
+//! # Key Types
+//!
+//! - [`CheckRunner`]: Orchestrates check execution with parallel/sequential support
+//! - [`CheckResult`]: Result of executing a check including output and timing
+//! - [`CheckStatus`]: Current status of a check (Pending, Running, Passed, etc.)
+//! - [`RunnerEvent`]: Events emitted during execution for UI updates
+//!
+//! # Key Functions
+//!
+//! - [`run_single_check`]: Execute a single check (for retry operations)
+//! - [`run_fix_command`]: Execute a fix command for a check
+//! - [`format_duration`]: Format milliseconds as human-readable duration
+
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
 use anyhow::Result;
@@ -612,7 +631,10 @@ pub async fn run_fix_command(
     .await
 }
 
-/// Run a check with a custom command (e.g., for running without file filtering)
+/// Run a check with a custom command (e.g., for running without file filtering).
+///
+/// This is used when running a check for "all files" by removing the {files}
+/// placeholder from the command.
 pub async fn run_check_with_command(
     check: &CheckToRun,
     command: &str,

@@ -1,3 +1,19 @@
+//! Simple console output mode for CI pipelines (no TUI).
+//!
+//! This module provides a non-interactive execution mode that prints check
+//! results directly to the console. It's designed for CI/CD pipelines where
+//! a full terminal UI is not needed or available.
+//!
+//! # Usage
+//!
+//! Invoked via `--simple` CLI flag. Runs all checks sequentially or in parallel
+//! (per group config) and prints results with colored output.
+//!
+//! # Exit Codes
+//!
+//! - `0`: All checks passed
+//! - `1`: One or more checks failed
+
 use crate::checks::{group_checks, CheckToRun};
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
@@ -7,6 +23,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command;
 
+/// Run checks in simple console mode (no TUI).
+///
+/// Prints results directly to stdout with colored output. Exits with code 1
+/// if any check fails.
+///
+/// # Errors
+///
+/// Returns an error if Docker operations fail.
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
