@@ -604,7 +604,9 @@ checks: {}
         let err = result.unwrap_err().to_string();
         // Should mention the typo field or that base_branch is missing
         assert!(
-            err.contains("base_branc") || err.contains("unknown field") || err.contains("base_branch"),
+            err.contains("base_branc")
+                || err.contains("unknown field")
+                || err.contains("base_branch"),
             "Error should mention typo field or missing required field: {}",
             err
         );
