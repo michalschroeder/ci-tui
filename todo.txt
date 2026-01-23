@@ -1,6 +1,4 @@
-- simple mode messes with db container
 - test list for run have duplicates? probably because of many sources
 - allow select text?
 - output shows Files and +5 more, not sure if that is needed we have e-expand to see it
-- if check will be run for all (no files affected) it should ask if check should be run some kind of modal
 - add config reference to repo
