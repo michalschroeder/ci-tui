@@ -129,6 +129,7 @@ jobs:
           context: .
           push: false
           load: true
+          target: runtime
           tags: ci-tui:ci-test
           build-args: |
             CI_TUI_GIT_HASH=${{ github.sha }}
