@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 005: Show full datetime in build footer
+Last activity: 2026-01-23 — Completed quick task 006: r-hotkey refresh git changes before retry
 
 Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: 4.6m
-- Total execution time: 0.38 hours
+- Total plans completed: 6
+- Average duration: 4.8m
+- Total execution time: 0.50 hours
 
 **By Phase:**
 
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 20%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (1m), 01-02 (4m), 002 (1m), 003 (1m), 001 (9m)
+- Last 5 plans: 006 (7m), 005 (1m), 01-03 (1m), 01-02 (4m), 002 (1m)
 - Trend: Quick tasks range from 1-9m depending on Docker build requirements
 
 *Updated after each plan completion*
@@ -75,9 +75,10 @@ None yet.
 | 001 | Optimize Docker build context with .dockerignore | 2026-01-23 | eada4fe | [001-shrink-docker-image](./quick/001-shrink-docker-image-following-best-pract/) |
 | 004 | Fix f-hotkey to only select failed items | 2026-01-23 | ac2ea17 | [004-fix-f-hotkey](./quick/004-fix-f-hotkey-to-only-select-failed-check/) |
 | 005 | Show full datetime in build footer | 2026-01-23 | 255aeec | [005-show-full-datetime](./quick/005-show-full-datetime-in-build-footer/) |
+| 006 | r-hotkey refresh git changes before retry | 2026-01-23 | c02b7fe | [006-r-hotkey-refresh](./quick/006-r-hotkey-refresh-git-changes-before-retr/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 005 (Show full datetime in build footer), ready for Phase 2 planning
+Stopped at: Completed quick task 006 (r-hotkey refresh git changes before retry), ready for Phase 2 planning
 Resume file: None
