@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 015: Add Release Please for automated releases
+Last activity: 2026-01-23 — Completed quick task 016: Skip checks with {files} placeholder when no matches
 
 Progress: [██░░░░░░░░] 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 15
-- Average duration: 5.3m
-- Total execution time: 1.17 hours
+- Total plans completed: 16
+- Average duration: 5.2m
+- Total execution time: 1.24 hours
 
 **By Phase:**
 
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 25%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 015 (2m), 014 (1m), 013 (1m), 012 (12m), 011 (8m)
+- Last 5 plans: 016 (4m), 015 (2m), 014 (1m), 013 (1m), 012 (12m)
 - Trend: Quick tasks range from 1-12m depending on complexity
 
 *Updated after each plan completion*
@@ -64,6 +64,8 @@ Recent decisions affecting current work:
 - quick-011: Derive image name from container_name if not explicit (preserves docker-compose behavior)
 - quick-012: Track output_visible_lines in App state and update during render (dynamic scroll bounds)
 - quick-012: Show scroll position indicator only when content exceeds visible area (avoid clutter)
+- quick-016: Auto-skip checks with {files} placeholder when no matches (prevents accidental full-codebase runs)
+- quick-016: Keep skipped checks visible with on-demand trigger capability (user awareness + manual override)
 
 ### Pending Todos
 
@@ -93,9 +95,10 @@ None yet.
 | 013 | Add config validation with schema error | 2026-01-23 | f66485a | [013-add-config-validation-with-schema-error-](./quick/013-add-config-validation-with-schema-error-/) |
 | 014 | Add CI/CD pipeline with GitHub Actions | 2026-01-23 | a3be1b1 | [014-add-ci-cd-pipeline](./quick/014-add-ci-cd-pipeline-with-github-actions/) |
 | 015 | Add Release Please for automated releases | 2026-01-23 | 7a5530d | [015-add-release-please](./quick/015-add-release-please-for-automated-release/) |
+| 016 | Skip checks with {files} placeholder when no matches | 2026-01-23 | c469cd4 | [016-skip-checks-with-files-placeholder-when](./quick/016-skip-checks-with-files-placeholder-when/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 015 (Add Release Please for automated releases), ready for Phase 2 planning
+Stopped at: Completed quick task 016 (Skip checks with {files} placeholder when no matches), ready for Phase 2 planning
 Resume file: None
