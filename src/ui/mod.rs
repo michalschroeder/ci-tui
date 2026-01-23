@@ -346,8 +346,14 @@ fn handle_key_event(
                     let docker_config = Arc::clone(&channels.docker_config);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        let result =
-                            run_single_check(&check, &project_root, &docker_dir, &docker_config, &global_env).await;
+                        let result = run_single_check(
+                            &check,
+                            &project_root,
+                            &docker_dir,
+                            &docker_config,
+                            &global_env,
+                        )
+                        .await;
                         let _ = retry_tx.send(result).await;
                     });
                 }
@@ -673,7 +679,7 @@ pub async fn run(
 
         // Render if state changed
         if app.needs_redraw {
-            terminal.draw(|f| dashboard::render(&app, f))?;
+            terminal.draw(|f| dashboard::render(&mut app, f))?;
             app.needs_redraw = false;
         }
     }

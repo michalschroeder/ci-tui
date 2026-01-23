@@ -52,7 +52,7 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
     }
 }
 
-pub fn render(app: &App, frame: &mut Frame) {
+pub fn render(app: &mut App, frame: &mut Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -182,7 +182,7 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(mem_sparkline, chunks[1]);
 }
 
-fn render_main(app: &App, frame: &mut Frame, area: Rect) {
+fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -785,7 +785,10 @@ fn render_pre_command_output(
     frame.render_widget(paragraph, area);
 }
 
-fn render_output(app: &App, frame: &mut Frame, area: Rect) {
+fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
+    // Update the visible lines for scroll calculations (subtract 2 for borders)
+    app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
+
     // Dispatch to appropriate sub-renderer based on state
     if !app.fix_all_results.is_empty() && !app.fix_all_running {
         render_fix_all_results(app, frame, area);

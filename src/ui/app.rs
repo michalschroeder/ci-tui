@@ -64,6 +64,8 @@ pub struct App {
     pub selected_check: usize,
     /// Scroll position in output panel
     pub output_scroll: usize,
+    /// Number of visible lines in output area (updated during render)
+    pub output_visible_lines: usize,
     /// Current filter for check list
     pub status_filter: StatusFilter,
 
@@ -159,6 +161,7 @@ impl App {
             current_branch,
             selected_check: 0,
             output_scroll: 0,
+            output_visible_lines: 20,
             status_filter: StatusFilter::All,
             current_group: None,
             all_finished: false,
@@ -219,6 +222,7 @@ impl App {
         // Reset state
         self.selected_check = 0;
         self.output_scroll = 0;
+        self.output_visible_lines = 20;
         self.current_group = None;
         self.all_finished = false;
         self.run_started_at = Some(Instant::now());
@@ -570,19 +574,27 @@ impl App {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        // Get max scroll based on output content length (check or pre-command)
+        // Get max scroll based on output content length and visible area
+        let visible_lines = self.output_visible_lines;
         let max_scroll = match self.selected_item() {
             Some(SelectableItem::Check(check)) => self
                 .results
                 .get(check.id())
-                .map(|result| result.output.lines().count().saturating_sub(5))
+                .map(|result| result.output.lines().count().saturating_sub(visible_lines))
                 .unwrap_or(0),
-            Some(SelectableItem::PreCommand(pc)) => pc.output.lines().count().saturating_sub(5),
+            Some(SelectableItem::PreCommand(pc)) => {
+                pc.output.lines().count().saturating_sub(visible_lines)
+            }
             None => 0,
         };
 
         self.output_scroll = (self.output_scroll + n).min(max_scroll);
         self.needs_redraw = true;
+    }
+
+    /// Set the number of visible lines in output area (called during render)
+    pub fn set_output_visible_lines(&mut self, lines: usize) {
+        self.output_visible_lines = lines;
     }
 
     pub fn toggle_failed_filter(&mut self) {
