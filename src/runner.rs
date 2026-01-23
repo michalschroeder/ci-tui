@@ -160,7 +160,7 @@ impl CheckResult {
         Self {
             check_id: check_id.to_string(),
             status: CheckStatus::Skipped,
-            output: "No matching files".to_string(),
+            output: "No changes detected".to_string(),
             error_output: String::new(),
             duration_ms: 0,
             started_at: None,

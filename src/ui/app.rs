@@ -125,10 +125,13 @@ impl App {
         checks: Vec<CheckToRun>,
         current_branch: String,
     ) -> Self {
-        // Initialize results - pending for auto-run, on_demand for manual triggers
+        // Initialize results - skipped for checks with {files} and no matches,
+        // on_demand for manual triggers, pending for auto-run
         let mut results = HashMap::new();
         for check in &checks {
-            if check.on_demand {
+            if check.skipped_no_files {
+                results.insert(check.id().to_string(), CheckResult::skipped(check.id()));
+            } else if check.on_demand {
                 results.insert(check.id().to_string(), CheckResult::on_demand(check.id()));
             } else {
                 results.insert(check.id().to_string(), CheckResult::pending(check.id()));
@@ -189,10 +192,14 @@ impl App {
         self.changed_files = changed_files;
         self.checks = checks.clone();
 
-        // Reset results - pending for auto-run, on_demand for manual triggers
+        // Reset results - skipped for checks with {files} and no matches,
+        // on_demand for manual triggers, pending for auto-run
         self.results.clear();
         for check in &checks {
-            if check.on_demand {
+            if check.skipped_no_files {
+                self.results
+                    .insert(check.id().to_string(), CheckResult::skipped(check.id()));
+            } else if check.on_demand {
                 self.results
                     .insert(check.id().to_string(), CheckResult::on_demand(check.id()));
             } else {
