@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/michalschroeder/ci-tui/compare/v0.1.5...v0.1.6) (2026-01-23)
+
+
+### Bug Fixes
+
+* **checks:** skip test discovery fallback when {files} placeholder used ([f01005f](https://github.com/michalschroeder/ci-tui/commit/f01005f67ac5a83249968ff6be69de41770f9f52))
+
 ## [0.1.5](https://github.com/michalschroeder/ci-tui/compare/v0.1.4...v0.1.5) (2026-01-23)
 
 
