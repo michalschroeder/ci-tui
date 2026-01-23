@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.5](https://github.com/michalschroeder/ci-tui/compare/v0.1.4...v0.1.5) (2026-01-23)
+
+
+### Performance Improvements
+
+* **ci:** optimize Docker builds with native ARM64 runners ([2c9be2a](https://github.com/michalschroeder/ci-tui/commit/2c9be2ae3a8987a9b105bf423e122617a94ddd6f))
+* **ci:** remove Docker build from CI workflow ([665ce77](https://github.com/michalschroeder/ci-tui/commit/665ce77ebbf3bd2f4e319ec05ee443c55efa446d))
+
+
+### Documentation
+
+* **quick-017:** update STATE.md for Docker build optimization ([6a9f4e6](https://github.com/michalschroeder/ci-tui/commit/6a9f4e61d8d88275e2ce4441e3a260641674a240))
+
 ## [0.1.4](https://github.com/michalschroeder/ci-tui/compare/v0.1.3...v0.1.4) (2026-01-23)
 
 
