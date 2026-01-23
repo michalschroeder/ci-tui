@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 008: Research CI-TUI self-hosting requirement
+Last activity: 2026-01-23 — Completed quick task 009: Replace docker-compose exec with docker exec/run
 
 Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
-- Average duration: 4.4m
-- Total execution time: 0.58 hours
+- Total plans completed: 9
+- Average duration: 5.3m
+- Total execution time: 0.78 hours
 
 **By Phase:**
 
@@ -31,8 +31,8 @@ Progress: [██░░░░░░░░] 20%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 008 (2m), 007 (4m), 006 (7m), 005 (1m), 01-03 (1m)
-- Trend: Quick tasks range from 1-9m depending on complexity
+- Last 5 plans: 009 (12m), 008 (2m), 007 (4m), 006 (7m), 005 (1m)
+- Trend: Quick tasks range from 1-12m depending on complexity
 
 *Updated after each plan completion*
 
@@ -58,6 +58,8 @@ Recent decisions affecting current work:
 - quick-001: Add .dockerignore to exclude build artifacts (build speed over image size)
 - quick-007: Reuse show_full_command flag for both command and files expansion ('e' hotkey)
 - quick-008: Two-phase self-hosting strategy (compose now, run mode later)
+- quick-009: Use docker exec when container running, docker run when not (eliminates docker-compose dependency)
+- quick-009: Derive container name from project_dir + service by default (backward compatibility)
 
 ### Pending Todos
 
@@ -80,9 +82,10 @@ None yet.
 | 006 | r-hotkey refresh git changes before retry | 2026-01-23 | c02b7fe | [006-r-hotkey-refresh](./quick/006-r-hotkey-refresh-git-changes-before-retr/) |
 | 007 | Remove '+N more' from files section, use 'e' to expand | 2026-01-23 | a6a2498 | [007-remove-n-more](./quick/007-remove-n-more-from-files-section-use-e-h/) |
 | 008 | Research CI-TUI self-hosting requirement | 2026-01-23 | 05aa45e | [008-research-ci-tui-self-hosting-requirement](./quick/008-research-ci-tui-self-hosting-requirement/) |
+| 009 | Replace docker-compose exec with docker exec/run | 2026-01-23 | a3859bf | [009-replace-docker-compose-exec-with-docker-](./quick/009-replace-docker-compose-exec-with-docker-/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 008 (Research CI-TUI self-hosting requirement), ready for Phase 2 planning
+Stopped at: Completed quick task 009 (Replace docker-compose exec with docker exec/run), ready for Phase 2 planning
 Resume file: None
