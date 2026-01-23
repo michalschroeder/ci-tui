@@ -13,7 +13,7 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 001: Optimize Docker build context
+Last activity: 2026-01-23 — Completed quick task 004: Fix f-hotkey filtering
 
 Progress: [██░░░░░░░░] 20%
 
@@ -73,9 +73,10 @@ None yet.
 | 002 | Add version display showing git hash + build date | 2026-01-23 | dc4016f | [002-add-version-display](./quick/002-add-version-display-git-hash-and-build-d/) |
 | 003 | Remove unused run.sh and Makefile targets | 2026-01-23 | d812197 | [003-review-and-remove](./quick/003-review-and-remove-unused-run-sh-and-make/) |
 | 001 | Optimize Docker build context with .dockerignore | 2026-01-23 | eada4fe | [001-shrink-docker-image](./quick/001-shrink-docker-image-following-best-pract/) |
+| 004 | Fix f-hotkey to only select failed items | 2026-01-23 | ac2ea17 | [004-fix-f-hotkey](./quick/004-fix-f-hotkey-to-only-select-failed-check/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 001 (Docker optimization), ready for Phase 2 planning
+Stopped at: Completed quick task 004 (Fix f-hotkey filtering), ready for Phase 2 planning
 Resume file: None
