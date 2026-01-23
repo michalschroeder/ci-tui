@@ -1,10 +1,10 @@
-# CI-TUI Configuration for Laravel PHP Projects
+# CI-TUI Configuration for Symfony PHP Projects
 #
-# This is a complete working example for a typical Laravel application with:
+# This is a complete working example for a typical Symfony application with:
 # - PHP CS Fixer for code style (with auto-fix)
-# - PHPStan/Larastan for static analysis
+# - PHPStan for static analysis
 # - PHPUnit for testing with intelligent test discovery
-# - Database migrations before tests
+# - Doctrine migrations before tests
 #
 # Adjust paths, versions, and check configurations to match your project.
 
@@ -28,8 +28,8 @@ docker:
   # Useful for disabling xdebug, setting test environment
   env:
     XDEBUG_MODE: "off"
-    APP_ENV: "testing"
-    DB_CONNECTION: "testing"
+    APP_ENV: "test"
+    DATABASE_URL: "postgresql://test:test@localhost:5432/test_db?serverVersion=15&charset=utf8"
 
 git:
   # Compare against main branch to detect changes
@@ -48,7 +48,7 @@ file_patterns:
 
   # PHP source files (not tests)
   php_src:
-    pattern: '^(app|src)/.*\.php$'
+    pattern: '^src/.*\.php$'
     color: blue
 
   # PHP test files
@@ -56,27 +56,27 @@ file_patterns:
     pattern: '^tests/.*\.php$'
     color: green
 
-  # Blade templates
-  blade:
-    pattern: '\.blade\.php$'
+  # Twig templates
+  twig:
+    pattern: '\.twig$'
     color: magenta
 
-  # Database migrations
+  # Doctrine migrations
   migrations:
-    pattern: '^database/migrations/.*\.php$'
+    pattern: '^migrations/.*\.php$'
     color: yellow
 
   # Configuration files
   config:
-    pattern: '^config/.*\.php$'
+    pattern: '^config/.*\.(php|yaml|yml)$'
     color: cyan
 
 # Patterns for files to ignore (never trigger checks)
 ignore_patterns:
   - '^vendor/'
   - '^node_modules/'
-  - '^storage/'
-  - '^bootstrap/cache/'
+  - '^var/'
+  - '^public/bundles/'
   - '\.md$'
   - '\.txt$'
   - '\.log$'
@@ -101,6 +101,7 @@ checks:
           file_pattern: php
 
       # PHP CS Fixer for code style
+      # Symfony uses php-cs-fixer natively with .php-cs-fixer.dist.php config
       # fix_command runs when using --fix flag
       php-cs-fixer:
         name: PHP CS Fixer
@@ -117,7 +118,8 @@ checks:
     parallel: false
     stop_on_failure: false
     checks:
-      # PHPStan/Larastan for static analysis
+      # PHPStan for static analysis
+      # Symfony projects typically use phpstan/extension-installer for auto-config
       # Analyzes specific files when source changes
       phpstan:
         name: PHPStan Analysis
@@ -141,22 +143,25 @@ checks:
     # Commands run before checks in this group
     # Useful for setting up test database
     pre_commands:
-      # Run migrations in test environment
+      # Run Doctrine migrations in test environment
       - name: Migrate test database
-        command: php artisan migrate --env=testing --force
+        command: bin/console doctrine:migrations:migrate --no-interaction --env=test
         service: php
         exec: true
         env:
-          DB_CONNECTION: testing
+          APP_ENV: test
 
-      # Optional: Seed test data
-      # - name: Seed test database
-      #   command: php artisan db:seed --class=TestSeeder --env=testing
+      # Optional: Load fixtures for test data
+      # - name: Load test fixtures
+      #   command: bin/console doctrine:fixtures:load --no-interaction --env=test
       #   service: php
       #   exec: true
+      #   env:
+      #     APP_ENV: test
 
     checks:
       # PHPUnit with intelligent test discovery
+      # Symfony uses PHPUnit with phpunit.xml.dist configuration
       phpunit:
         name: PHPUnit Tests
         command: vendor/bin/phpunit --colors=always {files}
@@ -172,36 +177,43 @@ checks:
             strategies:
               # Strategy 1: Path mapping (convention-based)
               # Maps source files to test files by path structure
+              # Symfony convention: src/{path}.php -> tests/{path}Test.php
               - type: path_mapping
                 rules:
-                  # Rule for app/ directory (Laravel default)
-                  # Example: app/Services/UserService.php
-                  #       -> tests/Unit/Services/UserServiceTest.php
-                  #       -> tests/Feature/Services/UserServiceTest.php
-                  - source: "app/{path}.php"
-                    tests:
-                      - "tests/Unit/{path}Test.php"
-                      - "tests/Feature/{path}Test.php"
-
-                  # Rule for src/ directory (if using DDD structure)
+                  # Rule for src/ directory (Symfony standard)
+                  # Example: src/Service/UserService.php
+                  #       -> tests/Service/UserServiceTest.php
+                  #       -> tests/Integration/Service/UserServiceTest.php
                   - source: "src/{path}.php"
                     tests:
-                      - "tests/Unit/{path}Test.php"
+                      - "tests/{path}Test.php"
                       - "tests/Integration/{path}Test.php"
+
+                  # Controllers often have functional tests
+                  - source: "src/Controller/{path}.php"
+                    tests:
+                      - "tests/Controller/{path}Test.php"
+                      - "tests/Functional/{path}Test.php"
+
+                  # Entities may have unit tests
+                  - source: "src/Entity/{path}.php"
+                    tests:
+                      - "tests/Entity/{path}Test.php"
+                      - "tests/Unit/Entity/{path}Test.php"
 
               # Strategy 2: Grep search (finds indirect references)
               # Searches test files for class names
               # Useful for integration tests that import multiple classes
               - type: grep_search
                 search_dirs:
-                  - tests/Feature
+                  - tests/Functional
                   - tests/Integration
                 pattern: '(use|class|new)\s+(\w+\\)*{basename}(;|\(|Test)'
 
-      # Feature tests only (useful for quick iteration)
-      phpunit-feature:
-        name: Feature Tests Only
-        command: vendor/bin/phpunit --colors=always --testsuite=Feature {files}
+      # Functional tests only (useful for API testing)
+      phpunit-functional:
+        name: Functional Tests Only
+        command: vendor/bin/phpunit --colors=always --testsuite=functional {files}
         service: php
         on_demand: true
         triggers:
@@ -218,10 +230,12 @@ checks:
 # ---
 # Common Modifications:
 #
-# 1. Add Pest PHP support:
-#    command: vendor/bin/pest --colors=always {files}
+# 1. Add Symfony-specific static analysis:
+#    psalm:
+#      name: Psalm Analysis
+#      command: vendor/bin/psalm --show-info=true {files}
 #
-# 2. Add parallel testing:
+# 2. Add parallel testing with ParaTest:
 #    command: vendor/bin/paratest --colors=always {files}
 #
 # 3. Add code coverage:
@@ -230,19 +244,33 @@ checks:
 #      command: vendor/bin/phpunit --coverage-html coverage {files}
 #      on_demand: true
 #
-# 4. Add Laravel Pint (instead of PHP CS Fixer):
-#    pint:
-#      name: Laravel Pint
-#      command: vendor/bin/pint --test {files}
-#      fix_command: vendor/bin/pint {files}
+# 4. Add Symfony console commands linting:
+#    console-lint:
+#      name: Console Lint
+#      command: bin/console lint:yaml config --parse-tags
+#      triggers:
+#        file_pattern: config
 #
-# 5. Add Rector for automated refactoring:
-#    rector:
-#      name: Rector
-#      command: vendor/bin/rector process --dry-run {files}
-#      fix_command: vendor/bin/rector process {files}
+# 5. Add Twig template linting:
+#    twig-lint:
+#      name: Twig Lint
+#      command: bin/console lint:twig templates
+#      triggers:
+#        file_pattern: twig
 #
-# 6. Add specific test suites:
+# 6. Add Doctrine schema validation:
+#    doctrine-validate:
+#      name: Doctrine Schema Validation
+#      command: bin/console doctrine:schema:validate --skip-sync
+#      on_demand: true
+#
+# 7. Add container linting:
+#    container-lint:
+#      name: Container Lint
+#      command: bin/console lint:container
+#      on_demand: true
+#
+# 8. Add specific test suites for Symfony structure:
 #    triggers:
 #      file_pattern: php_src
 #      test_discovery:
@@ -250,18 +278,21 @@ checks:
 #        strategies:
 #          - type: path_mapping
 #            rules:
-#              # Controllers -> Feature tests
-#              - source: "app/Http/Controllers/{path}.php"
-#                tests: ["tests/Feature/{path}Test.php"]
-#              # Models -> Unit tests
-#              - source: "app/Models/{path}.php"
-#                tests: ["tests/Unit/Models/{path}Test.php"]
+#              # Controllers -> Functional tests
+#              - source: "src/Controller/{path}.php"
+#                tests: ["tests/Functional/{path}Test.php"]
+#              # Services -> Unit tests
+#              - source: "src/Service/{path}.php"
+#                tests: ["tests/Unit/Service/{path}Test.php"]
+#              # Repositories -> Integration tests
+#              - source: "src/Repository/{path}.php"
+#                tests: ["tests/Integration/Repository/{path}Test.php"]
 #
-# 7. Add database-specific checks:
+# 9. Add database-specific checks:
 #    checks:
-#      migrations:
+#      migrations-test:
 #        name: Migration Test
-#        command: php artisan migrate:fresh --env=testing
+#        command: bin/console doctrine:migrations:migrate --no-interaction --env=test
 #        on_demand: true
 #        triggers:
 #          file_pattern: migrations
