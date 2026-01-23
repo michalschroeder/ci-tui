@@ -117,7 +117,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.tag }}
-            type=sha
             type=raw,value=latest
 
       - name: Create manifest list and push
