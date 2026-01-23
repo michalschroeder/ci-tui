@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CiConfig {
     pub version: u32,
     pub docker: DockerConfig,
@@ -23,6 +24,7 @@ pub struct CiConfig {
 
 /// File pattern definition with optional color for UI display
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilePattern {
     /// Regex pattern for matching files
     pub pattern: String,
@@ -47,6 +49,7 @@ impl Clone for CiConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerConfig {
     pub project_dir: String,
     /// Default Docker service name (defaults to "app" if not specified)
@@ -157,6 +160,7 @@ fn expand_env_vars(input: &str) -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitConfig {
     pub base_branch: String,
     pub fallback_branch: String,
@@ -164,6 +168,7 @@ pub struct GitConfig {
 
 /// Configuration for an execution group
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupConfig {
     /// Optional display name for the group (uses key name if not set)
     #[serde(default)]
@@ -182,6 +187,7 @@ pub struct GroupConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckDefinition {
     pub name: String,
     pub command: String,
@@ -204,6 +210,7 @@ pub struct CheckDefinition {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CheckTriggers {
     #[serde(default)]
     pub file_pattern: Option<String>,
@@ -213,6 +220,7 @@ pub struct CheckTriggers {
 
 /// Inline test discovery configuration for a check
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestDiscoveryConfig {
     /// Source file pattern key that triggers discovery (references file_patterns)
     pub source_pattern: String,
@@ -222,7 +230,7 @@ pub struct TestDiscoveryConfig {
 
 /// Strategy for discovering related test files
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum TestDiscoveryStrategy {
     /// Map source paths to test paths by pattern
     #[serde(rename = "path_mapping")]
@@ -239,6 +247,7 @@ pub enum TestDiscoveryStrategy {
 
 /// Rule for mapping source paths to test paths
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathMappingRule {
     /// Source file pattern with {path} placeholder (e.g., "src/{path}.php")
     pub source: String,
@@ -247,6 +256,7 @@ pub struct PathMappingRule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreCommand {
     /// Display name for the command
     pub name: String,
@@ -528,5 +538,75 @@ checks:
 
         let tests = config.get_group("tests").unwrap();
         assert!(!tests.parallel);
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_top_level() {
+        let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+typo_field: oops
+"#;
+        let result: Result<CiConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("typo_field") || err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_nested() {
+        let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  unknown_docker_field: invalid
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+        let result: Result<CiConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown_docker_field") || err.contains("unknown field"),
+            "Error should mention unknown field in docker config: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_typo_produces_helpful_error() {
+        let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branc: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+        let result: Result<CiConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should mention the typo field or that base_branch is missing
+        assert!(
+            err.contains("base_branc") || err.contains("unknown field") || err.contains("base_branch"),
+            "Error should mention typo field or missing required field: {}",
+            err
+        );
     }
 }
