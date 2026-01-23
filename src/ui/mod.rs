@@ -260,17 +260,24 @@ fn handle_key_event(
                             new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
 
                             // Re-determine checks with fresh git state
-                            let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+                            let new_checks = determine_checks(
+                                config,
+                                &new_changed_files,
+                                &channels.project_root,
+                            );
 
                             // Find the matching check by ID
-                            if let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) {
+                            if let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id)
+                            {
                                 let new_check = new_check.clone();
 
                                 // Update app state with new git state and check info
                                 app.changed_files = new_changed_files;
 
                                 // Update the check in app.checks with the new version
-                                if let Some(idx) = app.checks.iter().position(|c| c.id() == check_id) {
+                                if let Some(idx) =
+                                    app.checks.iter().position(|c| c.id() == check_id)
+                                {
                                     app.checks[idx] = new_check.clone();
                                 }
 
@@ -281,12 +288,20 @@ fn handle_key_event(
                                 let docker_dir = Arc::clone(&channels.docker_project_dir);
                                 let global_env = Arc::clone(&channels.global_env);
                                 tokio::spawn(async move {
-                                    let result = run_single_check(&new_check, &project_root, &docker_dir, &global_env).await;
+                                    let result = run_single_check(
+                                        &new_check,
+                                        &project_root,
+                                        &docker_dir,
+                                        &global_env,
+                                    )
+                                    .await;
                                     let _ = retry_tx.send(result).await;
                                 });
                             } else {
                                 // Check no longer applicable after git refresh
-                                app.status_message = Some("Check no longer applicable after git refresh".to_string());
+                                app.status_message = Some(
+                                    "Check no longer applicable after git refresh".to_string(),
+                                );
                             }
                         }
                         Err(_) => {
@@ -298,7 +313,13 @@ fn handle_key_event(
                             let docker_dir = Arc::clone(&channels.docker_project_dir);
                             let global_env = Arc::clone(&channels.global_env);
                             tokio::spawn(async move {
-                                let result = run_single_check(&check, &project_root, &docker_dir, &global_env).await;
+                                let result = run_single_check(
+                                    &check,
+                                    &project_root,
+                                    &docker_dir,
+                                    &global_env,
+                                )
+                                .await;
                                 let _ = retry_tx.send(result).await;
                             });
                         }
