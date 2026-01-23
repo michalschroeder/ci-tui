@@ -83,10 +83,27 @@ impl DockerConfig {
 
         // Derive container name from project_dir and service
         // Extract project name from project_dir (last path component)
-        let project_name = std::path::Path::new(&self.project_dir)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project");
+        // Handle "." and relative paths by resolving to absolute path first
+        let path = std::path::Path::new(&self.project_dir);
+        let project_name = if self.project_dir == "." || self.project_dir == ".." {
+            // Resolve relative path to get actual directory name
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| {
+                    let resolved = if self.project_dir == "." {
+                        cwd
+                    } else {
+                        cwd.parent()?.to_path_buf()
+                    };
+                    resolved.file_name()?.to_str().map(String::from)
+                })
+                .unwrap_or_else(|| "project".to_string())
+        } else {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string()
+        };
 
         // Docker Compose naming convention: {project}-{service}-1
         format!("{}-{}-1", project_name, self.service)
