@@ -1255,16 +1255,33 @@ checks:
         // With All filter, both pre-commands should be visible
         app.status_filter = StatusFilter::All;
         let items = app.get_selectable_items();
-        let pre_cmd_count = items.iter().filter(|i| matches!(i, SelectableItem::PreCommand(_))).count();
+        let pre_cmd_count = items
+            .iter()
+            .filter(|i| matches!(i, SelectableItem::PreCommand(_)))
+            .count();
         assert_eq!(pre_cmd_count, 2, "All filter should show all pre-commands");
 
         // With Failed filter, only the failed pre-command should be visible
         app.status_filter = StatusFilter::Failed;
         let items = app.get_selectable_items();
-        let pre_cmds: Vec<_> = items.iter().filter_map(|i| {
-            if let SelectableItem::PreCommand(pc) = i { Some(pc) } else { None }
-        }).collect();
-        assert_eq!(pre_cmds.len(), 1, "Failed filter should only show failed pre-commands");
-        assert_eq!(pre_cmds[0].name, "setup-env", "Should only show the failed pre-command");
+        let pre_cmds: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let SelectableItem::PreCommand(pc) = i {
+                    Some(pc)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            pre_cmds.len(),
+            1,
+            "Failed filter should only show failed pre-commands"
+        );
+        assert_eq!(
+            pre_cmds[0].name, "setup-env",
+            "Should only show the failed pre-command"
+        );
     }
 }
