@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 012: Fix check output panel scrolling
+Last activity: 2026-01-23 — Completed quick task 013: Add config validation with schema error
 
-Progress: [██░░░░░░░░] 24%
+Progress: [██░░░░░░░░] 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
-- Average duration: 6.0m
-- Total execution time: 1.12 hours
+- Total plans completed: 13
+- Average duration: 5.5m
+- Total execution time: 1.13 hours
 
 **By Phase:**
 
@@ -31,8 +31,8 @@ Progress: [██░░░░░░░░] 24%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 012 (12m), 011 (8m), 010 (2m), 009 (12m), 008 (2m)
-- Trend: Quick tasks range from 2-12m depending on complexity
+- Last 5 plans: 013 (1m), 012 (12m), 011 (8m), 010 (2m), 009 (12m)
+- Trend: Quick tasks range from 1-12m depending on complexity
 
 *Updated after each plan completion*
 
@@ -90,9 +90,10 @@ None yet.
 | 010 | Remove docker-compose from Docker image | 2026-01-23 | 76ac35b | [010-remove-docker-compose-from-docker-image](./quick/010-remove-docker-compose-from-docker-image/) |
 | 011 | Create CI-TUI config for self-hosting | 2026-01-23 | e42634c | [011-create-ci-tui-config-for-self-hosting](./quick/011-create-ci-tui-config-for-self-hosting/) |
 | 012 | Fix check output panel scrolling | 2026-01-23 | e59c0f4 | [012-fix-check-output-panel-scrolling](./quick/012-fix-check-output-panel-scrolling/) |
+| 013 | Add config validation with schema error | 2026-01-23 | f66485a | [013-add-config-validation-with-schema-error-](./quick/013-add-config-validation-with-schema-error-/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 012 (Fix check output panel scrolling), ready for Phase 2 planning
+Stopped at: Completed quick task 013 (Add config validation with schema error), ready for Phase 2 planning
 Resume file: None
