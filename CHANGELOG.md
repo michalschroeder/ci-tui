@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/michalschroeder/ci-tui/compare/v0.1.1...v0.1.2) (2026-01-23)
+
+
+### Bug Fixes
+
+* **ci:** trigger release-please only after CI passes ([4d2cf04](https://github.com/michalschroeder/ci-tui/commit/4d2cf04c2dae5d652cbcff3c0be4a5ad19e36def))
+
 ## [0.1.1](https://github.com/michalschroeder/ci-tui/compare/v0.1.0...v0.1.1) (2026-01-23)
 
 
