@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/michalschroeder/ci-tui/compare/v0.1.2...v0.1.3) (2026-01-23)
+
+
+### Bug Fixes
+
+* **ci:** add checkout and explicit token to release-please ([bf29607](https://github.com/michalschroeder/ci-tui/commit/bf296073d22689bedc71427cb489af92b19a7c31))
+* **ci:** trigger release build on GitHub release event ([3f96b58](https://github.com/michalschroeder/ci-tui/commit/3f96b58af2885e547b1da34ae10be34b7bc52b70))
+
 ## [0.1.2](https://github.com/michalschroeder/ci-tui/compare/v0.1.1...v0.1.2) (2026-01-23)
 
 
