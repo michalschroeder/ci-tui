@@ -1,0 +1,267 @@
+# CI-TUI Configuration for Laravel PHP Projects
+#
+# This is a complete working example for a typical Laravel application with:
+# - PHP CS Fixer for code style (with auto-fix)
+# - PHPStan/Larastan for static analysis
+# - PHPUnit for testing with intelligent test discovery
+# - Database migrations before tests
+#
+# Adjust paths, versions, and check configurations to match your project.
+
+version: 2
+
+docker:
+  # Path to directory containing docker-compose.yml
+  project_dir: .
+
+  # Docker service name from docker-compose.yml
+  # Assumes you have a service like:
+  #   services:
+  #     php:
+  #       image: php:8.2-cli
+  service: php
+
+  # Optional: Explicit container name if not using standard compose naming
+  # container: myproject-php-1
+
+  # Environment variables passed to all commands
+  # Useful for disabling xdebug, setting test environment
+  env:
+    XDEBUG_MODE: "off"
+    APP_ENV: "testing"
+    DB_CONNECTION: "testing"
+
+git:
+  # Compare against main branch to detect changes
+  base_branch: main
+
+  # Fallback if main doesn't exist (e.g., fresh clone)
+  fallback_branch: develop
+
+# File patterns define regex patterns for matching changed files
+# These are referenced by check triggers below
+file_patterns:
+  # All PHP files
+  php:
+    pattern: '\.php$'
+    color: white
+
+  # PHP source files (not tests)
+  php_src:
+    pattern: '^(app|src)/.*\.php$'
+    color: blue
+
+  # PHP test files
+  php_tests:
+    pattern: '^tests/.*\.php$'
+    color: green
+
+  # Blade templates
+  blade:
+    pattern: '\.blade\.php$'
+    color: magenta
+
+  # Database migrations
+  migrations:
+    pattern: '^database/migrations/.*\.php$'
+    color: yellow
+
+  # Configuration files
+  config:
+    pattern: '^config/.*\.php$'
+    color: cyan
+
+# Patterns for files to ignore (never trigger checks)
+ignore_patterns:
+  - '^vendor/'
+  - '^node_modules/'
+  - '^storage/'
+  - '^bootstrap/cache/'
+  - '\.md$'
+  - '\.txt$'
+  - '\.log$'
+
+# Check groups execute sequentially
+# Within a group, checks can run in parallel
+checks:
+  # Group 1: Fast linting checks (run in parallel)
+  lint:
+    name: Code Linting
+    parallel: true
+    stop_on_failure: false
+    checks:
+      # PHP syntax check (very fast, catches parse errors)
+      php-syntax:
+        name: PHP Syntax Check
+        command: |
+          for file in {files}; do
+            php -l "$file" || exit 1
+          done
+        triggers:
+          file_pattern: php
+
+      # PHP CS Fixer for code style
+      # fix_command runs when using --fix flag
+      php-cs-fixer:
+        name: PHP CS Fixer
+        command: vendor/bin/php-cs-fixer fix --dry-run --diff --verbose {files}
+        fix_command: vendor/bin/php-cs-fixer fix {files}
+        triggers:
+          file_pattern: php
+        env:
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+
+  # Group 2: Static analysis (runs after lint group)
+  analysis:
+    name: Static Analysis
+    parallel: false
+    stop_on_failure: false
+    checks:
+      # PHPStan/Larastan for static analysis
+      # Analyzes specific files when source changes
+      phpstan:
+        name: PHPStan Analysis
+        command: vendor/bin/phpstan analyse --memory-limit=2G {files}
+        triggers:
+          file_pattern: php_src
+
+      # Full project analysis (on-demand only)
+      # Trigger manually with 't' key when needed
+      phpstan-full:
+        name: PHPStan Full Analysis
+        command: vendor/bin/phpstan analyse --memory-limit=2G
+        on_demand: true
+
+  # Group 3: Tests with database setup
+  tests:
+    name: Test Suite
+    parallel: false
+    stop_on_failure: false
+
+    # Commands run before checks in this group
+    # Useful for setting up test database
+    pre_commands:
+      # Run migrations in test environment
+      - name: Migrate test database
+        command: php artisan migrate --env=testing --force
+        service: php
+        exec: true
+        env:
+          DB_CONNECTION: testing
+
+      # Optional: Seed test data
+      # - name: Seed test database
+      #   command: php artisan db:seed --class=TestSeeder --env=testing
+      #   service: php
+      #   exec: true
+
+    checks:
+      # PHPUnit with intelligent test discovery
+      phpunit:
+        name: PHPUnit Tests
+        command: vendor/bin/phpunit --colors=always {files}
+        service: php
+        on_demand: false
+        triggers:
+          # Always run when test files change
+          file_pattern: php_tests
+
+          # Discover related tests when source files change
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              # Strategy 1: Path mapping (convention-based)
+              # Maps source files to test files by path structure
+              - type: path_mapping
+                rules:
+                  # Rule for app/ directory (Laravel default)
+                  # Example: app/Services/UserService.php
+                  #       -> tests/Unit/Services/UserServiceTest.php
+                  #       -> tests/Feature/Services/UserServiceTest.php
+                  - source: "app/{path}.php"
+                    tests:
+                      - "tests/Unit/{path}Test.php"
+                      - "tests/Feature/{path}Test.php"
+
+                  # Rule for src/ directory (if using DDD structure)
+                  - source: "src/{path}.php"
+                    tests:
+                      - "tests/Unit/{path}Test.php"
+                      - "tests/Integration/{path}Test.php"
+
+              # Strategy 2: Grep search (finds indirect references)
+              # Searches test files for class names
+              # Useful for integration tests that import multiple classes
+              - type: grep_search
+                search_dirs:
+                  - tests/Feature
+                  - tests/Integration
+                pattern: '(use|class|new)\s+(\w+\\)*{basename}(;|\(|Test)'
+
+      # Feature tests only (useful for quick iteration)
+      phpunit-feature:
+        name: Feature Tests Only
+        command: vendor/bin/phpunit --colors=always --testsuite=Feature {files}
+        service: php
+        on_demand: true
+        triggers:
+          file_pattern: php_tests
+
+      # Full test suite without file filtering
+      # Marked on-demand so it only runs when manually triggered
+      phpunit-full:
+        name: Full Test Suite
+        command: vendor/bin/phpunit --colors=always
+        service: php
+        on_demand: true
+
+# ---
+# Common Modifications:
+#
+# 1. Add Pest PHP support:
+#    command: vendor/bin/pest --colors=always {files}
+#
+# 2. Add parallel testing:
+#    command: vendor/bin/paratest --colors=always {files}
+#
+# 3. Add code coverage:
+#    phpunit-coverage:
+#      name: PHPUnit Coverage
+#      command: vendor/bin/phpunit --coverage-html coverage {files}
+#      on_demand: true
+#
+# 4. Add Laravel Pint (instead of PHP CS Fixer):
+#    pint:
+#      name: Laravel Pint
+#      command: vendor/bin/pint --test {files}
+#      fix_command: vendor/bin/pint {files}
+#
+# 5. Add Rector for automated refactoring:
+#    rector:
+#      name: Rector
+#      command: vendor/bin/rector process --dry-run {files}
+#      fix_command: vendor/bin/rector process {files}
+#
+# 6. Add specific test suites:
+#    triggers:
+#      file_pattern: php_src
+#      test_discovery:
+#        source_pattern: php_src
+#        strategies:
+#          - type: path_mapping
+#            rules:
+#              # Controllers -> Feature tests
+#              - source: "app/Http/Controllers/{path}.php"
+#                tests: ["tests/Feature/{path}Test.php"]
+#              # Models -> Unit tests
+#              - source: "app/Models/{path}.php"
+#                tests: ["tests/Unit/Models/{path}Test.php"]
+#
+# 7. Add database-specific checks:
+#    checks:
+#      migrations:
+#        name: Migration Test
+#        command: php artisan migrate:fresh --env=testing
+#        on_demand: true
+#        triggers:
+#          file_pattern: migrations
