@@ -8,18 +8,44 @@ CI-TUI is a terminal UI application for running CI checks on changed files. It d
 
 ## Code Validation (REQUIRED)
 
-**IMPORTANT:** After writing or modifying code, ALWAYS run this command to validate:
+**IMPORTANT:** After writing or modifying code, ALWAYS run these commands to validate:
+
+### Step 1: Auto-fix (before commits)
+
+Run fix mode to auto-apply formatting fixes:
+
+```bash
+docker run -it --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
+```
+
+This runs `cargo fmt` on changed files to fix formatting issues automatically.
+
+### Step 2: Validate
+
+Run validation to check all CI checks pass:
 
 ```bash
 docker run -it --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
 ```
 
 This runs ci-tui in simple mode (self-hosting) which executes:
-- `cargo fmt` - Code formatting
+- `cargo fmt --check` - Code formatting check
 - `cargo clippy` - Linter checks
 - `cargo nextest run` - Test suite
 
+**Workflow:** Run `--fix` first, then `--simple` to validate. Both must pass before any commit or push.
+
 This is the ONLY command Claude should use to validate code changes. Do not use `make test`, `cargo test`, or other commands directly.
+
+### Failure Handling
+
+If validation commands fail or do not pass after **3 attempts**, STOP and ask the user:
+
+1. **Continue with 3 more retries?** - Keep trying to fix the issue
+2. **Need more context?** - User provides additional information about the problem
+3. **Stop here?** - Abandon the current approach and discuss alternatives
+
+Do not keep retrying indefinitely. After 3 failed attempts, always pause and ask for guidance.
 
 ## Other Development Commands
 
