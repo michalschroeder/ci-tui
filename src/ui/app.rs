@@ -268,10 +268,13 @@ impl App {
     /// Returns (fix_command, service, container) for the selected check
     pub fn get_selected_fix_command(&self) -> Option<(String, String, Option<String>)> {
         self.selected_check().and_then(|check| {
-            check
-                .resolved_fix_command
-                .as_ref()
-                .map(|cmd| (cmd.clone(), check.service.clone(), check.definition.container.clone()))
+            check.resolved_fix_command.as_ref().map(|cmd| {
+                (
+                    cmd.clone(),
+                    check.service.clone(),
+                    check.definition.container.clone(),
+                )
+            })
         })
     }
 
@@ -317,10 +320,14 @@ impl App {
         self.get_fixable_checks()
             .iter()
             .filter_map(|check| {
-                check
-                    .resolved_fix_command
-                    .as_ref()
-                    .map(|cmd| (check.id().to_string(), cmd.clone(), check.service.clone(), check.definition.container.clone()))
+                check.resolved_fix_command.as_ref().map(|cmd| {
+                    (
+                        check.id().to_string(),
+                        cmd.clone(),
+                        check.service.clone(),
+                        check.definition.container.clone(),
+                    )
+                })
             })
             .collect()
     }
@@ -788,6 +795,7 @@ checks:
                 name: name.to_string(),
                 command: format!("{} {{files}}", id),
                 service: None,
+                container: None,
                 fix_command: if has_fix {
                     Some(format!("{} --fix {{files}}", id))
                 } else {

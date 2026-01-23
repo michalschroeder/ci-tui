@@ -1,5 +1,5 @@
 use crate::checks::{group_checks, CheckToRun};
-use crate::config::CiConfig;
+use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use anyhow::Result;
@@ -14,7 +14,7 @@ pub async fn run(
     project_root: PathBuf,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let container_name = config.docker.container_name();
+    let docker_config = &config.docker;
 
     // Print header
     println!(
@@ -47,9 +47,9 @@ pub async fn run(
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, &container_name).await
+            run_parallel(group_checks, &project_root, docker_config).await
         } else {
-            run_sequential(group_checks, &project_root, &container_name).await
+            run_sequential(group_checks, &project_root, docker_config).await
         };
 
         for result in results {
@@ -184,7 +184,7 @@ fn print_result(result: &CheckResult) {
 async fn run_sequential(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    container_name: &str,
+    docker_config: &DockerConfig,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
@@ -192,7 +192,7 @@ async fn run_sequential(
         if check.on_demand {
             continue;
         }
-        let result = run_check(check, project_root, container_name).await;
+        let result = run_check(check, project_root, docker_config).await;
         results.push(result);
     }
     results
@@ -201,7 +201,7 @@ async fn run_sequential(
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    container_name: &str,
+    docker_config: &DockerConfig,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
 
@@ -213,10 +213,10 @@ async fn run_parallel(
         let check_id = check.id().to_string();
         let check = check.clone();
         let project_root = project_root.to_path_buf();
-        let container_name = container_name.to_string();
+        let docker_config = docker_config.clone();
 
         let handle =
-            tokio::spawn(async move { run_check(&check, &project_root, &container_name).await });
+            tokio::spawn(async move { run_check(&check, &project_root, &docker_config).await });
         handles.push((check_id, handle));
     }
 
@@ -244,9 +244,21 @@ fn is_container_running(container_name: &str) -> bool {
     }
 }
 
-async fn run_check(check: &CheckToRun, project_root: &Path, container_name: &str) -> CheckResult {
+async fn run_check(
+    check: &CheckToRun,
+    project_root: &Path,
+    docker_config: &DockerConfig,
+) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
+
+    // Use per-check container if specified, otherwise use default
+    let default_container = docker_config.container_name();
+    let container_name = check
+        .definition
+        .container
+        .as_deref()
+        .unwrap_or(&default_container);
 
     // Check if container is running, use exec if yes, run if no
     let docker_cmd = if is_container_running(container_name) {
@@ -258,13 +270,18 @@ async fn run_check(check: &CheckToRun, project_root: &Path, container_name: &str
         )
     } else {
         // Container not running, use docker run with --rm
-        // Strip the -1 suffix to get image name (e.g., "myproject-app-1" -> "myproject-app")
-        let image_name = container_name.trim_end_matches("-1");
-        format!(
-            "docker run --rm -w /app {} bash -c '{}'",
+        let image_name = docker_config.image_name();
+        let work_dir = docker_config.working_dir();
+        let mut cmd = format!("docker run --rm -w {}", work_dir);
+        if let Some(ref volume) = docker_config.volume_mount {
+            cmd.push_str(&format!(" -v {}", volume));
+        }
+        cmd.push_str(&format!(
+            " {} bash -c '{}'",
             image_name,
             check.resolved_command.replace('\'', "'\\''")
-        )
+        ));
+        cmd
     };
 
     let output = Command::new("sh")
