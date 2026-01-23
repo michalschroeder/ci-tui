@@ -14,7 +14,7 @@ pub async fn run(
     project_root: PathBuf,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let docker_project_dir = &config.docker.project_dir;
+    let container_name = config.docker.container_name();
 
     // Print header
     println!(
@@ -47,9 +47,9 @@ pub async fn run(
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, docker_project_dir).await
+            run_parallel(group_checks, &project_root, &container_name).await
         } else {
-            run_sequential(group_checks, &project_root, docker_project_dir).await
+            run_sequential(group_checks, &project_root, &container_name).await
         };
 
         for result in results {
@@ -184,7 +184,7 @@ fn print_result(result: &CheckResult) {
 async fn run_sequential(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    docker_project_dir: &str,
+    container_name: &str,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
@@ -192,7 +192,7 @@ async fn run_sequential(
         if check.on_demand {
             continue;
         }
-        let result = run_check(check, project_root, docker_project_dir).await;
+        let result = run_check(check, project_root, container_name).await;
         results.push(result);
     }
     results
@@ -201,7 +201,7 @@ async fn run_sequential(
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    docker_project_dir: &str,
+    container_name: &str,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
 
@@ -213,10 +213,10 @@ async fn run_parallel(
         let check_id = check.id().to_string();
         let check = check.clone();
         let project_root = project_root.to_path_buf();
-        let docker_dir = docker_project_dir.to_string();
+        let container_name = container_name.to_string();
 
         let handle =
-            tokio::spawn(async move { run_check(&check, &project_root, &docker_dir).await });
+            tokio::spawn(async move { run_check(&check, &project_root, &container_name).await });
         handles.push((check_id, handle));
     }
 
@@ -229,19 +229,47 @@ async fn run_parallel(
     results
 }
 
+/// Check if a Docker container is currently running
+fn is_container_running(container_name: &str) -> bool {
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", container_name])
+        .output();
+
+    match output {
+        Ok(output) => {
+            let result = String::from_utf8_lossy(&output.stdout);
+            result.trim() == "true"
+        }
+        Err(_) => false,
+    }
+}
+
 async fn run_check(
     check: &CheckToRun,
     project_root: &Path,
-    docker_project_dir: &str,
+    container_name: &str,
 ) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
 
-    let docker_cmd = format!(
-        "docker compose --project-directory={} run --rm php sh -c \"{}\"",
-        docker_project_dir,
-        check.resolved_command.replace('"', "\\\"")
-    );
+    // Check if container is running, use exec if yes, run if no
+    let docker_cmd = if is_container_running(container_name) {
+        // Container is running, use docker exec
+        format!(
+            "docker exec {} bash -c '{}'",
+            container_name,
+            check.resolved_command.replace('\'', "'\\''")
+        )
+    } else {
+        // Container not running, use docker run with --rm
+        // Strip the -1 suffix to get image name (e.g., "myproject-app-1" -> "myproject-app")
+        let image_name = container_name.trim_end_matches("-1");
+        format!(
+            "docker run --rm -w /app {} bash -c '{}'",
+            image_name,
+            check.resolved_command.replace('\'', "'\\''")
+        )
+    };
 
     let output = Command::new("sh")
         .arg("-c")
