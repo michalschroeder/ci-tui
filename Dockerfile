@@ -53,8 +53,8 @@ LABEL org.opencontainers.image.title="CI TUI"
 LABEL org.opencontainers.image.description="TUI for running CI checks"
 LABEL org.opencontainers.image.source="https://github.com/michalschroeder/ci-tui"
 
-# Install runtime dependencies (git for change detection, docker CLI with compose plugin)
-RUN apk add --no-cache git docker-cli docker-cli-compose
+# Install runtime dependencies (git for change detection, docker CLI)
+RUN apk add --no-cache git docker-cli
 
 # Mark any directory as safe for git (needed for mounted volumes)
 RUN git config --global --add safe.directory '*'
