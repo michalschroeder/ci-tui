@@ -18,6 +18,87 @@ fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
+/// Check if a Docker container is currently running
+fn is_container_running(container_name: &str) -> bool {
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", container_name])
+        .output();
+
+    match output {
+        Ok(output) => {
+            let result = String::from_utf8_lossy(&output.stdout);
+            result.trim() == "true"
+        }
+        Err(_) => false,
+    }
+}
+
+/// Build a docker exec command with environment variables
+fn build_docker_exec_command(
+    container_name: &str,
+    env: &std::collections::HashMap<String, String>,
+    command: &str,
+) -> String {
+    // Build env flags for docker exec (-e KEY='VALUE' for each)
+    // Values are quoted to handle special characters like & ? in URLs
+    let env_flags: String = env
+        .iter()
+        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Build docker exec command
+    // Use bash with single quotes to prevent outer shell from expanding variables
+    if env_flags.is_empty() {
+        format!(
+            "docker exec {} bash -c '{}'",
+            container_name,
+            command.replace('\'', "'\\''")
+        )
+    } else {
+        format!(
+            "docker exec {} {} bash -c '{}'",
+            env_flags,
+            container_name,
+            command.replace('\'', "'\\''")
+        )
+    }
+}
+
+/// Build a docker run command with environment variables
+fn build_docker_run_command(
+    container_name: &str,
+    env: &std::collections::HashMap<String, String>,
+    command: &str,
+) -> String {
+    // Build env flags for docker run (-e KEY='VALUE' for each)
+    let env_flags: String = env
+        .iter()
+        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Use container name as image name (Docker Compose convention)
+    // Strip the -1 suffix to get the image name (e.g., "myproject-app-1" -> "myproject-app")
+    let image_name = container_name.trim_end_matches("-1");
+
+    // Build docker run command with --rm flag and /app workdir
+    if env_flags.is_empty() {
+        format!(
+            "docker run --rm -w /app {} bash -c '{}'",
+            image_name,
+            command.replace('\'', "'\\''")
+        )
+    } else {
+        format!(
+            "docker run --rm {} -w /app {} bash -c '{}'",
+            env_flags,
+            image_name,
+            command.replace('\'', "'\\''")
+        )
+    }
+}
+
 /// Status of a CI check during execution
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -131,17 +212,17 @@ pub enum RunnerEvent {
 pub struct CheckRunner {
     config: Arc<CiConfig>,
     project_root: Arc<Path>,
-    docker_project_dir: Arc<str>,
+    container_name: Arc<str>,
 }
 
 impl CheckRunner {
     /// Create a new check runner with the given configuration
     pub fn new(config: CiConfig, project_root: &Path) -> Self {
-        let docker_project_dir: Arc<str> = config.docker.project_dir.clone().into();
+        let container_name: Arc<str> = config.docker.container_name().into();
         Self {
             config: Arc::new(config),
             project_root: Arc::from(project_root),
-            docker_project_dir,
+            container_name,
         }
     }
 
@@ -258,14 +339,14 @@ impl CheckRunner {
             let check = check.clone();
             let event_tx = event_tx.clone();
             let project_root = self.project_root.clone();
-            let docker_project_dir = self.docker_project_dir.clone();
+            let container_name = self.container_name.clone();
             let global_env = self.config.docker.env.clone();
 
             let handle = tokio::spawn(async move {
                 let result = run_docker_check(
                     &check,
                     &project_root,
-                    &docker_project_dir,
+                    &container_name,
                     &global_env,
                     &event_tx,
                 )
@@ -291,7 +372,7 @@ impl CheckRunner {
         run_docker_check(
             check,
             &self.project_root,
-            &self.docker_project_dir,
+            &self.container_name,
             &self.config.docker.env,
             event_tx,
         )
@@ -311,32 +392,24 @@ impl CheckRunner {
         let mut env = self.config.docker.env.clone();
         env.extend(pre_cmd.env.clone());
 
-        // Build env flags for docker compose exec (-e KEY=VALUE for each)
-        // Values are quoted to handle special characters like & ? in URLs
-        let env_flags: String = env
-            .iter()
-            .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Use bash with single quotes to prevent outer shell from expanding variables
-        // This ensures $variables in the command are handled by the inner bash, not the outer sh
-        // Always use exec -T to run in existing container (no TTY for non-interactive execution)
-        let docker_cmd = if env_flags.is_empty() {
-            format!(
-                "docker compose --project-directory={} exec -T {} bash -c '{}'",
-                self.docker_project_dir,
-                service,
-                pre_cmd.command.replace('\'', "'\\''")
-            )
+        // Get container name for this service
+        // For service-specific pre-commands, derive container from service name
+        let container_name = if service != self.config.default_service() {
+            // Different service, derive container name
+            let project_name = std::path::Path::new(&self.config.docker.project_dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            format!("{}-{}-1", project_name, service)
         } else {
-            format!(
-                "docker compose --project-directory={} exec -T {} {} bash -c '{}'",
-                self.docker_project_dir,
-                env_flags,
-                service,
-                pre_cmd.command.replace('\'', "'\\''")
-            )
+            self.container_name.to_string()
+        };
+
+        // Check if container is running, use exec if yes, run if no
+        let docker_cmd = if is_container_running(&container_name) {
+            build_docker_exec_command(&container_name, &env, &pre_cmd.command)
+        } else {
+            build_docker_run_command(&container_name, &env, &pre_cmd.command)
         };
 
         let output = tokio::process::Command::new("sh")
@@ -367,12 +440,11 @@ impl CheckRunner {
 async fn run_docker_check(
     check: &CheckToRun,
     project_root: &Path,
-    docker_project_dir: &str,
+    container_name: &str,
     global_env: &std::collections::HashMap<String, String>,
     event_tx: &mpsc::Sender<RunnerEvent>,
 ) -> CheckResult {
     let check_id = check.id().to_string();
-    let service = check.service.as_str();
 
     // Merge global env with check-specific env (check env takes precedence)
     let mut env = global_env.clone();
@@ -388,8 +460,7 @@ async fn run_docker_check(
         check_id,
         &check.resolved_command,
         project_root,
-        docker_project_dir,
-        service,
+        container_name,
         &env,
     )
     .await
@@ -413,39 +484,17 @@ async fn execute_docker_command(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
-    docker_project_dir: &str,
-    docker_service: &str,
+    container_name: &str,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
 
-    // Build env flags for docker compose exec (-e KEY=VALUE for each)
-    // Values are quoted to handle special characters like & ? in URLs
-    let env_flags: String = env
-        .iter()
-        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // Build docker command with configurable service name
-    // Use exec -T to run in existing container (no TTY for non-interactive execution)
-    // Use bash with single quotes to prevent outer shell from expanding variables
-    let docker_cmd = if env_flags.is_empty() {
-        format!(
-            "docker compose --project-directory={} exec -T {} bash -c '{}'",
-            docker_project_dir,
-            docker_service,
-            command.replace('\'', "'\\''")
-        )
+    // Check if container is running, use exec if yes, run if no
+    let docker_cmd = if is_container_running(container_name) {
+        build_docker_exec_command(container_name, env, command)
     } else {
-        format!(
-            "docker compose --project-directory={} exec -T {} {} bash -c '{}'",
-            docker_project_dir,
-            env_flags,
-            docker_service,
-            command.replace('\'', "'\\''")
-        )
+        build_docker_run_command(container_name, env, command)
     };
 
     let output = tokio::process::Command::new("sh")
@@ -494,10 +543,9 @@ async fn execute_docker_command(
 pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    docker_project_dir: &str,
+    container_name: &str,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    let service = check.service.as_str();
     // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());
@@ -505,8 +553,7 @@ pub async fn run_single_check(
         check.id().to_string(),
         &check.resolved_command,
         project_root,
-        docker_project_dir,
-        service,
+        container_name,
         &merged_env,
     )
     .await
@@ -516,16 +563,14 @@ pub async fn run_single_check(
 pub async fn run_fix_command(
     fix_command: &str,
     project_root: &std::path::Path,
-    docker_project_dir: &str,
-    docker_service: &str,
+    container_name: &str,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
     execute_docker_command(
         "fix".to_string(),
         fix_command,
         project_root,
-        docker_project_dir,
-        docker_service,
+        container_name,
         env,
     )
     .await
@@ -536,10 +581,9 @@ pub async fn run_check_with_command(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    docker_project_dir: &str,
+    container_name: &str,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    let service = check.service.as_str();
     // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());
@@ -547,8 +591,7 @@ pub async fn run_check_with_command(
         check.id().to_string(),
         command,
         project_root,
-        docker_project_dir,
-        service,
+        container_name,
         &merged_env,
     )
     .await

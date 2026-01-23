@@ -162,8 +162,8 @@ struct EventChannels {
     fix_all_tx: mpsc::Sender<(CheckResult, bool)>,
     retry_tx: mpsc::Sender<CheckResult>,
     project_root: Arc<PathBuf>,
-    /// Docker project directory path (Arc for cheap cloning into async tasks)
-    docker_project_dir: Arc<str>,
+    /// Container name for docker exec/run commands (Arc for cheap cloning into async tasks)
+    container_name: Arc<str>,
     /// Global environment variables from config (for docker exec -e flags)
     global_env: Arc<std::collections::HashMap<String, String>>,
 }
@@ -285,7 +285,7 @@ fn handle_key_event(
                                 app.reset_check_for_retry(&check_id);
                                 let retry_tx = channels.retry_tx.clone();
                                 let project_root = Arc::clone(&channels.project_root);
-                                let docker_dir = Arc::clone(&channels.docker_project_dir);
+                                let docker_dir = Arc::clone(&channels.container_name);
                                 let global_env = Arc::clone(&channels.global_env);
                                 tokio::spawn(async move {
                                     let result = run_single_check(
@@ -310,7 +310,7 @@ fn handle_key_event(
                             app.reset_check_for_retry(check.id());
                             let retry_tx = channels.retry_tx.clone();
                             let project_root = Arc::clone(&channels.project_root);
-                            let docker_dir = Arc::clone(&channels.docker_project_dir);
+                            let docker_dir = Arc::clone(&channels.container_name);
                             let global_env = Arc::clone(&channels.global_env);
                             tokio::spawn(async move {
                                 let result = run_single_check(
@@ -336,7 +336,7 @@ fn handle_key_event(
                     app.trigger_on_demand_check(check.id());
                     let retry_tx = channels.retry_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.docker_project_dir);
+                    let docker_dir = Arc::clone(&channels.container_name);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
                         let result =
@@ -357,7 +357,7 @@ fn handle_key_event(
                     app.status_message = Some("Running for all files...".to_string());
                     let retry_tx = channels.retry_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.docker_project_dir);
+                    let docker_dir = Arc::clone(&channels.container_name);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
                         let result = run_check_with_command(
@@ -410,18 +410,17 @@ fn handle_key_event(
         // Run fix for selected check
         (KeyCode::Char('x'), KeyModifiers::NONE) => {
             if app.can_fix_selected() {
-                if let Some((fix_cmd, service)) = app.get_selected_fix_command() {
+                if let Some((fix_cmd, _service)) = app.get_selected_fix_command() {
                     app.start_fix();
                     let fix_tx = channels.fix_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.docker_project_dir);
+                    let docker_dir = Arc::clone(&channels.container_name);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
                         let result = run_fix_command(
                             &fix_cmd,
                             &project_root,
                             &docker_dir,
-                            &service,
                             &global_env,
                         )
                         .await;
@@ -440,17 +439,16 @@ fn handle_key_event(
                     app.start_fix_all(total);
                     let fix_all_tx = channels.fix_all_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.docker_project_dir);
+                    let docker_dir = Arc::clone(&channels.container_name);
                     let global_env = Arc::clone(&channels.global_env);
                     tokio::spawn(async move {
-                        for (i, (_check_id, fix_cmd, service)) in
+                        for (i, (_check_id, fix_cmd, _service)) in
                             fix_commands.into_iter().enumerate()
                         {
                             let result = run_fix_command(
                                 &fix_cmd,
                                 &project_root,
                                 &docker_dir,
-                                &service,
                                 &global_env,
                             )
                             .await;
@@ -583,7 +581,7 @@ pub async fn run(
     let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<(CheckResult, bool)>(10);
     let (retry_tx, mut retry_rx) = mpsc::channel::<CheckResult>(1);
     let project_root = Arc::new(project_root);
-    let docker_project_dir: Arc<str> = config.docker.project_dir.clone().into();
+    let container_name: Arc<str> = config.docker.container_name().into();
     let global_env: Arc<std::collections::HashMap<String, String>> =
         Arc::new(config.docker.env.clone());
 
@@ -592,7 +590,7 @@ pub async fn run(
         fix_all_tx,
         retry_tx,
         project_root: Arc::clone(&project_root),
-        docker_project_dir,
+        container_name,
         global_env,
     };
 
