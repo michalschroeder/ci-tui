@@ -13,16 +13,16 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 010: Remove docker-compose from Docker image
+Last activity: 2026-01-23 — Completed quick task 011: Create CI-TUI config for self-hosting
 
-Progress: [██░░░░░░░░] 20%
+Progress: [██░░░░░░░░] 22%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
-- Average duration: 5.3m
-- Total execution time: 0.78 hours
+- Total plans completed: 11
+- Average duration: 5.5m
+- Total execution time: 0.92 hours
 
 **By Phase:**
 
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 20%
 | 01-foundation | 3 | 12.5m | 4.2m |
 
 **Recent Trend:**
-- Last 5 plans: 009 (12m), 008 (2m), 007 (4m), 006 (7m), 005 (1m)
+- Last 5 plans: 011 (8m), 010 (2m), 009 (12m), 008 (2m), 007 (4m)
 - Trend: Quick tasks range from 1-12m depending on complexity
 
 *Updated after each plan completion*
@@ -60,6 +60,8 @@ Recent decisions affecting current work:
 - quick-008: Two-phase self-hosting strategy (compose now, run mode later)
 - quick-009: Use docker exec when container running, docker run when not (eliminates docker-compose dependency)
 - quick-009: Derive container name from project_dir + service by default (backward compatibility)
+- quick-011: Add image/volume_mount/work_dir as optional fields (maintains backward compatibility)
+- quick-011: Derive image name from container_name if not explicit (preserves docker-compose behavior)
 
 ### Pending Todos
 
@@ -84,9 +86,10 @@ None yet.
 | 008 | Research CI-TUI self-hosting requirement | 2026-01-23 | 05aa45e | [008-research-ci-tui-self-hosting-requirement](./quick/008-research-ci-tui-self-hosting-requirement/) |
 | 009 | Replace docker-compose exec with docker exec/run | 2026-01-23 | a3859bf | [009-replace-docker-compose-exec-with-docker-](./quick/009-replace-docker-compose-exec-with-docker-/) |
 | 010 | Remove docker-compose from Docker image | 2026-01-23 | 76ac35b | [010-remove-docker-compose-from-docker-image](./quick/010-remove-docker-compose-from-docker-image/) |
+| 011 | Create CI-TUI config for self-hosting | 2026-01-23 | e42634c | [011-create-ci-tui-config-for-self-hosting](./quick/011-create-ci-tui-config-for-self-hosting/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 010 (Remove docker-compose from Docker image), ready for Phase 2 planning
+Stopped at: Completed quick task 011 (Create CI-TUI config for self-hosting), ready for Phase 2 planning
 Resume file: None
