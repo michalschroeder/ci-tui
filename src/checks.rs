@@ -1,6 +1,7 @@
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// A CI check that has been determined to run, with resolved commands
@@ -166,6 +167,13 @@ pub fn determine_checks(
                         }
                     }
                 }
+
+                // Deduplicate matched files (file_pattern and test_discovery may find same file)
+                let matched_files: Vec<String> = matched_files
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
 
                 // If files matched, add this check to run
                 if !matched_files.is_empty() {
