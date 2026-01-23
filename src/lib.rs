@@ -15,6 +15,7 @@
 
 pub mod checks;
 pub mod config;
+pub mod fix;
 pub mod git;
 pub mod runner;
 pub mod simple;

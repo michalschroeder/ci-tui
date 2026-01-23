@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ci_tui::{checks, config, git, simple, ui};
+use ci_tui::{checks, config, fix, git, simple, ui};
 use clap::Parser;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -15,6 +15,10 @@ struct Cli {
     /// Run in simple console mode (no TUI)
     #[arg(short, long)]
     simple: bool,
+
+    /// Run only fix commands (skip checks)
+    #[arg(long)]
+    fix: bool,
 }
 
 #[tokio::main]
@@ -36,6 +40,11 @@ async fn main() -> Result<()> {
     // Detect changed files and apply ignore patterns
     let mut changed_files = git::detect_changes(&project_root, &config.git)?;
     changed_files.apply_ignore_patterns(&config.ignore_patterns);
+
+    // Run fix mode if requested
+    if cli.fix {
+        return fix::run(config, changed_files, project_root).await;
+    }
 
     // Determine which checks to run
     let checks_to_run = checks::determine_checks(&config, &changed_files, &project_root);
