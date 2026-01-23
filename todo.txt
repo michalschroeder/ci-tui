@@ -5,4 +5,3 @@
 - test list for run have duplicates? probably because of many sources
 - allow select text?
 - output shows Files and +5 more, not sure if that is needed we have e-expand to see it
-- docker image is very hude, lets try to shrink it
