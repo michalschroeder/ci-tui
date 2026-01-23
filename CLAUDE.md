@@ -6,29 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers with real-time output streaming.
 
-## Build and Development Commands
+## Code Validation (REQUIRED)
+
+**IMPORTANT:** After writing or modifying code, ALWAYS run this command to validate:
 
 ```bash
-# Run tests (in Docker)
-make test
+docker run -it --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
+```
 
-# Run clippy lints (in Docker)
-make clippy
+This runs ci-tui in simple mode (self-hosting) which executes:
+- `cargo fmt` - Code formatting
+- `cargo clippy` - Linter checks
+- `cargo nextest run` - Test suite
 
-# Format code (in Docker)
-make fmt
+This is the ONLY command Claude should use to validate code changes. Do not use `make test`, `cargo test`, or other commands directly.
 
-# Type check (in Docker)
-make check
+## Other Development Commands
 
+```bash
 # Build Docker image locally
 make build
 
 # Run with local cargo (requires Rust installed)
 cargo run -- --config <path-to-config.yaml>
-
-# Run single test
-cargo test <test_name>
 ```
 
 ## Architecture
