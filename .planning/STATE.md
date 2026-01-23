@@ -13,7 +13,7 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 2 of 5 (Code Quality Baseline)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-23 — Completed quick task 016: Skip checks with {files} placeholder when no matches
+Last activity: 2026-01-23 — Completed quick task 017: Optimize Docker builds with native ARM64 runners
 
 Progress: [██░░░░░░░░] 25%
 
@@ -96,9 +96,10 @@ None yet.
 | 014 | Add CI/CD pipeline with GitHub Actions | 2026-01-23 | a3be1b1 | [014-add-ci-cd-pipeline](./quick/014-add-ci-cd-pipeline-with-github-actions/) |
 | 015 | Add Release Please for automated releases | 2026-01-23 | 7a5530d | [015-add-release-please](./quick/015-add-release-please-for-automated-release/) |
 | 016 | Skip checks with {files} placeholder when no matches | 2026-01-23 | c469cd4 | [016-skip-checks-with-files-placeholder-when](./quick/016-skip-checks-with-files-placeholder-when/) |
+| 017 | Optimize Docker builds with native ARM64 runners | 2026-01-23 | 2c9be2a | [017-optimize-docker-build-with-matrix-strat](./quick/017-optimize-docker-build-with-matrix-strat/) |
 
 ## Session Continuity
 
 Last session: 2026-01-23
-Stopped at: Completed quick task 016 (Skip checks with {files} placeholder when no matches), ready for Phase 2 planning
+Stopped at: Completed quick task 017 (Optimize Docker builds with native ARM64 runners)
 Resume file: None
