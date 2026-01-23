@@ -40,7 +40,7 @@ ci: fmt-check clippy test ## Run all CI checks locally (in Docker)
 
 # Capture version info for Docker builds
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE := $(shell date +%Y-%m-%d)
+BUILD_DATE := $(shell date "+%Y-%m-%d %H:%M")
 
 build: ## Build the Docker image locally
 	docker build \

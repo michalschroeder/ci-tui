@@ -28,7 +28,7 @@ fn main() {
         .filter(|s| !s.is_empty() && s != "unknown")
         .or_else(|| {
             Command::new("date")
-                .args(["+%Y-%m-%d"])
+                .args(["+%Y-%m-%d %H:%M"])
                 .output()
                 .ok()
                 .and_then(|output| {
