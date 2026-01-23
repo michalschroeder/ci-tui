@@ -492,4 +492,75 @@ checks:
         assert_eq!(all_files_cmd, "parallel-lint");
         assert!(!all_files_cmd.contains("{files}"));
     }
+
+    #[test]
+    fn test_check_with_files_placeholder_no_matches_is_skipped() {
+        let config = parse_config();
+        // Change only YAML files - no PHP files
+        let changed_files = make_changed_files(vec!["config/services.yaml"]);
+        let project_root = PathBuf::from("/tmp/project");
+
+        let checks = determine_checks(&config, &changed_files, &project_root);
+
+        // php-lint uses {files} placeholder and no PHP files matched
+        let php_lint = checks.iter().find(|c| c.id() == "php-lint").unwrap();
+        assert!(php_lint.on_demand, "Check should be on-demand");
+        assert!(
+            php_lint.skipped_no_files,
+            "Check should have skipped_no_files=true"
+        );
+
+        // phpstan also uses {files} placeholder and no PHP files matched
+        let phpstan = checks.iter().find(|c| c.id() == "phpstan").unwrap();
+        assert!(phpstan.on_demand, "Check should be on-demand");
+        assert!(
+            phpstan.skipped_no_files,
+            "Check should have skipped_no_files=true"
+        );
+    }
+
+    #[test]
+    fn test_check_without_files_placeholder_no_matches_not_skipped() {
+        // Test config with a check that doesn't use {files} placeholder
+        let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit All Tests
+        command: phpunit --all
+        triggers:
+          file_pattern: php
+"#;
+        let config: CiConfig =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+        // Change only YAML files - no PHP files
+        let changed_files = make_changed_files(vec!["config/services.yaml"]);
+        let project_root = PathBuf::from("/tmp/project");
+
+        let checks = determine_checks(&config, &changed_files, &project_root);
+
+        // phpunit doesn't use {{files}} placeholder, so shouldn't be auto-skipped
+        let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+        assert!(phpunit.on_demand, "Check should be on-demand");
+        assert!(
+            !phpunit.skipped_no_files,
+            "Check should NOT have skipped_no_files=true (no {{files}} placeholder)"
+        );
+    }
 }

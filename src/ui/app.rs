@@ -1328,4 +1328,26 @@ checks:
             "Should only show the failed pre-command"
         );
     }
+
+    #[test]
+    fn test_skipped_no_files_initializes_as_skipped() {
+        let config = parse_config();
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+
+        // Create a check with skipped_no_files=true
+        let mut check = make_check("php-lint", "fast", "PHP Lint", false, true);
+        check.skipped_no_files = true;
+
+        let checks = vec![check];
+
+        let app = App::new(config, changed_files, checks, "main".to_string());
+
+        // Check should be initialized as Skipped status
+        let result = app.results.get("php-lint").unwrap();
+        assert_eq!(result.status, CheckStatus::Skipped);
+        assert_eq!(result.output, "No changes detected");
+    }
 }
