@@ -4,7 +4,7 @@ docker:
   project_dir: .
   service: rust
   image: rust:latest
-  volume_mount: ".:/build"
+  volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
 
 git:

@@ -122,10 +122,12 @@ impl DockerConfig {
 
     /// Get volume mount arguments for docker run
     /// Returns "-v {volume_mount}" if volume_mount is set, None otherwise
+    /// Expands environment variables in format ${VAR_NAME}
     pub fn volume_args(&self) -> Option<String> {
-        self.volume_mount
-            .as_ref()
-            .map(|mount| format!("-v {}", mount))
+        self.volume_mount.as_ref().map(|mount| {
+            let expanded = expand_env_vars(mount);
+            format!("-v {}", expanded)
+        })
     }
 
     /// Get the working directory inside container
@@ -137,6 +139,21 @@ impl DockerConfig {
 
 fn default_service() -> String {
     "app".to_string()
+}
+
+/// Expand environment variables in format ${VAR_NAME}
+fn expand_env_vars(input: &str) -> String {
+    let mut result = input.to_string();
+    let re = Regex::new(r"\$\{([^}]+)\}").unwrap();
+
+    for cap in re.captures_iter(input) {
+        let var_name = &cap[1];
+        if let Ok(value) = std::env::var(var_name) {
+            result = result.replace(&cap[0], &value);
+        }
+    }
+
+    result
 }
 
 #[derive(Debug, Clone, Deserialize)]
