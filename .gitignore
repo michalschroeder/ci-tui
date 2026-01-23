@@ -11,3 +11,7 @@ Cargo.lock
 
 # CLAUDE
 .claude/settings.local.json
+
+# Planning
+.planning/phases
+.planning/quick
