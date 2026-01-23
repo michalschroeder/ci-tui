@@ -45,13 +45,13 @@ BUILD_DATE := $(shell date "+%Y-%m-%d %H:%M")
 build: ## Build the Docker image locally
 	docker build \
 		--build-arg CI_TUI_GIT_HASH=$(GIT_HASH) \
-		--build-arg CI_TUI_BUILD_DATE=$(BUILD_DATE) \
+		--build-arg "CI_TUI_BUILD_DATE=$(BUILD_DATE)" \
 		-t $(LOCAL_IMAGE) .
 
 build-no-cache: ## Build Docker image without cache
 	docker build --no-cache \
 		--build-arg CI_TUI_GIT_HASH=$(GIT_HASH) \
-		--build-arg CI_TUI_BUILD_DATE=$(BUILD_DATE) \
+		--build-arg "CI_TUI_BUILD_DATE=$(BUILD_DATE)" \
 		-t $(LOCAL_IMAGE) .
 
 push: build ## Build and push to registry
