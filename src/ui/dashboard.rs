@@ -596,7 +596,10 @@ fn render_fix_all_running(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render single fix result
 fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
-    let fix_result = app.fix_result.as_ref().unwrap();
+    let Some(fix_result) = app.fix_result.as_ref() else {
+        // Should not reach here (called only when fix_result is Some), but handle gracefully
+        return;
+    };
     let mut raw_output = String::with_capacity(512);
 
     let status_line = if fix_result.status == CheckStatus::Passed {

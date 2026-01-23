@@ -57,7 +57,10 @@ pub async fn run(
             };
 
             // If no files match and the fix_command uses {files} placeholder, skip
-            let fix_command = check.fix_command.as_ref().unwrap();
+            let Some(fix_command) = check.fix_command.as_ref() else {
+                // Should not reach here after is_none() check above, but handle gracefully
+                continue;
+            };
             if matching_files.is_empty() && fix_command.contains("{files}") {
                 continue;
             }
