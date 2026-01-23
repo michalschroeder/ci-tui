@@ -153,11 +153,15 @@ pub fn determine_checks(
                                         skipped_no_files: false,
                                     });
                                     continue;
-                                } else {
+                                } else if !check.command.contains("{files}") {
                                     // Fall back to running all when no related tests found
+                                    // BUT only if the command doesn't use {files} placeholder
+                                    // (running with empty {files} would run against entire codebase)
                                     matched_files
                                         .push("(source files changed - running all)".to_string());
                                 }
+                                // If command uses {files} and no tests found, matched_files stays empty
+                                // and check will be added as skipped below
                             }
                         }
                     }
@@ -561,6 +565,125 @@ checks:
         assert!(
             !phpunit.skipped_no_files,
             "Check should NOT have skipped_no_files=true (no {{files}} placeholder)"
+        );
+    }
+
+    #[test]
+    fn test_test_discovery_no_matches_with_files_placeholder_is_skipped() {
+        // Test scenario: source file changes, test discovery runs but finds no matching tests,
+        // and command uses {files} placeholder - should be skipped to avoid running all tests
+        let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php_src:
+    pattern: '^src/.*\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        triggers:
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/Unit/{path}Test.php
+"#;
+        let config: CiConfig =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+        // Source file changes but has no matching test (test file doesn't exist)
+        let changed_files = make_changed_files(vec!["src/SomeClass.php"]);
+        let project_root = PathBuf::from("/tmp/nonexistent");
+
+        let checks = determine_checks(&config, &changed_files, &project_root);
+
+        // phpunit uses {files} placeholder and no tests were found
+        // should be skipped to avoid running entire test suite
+        let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+        assert!(phpunit.on_demand, "Check should be on-demand");
+        assert!(
+            phpunit.skipped_no_files,
+            "Check should have skipped_no_files=true (uses {{files}} but no tests found)"
+        );
+        assert!(
+            phpunit.files[0].contains("skipped"),
+            "Files should indicate skipped status"
+        );
+    }
+
+    #[test]
+    fn test_test_discovery_no_matches_without_files_placeholder_runs_all() {
+        // Test scenario: source file changes, test discovery runs but finds no matching tests,
+        // and command does NOT use {files} placeholder - should run all tests
+        let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php_src:
+    pattern: '^src/.*\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit --all
+        triggers:
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/Unit/{path}Test.php
+"#;
+        let config: CiConfig =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+        // Source file changes but has no matching test
+        let changed_files = make_changed_files(vec!["src/SomeClass.php"]);
+        let project_root = PathBuf::from("/tmp/nonexistent");
+
+        let checks = determine_checks(&config, &changed_files, &project_root);
+
+        // phpunit does NOT use {files} placeholder
+        // should fall back to running all tests
+        let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+        assert!(
+            !phpunit.on_demand,
+            "Check should NOT be on-demand (runs all)"
+        );
+        assert!(
+            !phpunit.skipped_no_files,
+            "Check should NOT have skipped_no_files=true"
+        );
+        assert!(
+            phpunit.files[0].contains("running all"),
+            "Files should indicate running all"
         );
     }
 }
