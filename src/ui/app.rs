@@ -29,6 +29,44 @@ pub enum StatusFilter {
     Failed,
 }
 
+/// Messages for state updates - all mutations flow through update()
+#[derive(Debug)]
+pub enum AppMessage {
+    /// Navigation: next/previous check, scroll up/down
+    NextCheck,
+    PreviousCheck,
+    ScrollUp(usize),
+    ScrollDown(usize),
+    /// Filtering
+    ToggleFailedFilter,
+    ShowAll,
+    /// UI toggles
+    ToggleFullCommand,
+    /// Runner events from check execution
+    RunnerEvent(crate::runner::RunnerEvent),
+    /// System stats from background worker
+    SystemStats {
+        cpu_usage: f32,
+        mem_used: u64,
+        mem_total: u64,
+    },
+    /// Fix operations
+    StartFix,
+    FinishFix(crate::runner::CheckResult),
+    StartFixAll(usize),
+    AddFixAllResult(crate::runner::CheckResult),
+    FinishFixAll,
+    /// Retry/trigger operations
+    TriggerOnDemand(String),
+    ResetForRetry(String),
+    /// Retry result from async task
+    RetryResult(crate::runner::CheckResult),
+    /// Status message
+    SetStatusMessage(Option<String>),
+    /// Clear status on any key
+    ClearStatusMessage,
+}
+
 /// Status of a pre-command
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreCommandStatus {
@@ -568,8 +606,59 @@ impl App {
         }
     }
 
+    /// Central state update function - all mutations flow through here
+    ///
+    /// This implements a TEA-lite pattern where state changes are dispatched
+    /// through explicit message variants, enabling predictable state transitions
+    /// and easier testing.
+    pub fn update(&mut self, msg: AppMessage) {
+        match msg {
+            AppMessage::NextCheck => self.next_check_internal(),
+            AppMessage::PreviousCheck => self.previous_check_internal(),
+            AppMessage::ScrollUp(n) => self.scroll_up_internal(n),
+            AppMessage::ScrollDown(n) => self.scroll_down_internal(n),
+            AppMessage::ToggleFailedFilter => self.toggle_failed_filter_internal(),
+            AppMessage::ShowAll => self.show_all_internal(),
+            AppMessage::ToggleFullCommand => self.toggle_full_command_internal(),
+            AppMessage::RunnerEvent(event) => self.handle_runner_event(event),
+            AppMessage::SystemStats {
+                cpu_usage,
+                mem_used,
+                mem_total,
+            } => {
+                self.update_stats(cpu_usage, mem_used, mem_total);
+            }
+            AppMessage::StartFix => self.start_fix(),
+            AppMessage::FinishFix(result) => self.finish_fix(result),
+            AppMessage::StartFixAll(total) => self.start_fix_all(total),
+            AppMessage::AddFixAllResult(result) => self.add_fix_all_result(result),
+            AppMessage::FinishFixAll => self.finish_fix_all(),
+            AppMessage::TriggerOnDemand(check_id) => self.trigger_on_demand_check(&check_id),
+            AppMessage::ResetForRetry(check_id) => self.reset_check_for_retry(&check_id),
+            AppMessage::RetryResult(result) => {
+                self.results.insert(result.check_id.clone(), result);
+                self.needs_redraw = true;
+            }
+            AppMessage::SetStatusMessage(msg) => {
+                self.status_message = msg;
+                self.needs_redraw = true;
+            }
+            AppMessage::ClearStatusMessage => {
+                if self.status_message.is_some() {
+                    self.status_message = None;
+                    self.needs_redraw = true;
+                }
+            }
+        }
+        // Automatic dirty flag - every state change triggers redraw
+        // (some handlers already set this, but redundant sets are harmless)
+        self.needs_redraw = true;
+    }
+
     // Navigation - all methods set needs_redraw for immediate visual feedback
-    pub fn next_check(&mut self) {
+
+    /// Internal navigation method - does not set needs_redraw (handled by update())
+    fn next_check_internal(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix_result = None;
         self.fix_all_results.clear();
@@ -580,10 +669,14 @@ impl App {
         if self.selected_check < max {
             self.selected_check += 1;
         }
-        self.needs_redraw = true;
     }
 
-    pub fn previous_check(&mut self) {
+    pub fn next_check(&mut self) {
+        self.update(AppMessage::NextCheck);
+    }
+
+    /// Internal navigation method - does not set needs_redraw (handled by update())
+    fn previous_check_internal(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix_result = None;
         self.fix_all_results.clear();
@@ -593,15 +686,23 @@ impl App {
         if self.selected_check > 0 {
             self.selected_check -= 1;
         }
-        self.needs_redraw = true;
+    }
+
+    pub fn previous_check(&mut self) {
+        self.update(AppMessage::PreviousCheck);
+    }
+
+    /// Internal scroll method - does not set needs_redraw (handled by update())
+    fn scroll_up_internal(&mut self, n: usize) {
+        self.output_scroll = self.output_scroll.saturating_sub(n);
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.output_scroll = self.output_scroll.saturating_sub(n);
-        self.needs_redraw = true;
+        self.update(AppMessage::ScrollUp(n));
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
+    /// Internal scroll method - does not set needs_redraw (handled by update())
+    fn scroll_down_internal(&mut self, n: usize) {
         // Get max scroll based on output content length and visible area
         // Must count both stdout and stderr since both are rendered in the output panel
         let visible_lines = self.output_visible_lines;
@@ -628,7 +729,10 @@ impl App {
         };
 
         self.output_scroll = (self.output_scroll + n).min(max_scroll);
-        self.needs_redraw = true;
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        self.update(AppMessage::ScrollDown(n));
     }
 
     /// Set the number of visible lines in output area (called during render)
@@ -636,24 +740,36 @@ impl App {
         self.output_visible_lines = lines;
     }
 
-    pub fn toggle_failed_filter(&mut self) {
+    /// Internal filter method - does not set needs_redraw (handled by update())
+    fn toggle_failed_filter_internal(&mut self) {
         self.status_filter = match self.status_filter {
             StatusFilter::All => StatusFilter::Failed,
             StatusFilter::Failed => StatusFilter::All,
         };
         self.selected_check = 0;
-        self.needs_redraw = true;
+    }
+
+    pub fn toggle_failed_filter(&mut self) {
+        self.update(AppMessage::ToggleFailedFilter);
+    }
+
+    /// Internal filter method - does not set needs_redraw (handled by update())
+    fn show_all_internal(&mut self) {
+        self.status_filter = StatusFilter::All;
+        self.selected_check = 0;
     }
 
     pub fn show_all(&mut self) {
-        self.status_filter = StatusFilter::All;
-        self.selected_check = 0;
-        self.needs_redraw = true;
+        self.update(AppMessage::ShowAll);
+    }
+
+    /// Internal toggle method - does not set needs_redraw (handled by update())
+    fn toggle_full_command_internal(&mut self) {
+        self.show_full_command = !self.show_full_command;
     }
 
     pub fn toggle_full_command(&mut self) {
-        self.show_full_command = !self.show_full_command;
-        self.needs_redraw = true;
+        self.update(AppMessage::ToggleFullCommand);
     }
 
     // Stats

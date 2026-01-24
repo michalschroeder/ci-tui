@@ -181,7 +181,8 @@ mod filter_docker_warnings_tests {
 
     #[test]
     fn filters_variable_not_set_warnings() {
-        let stderr = "WARN[0000] variable is not set. Defaulting to a blank string\nActual error here\n";
+        let stderr =
+            "WARN[0000] variable is not set. Defaulting to a blank string\nActual error here\n";
         let filtered = filter_docker_warnings(stderr);
 
         // Note: filter_docker_warnings joins with \n but doesn't preserve trailing newlines
@@ -211,7 +212,11 @@ mod filter_docker_warnings_tests {
         let filtered = filter_docker_warnings(stderr);
 
         // When all lines are filtered, the result should be empty or just empty strings joined
-        assert!(filtered.is_empty() || filtered.trim().is_empty(), "filtered: {:?}", filtered);
+        assert!(
+            filtered.is_empty() || filtered.trim().is_empty(),
+            "filtered: {:?}",
+            filtered
+        );
     }
 
     #[test]
@@ -244,8 +249,8 @@ mod execute_docker_command_tests {
     use super::*;
     use ci_tui::config::DockerConfig;
     use mockall::predicate::*;
-    use std::path::Path;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
 
     fn minimal_docker_config() -> DockerConfig {
         DockerConfig {

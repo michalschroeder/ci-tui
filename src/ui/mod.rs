@@ -19,6 +19,8 @@
 mod app;
 mod dashboard;
 
+pub use app::AppMessage;
+
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
