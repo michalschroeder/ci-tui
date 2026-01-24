@@ -20,13 +20,75 @@
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
 use anyhow::Result;
+use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Output from executing a command
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Trait for executing commands, allowing mock implementations in tests
+#[cfg_attr(any(test, feature = "test"), mockall::automock)]
+#[async_trait]
+pub trait CommandExecutor: Send + Sync {
+    /// Execute a shell command and return the output
+    async fn execute(&self, command: &str, working_dir: &Path) -> CommandOutput;
+
+    /// Check if a Docker container is running
+    fn is_container_running(&self, container_name: &str) -> bool;
+}
+
+/// Production implementation of CommandExecutor
+pub struct RealCommandExecutor;
+
+#[async_trait]
+impl CommandExecutor for RealCommandExecutor {
+    async fn execute(&self, command: &str, working_dir: &Path) -> CommandOutput {
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(working_dir)
+            .output()
+            .await;
+
+        match output {
+            Ok(output) => CommandOutput {
+                success: output.status.success(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            },
+            Err(e) => CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("Failed to execute: {}", e),
+            },
+        }
+    }
+
+    fn is_container_running(&self, container_name: &str) -> bool {
+        let output = std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", container_name])
+            .output();
+
+        match output {
+            Ok(output) => {
+                let result = String::from_utf8_lossy(&output.stdout);
+                result.trim() == "true"
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 /// Filter out Docker Compose warning messages from stderr
-fn filter_docker_warnings(stderr: &str) -> String {
+pub fn filter_docker_warnings(stderr: &str) -> String {
     stderr
         .lines()
         .filter(|line| {
@@ -37,23 +99,8 @@ fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
-/// Check if a Docker container is currently running
-fn is_container_running(container_name: &str) -> bool {
-    let output = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", container_name])
-        .output();
-
-    match output {
-        Ok(output) => {
-            let result = String::from_utf8_lossy(&output.stdout);
-            result.trim() == "true"
-        }
-        Err(_) => false,
-    }
-}
-
 /// Build a docker exec command with environment variables
-fn build_docker_exec_command(
+pub fn build_docker_exec_command(
     container_name: &str,
     env: &std::collections::HashMap<String, String>,
     command: &str,
@@ -85,7 +132,7 @@ fn build_docker_exec_command(
 }
 
 /// Build a docker run command with environment variables
-fn build_docker_run_command(
+pub fn build_docker_run_command(
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
     command: &str,
@@ -238,16 +285,27 @@ pub struct CheckRunner {
     config: Arc<CiConfig>,
     project_root: Arc<Path>,
     container_name: Arc<str>,
+    executor: Arc<dyn CommandExecutor>,
 }
 
 impl CheckRunner {
     /// Create a new check runner with the given configuration
     pub fn new(config: CiConfig, project_root: &Path) -> Self {
+        Self::with_executor(config, project_root, Arc::new(RealCommandExecutor))
+    }
+
+    /// Create a new check runner with a custom executor (for testing)
+    pub fn with_executor(
+        config: CiConfig,
+        project_root: &Path,
+        executor: Arc<dyn CommandExecutor>,
+    ) -> Self {
         let container_name: Arc<str> = config.docker.container_name().into();
         Self {
             config: Arc::new(config),
             project_root: Arc::from(project_root),
             container_name,
+            executor,
         }
     }
 
@@ -373,15 +431,17 @@ impl CheckRunner {
                 .into();
             let docker_config = self.config.docker.clone();
             let global_env = self.config.docker.env.clone();
+            let executor = self.executor.clone();
 
             let handle = tokio::spawn(async move {
-                let result = run_docker_check(
+                let result = run_docker_check_with_executor(
                     &check,
                     &project_root,
                     &container_name,
                     &docker_config,
                     &global_env,
                     &event_tx,
+                    executor.as_ref(),
                 )
                 .await;
                 let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
@@ -408,13 +468,14 @@ impl CheckRunner {
             .container
             .as_deref()
             .unwrap_or(&self.container_name);
-        run_docker_check(
+        run_docker_check_with_executor(
             check,
             &self.project_root,
             container_name,
             &self.config.docker,
             &self.config.docker.env,
             event_tx,
+            self.executor.as_ref(),
         )
         .await
     }
@@ -448,44 +509,34 @@ impl CheckRunner {
         };
 
         // Check if container is running, use exec if yes, run if no
-        let docker_cmd = if is_container_running(&container_name) {
+        let docker_cmd = if self.executor.is_container_running(&container_name) {
             build_docker_exec_command(&container_name, &env, &pre_cmd.command)
         } else {
             build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
         };
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&docker_cmd)
-            .current_dir(&self.project_root)
-            .output()
-            .await;
+        let output = self.executor.execute(&docker_cmd, &self.project_root).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = filter_docker_warnings(&String::from_utf8_lossy(&output.stderr));
-                let combined = if stderr.is_empty() {
-                    stdout
-                } else {
-                    format!("{}\n{}", stdout, stderr)
-                };
-                (output.status.success(), combined, duration_ms)
-            }
-            Err(e) => (false, format!("Failed to execute: {}", e), duration_ms),
-        }
+        let stderr = filter_docker_warnings(&output.stderr);
+        let combined = if stderr.is_empty() {
+            output.stdout.clone()
+        } else {
+            format!("{}\n{}", output.stdout, stderr)
+        };
+        (output.success, combined, duration_ms)
     }
 }
 
-async fn run_docker_check(
+async fn run_docker_check_with_executor(
     check: &CheckToRun,
     project_root: &Path,
     container_name: &str,
     docker_config: &crate::config::DockerConfig,
     global_env: &std::collections::HashMap<String, String>,
     event_tx: &mpsc::Sender<RunnerEvent>,
+    executor: &dyn CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
 
@@ -499,13 +550,14 @@ async fn run_docker_check(
         })
         .await;
 
-    execute_docker_command(
+    execute_docker_command_with_executor(
         check_id,
         &check.resolved_command,
         project_root,
         container_name,
         docker_config,
         &env,
+        executor,
     )
     .await
 }
@@ -523,7 +575,50 @@ pub fn format_duration(ms: u64) -> String {
     }
 }
 
-/// Execute a command in Docker and return the result
+/// Execute a command in Docker and return the result (for testing with executor)
+pub async fn execute_docker_command_with_executor(
+    check_id: String,
+    command: &str,
+    project_root: &std::path::Path,
+    container_name: &str,
+    docker_config: &crate::config::DockerConfig,
+    env: &std::collections::HashMap<String, String>,
+    executor: &dyn CommandExecutor,
+) -> CheckResult {
+    let started_at = chrono::Local::now();
+    let start = std::time::Instant::now();
+
+    // Check if container is running, use exec if yes, run if no
+    let docker_cmd = if executor.is_container_running(container_name) {
+        build_docker_exec_command(container_name, env, command)
+    } else {
+        build_docker_run_command(docker_config, env, command)
+    };
+
+    let output = executor.execute(&docker_cmd, project_root).await;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let finished_at = chrono::Local::now();
+
+    let stderr = filter_docker_warnings(&output.stderr);
+    let status = if output.success {
+        CheckStatus::Passed
+    } else {
+        CheckStatus::Failed
+    };
+
+    CheckResult {
+        check_id,
+        status,
+        output: output.stdout,
+        error_output: stderr,
+        duration_ms,
+        started_at: Some(started_at),
+        finished_at: Some(finished_at),
+    }
+}
+
+/// Execute a command in Docker and return the result (backward-compatible wrapper)
 async fn execute_docker_command(
     check_id: String,
     command: &str,
@@ -532,56 +627,16 @@ async fn execute_docker_command(
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    let started_at = chrono::Local::now();
-    let start = std::time::Instant::now();
-
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if is_container_running(container_name) {
-        build_docker_exec_command(container_name, env, command)
-    } else {
-        build_docker_run_command(docker_config, env, command)
-    };
-
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&docker_cmd)
-        .current_dir(project_root)
-        .output()
-        .await;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let finished_at = chrono::Local::now();
-
-    match output {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = filter_docker_warnings(&String::from_utf8_lossy(&output.stderr));
-            let status = if output.status.success() {
-                CheckStatus::Passed
-            } else {
-                CheckStatus::Failed
-            };
-
-            CheckResult {
-                check_id,
-                status,
-                output: stdout,
-                error_output: stderr,
-                duration_ms,
-                started_at: Some(started_at),
-                finished_at: Some(finished_at),
-            }
-        }
-        Err(e) => CheckResult {
-            check_id,
-            status: CheckStatus::Failed,
-            output: String::new(),
-            error_output: format!("Failed to execute: {}", e),
-            duration_ms,
-            started_at: Some(started_at),
-            finished_at: Some(finished_at),
-        },
-    }
+    execute_docker_command_with_executor(
+        check_id,
+        command,
+        project_root,
+        container_name,
+        docker_config,
+        env,
+        &RealCommandExecutor,
+    )
+    .await
 }
 
 /// Run a single check (for retry single)

@@ -20,6 +20,7 @@ ansi-to-tui = "8"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }
+async-trait = "0.1"
 
 # CLI parsing
 clap = { version = "4", features = ["derive"] }
