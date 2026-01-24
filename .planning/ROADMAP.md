@@ -74,10 +74,12 @@ Plans:
   3. Developer adds new YAML config structure and parser tests validate both success and error cases
   4. All unit tests run in under 1 second providing immediate feedback during development
 
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 03-01: TBD during planning
+- [ ] 03-01-PLAN.md — Add comprehensive rstest tests for checks.rs
+- [ ] 03-02-PLAN.md — Add comprehensive rstest tests for test_discovery.rs
+- [ ] 03-03-PLAN.md — Add comprehensive rstest tests for config.rs
 
 ### Phase 4: Mock-Based Tests
 **Goal**: Modules with external dependencies (Docker, Git) are testable in isolation without containers or repositories
@@ -124,7 +126,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Foundation | 3/3 | Complete | 2026-01-23 |
 | 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
-| 3. Unit Test Coverage | 0/TBD | Not started | - |
+| 3. Unit Test Coverage | 0/3 | Ready | - |
 | 4. Mock-Based Tests | 0/TBD | Not started | - |
 | 5. Widget Tests & Architecture | 0/TBD | Not started | - |
 

@@ -396,6 +396,8 @@ impl CheckDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     fn minimal_config_yaml() -> &'static str {
         r#"
@@ -652,5 +654,198 @@ checks: {}
             "Error should mention typo field or missing required field: {}",
             err
         );
+    }
+
+    mod test_file_patterns {
+        use super::*;
+
+        #[rstest]
+        #[case("php", Some(r"\.php$"))]
+        #[case("php_src", Some("^src/"))]
+        #[case("tests", Some(r"tests/.*\.php$"))]
+        #[case("nonexistent", None)]
+        #[case("", None)] // Empty key
+        fn test_get_file_pattern(#[case] key: &str, #[case] expected: Option<&str>) {
+            let config = parse_test_config();
+            assert_eq!(config.get_file_pattern(key), expected);
+        }
+    }
+
+    mod test_should_ignore_file {
+        use super::*;
+
+        #[rstest]
+        #[case("README.md", true)] // Matches \.md$
+        #[case("docs/CONTRIBUTING.md", true)]
+        #[case(".github/workflows/ci.yml", true)] // Matches \.github/
+        #[case("src/Service/Foo.php", false)]
+        #[case("tests/FooTest.php", false)]
+        #[case("", false)] // Empty path
+        fn test_should_ignore_file(#[case] path: &str, #[case] should_ignore: bool) {
+            let config = parse_test_config();
+            assert_eq!(config.should_ignore_file(path), should_ignore);
+        }
+    }
+
+    mod test_get_file_color {
+        use super::*;
+
+        #[rstest]
+        #[case("src/Service/Foo.php", "blue")] // Matches php_src with blue
+        #[case("tests/Unit/FooTest.php", "green")] // Matches tests with green
+        #[case("composer.json", "white")] // No color defined
+        #[case("", "white")] // Empty path
+        fn test_get_file_color(#[case] path: &str, #[case] expected_color: &str) {
+            let config = parse_test_config();
+            assert_eq!(config.get_file_color(path), expected_color);
+        }
+    }
+
+    mod test_docker_config {
+        use super::*;
+
+        #[test]
+        fn test_container_name_explicit() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./infrastructure
+  service: php
+  container: explicit-container-name
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.container_name(), "explicit-container-name");
+        }
+
+        #[test]
+        fn test_container_name_derived() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./infrastructure
+  service: php
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.container_name(), "infrastructure-php-1");
+        }
+
+        #[test]
+        fn test_container_name_current_dir() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let container_name = config.docker.container_name();
+            // Should derive from current directory name
+            assert!(container_name.ends_with("-app-1"));
+            assert_ne!(container_name, ".-app-1"); // Should not use literal "."
+        }
+
+        #[test]
+        fn test_image_name_explicit() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  image: rust:latest
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.image_name(), "rust:latest");
+        }
+
+        #[test]
+        fn test_image_name_derived() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./myproject
+  service: web
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // Image derived from container name by stripping -1 suffix
+            assert_eq!(config.docker.image_name(), "myproject-web");
+        }
+
+        #[test]
+        fn test_volume_args() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  volume_mount: ".:/build"
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.volume_args(), Some("-v .:/build".to_string()));
+        }
+
+        #[test]
+        fn test_working_dir_default() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.working_dir(), "/app");
+        }
+
+        #[test]
+        fn test_working_dir_custom() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  work_dir: "/custom/path"
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.working_dir(), "/custom/path");
+        }
     }
 }
