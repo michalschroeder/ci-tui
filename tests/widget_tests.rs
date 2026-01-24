@@ -3,7 +3,7 @@
 //! These tests verify dashboard rendering by checking terminal buffer contents
 //! at fixed 80x24 dimensions.
 
-use ci_tui::ui::{app::App, dashboard};
+use ci_tui::ui::dashboard;
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
 mod common;
@@ -22,7 +22,7 @@ fn create_terminal() -> Terminal<TestBackend> {
 fn find_symbol_color(buffer: &Buffer, symbol: char) -> Option<Color> {
     for y in 0..buffer.area.height {
         for x in 0..buffer.area.width {
-            let cell = buffer.get(x, y);
+            let cell = &buffer[(x, y)];
             if cell.symbol() == symbol.to_string() {
                 return Some(cell.fg);
             }
@@ -36,7 +36,7 @@ fn buffer_contains(buffer: &Buffer, text: &str) -> bool {
     for y in 0..buffer.area.height {
         let mut line = String::new();
         for x in 0..buffer.area.width {
-            line.push_str(buffer.get(x, y).symbol());
+            line.push_str(&buffer[(x, y)].symbol());
         }
         if line.contains(text) {
             return true;
@@ -50,7 +50,7 @@ fn count_symbol(buffer: &Buffer, symbol: char) -> usize {
     let mut count = 0;
     for y in 0..buffer.area.height {
         for x in 0..buffer.area.width {
-            if buffer.get(x, y).symbol() == symbol.to_string() {
+            if buffer[(x, y)].symbol() == symbol.to_string() {
                 count += 1;
             }
         }
