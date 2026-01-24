@@ -40,7 +40,7 @@ chrono = "0.4"
 base64 = "0.22"
 
 # System monitoring
-sysinfo = "0.37"
+sysinfo = "0.38"
 
 [profile.release]
 opt-level = 3
