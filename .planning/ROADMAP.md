@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Code Quality Baseline** - Clean up codebase to idiomatic Rust
 - [x] **Phase 3: Unit Test Coverage** - Tests for business logic modules
 - [x] **Phase 4: Mock-Based Tests** - Tests for external dependencies
-- [ ] **Phase 5: Widget Tests & Architecture** - UI tests + architectural polish
+- [x] **Phase 5: Widget Tests & Architecture** - UI tests + architectural polish
 
 ## Phase Details
 
@@ -116,9 +116,9 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Centralize state mutations in App::update() with AppMessage enum
-- [ ] 05-02-PLAN.md — Add widget tests for dashboard rendering with TestBackend
-- [ ] 05-03-PLAN.md — Verify panic hook and achieve 60%+ code coverage
+- [x] 05-01-PLAN.md — Centralize state mutations in App::update() with AppMessage enum
+- [x] 05-02-PLAN.md — Add widget tests for dashboard rendering with TestBackend
+- [x] 05-03-PLAN.md — Verify panic hook and achieve 60%+ code coverage
 
 ## Progress
 
@@ -131,7 +131,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
 | 3. Unit Test Coverage | 3/3 | Complete | 2026-01-24 |
 | 4. Mock-Based Tests | 2/2 | Complete | 2026-01-24 |
-| 5. Widget Tests & Architecture | 0/3 | Not started | - |
+| 5. Widget Tests & Architecture | 3/3 | Complete | 2026-01-24 |
 
 ---
 *Roadmap created: 2026-01-22*
