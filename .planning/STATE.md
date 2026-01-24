@@ -11,18 +11,18 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 ## Current Position
 
 Phase: 5 of 5 (Widget Tests & Architecture)
-Plan: 2 of TBD in current phase
+Plan: 1 of TBD in current phase
 Status: In progress
-Last activity: 2026-01-24 — Completed 05-02-PLAN.md
+Last activity: 2026-01-24 — Completed 05-01-PLAN.md
 
-Progress: [████████░░] 82%
+Progress: [████████░░] 81%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 29
-- Average duration: 4.7m
-- Total execution time: 2.33 hours
+- Total plans completed: 28
+- Average duration: 4.9m
+- Total execution time: 2.29 hours
 
 **By Phase:**
 
@@ -32,11 +32,11 @@ Progress: [████████░░] 82%
 | 02-code-quality-baseline | 2 | 10m | 5m |
 | 03-unit-test-coverage | 3 | 11m | 3.7m |
 | 04-mock-based-tests | 2 | 24m | 12m |
-| 05-widget-tests-architecture | 2 | 9m | 4.5m |
+| 05-widget-tests-architecture | 1 | 6.5m | 6.5m |
 
 **Recent Trend:**
-- Last 5 plans: 05-02 (5m), 05-01 (4m), 04-02 (13m), 04-01 (11m), 03-03 (3m)
-- Trend: Widget tests are fast to write with good test infrastructure
+- Last 5 plans: 05-01 (6.5m), 04-02 (13m), 04-01 (11m), 03-03 (3m), 03-02 (2.5m)
+- Trend: TEA-lite refactor completed quickly with good test coverage
 
 *Updated after each plan completion*
 
@@ -83,9 +83,9 @@ Recent decisions affecting current work:
 - 04-01: Use Vec<String> in trait signatures to avoid lifetime issues (cleaner than &[&str])
 - 04-02: Use async-trait for async methods in trait (mockall supports with proper macro ordering)
 - 04-02: Separate pure function tests from mock-based tests (test pure functions directly, mock only I/O)
-- 05-02: Use fixed 80x24 terminal dimensions for deterministic widget test assertions
-- 05-02: Test buffer content, colors, and symbol positions rather than exact pixel coordinates
-- 05-02: Make dashboard module public to allow widget tests to call render functions
+- 05-01: Rename navigation methods to *_internal (private) while keeping public wrappers (backward compatibility)
+- 05-01: Automatic needs_redraw flag set at end of update() (redundant sets harmless)
+- 05-01: All state mutations route through AppMessage dispatch (TEA-lite pattern)
 
 ### Pending Todos
 
@@ -126,6 +126,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-24T22:18:00Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-01-24
+Stopped at: Completed 05-01-PLAN.md
 Resume file: None
