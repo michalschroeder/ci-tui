@@ -117,8 +117,9 @@ fn grep_search(
         }
 
         // Use grep to find files containing the pattern
+        // Note: "." is required - without a path argument, grep reads from stdin
         if let Ok(output) = std::process::Command::new("grep")
-            .args(["-rl", &expanded_pattern])
+            .args(["-rl", &expanded_pattern, "."])
             .current_dir(&dir_path)
             .output()
         {
