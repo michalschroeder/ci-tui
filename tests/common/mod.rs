@@ -3,8 +3,8 @@
 use ci_tui::checks::CheckToRun;
 use ci_tui::config::{CheckDefinition, CiConfig};
 use ci_tui::git::ChangedFiles;
-use ci_tui::runner::{CheckResult, CheckStatus};
-use ci_tui::ui::App;
+use ci_tui::runner::CheckStatus;
+use ci_tui::ui::app::App;
 
 // Re-export for convenience
 pub use ci_tui::git::MockGitExecutor;
@@ -135,9 +135,6 @@ pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> Ch
             triggers: None,
             on_demand: false,
             env: std::collections::HashMap::new(),
-            image: None,
-            volume_mount: None,
-            work_dir: None,
         },
         service: "app".to_string(),
         files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
