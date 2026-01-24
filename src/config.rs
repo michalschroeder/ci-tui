@@ -848,4 +848,307 @@ checks: {}
             assert_eq!(config.docker.working_dir(), "/custom/path");
         }
     }
+
+    mod test_yaml_parsing_errors {
+        use super::*;
+
+        #[rstest]
+        #[case("typo_field: oops", "typo_field")] // Unknown top-level field
+        #[case("docker:\n  unknown_field: x", "unknown")] // Unknown nested field
+        #[case("docker:\n  project_dir: .", "base_branch")] // Missing required field
+        fn test_unknown_fields_rejected(#[case] extra_yaml: &str, #[case] error_contains: &str) {
+            let yaml = format!(
+                r#"
+version: 2
+{}
+file_patterns: {{}}
+checks: {{}}
+"#,
+                extra_yaml
+            );
+            let result: Result<CiConfig, _> = serde_yaml::from_str(&yaml);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains(error_contains),
+                "Error should contain '{}', got: {}",
+                error_contains,
+                err
+            );
+        }
+    }
+
+    mod test_invalid_regex {
+        use super::*;
+
+        #[test]
+        fn test_invalid_regex_in_file_pattern() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  bad:
+    pattern: '[unclosed'
+checks: {}
+"#;
+            // Config should parse (regex compiled lazily)
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // get_file_pattern returns the pattern string (not compiled)
+            assert_eq!(config.get_file_pattern("bad"), Some("[unclosed"));
+            // Actual regex compilation happens at usage time
+            // The pattern matching code handles invalid regex gracefully
+        }
+
+        #[test]
+        fn test_invalid_regex_in_ignore_patterns() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+ignore_patterns:
+  - '\.md$'
+  - '[unclosed'
+  - '\.txt$'
+checks: {}
+"#;
+            // Config should parse
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // should_ignore_file handles invalid regex gracefully (skips them)
+            // Valid patterns should still work
+            assert!(config.should_ignore_file("README.md"));
+            assert!(config.should_ignore_file("notes.txt"));
+        }
+    }
+
+    mod test_boundary_cases {
+        use super::*;
+
+        #[test]
+        fn test_empty_file_patterns() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.get_file_pattern("anything"), None);
+            assert_eq!(config.get_file_color("any/file.txt"), "white");
+        }
+
+        #[test]
+        fn test_empty_checks() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.groups().count(), 0);
+            assert!(config.get_group("anything").is_none());
+        }
+
+        #[test]
+        fn test_empty_ignore_patterns() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // Should not ignore anything
+            assert!(!config.should_ignore_file("README.md"));
+            assert!(!config.should_ignore_file(".github/workflow.yml"));
+            assert!(!config.should_ignore_file("src/main.rs"));
+        }
+
+        #[test]
+        fn test_check_with_all_optional_fields() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: default_service
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  rust:
+    pattern: '\.rs$'
+checks:
+  comprehensive:
+    checks:
+      full-check:
+        name: Full Featured Check
+        command: cargo test
+        service: custom_service
+        container: custom_container
+        fix_command: cargo fmt
+        on_demand: true
+        env:
+          TEST_VAR: value
+        triggers:
+          file_pattern: rust
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let group = config.get_group("comprehensive").unwrap();
+            let check = group.checks.get("full-check").unwrap();
+
+            assert_eq!(check.name, "Full Featured Check");
+            assert_eq!(check.command, "cargo test");
+            assert_eq!(check.service, Some("custom_service".to_string()));
+            assert_eq!(check.container, Some("custom_container".to_string()));
+            assert_eq!(check.fix_command, Some("cargo fmt".to_string()));
+            assert!(check.on_demand);
+            assert_eq!(check.env.get("TEST_VAR"), Some(&"value".to_string()));
+            assert!(check.triggers.is_some());
+        }
+
+        #[test]
+        fn test_minimal_valid_config() {
+            // Absolute minimum required fields
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.version, 2);
+            assert_eq!(config.docker.project_dir, ".");
+            assert_eq!(config.docker.service, "app"); // Default value
+            assert_eq!(config.git.base_branch, "main");
+            assert_eq!(config.git.fallback_branch, "HEAD~1");
+        }
+    }
+
+    mod test_check_definition {
+        use super::*;
+
+        #[test]
+        fn test_always_run_with_triggers() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  php:
+    pattern: '\.php$'
+checks:
+  group:
+    checks:
+      check_with_triggers:
+        name: Check
+        command: test
+        triggers:
+          file_pattern: php
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let group = config.get_group("group").unwrap();
+            let check = group.checks.get("check_with_triggers").unwrap();
+            assert!(!check.always_run()); // Has triggers = not always_run
+        }
+
+        #[test]
+        fn test_always_run_without_triggers() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks:
+  group:
+    checks:
+      check_no_triggers:
+        name: Check
+        command: test
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let group = config.get_group("group").unwrap();
+            let check = group.checks.get("check_no_triggers").unwrap();
+            assert!(check.always_run()); // No triggers = always_run
+        }
+
+        #[test]
+        fn test_service_or_default_with_service() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks:
+  group:
+    checks:
+      check_with_service:
+        name: Check
+        command: test
+        service: custom
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let group = config.get_group("group").unwrap();
+            let check = group.checks.get("check_with_service").unwrap();
+            assert_eq!(check.service_or_default("default"), "custom");
+        }
+
+        #[test]
+        fn test_service_or_default_without_service() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks:
+  group:
+    checks:
+      check_no_service:
+        name: Check
+        command: test
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let group = config.get_group("group").unwrap();
+            let check = group.checks.get("check_no_service").unwrap();
+            assert_eq!(
+                check.service_or_default("default_service"),
+                "default_service"
+            );
+        }
+    }
 }
