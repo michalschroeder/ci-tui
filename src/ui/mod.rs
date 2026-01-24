@@ -304,7 +304,7 @@ fn handle_key_event(
                                 }
 
                                 // Reset and run the check with updated state
-                                app.reset_check_for_retry(&check_id);
+                                app.update(AppMessage::ResetForRetry(check_id.clone()));
                                 let retry_tx = channels.retry_tx.clone();
                                 let project_root = Arc::clone(&channels.project_root);
                                 let docker_dir = Arc::clone(&channels.container_name);
@@ -323,15 +323,15 @@ fn handle_key_event(
                                 });
                             } else {
                                 // Check no longer applicable after git refresh
-                                app.status_message = Some(
+                                app.update(AppMessage::SetStatusMessage(Some(
                                     "Check no longer applicable after git refresh".to_string(),
-                                );
+                                )));
                             }
                         }
                         Err(_) => {
                             // Git refresh failed - fall back to running with existing check
                             let check = check.clone();
-                            app.reset_check_for_retry(check.id());
+                            app.update(AppMessage::ResetForRetry(check.id().to_string()));
                             let retry_tx = channels.retry_tx.clone();
                             let project_root = Arc::clone(&channels.project_root);
                             let docker_dir = Arc::clone(&channels.container_name);
@@ -359,7 +359,7 @@ fn handle_key_event(
             if app.can_trigger_selected() {
                 if let Some(check) = app.selected_check() {
                     let check = check.clone();
-                    app.trigger_on_demand_check(check.id());
+                    app.update(AppMessage::TriggerOnDemand(check.id().to_string()));
                     let retry_tx = channels.retry_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
                     let docker_dir = Arc::clone(&channels.container_name);
@@ -386,8 +386,10 @@ fn handle_key_event(
                 if let Some(check) = app.selected_check() {
                     let check = check.clone();
                     let all_files_cmd = check.get_command_for_all_files();
-                    app.reset_check_for_retry(check.id());
-                    app.status_message = Some("Running for all files...".to_string());
+                    app.update(AppMessage::ResetForRetry(check.id().to_string()));
+                    app.update(AppMessage::SetStatusMessage(Some(
+                        "Running for all files...".to_string(),
+                    )));
                     let retry_tx = channels.retry_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
                     let docker_dir = Arc::clone(&channels.container_name);
@@ -414,7 +416,9 @@ fn handle_key_event(
             if let Some(check) = app.selected_check() {
                 let command = &check.resolved_command;
                 copy_to_clipboard(command);
-                app.status_message = Some("Command copied to clipboard".to_string());
+                app.update(AppMessage::SetStatusMessage(Some(
+                    "Command copied to clipboard".to_string(),
+                )));
             }
             KeyAction::None
         }
@@ -446,7 +450,7 @@ fn handle_key_event(
         (KeyCode::Char('x'), KeyModifiers::NONE) => {
             if app.can_fix_selected() {
                 if let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() {
-                    app.start_fix();
+                    app.update(AppMessage::StartFix);
                     let fix_tx = channels.fix_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
                     let default_container = Arc::clone(&channels.container_name);
@@ -474,7 +478,7 @@ fn handle_key_event(
                 let fix_commands = app.get_all_fix_commands();
                 if !fix_commands.is_empty() {
                     let total = fix_commands.len();
-                    app.start_fix_all(total);
+                    app.update(AppMessage::StartFixAll(total));
                     let fix_all_tx = channels.fix_all_tx.clone();
                     let project_root = Arc::clone(&channels.project_root);
                     let default_container = Arc::clone(&channels.container_name);
@@ -521,8 +525,7 @@ fn handle_message(
 
             // Clear status message on any key press
             if app.status_message.is_some() {
-                app.status_message = None;
-                app.needs_redraw = true;
+                app.update(AppMessage::ClearStatusMessage);
 
                 #[cfg(debug_assertions)]
                 {
@@ -545,10 +548,7 @@ fn handle_message(
                     new_changed_files,
                     new_checks,
                 }),
-                KeyAction::None => {
-                    app.needs_redraw = true;
-                    Ok(Action::Continue)
-                }
+                KeyAction::None => Ok(Action::Continue),
             };
 
             #[cfg(debug_assertions)]
@@ -562,31 +562,30 @@ fn handle_message(
             result
         }
         Message::RunnerEvent(event) => {
-            app.handle_runner_event(event);
-            app.needs_redraw = true;
+            app.update(AppMessage::RunnerEvent(event));
             Ok(Action::Continue)
         }
         Message::SystemStats(stats) => {
-            app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
-            app.needs_redraw = true;
+            app.update(AppMessage::SystemStats {
+                cpu_usage: stats.cpu_usage,
+                mem_used: stats.mem_used,
+                mem_total: stats.mem_total,
+            });
             Ok(Action::Continue)
         }
         Message::FixResult(result) => {
-            app.finish_fix(result);
-            app.needs_redraw = true;
+            app.update(AppMessage::FinishFix(result));
             Ok(Action::Continue)
         }
         Message::FixAllResult(result, is_last) => {
-            app.add_fix_all_result(result);
+            app.update(AppMessage::AddFixAllResult(result));
             if is_last {
-                app.finish_fix_all();
+                app.update(AppMessage::FinishFixAll);
             }
-            app.needs_redraw = true;
             Ok(Action::Continue)
         }
         Message::RetryResult(result) => {
-            app.results.insert(result.check_id.clone(), result);
-            app.needs_redraw = true;
+            app.update(AppMessage::RetryResult(result));
             Ok(Action::Continue)
         }
     }
