@@ -5,9 +5,11 @@
 
 mod common;
 
-use ci_tui::git::{detect_changes_with_executor, get_changed_files_with_executor,
-                   current_branch_with_executor, short_commit_with_executor, MockGitExecutor};
 use ci_tui::config::GitConfig;
+use ci_tui::git::{
+    current_branch_with_executor, detect_changes_with_executor, get_changed_files_with_executor,
+    short_commit_with_executor, MockGitExecutor,
+};
 use common::{mock_git_error, mock_git_with_output};
 use rstest::rstest;
 use std::path::Path;

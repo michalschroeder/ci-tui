@@ -218,7 +218,10 @@ pub fn current_branch(project_root: &Path) -> Result<String> {
 /// Get current branch using a custom executor (testable version).
 ///
 /// See [`current_branch`] for details.
-pub fn current_branch_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+pub fn current_branch_with_executor(
+    project_root: &Path,
+    executor: &impl GitExecutor,
+) -> Result<String> {
     let args = vec![
         "rev-parse".to_string(),
         "--abbrev-ref".to_string(),
@@ -240,7 +243,10 @@ pub fn short_commit(project_root: &Path) -> Result<String> {
 /// Get short commit using a custom executor (testable version).
 ///
 /// See [`short_commit`] for details.
-pub fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+pub fn short_commit_with_executor(
+    project_root: &Path,
+    executor: &impl GitExecutor,
+) -> Result<String> {
     let args = vec![
         "rev-parse".to_string(),
         "--short".to_string(),
@@ -249,7 +255,6 @@ pub fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecut
     let output = executor.run_command(project_root, &args)?;
     Ok(output.trim().to_string())
 }
-
 
 #[cfg(test)]
 mod tests {
