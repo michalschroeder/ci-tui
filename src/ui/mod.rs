@@ -16,7 +16,7 @@
 //! - [`app`]: Application state management
 //! - [`dashboard`]: Rendering logic using ratatui widgets
 
-mod app;
+pub mod app;
 mod dashboard;
 
 pub use app::AppMessage;

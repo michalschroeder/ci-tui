@@ -31,6 +31,7 @@ pub fn mock_git_error(error_msg: &str) -> MockGitExecutor {
 }
 
 /// Create a mock executor that returns success
+#[allow(dead_code)]
 pub fn mock_executor_success(stdout: &str) -> MockCommandExecutor {
     let stdout = stdout.to_string();
     let mut mock = MockCommandExecutor::new();
@@ -64,6 +65,7 @@ pub fn mock_executor_failure(stderr: &str) -> MockCommandExecutor {
 }
 
 /// Minimal config YAML for widget tests
+#[allow(dead_code)]
 pub fn widget_test_config_yaml() -> &'static str {
     r#"
 version: 2
@@ -113,11 +115,13 @@ checks:
 }
 
 /// Parse the widget test config
+#[allow(dead_code)]
 pub fn parse_widget_config() -> CiConfig {
     serde_yaml::from_str(widget_test_config_yaml()).expect("Failed to parse widget test config")
 }
 
 /// Create a CheckToRun for testing
+#[allow(dead_code)]
 pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> CheckToRun {
     CheckToRun {
         id: id.to_string(),
@@ -156,6 +160,7 @@ pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> Ch
 /// - 2 changed files
 /// - Branch: "feature/test"
 /// - Some CPU/memory history
+#[allow(dead_code)]
 pub fn make_test_app() -> App {
     let config = parse_widget_config();
     let changed_files = ChangedFiles {
@@ -196,6 +201,7 @@ pub fn make_test_app() -> App {
 }
 
 /// Create App with all checks passed (for success state tests)
+#[allow(dead_code)]
 pub fn make_test_app_all_passed() -> App {
     let mut app = make_test_app();
     app.all_finished = true;
@@ -207,6 +213,7 @@ pub fn make_test_app_all_passed() -> App {
 }
 
 /// Create App with running checks (for progress state tests)
+#[allow(dead_code)]
 pub fn make_test_app_running() -> App {
     let mut app = make_test_app();
     app.current_group = Some("lint".to_string());
