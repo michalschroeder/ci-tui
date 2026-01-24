@@ -39,8 +39,8 @@ Requirements for code quality milestone. Each maps to roadmap phases.
 - [x] **COVR-01**: Unit tests for `checks.rs` (check determination logic)
 - [x] **COVR-02**: Unit tests for `test_discovery.rs` (path mapping, grep search)
 - [x] **COVR-03**: Unit tests for `config.rs` (YAML parsing, pattern compilation)
-- [ ] **COVR-04**: Mock-based tests for `runner.rs` (Docker execution without containers)
-- [ ] **COVR-05**: Mock-based tests for `git.rs` (git operations without repo)
+- [x] **COVR-04**: Mock-based tests for `runner.rs` (Docker execution without containers)
+- [x] **COVR-05**: Mock-based tests for `git.rs` (git operations without repo)
 - [ ] **COVR-06**: Widget tests for UI components using TestBackend
 - [ ] **COVR-07**: Achieve 60%+ code coverage for core modules
 
@@ -111,8 +111,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COVR-01 | Phase 3 | Complete |
 | COVR-02 | Phase 3 | Complete |
 | COVR-03 | Phase 3 | Complete |
-| COVR-04 | Phase 4 | Pending |
-| COVR-05 | Phase 4 | Pending |
+| COVR-04 | Phase 4 | Complete |
+| COVR-05 | Phase 4 | Complete |
 | COVR-06 | Phase 5 | Pending |
 | COVR-07 | Phase 5 | Pending |
 | ARCH-01 | Phase 5 | Pending |
@@ -126,4 +126,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-22*
-*Last updated: 2026-01-24 after Phase 3 completion*
+*Last updated: 2026-01-24 after Phase 4 completion*
