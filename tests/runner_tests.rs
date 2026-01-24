@@ -4,9 +4,15 @@
 //! - Pure command-building functions (no mocks needed)
 //! - Docker command execution (using mocks)
 
-use ci_tui::runner::{build_docker_exec_command, build_docker_run_command, filter_docker_warnings};
+use ci_tui::runner::{
+    build_docker_exec_command, build_docker_run_command, execute_docker_command_with_executor,
+    filter_docker_warnings, CheckStatus,
+};
 use rstest::rstest;
 use std::collections::HashMap;
+
+mod common;
+use common::{mock_executor_success, CommandOutput, MockCommandExecutor};
 
 mod build_docker_exec_command_tests {
     use super::*;
@@ -231,5 +237,201 @@ Fatal: cannot continue";
         // Line structure should be preserved
         let lines: Vec<&str> = filtered.lines().collect();
         assert_eq!(lines.len(), 3);
+    }
+}
+
+mod execute_docker_command_tests {
+    use super::*;
+    use ci_tui::config::DockerConfig;
+    use mockall::predicate::*;
+    use std::path::Path;
+    use pretty_assertions::assert_eq;
+
+    fn minimal_docker_config() -> DockerConfig {
+        DockerConfig {
+            project_dir: "/app".to_string(),
+            service: "app".to_string(),
+            container: None,
+            image: Some("test-image:latest".to_string()),
+            volume_mount: None,
+            work_dir: None,
+            env: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_successful_check() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("test-container"))
+            .returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.contains("cargo test"))
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: "test result: ok. 5 passed\n".to_string(),
+                stderr: String::new(),
+            });
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "cargo test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::Passed);
+        assert!(result.output.contains("test result: ok"));
+        assert!(result.error_output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_failed_check() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("test-container"))
+            .returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.contains("cargo test"))
+            .returning(|_, _| CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: test failed\n".to_string(),
+            });
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "cargo test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::Failed);
+        assert!(result.error_output.contains("test failed"));
+    }
+
+    #[tokio::test]
+    async fn uses_docker_exec_when_container_running() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("test-container"))
+            .returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| {
+                // Should use docker exec when container is running
+                cmd.starts_with("docker exec")
+            })
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let _result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn uses_docker_run_when_container_not_running() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("test-container"))
+            .returning(|_| false);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| {
+                // Should use docker run when container is not running
+                cmd.starts_with("docker run")
+            })
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let _result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn captures_duration() {
+        let mock = mock_executor_success("output");
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+
+        // Duration should be captured
+        assert!(result.started_at.is_some());
+        assert!(result.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn filters_docker_warnings_in_stderr() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: "WARN[0000] variable is not set. Defaulting to a blank string\nActual error\n"
+                .to_string(),
+        });
+
+        let config = minimal_docker_config();
+        let env = HashMap::new();
+        let result = execute_docker_command_with_executor(
+            "test-check".to_string(),
+            "test",
+            Path::new("/app"),
+            "test-container",
+            &config,
+            &env,
+            &mock,
+        )
+        .await;
+
+        // Docker warnings should be filtered from error output
+        assert!(!result.error_output.contains("variable is not set"));
+        assert!(result.error_output.contains("Actual error"));
     }
 }
