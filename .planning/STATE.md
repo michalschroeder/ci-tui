@@ -13,7 +13,7 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 Phase: 4 of 5 (Mock-Based Tests)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-01-24 — Completed Phase 3: Unit Test Coverage (verified)
+Last activity: 2026-01-24 — Fixed grep_search missing path argument bug
 
 Progress: [██████░░░░] 60%
 
@@ -112,6 +112,7 @@ None yet.
 | 020 | Add docs directory with config file documentation | 2026-01-23 | f2a276b | [020-add-docs-directory-with-config-file-docu](./quick/020-add-docs-directory-with-config-file-docu/) |
 | 021 | Replace Laravel example with Symfony example | 2026-01-23 | e760c38 | [021-replace-laravel-example-with-symfony-in-](./quick/021-replace-laravel-example-with-symfony-in-/) |
 | 022 | Add grep_search tests for test discovery | 2026-01-24 | 8ada5b3 | [022-add-grep-search-tests](./quick/022-add-grep-search-tests/) |
+| 023 | Fix grep_search missing path argument | 2026-01-24 | b62ce7c | - |
 
 ## Session Continuity
 
