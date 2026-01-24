@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.7](https://github.com/michalschroeder/ci-tui/compare/v0.1.6...v0.1.7) (2026-01-23)
+
+
+### Features
+
+* **quick-018:** deduplicate matched files in determine_checks ([5544e71](https://github.com/michalschroeder/ci-tui/commit/5544e71af8f204dd6ccfaa03e6d46fe2383fbe93))
+* **quick-019:** add --fix CLI argument and fix mode module ([c4c47f5](https://github.com/michalschroeder/ci-tui/commit/c4c47f5a0ff49fd82291d45d1219a5bd45151bc4))
+
+
+### Documentation
+
+* **CLAUDE:** add --fix workflow and failure handling instructions ([13842c3](https://github.com/michalschroeder/ci-tui/commit/13842c3d33cc41a999d093e938fd3c23ab22acb8))
+* **CLAUDE:** update validation instructions to use ci-tui ([7c46cd1](https://github.com/michalschroeder/ci-tui/commit/7c46cd195a7b81f6092324676957ef0627318049))
+* **quick-018:** complete TDD test for duplicate detection task ([06ded34](https://github.com/michalschroeder/ci-tui/commit/06ded34b38d24e23855ca1dbc4a0d1efb2d97830))
+* **quick-019:** complete add --fix parameter task ([145bc72](https://github.com/michalschroeder/ci-tui/commit/145bc7243215e7648f08a38c1579a25f0a954ef2))
+
 ## [0.1.6](https://github.com/michalschroeder/ci-tui/compare/v0.1.5...v0.1.6) (2026-01-23)
 
 
