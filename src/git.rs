@@ -7,6 +7,7 @@
 //! # Key Types
 //!
 //! - [`ChangedFiles`]: Collection of changed file paths with filtering methods
+//! - [`GitExecutor`]: Trait abstraction for git command execution
 //!
 //! # Key Functions
 //!
@@ -18,6 +19,51 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+
+/// Trait for executing git commands.
+///
+/// This abstraction allows mocking git operations in tests without requiring
+/// a real Git repository. The production implementation uses `std::process::Command`.
+#[cfg_attr(test, mockall::automock)]
+pub trait GitExecutor {
+    /// Execute a git command with the given arguments.
+    ///
+    /// # Arguments
+    ///
+    /// * `project_root` - Working directory for the git command
+    /// * `args` - Command line arguments to pass to git
+    ///
+    /// # Returns
+    ///
+    /// Returns the stdout output as a string if successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command fails or git exits with non-zero status.
+    fn run_command(&self, project_root: &Path, args: &[String]) -> Result<String>;
+}
+
+/// Real implementation of GitExecutor that invokes the git binary.
+pub struct RealGitExecutor;
+
+impl GitExecutor for RealGitExecutor {
+    fn run_command(&self, project_root: &Path, args: &[String]) -> Result<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project_root)
+            .output()
+            .context("Failed to run git command")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
 
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
@@ -90,6 +136,17 @@ impl ChangedFiles {
 ///
 /// Returns an error if git operations fail unexpectedly.
 pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<ChangedFiles> {
+    detect_changes_with_executor(project_root, git_config, &RealGitExecutor)
+}
+
+/// Detect changed files using a custom executor (testable version).
+///
+/// See [`detect_changes`] for details.
+fn detect_changes_with_executor(
+    project_root: &Path,
+    git_config: &GitConfig,
+    executor: &impl GitExecutor,
+) -> Result<ChangedFiles> {
     // Try different base refs in order
     let base_refs = [
         format!("origin/{}", git_config.base_branch),
@@ -98,7 +155,7 @@ pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<Cha
     ];
 
     for base_ref in &base_refs {
-        match get_changed_files(project_root, base_ref) {
+        match get_changed_files_with_executor(project_root, base_ref, executor) {
             Ok(changed_files) => {
                 return Ok(changed_files);
             }
@@ -119,20 +176,25 @@ pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<Cha
 ///
 /// Returns an error if the git command fails or the reference doesn't exist.
 pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedFiles> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", base_ref])
-        .current_dir(project_root)
-        .output()
-        .context("Failed to run git diff")?;
+    get_changed_files_with_executor(project_root, base_ref, &RealGitExecutor)
+}
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+/// Get changed files using a custom executor (testable version).
+///
+/// See [`get_changed_files`] for details.
+fn get_changed_files_with_executor(
+    project_root: &Path,
+    base_ref: &str,
+    executor: &impl GitExecutor,
+) -> Result<ChangedFiles> {
+    let args = vec![
+        "diff".to_string(),
+        "--name-only".to_string(),
+        base_ref.to_string(),
+    ];
+    let output = executor.run_command(project_root, &args)?;
 
-    let files = String::from_utf8_lossy(&output.stdout)
+    let files = output
         .lines()
         .filter(|line| !line.is_empty())
         .map(String::from)
@@ -150,13 +212,20 @@ pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedF
 ///
 /// Returns an error if the git command fails.
 pub fn current_branch(project_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .context("Failed to get current branch")?;
+    current_branch_with_executor(project_root, &RealGitExecutor)
+}
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+/// Get current branch using a custom executor (testable version).
+///
+/// See [`current_branch`] for details.
+fn current_branch_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+    let args = vec![
+        "rev-parse".to_string(),
+        "--abbrev-ref".to_string(),
+        "HEAD".to_string(),
+    ];
+    let output = executor.run_command(project_root, &args)?;
+    Ok(output.trim().to_string())
 }
 
 /// Get short commit hash.
@@ -165,13 +234,20 @@ pub fn current_branch(project_root: &Path) -> Result<String> {
 ///
 /// Returns an error if the git command fails.
 pub fn short_commit(project_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .context("Failed to get commit hash")?;
+    short_commit_with_executor(project_root, &RealGitExecutor)
+}
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+/// Get short commit using a custom executor (testable version).
+///
+/// See [`short_commit`] for details.
+fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+    let args = vec![
+        "rev-parse".to_string(),
+        "--short".to_string(),
+        "HEAD".to_string(),
+    ];
+    let output = executor.run_command(project_root, &args)?;
+    Ok(output.trim().to_string())
 }
 
 #[cfg(test)]

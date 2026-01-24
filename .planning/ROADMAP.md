@@ -93,10 +93,11 @@ Plans:
   2. Developer runs git.rs tests in directory without Git repository and all tests pass using mocked Git operations
   3. Test suite executes completely in CI environment without Docker daemon or Git repositories
 
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 04-01: TBD during planning
+- [ ] 04-01-PLAN.md — Add GitExecutor trait and mock-based git tests
+- [ ] 04-02-PLAN.md — Add CommandExecutor trait and mock-based Docker tests
 
 ### Phase 5: Widget Tests & Architecture
 **Goal**: UI components have widget tests using TestBackend, architecture follows centralized state update pattern, and 60%+ code coverage is achieved
@@ -127,7 +128,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Foundation | 3/3 | Complete | 2026-01-23 |
 | 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
 | 3. Unit Test Coverage | 3/3 | Complete | 2026-01-24 |
-| 4. Mock-Based Tests | 0/TBD | Not started | - |
+| 4. Mock-Based Tests | 0/2 | Planned | - |
 | 5. Widget Tests & Architecture | 0/TBD | Not started | - |
 
 ---
