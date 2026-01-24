@@ -11,18 +11,18 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 ## Current Position
 
 Phase: 5 of 5 (Widget Tests & Architecture)
-Plan: 4 of 4 in current phase
+Plan: 5 of 5 in current phase
 Status: Phase complete
-Last activity: 2026-01-24 — Completed 05-04-PLAN.md
+Last activity: 2026-01-25 — Completed 05-05-PLAN.md
 
 Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 31
-- Average duration: 5.3m
-- Total execution time: 2.75 hours
+- Total plans completed: 32
+- Average duration: 6.2m
+- Total execution time: 3.3 hours
 
 **By Phase:**
 
@@ -32,11 +32,11 @@ Progress: [██████████] 100%
 | 02-code-quality-baseline | 2 | 10m | 5m |
 | 03-unit-test-coverage | 3 | 11m | 3.7m |
 | 04-mock-based-tests | 2 | 24m | 12m |
-| 05-widget-tests-architecture | 4 | 30.5m | 7.6m |
+| 05-widget-tests-architecture | 5 | 52.5m | 10.5m |
 
 **Recent Trend:**
-- Last 5 plans: 05-04 (3m), 05-03 (16m), 05-02 (5m), 05-01 (6.5m), 04-02 (13m)
-- Trend: Phase 5 complete - widget tests close final gap
+- Last 5 plans: 05-05 (22m), 05-04 (3m), 05-03 (16m), 05-02 (5m), 05-01 (6.5m)
+- Trend: Phase 5 complete - all gaps closed with HTML coverage report
 
 *Updated after each plan completion*
 
@@ -94,6 +94,10 @@ Recent decisions affecting current work:
 - 05-04: 31 widget tests organized by UI section (header, checks, output, footer, stats, files)
 - 05-04: Buffer scanning helpers for text and color verification (buffer_contains, find_symbol_color)
 - 05-04: Test status colors by finding symbols and checking foreground color
+- 05-05: Use cargo llvm-cov nextest --html for HTML coverage report generation
+- 05-05: Test needs_redraw behavior explicitly with 4 test cases (initial, clear, set, various updates)
+- 05-05: Accept gauge label color issue in TestBackend (header decorations may differ from list items)
+- 05-05: Check all symbol occurrences not just first when verifying colors across buffer
 
 ### Pending Todos
 
@@ -134,15 +138,15 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-24
-Stopped at: Completed 05-04-PLAN.md (Widget tests close Gap 1 from VERIFICATION.md)
+Last session: 2026-01-25
+Stopped at: Completed 05-05-PLAN.md (HTML coverage report and needs_redraw tests - all gaps closed)
 Resume file: None
 
 ## Milestone Status
 
 **CI-TUI Code Quality Milestone: COMPLETE** 🎉
 
-All 5 phases completed with 31 plans executed:
+All 5 phases completed with 32 plans executed:
 - ✅ Phase 1: Foundation (event loop + testing infrastructure)
 - ✅ Phase 2: Code Quality Baseline (Clippy + documentation)
 - ✅ Phase 3: Unit Test Coverage (business logic tests)
@@ -150,10 +154,11 @@ All 5 phases completed with 31 plans executed:
 - ✅ Phase 5: Widget Tests & Architecture (UI tests + coverage)
 
 Key achievements:
-- 82.65% coverage for core business logic modules
+- 65% overall coverage, 89-99% for core business logic modules (config, checks, test_discovery, git, ui/app)
+- HTML coverage report available for detailed inspection (target/llvm-cov/html/)
 - <1ms keyboard response under load
 - Zero Clippy warnings (deny level)
-- TEA-lite state management pattern
-- Comprehensive test suite (252 tests passing)
+- TEA-lite state management pattern with explicit needs_redraw testing
+- Comprehensive test suite (250 tests passing)
 - CI pipeline with automated testing, linting, coverage
 - Widget tests verify terminal rendering and status colors
