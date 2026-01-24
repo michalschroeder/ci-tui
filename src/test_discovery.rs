@@ -126,7 +126,9 @@ fn grep_search(
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
-                    let test_path = format!("{}/{}", search_dir, line.trim());
+                    // Strip "./" prefix that grep adds when searching "."
+                    let relative_path = line.trim().strip_prefix("./").unwrap_or(line.trim());
+                    let test_path = format!("{}/{}", search_dir, relative_path);
                     found_tests.push(test_path);
                 }
             }
@@ -168,7 +170,6 @@ fn expand_placeholders(pattern: &str, source_file: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
     use rstest::rstest;
 
     mod test_extract_path_from_pattern {

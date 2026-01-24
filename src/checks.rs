@@ -349,6 +349,14 @@ checks:
         fix_command: phpstan fix {files}
         triggers:
           file_pattern: php
+
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit
+        command: phpunit {files}
+        triggers:
+          file_pattern: tests
 "#
     }
 
@@ -489,7 +497,8 @@ checks:
         let grouped = group_checks(&checks);
 
         let group_names: Vec<&str> = grouped.iter().map(|(name, _)| *name).collect();
-        assert_eq!(group_names, vec!["warmup", "fast", "analysis"]);
+        // Groups: warmup (always), fast (php matches), analysis (php matches), tests (skipped - no match)
+        assert_eq!(group_names, vec!["warmup", "fast", "analysis", "tests"]);
     }
 
     #[test]

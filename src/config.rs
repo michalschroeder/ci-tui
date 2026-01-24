@@ -396,7 +396,6 @@ impl CheckDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
     use rstest::rstest;
 
     fn minimal_config_yaml() -> &'static str {
@@ -855,7 +854,7 @@ checks: {}
         #[rstest]
         #[case("typo_field: oops", "typo_field")] // Unknown top-level field
         #[case("docker:\n  unknown_field: x", "unknown")] // Unknown nested field
-        #[case("docker:\n  project_dir: .", "base_branch")] // Missing required field
+        #[case("docker:\n  project_dir: .", "git")] // Missing required git section
         fn test_unknown_fields_rejected(#[case] extra_yaml: &str, #[case] error_contains: &str) {
             let yaml = format!(
                 r#"
