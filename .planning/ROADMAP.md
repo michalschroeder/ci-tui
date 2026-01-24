@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Code Quality Baseline** - Clean up codebase to idiomatic Rust
 - [x] **Phase 3: Unit Test Coverage** - Tests for business logic modules
 - [x] **Phase 4: Mock-Based Tests** - Tests for external dependencies
-- [ ] **Phase 5: Widget Tests & Architecture** - UI tests + architectural polish (gap closure in progress)
+- [x] **Phase 5: Widget Tests & Architecture** - UI tests + architectural polish
 
 ## Phase Details
 
@@ -119,8 +119,8 @@ Plans:
 - [x] 05-01-PLAN.md — Centralize state mutations in App::update() with AppMessage enum
 - [x] 05-02-PLAN.md — Add widget tests for dashboard rendering with TestBackend
 - [x] 05-03-PLAN.md — Verify panic hook and achieve 60%+ code coverage
-- [ ] 05-04-PLAN.md — (Gap closure) Create widget tests using TestBackend
-- [ ] 05-05-PLAN.md — (Gap closure) Generate HTML coverage report and add needs_redraw tests
+- [x] 05-04-PLAN.md — (Gap closure) Create widget tests using TestBackend
+- [x] 05-05-PLAN.md — (Gap closure) Generate HTML coverage report and add needs_redraw tests
 
 ## Progress
 
@@ -133,8 +133,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
 | 3. Unit Test Coverage | 3/3 | Complete | 2026-01-24 |
 | 4. Mock-Based Tests | 2/2 | Complete | 2026-01-24 |
-| 5. Widget Tests & Architecture | 3/5 | Gap Closure | - |
+| 5. Widget Tests & Architecture | 5/5 | Complete | 2026-01-25 |
 
 ---
 *Roadmap created: 2026-01-22*
-*Last updated: 2026-01-24*
+*Last updated: 2026-01-25*
