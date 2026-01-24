@@ -17,7 +17,7 @@
 //! - [`dashboard`]: Rendering logic using ratatui widgets
 
 pub mod app;
-mod dashboard;
+pub mod dashboard;
 
 pub use app::AppMessage;
 
