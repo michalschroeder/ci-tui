@@ -113,10 +113,12 @@ Plans:
   4. Running `cargo llvm-cov --html` shows 60%+ code coverage across core modules with detailed line-by-line report
   5. Dirty flag optimization (needs_redraw) is preserved and verified during all UI refactoring
 
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 05-01: TBD during planning
+- [ ] 05-01-PLAN.md — Centralize state mutations in App::update() with AppMessage enum
+- [ ] 05-02-PLAN.md — Add widget tests for dashboard rendering with TestBackend
+- [ ] 05-03-PLAN.md — Verify panic hook and achieve 60%+ code coverage
 
 ## Progress
 
@@ -129,7 +131,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Code Quality Baseline | 2/2 | Complete | 2026-01-24 |
 | 3. Unit Test Coverage | 3/3 | Complete | 2026-01-24 |
 | 4. Mock-Based Tests | 2/2 | Complete | 2026-01-24 |
-| 5. Widget Tests & Architecture | 0/TBD | Not started | - |
+| 5. Widget Tests & Architecture | 0/3 | Not started | - |
 
 ---
 *Roadmap created: 2026-01-22*
