@@ -292,6 +292,7 @@ mod tests {
     use super::*;
     use crate::config::CiConfig;
     use crate::git::ChangedFiles;
+    use rstest::rstest;
     use std::path::PathBuf;
 
     fn test_config_yaml() -> &'static str {
@@ -796,5 +797,447 @@ checks:
             "Expected 'tests/Unit/FooTest.php' to appear exactly once, but found {} occurrences in {:?}",
             test_file_count, files
         );
+    }
+
+    mod test_determine_checks {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[rstest]
+        #[case("src/Foo.php", "php", true)]
+        #[case("src/Foo.php", "yaml", false)]
+        #[case("config.yaml", "yaml", true)]
+        #[case("config.yml", "yaml", true)]
+        #[case("README.md", "php", false)]
+        #[case("src/Bar/Baz.php", "php", true)]
+        #[case("tests/FooTest.php", "tests", true)]
+        #[case("", "php", false)]
+        fn test_file_pattern_trigger(
+            #[case] file: &str,
+            #[case] pattern_key: &str,
+            #[case] should_trigger: bool,
+        ) {
+            let config = parse_config();
+            let changed_files = if file.is_empty() {
+                make_changed_files(vec![])
+            } else {
+                make_changed_files(vec![file])
+            };
+            let project_root = PathBuf::from("/tmp/project");
+
+            let checks = determine_checks(&config, &changed_files, &project_root);
+
+            // Find checks that have the pattern_key trigger
+            let matching_checks: Vec<_> = checks
+                .iter()
+                .filter(|c| {
+                    c.definition
+                        .triggers
+                        .as_ref()
+                        .and_then(|t| t.file_pattern.as_ref())
+                        .map(|p| p == pattern_key)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if should_trigger {
+                // At least one check with this pattern should not be on-demand
+                let has_triggered = matching_checks.iter().any(|c| !c.on_demand);
+                assert!(
+                    has_triggered,
+                    "Expected file '{}' to trigger pattern '{}', but all checks are on-demand",
+                    file, pattern_key
+                );
+            } else {
+                // All checks with this pattern should be on-demand (skipped)
+                let all_on_demand = matching_checks.iter().all(|c| c.on_demand);
+                assert!(
+                    all_on_demand,
+                    "Expected file '{}' NOT to trigger pattern '{}', but found triggered checks",
+                    file, pattern_key
+                );
+            }
+        }
+
+        #[test]
+        fn test_empty_changed_files_returns_only_always_run_checks() {
+            let config = parse_config();
+            let changed_files = make_changed_files(vec![]);
+            let project_root = PathBuf::from("/tmp/project");
+
+            let checks = determine_checks(&config, &changed_files, &project_root);
+
+            // Should have at least the cache-warmup check (always run)
+            let always_run_checks: Vec<_> = checks.iter().filter(|c| !c.on_demand).collect();
+            assert!(
+                !always_run_checks.is_empty(),
+                "Should have always-run checks"
+            );
+
+            // Verify cache-warmup is present and not on-demand
+            let cache_warmup = checks.iter().find(|c| c.id() == "cache-warmup");
+            assert!(cache_warmup.is_some(), "Cache warmup should be present");
+            assert!(
+                !cache_warmup.unwrap().on_demand,
+                "Cache warmup should not be on-demand"
+            );
+
+            // All checks with triggers should be on-demand (skipped)
+            for check in checks.iter() {
+                if check.definition.triggers.is_some() {
+                    assert!(
+                        check.on_demand,
+                        "Check '{}' with triggers should be on-demand when no files match",
+                        check.id()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_empty_config_returns_empty() {
+            let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig =
+                serde_yaml::from_str(config_yaml).expect("Failed to parse empty config");
+            let changed_files = make_changed_files(vec!["src/Foo.php"]);
+            let project_root = PathBuf::from("/tmp/project");
+
+            let checks = determine_checks(&config, &changed_files, &project_root);
+
+            assert_eq!(checks.len(), 0, "Empty config should return no checks");
+        }
+
+        #[test]
+        fn test_no_matching_patterns_marks_as_on_demand() {
+            let config = parse_config();
+            // Change a file that matches no patterns in config
+            let changed_files = make_changed_files(vec!["README.txt", "data.json"]);
+            let project_root = PathBuf::from("/tmp/project");
+
+            let checks = determine_checks(&config, &changed_files, &project_root);
+
+            // All checks with triggers should be on-demand
+            let checks_with_triggers: Vec<_> = checks
+                .iter()
+                .filter(|c| c.definition.triggers.is_some())
+                .collect();
+
+            assert!(
+                !checks_with_triggers.is_empty(),
+                "Config should have checks with triggers"
+            );
+
+            for check in checks_with_triggers {
+                assert!(
+                    check.on_demand,
+                    "Check '{}' should be on-demand when no files match its patterns",
+                    check.id()
+                );
+            }
+        }
+
+        #[test]
+        fn test_both_file_pattern_and_test_discovery_triggers() {
+            // This test uses the existing test_no_duplicate_test_files_from_multiple_triggers
+            // config which has both trigger types
+            let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  phpunit:
+    pattern: 'tests/.*Test\.php$'
+  php_src:
+    pattern: '^src/.*\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        triggers:
+          file_pattern: phpunit
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/Unit/{path}Test.php
+"#;
+            let config: CiConfig =
+                serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+            let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+            let test_file_path = temp_dir.path().join("tests/Unit/FooTest.php");
+            std::fs::create_dir_all(test_file_path.parent().unwrap())
+                .expect("Failed to create test dir");
+            std::fs::write(&test_file_path, "<?php // test content")
+                .expect("Failed to write test file");
+
+            // Change only a test file (file_pattern trigger)
+            let changed_files = make_changed_files(vec!["tests/Unit/FooTest.php"]);
+            let checks = determine_checks(&config, &changed_files, temp_dir.path());
+
+            let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+            assert!(!phpunit.on_demand, "Check should be triggered");
+            assert!(
+                phpunit
+                    .files
+                    .contains(&"tests/Unit/FooTest.php".to_string()),
+                "Should include the test file"
+            );
+        }
+
+        #[test]
+        fn test_multiple_checks_same_pattern() {
+            let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  group1:
+    checks:
+      check1:
+        name: Check 1
+        command: check1 {files}
+        triggers:
+          file_pattern: php
+      check2:
+        name: Check 2
+        command: check2 {files}
+        triggers:
+          file_pattern: php
+"#;
+            let config: CiConfig =
+                serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+            let changed_files = make_changed_files(vec!["src/Foo.php"]);
+            let project_root = PathBuf::from("/tmp/project");
+
+            let checks = determine_checks(&config, &changed_files, &project_root);
+
+            // Both checks should be triggered
+            let check1 = checks.iter().find(|c| c.id() == "check1");
+            let check2 = checks.iter().find(|c| c.id() == "check2");
+
+            assert!(check1.is_some(), "check1 should be present");
+            assert!(check2.is_some(), "check2 should be present");
+
+            let check1 = check1.unwrap();
+            let check2 = check2.unwrap();
+
+            assert!(!check1.on_demand, "check1 should be triggered");
+            assert!(!check2.on_demand, "check2 should be triggered");
+
+            assert!(
+                check1.files.contains(&"src/Foo.php".to_string()),
+                "check1 should have matching file"
+            );
+            assert!(
+                check2.files.contains(&"src/Foo.php".to_string()),
+                "check2 should have matching file"
+            );
+        }
+    }
+
+    mod test_resolve_command {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn test_files_placeholder_replaced() {
+            let config = parse_config();
+            let check = config
+                .groups()
+                .find_map(|(_, g)| g.checks.get("php-lint"))
+                .expect("php-lint should exist");
+
+            let files = vec!["src/Foo.php", "src/Bar.php"];
+            let resolved = resolve_command(&config, check, &files, false);
+
+            assert!(
+                resolved.contains("src/Foo.php"),
+                "Resolved command should contain first file"
+            );
+            assert!(
+                resolved.contains("src/Bar.php"),
+                "Resolved command should contain second file"
+            );
+            assert!(
+                !resolved.contains("{files}"),
+                "Resolved command should not contain placeholder"
+            );
+        }
+
+        #[test]
+        fn test_files_placeholder_empty_when_no_files() {
+            let config = parse_config();
+            let check = config
+                .groups()
+                .find_map(|(_, g)| g.checks.get("php-lint"))
+                .expect("php-lint should exist");
+
+            let resolved = resolve_command(&config, check, &[], false);
+
+            assert_eq!(
+                resolved, "parallel-lint",
+                "Resolved command should have {{files}} replaced with empty string"
+            );
+        }
+
+        #[test]
+        fn test_command_trimmed() {
+            let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  test:
+    checks:
+      test-check:
+        name: Test
+        command: "  phpunit   {files}  "
+        triggers:
+          file_pattern: php
+"#;
+            let config: CiConfig =
+                serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+            let check = config
+                .groups()
+                .find_map(|(_, g)| g.checks.get("test-check"))
+                .expect("test-check should exist");
+
+            let resolved = resolve_command(&config, check, &[], false);
+
+            // Should be trimmed
+            assert_eq!(resolved, "phpunit", "Command should be trimmed");
+            assert!(
+                !resolved.starts_with(' '),
+                "Command should not start with space"
+            );
+            assert!(
+                !resolved.ends_with(' '),
+                "Command should not end with space"
+            );
+        }
+
+        #[test]
+        fn test_fix_command_resolved() {
+            let config = parse_config();
+            let check = config
+                .groups()
+                .find_map(|(_, g)| g.checks.get("phpstan"))
+                .expect("phpstan should exist");
+
+            let files = vec!["src/Foo.php"];
+            let resolved_fix = resolve_command(&config, check, &files, true);
+
+            assert!(
+                resolved_fix.contains("phpstan fix"),
+                "Fix command should be resolved"
+            );
+            assert!(
+                resolved_fix.contains("src/Foo.php"),
+                "Fix command should contain file"
+            );
+        }
+    }
+
+    mod test_group_checks {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn test_empty_checks_returns_empty_groups() {
+            let checks: Vec<CheckToRun> = vec![];
+            let grouped = group_checks(&checks);
+
+            assert_eq!(grouped.len(), 0, "Empty checks should return empty groups");
+        }
+
+        #[test]
+        fn test_single_group() {
+            let checks = vec![
+                make_check("check1", "group1", "Check 1", "cmd1", false, false),
+                make_check("check2", "group1", "Check 2", "cmd2", false, false),
+                make_check("check3", "group1", "Check 3", "cmd3", false, false),
+            ];
+
+            let grouped = group_checks(&checks);
+
+            assert_eq!(grouped.len(), 1, "Should have one group");
+            assert_eq!(grouped[0].0, "group1", "Group name should match");
+            assert_eq!(grouped[0].1.len(), 3, "Group should have 3 checks");
+        }
+
+        #[test]
+        fn test_multiple_groups_preserve_order() {
+            let checks = vec![
+                make_check("check1", "warmup", "Check 1", "cmd1", false, false),
+                make_check("check2", "fast", "Check 2", "cmd2", false, false),
+                make_check("check3", "analysis", "Check 3", "cmd3", false, false),
+                make_check("check4", "fast", "Check 4", "cmd4", false, false),
+            ];
+
+            let grouped = group_checks(&checks);
+
+            assert_eq!(grouped.len(), 3, "Should have 3 groups");
+
+            // Groups should appear in order of first occurrence
+            let group_names: Vec<&str> = grouped.iter().map(|(name, _)| *name).collect();
+            assert_eq!(
+                group_names,
+                vec!["warmup", "fast", "analysis"],
+                "Groups should be in order of first occurrence"
+            );
+
+            // fast group should have 2 checks
+            let fast_group = grouped.iter().find(|(name, _)| *name == "fast").unwrap();
+            assert_eq!(fast_group.1.len(), 2, "fast group should have 2 checks");
+        }
     }
 }
