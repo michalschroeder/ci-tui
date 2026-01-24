@@ -24,7 +24,7 @@ use std::process::Command;
 ///
 /// This abstraction allows mocking git operations in tests without requiring
 /// a real Git repository. The production implementation uses `std::process::Command`.
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(test, feature = "test"), mockall::automock)]
 pub trait GitExecutor {
     /// Execute a git command with the given arguments.
     ///
@@ -142,7 +142,7 @@ pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<Cha
 /// Detect changed files using a custom executor (testable version).
 ///
 /// See [`detect_changes`] for details.
-fn detect_changes_with_executor(
+pub fn detect_changes_with_executor(
     project_root: &Path,
     git_config: &GitConfig,
     executor: &impl GitExecutor,
@@ -182,7 +182,7 @@ pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedF
 /// Get changed files using a custom executor (testable version).
 ///
 /// See [`get_changed_files`] for details.
-fn get_changed_files_with_executor(
+pub fn get_changed_files_with_executor(
     project_root: &Path,
     base_ref: &str,
     executor: &impl GitExecutor,
@@ -218,7 +218,7 @@ pub fn current_branch(project_root: &Path) -> Result<String> {
 /// Get current branch using a custom executor (testable version).
 ///
 /// See [`current_branch`] for details.
-fn current_branch_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+pub fn current_branch_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
     let args = vec![
         "rev-parse".to_string(),
         "--abbrev-ref".to_string(),
@@ -240,7 +240,7 @@ pub fn short_commit(project_root: &Path) -> Result<String> {
 /// Get short commit using a custom executor (testable version).
 ///
 /// See [`short_commit`] for details.
-fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+pub fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
     let args = vec![
         "rev-parse".to_string(),
         "--short".to_string(),
@@ -249,6 +249,7 @@ fn short_commit_with_executor(project_root: &Path, executor: &impl GitExecutor) 
     let output = executor.run_command(project_root, &args)?;
     Ok(output.trim().to_string())
 }
+
 
 #[cfg(test)]
 mod tests {
