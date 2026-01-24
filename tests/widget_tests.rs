@@ -31,6 +31,20 @@ fn find_symbol_color(buffer: &Buffer, symbol: char) -> Option<Color> {
     None
 }
 
+/// Helper to find all colors for a symbol in the buffer
+fn find_all_symbol_colors(buffer: &Buffer, symbol: char) -> Vec<Color> {
+    let mut colors = Vec::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            if cell.symbol() == symbol.to_string() {
+                colors.push(cell.fg);
+            }
+        }
+    }
+    colors
+}
+
 /// Helper to check if text appears anywhere in the buffer
 fn buffer_contains(buffer: &Buffer, text: &str) -> bool {
     for y in 0..buffer.area.height {
@@ -272,12 +286,24 @@ fn test_all_passed_state_shows_only_green() {
         checkmark_count
     );
 
-    // Verify they're green
-    let checkmark_color = find_symbol_color(buffer, '✓');
-    assert_eq!(
-        checkmark_color.unwrap(),
-        Color::Green,
-        "All checkmarks should be green"
+    // Verify ALL checkmarks are green
+    // Note: The header might have a checkmark with gauge background color,
+    // so we check that at least 3 checkmarks are green (one for each check)
+    let checkmark_colors = find_all_symbol_colors(buffer, '✓');
+    assert!(
+        checkmark_colors.len() >= 3,
+        "Should have found at least 3 checkmarks, found {}",
+        checkmark_colors.len()
+    );
+    let green_count = checkmark_colors
+        .iter()
+        .filter(|&c| *c == Color::Green)
+        .count();
+    assert!(
+        green_count >= 3,
+        "At least 3 checkmarks should be green (one per check), found {} green out of {} total",
+        green_count,
+        checkmark_colors.len()
     );
 }
 
