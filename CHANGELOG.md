@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.1.8](https://github.com/michalschroeder/ci-tui/compare/v0.1.7...v0.1.8) (2026-01-24)
+
+
+### Features
+
+* **02-01:** configure Clippy lints in Cargo.toml ([8745713](https://github.com/michalschroeder/ci-tui/commit/87457139ea0c675111edfd65a5151b489e2ead40))
+* **quick-021:** replace Laravel example with Symfony example ([b0f55e3](https://github.com/michalschroeder/ci-tui/commit/b0f55e3b4416b44139add6db9eaa9d92ad169c97))
+
+
+### Bug Fixes
+
+* **02-02:** replace production unwrap calls with proper Option handling ([e8e8d2f](https://github.com/michalschroeder/ci-tui/commit/e8e8d2fee5a5d17311e563f04db8c5b8548c6f6d))
+* **test-discovery:** add missing path argument to grep command ([b62ce7c](https://github.com/michalschroeder/ci-tui/commit/b62ce7cae829e789bc256e6b3087876f3dce0cbf))
+* **test-discovery:** strip ./ prefix from grep output and fix test conflicts ([a84061f](https://github.com/michalschroeder/ci-tui/commit/a84061fa6b6be5aa5398f79a41147f2ce67e496c))
+
+
+### Documentation
+
+* **02-02:** add comprehensive module and public API documentation ([4f4f8cf](https://github.com/michalschroeder/ci-tui/commit/4f4f8cf8c8997eacd5463806f11d59bfb3563315))
+* **03-01:** complete checks.rs unit test coverage plan ([c32f319](https://github.com/michalschroeder/ci-tui/commit/c32f319ffe234e8b88561ae2fd317b09233d190a))
+* **phase-2:** complete Code Quality Baseline phase ([3b9e3eb](https://github.com/michalschroeder/ci-tui/commit/3b9e3ebc83c0e5cdb6e16be1030409ad44a65390))
+* **phase-3:** complete Unit Test Coverage phase ([9f60d96](https://github.com/michalschroeder/ci-tui/commit/9f60d96af78ef808503e9dce9b196a6f656ebf71))
+* **quick-020:** complete config documentation plan ([2f3a63b](https://github.com/michalschroeder/ci-tui/commit/2f3a63bb19b0cf4fc14ef5516a56faf42247c7cc))
+* **quick-020:** create comprehensive configuration reference ([acc7562](https://github.com/michalschroeder/ci-tui/commit/acc7562eec5145c7f2387c8f73580750deff3d15))
+* **quick-020:** create PHP Laravel example config ([f2a276b](https://github.com/michalschroeder/ci-tui/commit/f2a276b04a3a73a859aef8a03d47620c5bec4935))
+* **quick-021:** complete Replace Laravel example with Symfony example task ([d6e923f](https://github.com/michalschroeder/ci-tui/commit/d6e923f949194815c5fa3c5c2c06d4db8de9b339))
+* **quick-021:** update documentation to reference Symfony example ([e760c38](https://github.com/michalschroeder/ci-tui/commit/e760c381f584e2f58ef45bad4486b8e342681773))
+* **quick-022:** add grep_search tests for test discovery ([d0fff92](https://github.com/michalschroeder/ci-tui/commit/d0fff928dfeeb609c75ea8c9a37648d86177fcc1))
+* **quick-023:** fix grep_search missing path argument ([99f7188](https://github.com/michalschroeder/ci-tui/commit/99f71880b347a1d5f6e38dbe7256fa2180a036f4))
+
 ## [0.1.7](https://github.com/michalschroeder/ci-tui/compare/v0.1.6...v0.1.7) (2026-01-23)
 
 
