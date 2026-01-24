@@ -11,18 +11,18 @@ See: .planning/PROJECT.md (updated 2026-01-22)
 ## Current Position
 
 Phase: 4 of 5 (Mock-Based Tests)
-Plan: 1 of TBD in current phase
+Plan: 2 of TBD in current phase
 Status: In progress
-Last activity: 2026-01-24 — Completed 04-01-PLAN.md (GitExecutor trait with mock tests)
+Last activity: 2026-01-24 — Completed 04-02-PLAN.md (CommandExecutor trait with async mock tests)
 
-Progress: [██████░░░░] 60%
+Progress: [██████░░░░] 62%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 26
-- Average duration: 4.4m
-- Total execution time: 1.96 hours
+- Total plans completed: 27
+- Average duration: 4.6m
+- Total execution time: 2.18 hours
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [██████░░░░] 60%
 | 01-foundation | 3 | 12.5m | 4.2m |
 | 02-code-quality-baseline | 2 | 10m | 5m |
 | 03-unit-test-coverage | 3 | 11m | 3.7m |
-| 04-mock-based-tests | 1 | 11m | 11m |
+| 04-mock-based-tests | 2 | 24m | 12m |
 
 **Recent Trend:**
-- Last 5 plans: 04-01 (11m), 03-03 (3m), 03-02 (2.5m), 03-01 (5.5m), 02-02 (8m)
-- Trend: Mock infrastructure setup takes longer than simple unit tests
+- Last 5 plans: 04-02 (13m), 04-01 (11m), 03-03 (3m), 03-02 (2.5m), 03-01 (5.5m)
+- Trend: Async trait mocking requires similar setup time to sync traits
 
 *Updated after each plan completion*
 
@@ -80,6 +80,8 @@ Recent decisions affecting current work:
 - 04-01: Use unconditional #[mockall::automock] with optional mockall dependency (enables integration tests)
 - 04-01: Make executor-accepting functions public for testability (maintains backward compatibility)
 - 04-01: Use Vec<String> in trait signatures to avoid lifetime issues (cleaner than &[&str])
+- 04-02: Use async-trait for async methods in trait (mockall supports with proper macro ordering)
+- 04-02: Separate pure function tests from mock-based tests (test pure functions directly, mock only I/O)
 
 ### Pending Todos
 
@@ -120,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-24T11:46:26Z
-Stopped at: Completed 04-01-PLAN.md (GitExecutor trait with mock tests)
+Last session: 2026-01-24T12:02:07Z
+Stopped at: Completed 04-02-PLAN.md (CommandExecutor trait with async mock tests)
 Resume file: None
