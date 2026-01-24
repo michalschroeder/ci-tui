@@ -1597,4 +1597,50 @@ checks:
             assert_eq!(app.output_scroll, 2);
         }
     }
+
+    mod needs_redraw_tests {
+        use super::*;
+
+        #[test]
+        fn test_needs_redraw_true_on_new_app() {
+            let app = make_app();
+            assert!(app.needs_redraw, "New app should need initial render");
+        }
+
+        #[test]
+        fn test_needs_redraw_can_be_cleared() {
+            let mut app = make_app();
+            app.needs_redraw = false;
+            assert!(!app.needs_redraw, "needs_redraw should be clearable");
+        }
+
+        #[test]
+        fn test_needs_redraw_set_after_update() {
+            let mut app = make_app();
+            app.needs_redraw = false; // Clear first
+            app.update(AppMessage::NextCheck);
+            assert!(app.needs_redraw, "update() should set needs_redraw");
+        }
+
+        #[test]
+        fn test_needs_redraw_set_after_various_updates() {
+            let messages = [
+                AppMessage::PreviousCheck,
+                AppMessage::ScrollUp(1),
+                AppMessage::ScrollDown(1),
+                AppMessage::ToggleFailedFilter,
+                AppMessage::ShowAll,
+                AppMessage::ToggleFullCommand,
+            ];
+            for msg in messages {
+                let mut app = make_app();
+                app.needs_redraw = false;
+                app.update(msg);
+                assert!(
+                    app.needs_redraw,
+                    "update() should set needs_redraw for all message types"
+                );
+            }
+        }
+    }
 }
