@@ -1478,4 +1478,123 @@ checks:
         assert_eq!(result.status, CheckStatus::Skipped);
         assert_eq!(result.output, "No changes detected");
     }
+
+    mod update_tests {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn test_update_next_check() {
+            let mut app = make_app();
+            assert_eq!(app.selected_check, 0);
+
+            app.update(AppMessage::NextCheck);
+
+            assert_eq!(app.selected_check, 1);
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_previous_check() {
+            let mut app = make_app();
+            app.selected_check = 2;
+
+            app.update(AppMessage::PreviousCheck);
+
+            assert_eq!(app.selected_check, 1);
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_toggle_filter() {
+            let mut app = make_app();
+            assert_eq!(app.status_filter, StatusFilter::All);
+
+            app.update(AppMessage::ToggleFailedFilter);
+
+            assert_eq!(app.status_filter, StatusFilter::Failed);
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_system_stats() {
+            let mut app = make_app();
+
+            app.update(AppMessage::SystemStats {
+                cpu_usage: 75.0,
+                mem_used: 8_000_000_000,
+                mem_total: 16_000_000_000,
+            });
+
+            assert_eq!(app.cpu_usage(), 75.0);
+            assert_eq!(app.mem_usage(), 50.0);
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_fix_lifecycle() {
+            let mut app = make_app();
+
+            // Start fix
+            app.update(AppMessage::StartFix);
+            assert!(app.fix_running);
+            assert!(app.fix_result.is_none());
+
+            // Finish fix
+            let result = CheckResult {
+                check_id: "test".to_string(),
+                status: CheckStatus::Passed,
+                output: "Fixed!".to_string(),
+                error_output: String::new(),
+                duration_ms: 100,
+                started_at: None,
+                finished_at: None,
+            };
+            app.update(AppMessage::FinishFix(result));
+
+            assert!(!app.fix_running);
+            assert!(app.fix_result.is_some());
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_status_message() {
+            let mut app = make_app();
+
+            app.update(AppMessage::SetStatusMessage(Some(
+                "Test message".to_string(),
+            )));
+            assert_eq!(app.status_message, Some("Test message".to_string()));
+
+            app.update(AppMessage::ClearStatusMessage);
+            assert!(app.status_message.is_none());
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_update_clears_fix_result_on_navigation() {
+            let mut app = make_app();
+            app.fix_result = Some(CheckResult::pending("test"));
+
+            app.update(AppMessage::NextCheck);
+
+            assert!(app.fix_result.is_none());
+        }
+
+        #[test]
+        fn test_update_scroll() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().output = (0..50)
+                .map(|i| format!("line {}", i))
+                .collect::<Vec<_>>()
+                .join("\n");
+            app.set_output_visible_lines(10);
+
+            app.update(AppMessage::ScrollDown(5));
+            assert_eq!(app.output_scroll, 5);
+
+            app.update(AppMessage::ScrollUp(3));
+            assert_eq!(app.output_scroll, 2);
+        }
+    }
 }
