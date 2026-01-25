@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.1.9](https://github.com/michalschroeder/ci-tui/compare/v0.1.8...v0.1.9) (2026-01-25)
+
+
+### Features
+
+* **04-02:** add CommandExecutor trait and refactor runner.rs ([fc2c933](https://github.com/michalschroeder/ci-tui/commit/fc2c933e7a11ccd835657fa34f3bb30deb595e76))
+* **05-01:** add AppMessage enum and App::update() method ([19b8e0f](https://github.com/michalschroeder/ci-tui/commit/19b8e0f95207686751195ef9574ce0f0cadd4d15))
+* **05-02:** add test helper for creating App with known state ([81c23af](https://github.com/michalschroeder/ci-tui/commit/81c23af6fa19958dd4a4bc7ffdf1d10c175a9ce3))
+* **05-04:** make dashboard module public for widget tests ([8b1717f](https://github.com/michalschroeder/ci-tui/commit/8b1717f1af0e7ee522e98e7b6a9e791947ff89a5))
+
+
+### Bug Fixes
+
+* **05-03:** fix test compilation errors ([d62f99e](https://github.com/michalschroeder/ci-tui/commit/d62f99e672360d4d1c0d84834118b798540800d7))
+* **05-03:** make app module public and fix test dead_code warnings ([b56796b](https://github.com/michalschroeder/ci-tui/commit/b56796baab02cdd47cc0aab34c8f051cd30aeb5a))
+* **05-04:** remove unused import and fix deprecated buffer.get() calls ([fad5b9b](https://github.com/michalschroeder/ci-tui/commit/fad5b9b39d46f2726e0170ca7b3c11ad9f7fc848))
+* **05-05:** fix widget test to check all checkmarks not just first ([3a50070](https://github.com/michalschroeder/ci-tui/commit/3a5007031f6497516c7fe684d3b51714dc4cbf08))
+* **deps:** update rust crate sysinfo to 0.38 ([2039095](https://github.com/michalschroeder/ci-tui/commit/20390955fde64f1a7a1d86e334713ea32559439f))
+* **deps:** update rust crate sysinfo to 0.38 ([#22](https://github.com/michalschroeder/ci-tui/issues/22)) ([e540d00](https://github.com/michalschroeder/ci-tui/commit/e540d00bd90b55341e446f09f29b2db4fd88e97d))
+
+
+### Code Refactoring
+
+* **04-01:** add GitExecutor trait and refactor git.rs ([999db00](https://github.com/michalschroeder/ci-tui/commit/999db00cd2e642282f93ce3a0063afa98b3a4816))
+* **05-01:** use AppMessage dispatch in mod.rs event loop ([08c986e](https://github.com/michalschroeder/ci-tui/commit/08c986ee26aaf848eb3503251a894c00e096e42f))
+
+
+### Documentation
+
+* **04-02:** complete CommandExecutor trait plan ([fafd0d5](https://github.com/michalschroeder/ci-tui/commit/fafd0d572d239cfff0806e7f725e5963404c0046))
+* **05-01:** complete TEA-lite state management plan ([382f53d](https://github.com/michalschroeder/ci-tui/commit/382f53db8bdc620e6a341dde93f5dbcf58a94308))
+* **05-03:** complete panic hook verification and coverage milestone ([e1b74d1](https://github.com/michalschroeder/ci-tui/commit/e1b74d1cc44a4155d714a4210c78f7b600c57eef))
+* **05-03:** mark Phase 5 as complete ([161bbc0](https://github.com/michalschroeder/ci-tui/commit/161bbc02b75cf174078e32672fd708218c570115))
+* **05-04:** complete widget tests plan ([2036014](https://github.com/michalschroeder/ci-tui/commit/203601454e245755282d585d94a271652bf01374))
+* **05-05:** generate HTML coverage report ([0f005c7](https://github.com/michalschroeder/ci-tui/commit/0f005c7cfc4b5a7a58dc18c2a247c11ed639b789))
+* **05-05:** update STATE.md with plan 05-05 completion ([f9f8c79](https://github.com/michalschroeder/ci-tui/commit/f9f8c7902b1300591e6c2d5224086451a6bc20b4))
+* **05:** complete Widget Tests & Architecture phase ([7980c98](https://github.com/michalschroeder/ci-tui/commit/7980c9875b0020da7a416b16ad23618d32ca498b))
+* **phase-4:** complete mock-based-tests phase ([8fab84d](https://github.com/michalschroeder/ci-tui/commit/8fab84d6f1df5a03b8dc5d95291ba1dcfa87e84c))
+* remove unnecessary `-it` flags from Docker commands in CLAUDE.md ([be60d64](https://github.com/michalschroeder/ci-tui/commit/be60d640104fed8cb013a5dcaaa795c27b17346c))
+
 ## [0.1.8](https://github.com/michalschroeder/ci-tui/compare/v0.1.7...v0.1.8) (2026-01-24)
 
 
