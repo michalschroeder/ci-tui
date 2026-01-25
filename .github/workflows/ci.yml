@@ -20,8 +20,8 @@ jobs:
       - name: Run actionlint
         uses: raven-actions/actionlint@v2
 
-  test:
-    name: Test
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -43,11 +43,37 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Run tests
-        run: cargo nextest run --profile ci
+      - name: Run unit tests
+        run: cargo nextest run --lib --profile ci
 
       - name: Run doctests
         run: cargo test --doc
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run integration tests
+        run: cargo nextest run --features test --test '*' --profile ci
 
   lint:
     name: Lint
@@ -106,7 +132,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Generate coverage report
-        run: cargo llvm-cov nextest --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --features test --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
