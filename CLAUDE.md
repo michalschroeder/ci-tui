@@ -15,7 +15,7 @@ CI-TUI is a terminal UI application for running CI checks on changed files. It d
 Run fix mode to auto-apply formatting fixes:
 
 ```bash
-docker run -it --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
 ```
 
 This runs `cargo fmt` on changed files to fix formatting issues automatically.
@@ -25,7 +25,7 @@ This runs `cargo fmt` on changed files to fix formatting issues automatically.
 Run validation to check all CI checks pass:
 
 ```bash
-docker run -it --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
 ```
 
 This runs ci-tui in simple mode (self-hosting) which executes:
