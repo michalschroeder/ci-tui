@@ -57,6 +57,29 @@ make build
 cargo run -- --config <path-to-config.yaml>
 ```
 
+## Versioning (Release Please)
+
+This project uses [Release Please](https://github.com/googleapis/release-please) for automated versioning and changelog generation.
+
+**How it works:**
+1. Push commits to `master` with [Conventional Commits](https://www.conventionalcommits.org/) format
+2. CI runs → Release Please creates/updates a release PR
+3. Merging the release PR triggers version bump, CHANGELOG.md update, and Docker image build
+
+**Version bumps based on commit types:**
+- `feat:` → Minor version bump (0.1.x → 0.2.0)
+- `fix:` → Patch version bump (0.1.8 → 0.1.9)
+- `feat!:` or `BREAKING CHANGE:` → Major version bump (0.x → 1.0.0)
+
+**Do NOT:**
+- Manually create git tags (Release Please manages them)
+- Edit `Cargo.toml` version field directly
+- Edit `CHANGELOG.md` directly
+
+**Config files:**
+- `release-please-config.json` - Release Please configuration
+- `.release-please-manifest.json` - Current version tracking
+
 ## Architecture
 
 ### Core Flow
