@@ -47,9 +47,16 @@ checks:
 
   tests:
     name: Tests
+    parallel: true
     checks:
-      test:
+      unit:
         name: Unit Tests
-        command: script -q -c "cargo nextest run --status-level all --color always" /dev/null
+        command: script -q -c "cargo nextest run --lib --status-level all --color always" /dev/null
+        triggers:
+          file_pattern: rust
+
+      integration:
+        name: Integration Tests
+        command: script -q -c "cargo nextest run --features test --test '*' --status-level all --color always" /dev/null
         triggers:
           file_pattern: rust
