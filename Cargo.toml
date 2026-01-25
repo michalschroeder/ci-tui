@@ -1,6 +1,6 @@
 [package]
 name = "ci-tui"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "TUI for running and monitoring CI checks"
 
@@ -41,7 +41,7 @@ chrono = "0.4"
 base64 = "0.22"
 
 # System monitoring
-sysinfo = "0.37"
+sysinfo = "0.38"
 
 # Test utilities (optional)
 mockall = { version = "0.14", optional = true }
