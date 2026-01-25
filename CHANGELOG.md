@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/michalschroeder/ci-tui/compare/v0.1.9...v0.1.10) (2026-01-25)
+
+
+### Documentation
+
+* add Release Please versioning section to CLAUDE.md ([7558f9f](https://github.com/michalschroeder/ci-tui/commit/7558f9fd59cf0a9f68e50c76573a9e6e26de4223))
+
 ## [0.1.9](https://github.com/michalschroeder/ci-tui/compare/v0.1.8...v0.1.9) (2026-01-25)
 
 
