@@ -3,5 +3,15 @@
   "extends": [
     "config:recommended",
     "helpers:pinGitHubActionDigests"
+  ],
+  "labels": ["dependencies"],
+  "schedule": ["after 8am and before 9am every day"],
+  "packageRules": [
+    {
+      "description": "Disable digest pinning for taiki-e/install-action (uses tool names as refs, not versions)",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["taiki-e/install-action"],
+      "pinDigests": false
+    }
   ]
 }
