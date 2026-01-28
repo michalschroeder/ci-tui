@@ -73,6 +73,7 @@ version: 2
 docker:
   project_dir: ./test
   service: app
+  shell: bash
 
 git:
   base_branch: main

@@ -104,6 +104,7 @@ pub fn build_docker_exec_command(
     container_name: &str,
     env: &std::collections::HashMap<String, String>,
     command: &str,
+    shell: &str,
 ) -> String {
     // Build env flags for docker exec (-e KEY='VALUE' for each)
     // Values are quoted to handle special characters like & ? in URLs
@@ -114,18 +115,20 @@ pub fn build_docker_exec_command(
         .join(" ");
 
     // Build docker exec command
-    // Use bash with single quotes to prevent outer shell from expanding variables
+    // Use configured shell with single quotes to prevent outer shell from expanding variables
     if env_flags.is_empty() {
         format!(
-            "docker exec {} bash -c '{}'",
+            "docker exec {} {} -c '{}'",
             container_name,
+            shell,
             command.replace('\'', "'\\''")
         )
     } else {
         format!(
-            "docker exec {} {} bash -c '{}'",
+            "docker exec {} {} {} -c '{}'",
             env_flags,
             container_name,
+            shell,
             command.replace('\'', "'\\''")
         )
     }
@@ -150,6 +153,9 @@ pub fn build_docker_run_command(
     // Get working directory from config (default: /app)
     let work_dir = docker_config.working_dir();
 
+    // Get shell from config (default: bash)
+    let shell = docker_config.shell();
+
     // Get volume mount args if configured
     let volume_args = docker_config.volume_args().unwrap_or_default();
 
@@ -166,7 +172,7 @@ pub fn build_docker_run_command(
 
     parts.push(format!("-w {}", work_dir));
     parts.push(image_name);
-    parts.push(format!("bash -c '{}'", command.replace('\'', "'\\''")));
+    parts.push(format!("{} -c '{}'", shell, command.replace('\'', "'\\''")));
 
     parts.join(" ")
 }
@@ -510,7 +516,12 @@ impl CheckRunner {
 
         // Check if container is running, use exec if yes, run if no
         let docker_cmd = if self.executor.is_container_running(&container_name) {
-            build_docker_exec_command(&container_name, &env, &pre_cmd.command)
+            build_docker_exec_command(
+                &container_name,
+                &env,
+                &pre_cmd.command,
+                self.config.docker.shell(),
+            )
         } else {
             build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
         };
@@ -590,7 +601,7 @@ pub async fn execute_docker_command_with_executor(
 
     // Check if container is running, use exec if yes, run if no
     let docker_cmd = if executor.is_container_running(container_name) {
-        build_docker_exec_command(container_name, env, command)
+        build_docker_exec_command(container_name, env, command, docker_config.shell())
     } else {
         build_docker_run_command(docker_config, env, command)
     };
