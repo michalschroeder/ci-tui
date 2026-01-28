@@ -887,6 +887,7 @@ version: 2
 docker:
   project_dir: ./infrastructure
   service: php
+  shell: bash
 
 git:
   base_branch: development

@@ -21,7 +21,7 @@ mod build_docker_exec_command_tests {
     #[test]
     fn no_env_vars() {
         let env = HashMap::new();
-        let cmd = build_docker_exec_command("my-container", &env, "cargo test");
+        let cmd = build_docker_exec_command("my-container", &env, "cargo test", "bash");
         assert_eq!(cmd, "docker exec my-container bash -c 'cargo test'");
     }
 
@@ -31,7 +31,7 @@ mod build_docker_exec_command_tests {
     fn single_env_var(#[case] key: &str, #[case] val: &str, #[case] expected_flag: &str) {
         let mut env = HashMap::new();
         env.insert(key.to_string(), val.to_string());
-        let cmd = build_docker_exec_command("container", &env, "test");
+        let cmd = build_docker_exec_command("container", &env, "test", "bash");
         assert!(
             cmd.contains(expected_flag),
             "Command '{}' should contain '{}'",
@@ -45,7 +45,7 @@ mod build_docker_exec_command_tests {
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
         env.insert("BAZ".to_string(), "qux".to_string());
-        let cmd = build_docker_exec_command("container", &env, "test");
+        let cmd = build_docker_exec_command("container", &env, "test", "bash");
 
         // Both env vars should be present
         assert!(cmd.contains("-e FOO='bar'") || cmd.contains("-e BAZ='qux'"));
@@ -56,7 +56,7 @@ mod build_docker_exec_command_tests {
     fn special_characters_in_url() {
         let mut env = HashMap::new();
         env.insert("URL".to_string(), "http://test?a=1&b=2".to_string());
-        let cmd = build_docker_exec_command("container", &env, "curl $URL");
+        let cmd = build_docker_exec_command("container", &env, "curl $URL", "bash");
 
         // URL with special characters should be properly quoted
         assert!(cmd.contains("-e URL='http://test?a=1&b=2'"));
@@ -66,7 +66,7 @@ mod build_docker_exec_command_tests {
     fn single_quote_in_env_value() {
         let mut env = HashMap::new();
         env.insert("MSG".to_string(), "it's working".to_string());
-        let cmd = build_docker_exec_command("container", &env, "echo $MSG");
+        let cmd = build_docker_exec_command("container", &env, "echo $MSG", "bash");
 
         // Single quotes in values should be escaped
         assert!(cmd.contains("it'\\''s working"));
@@ -75,7 +75,7 @@ mod build_docker_exec_command_tests {
     #[test]
     fn single_quote_in_command() {
         let env = HashMap::new();
-        let cmd = build_docker_exec_command("container", &env, "echo 'hello world'");
+        let cmd = build_docker_exec_command("container", &env, "echo 'hello world'", "bash");
 
         // Single quotes in command should be escaped
         assert!(cmd.contains("echo '\\''hello world'\\''"));
@@ -85,10 +85,28 @@ mod build_docker_exec_command_tests {
     fn command_with_env_flag_placement() {
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let cmd = build_docker_exec_command("my-container", &env, "cargo test");
+        let cmd = build_docker_exec_command("my-container", &env, "cargo test", "bash");
 
         // Env flags should come before container name and bash -c
         assert!(cmd.starts_with("docker exec -e FOO='bar' my-container bash -c"));
+    }
+
+    #[test]
+    fn custom_shell_sh() {
+        let env = HashMap::new();
+        let cmd = build_docker_exec_command("my-container", &env, "ls -la", "/bin/sh");
+        assert_eq!(cmd, "docker exec my-container /bin/sh -c 'ls -la'");
+    }
+
+    #[test]
+    fn custom_shell_with_env_vars() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let cmd = build_docker_exec_command("container", &env, "test", "/bin/sh");
+
+        // Should use custom shell
+        assert!(cmd.contains("/bin/sh -c"));
+        assert!(!cmd.contains("bash"));
     }
 }
 
@@ -105,6 +123,7 @@ mod build_docker_run_command_tests {
             image: Some("test-image:latest".to_string()),
             volume_mount: None,
             work_dir: None,
+            shell: "bash".to_string(),
             env: HashMap::new(),
         }
     }
@@ -118,6 +137,17 @@ mod build_docker_run_command_tests {
         assert!(cmd.starts_with("docker run --rm"));
         assert!(cmd.contains("test-image:latest"));
         assert!(cmd.contains("bash -c 'cargo test'"));
+    }
+
+    #[test]
+    fn with_custom_shell() {
+        let mut config = minimal_docker_config();
+        config.shell = "/bin/sh".to_string();
+        let env = HashMap::new();
+        let cmd = build_docker_run_command(&config, &env, "ls");
+
+        assert!(cmd.contains("/bin/sh -c 'ls'"));
+        assert!(!cmd.contains("bash"));
     }
 
     #[test]
@@ -260,6 +290,7 @@ mod execute_docker_command_tests {
             image: Some("test-image:latest".to_string()),
             volume_mount: None,
             work_dir: None,
+            shell: "bash".to_string(),
             env: HashMap::new(),
         }
     }

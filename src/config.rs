@@ -101,6 +101,8 @@ pub struct DockerConfig {
     /// Overrides the default /app workdir
     #[serde(default)]
     pub work_dir: Option<String>,
+    /// Shell to use inside container (e.g., "bash" or "/bin/sh" for Alpine)
+    pub shell: String,
     /// Environment variables to pass to all docker exec commands
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
@@ -167,6 +169,12 @@ impl DockerConfig {
     /// Returns work_dir if set, otherwise "/app"
     pub fn working_dir(&self) -> &str {
         self.work_dir.as_deref().unwrap_or("/app")
+    }
+
+    /// Get the shell to use inside containers
+    /// Returns configured shell (defaults to "bash" for backward compatibility)
+    pub fn shell(&self) -> &str {
+        &self.shell
     }
 }
 
@@ -405,6 +413,7 @@ version: 2
 docker:
   project_dir: ./infrastructure
   service: php
+  shell: bash
   # container: myproject-php-1  # Optional: explicit container name for docker exec
 
 git:
@@ -554,6 +563,7 @@ checks:
 version: 2
 docker:
   project_dir: ./infrastructure
+  shell: bash
 git:
   base_branch: dev
   fallback_branch: HEAD~1
@@ -589,6 +599,7 @@ checks:
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -613,6 +624,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
   unknown_docker_field: invalid
 git:
   base_branch: main
@@ -636,6 +648,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branc: main
   fallback_branch: HEAD~1
@@ -710,6 +723,7 @@ version: 2
 docker:
   project_dir: ./infrastructure
   service: php
+  shell: bash
   container: explicit-container-name
 git:
   base_branch: main
@@ -728,6 +742,7 @@ version: 2
 docker:
   project_dir: ./infrastructure
   service: php
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -745,6 +760,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -765,6 +781,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
   image: rust:latest
 git:
   base_branch: main
@@ -783,6 +800,7 @@ version: 2
 docker:
   project_dir: ./myproject
   service: web
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -801,6 +819,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
   volume_mount: ".:/build"
 git:
   base_branch: main
@@ -819,6 +838,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -836,6 +856,7 @@ version: 2
 docker:
   project_dir: .
   service: app
+  shell: bash
   work_dir: "/custom/path"
 git:
   base_branch: main
@@ -846,6 +867,47 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.docker.working_dir(), "/custom/path");
         }
+
+        #[test]
+        fn test_shell_required() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let result: Result<CiConfig, _> = serde_yaml::from_str(yaml);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("shell") || err.contains("missing field"),
+                "Error should mention missing shell field: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_shell_custom() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  shell: /bin/sh
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.shell(), "/bin/sh");
+        }
     }
 
     mod test_yaml_parsing_errors {
@@ -854,7 +916,7 @@ checks: {}
         #[rstest]
         #[case("typo_field: oops", "typo_field")] // Unknown top-level field
         #[case("docker:\n  unknown_field: x", "unknown")] // Unknown nested field
-        #[case("docker:\n  project_dir: .", "git")] // Missing required git section
+        #[case("docker:\n  project_dir: .\n  shell: bash", "git")] // Missing required git section
         fn test_unknown_fields_rejected(#[case] extra_yaml: &str, #[case] error_contains: &str) {
             let yaml = format!(
                 r#"
@@ -886,6 +948,7 @@ checks: {{}}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -908,6 +971,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -936,6 +1000,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -953,6 +1018,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -970,6 +1036,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -990,6 +1057,7 @@ version: 2
 docker:
   project_dir: .
   service: default_service
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -1032,6 +1100,7 @@ checks:
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -1042,6 +1111,7 @@ checks: {}
             assert_eq!(config.version, 2);
             assert_eq!(config.docker.project_dir, ".");
             assert_eq!(config.docker.service, "app"); // Default value
+            assert_eq!(config.docker.shell, "bash");
             assert_eq!(config.git.base_branch, "main");
             assert_eq!(config.git.fallback_branch, "HEAD~1");
         }
@@ -1056,6 +1126,7 @@ checks: {}
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -1083,6 +1154,7 @@ checks:
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -1106,6 +1178,7 @@ checks:
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1
@@ -1130,6 +1203,7 @@ checks:
 version: 2
 docker:
   project_dir: .
+  shell: bash
 git:
   base_branch: main
   fallback_branch: HEAD~1

@@ -195,12 +195,16 @@ async fn run_fix_command(
     let default_container = docker_config.container_name();
     let container_name = check_container.unwrap_or(&default_container);
 
+    // Get shell from config (default: bash)
+    let shell = docker_config.shell();
+
     // Check if container is running, use exec if yes, run if no
     let docker_cmd = if is_container_running(container_name) {
         // Container is running, use docker exec
         format!(
-            "docker exec {} bash -c '{}'",
+            "docker exec {} {} -c '{}'",
             container_name,
+            shell,
             command.replace('\'', "'\\''")
         )
     } else {
@@ -212,8 +216,9 @@ async fn run_fix_command(
             cmd.push_str(&format!(" -v {}", volume));
         }
         cmd.push_str(&format!(
-            " {} bash -c '{}'",
+            " {} {} -c '{}'",
             image_name,
+            shell,
             command.replace('\'', "'\\''")
         ));
         cmd
