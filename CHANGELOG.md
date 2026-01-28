@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.11](https://github.com/michalschroeder/ci-tui/compare/v0.1.10...v0.1.11) (2026-01-28)
+
+
+### Features
+
+* add configurable shell option for Alpine container compatibility ([b453fcd](https://github.com/michalschroeder/ci-tui/commit/b453fcdb1e3a3094114b3795223eb5497919d2a2))
+* add configurable shell option for Alpine container compatibility ([#28](https://github.com/michalschroeder/ci-tui/issues/28)) ([0c84689](https://github.com/michalschroeder/ci-tui/commit/0c846895ddbb730b3c9fe372ee61c5547cacc269))
+
 ## [0.1.10](https://github.com/michalschroeder/ci-tui/compare/v0.1.9...v0.1.10) (2026-01-25)
 
 
