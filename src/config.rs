@@ -45,7 +45,7 @@ pub struct CiConfig {
     pub ignore_patterns: Vec<String>,
     /// Cached compiled ignore patterns (lazily initialized)
     #[serde(skip)]
-    compiled_ignore_patterns: OnceLock<Vec<Regex>>,
+    pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
 }
 
 /// File pattern definition with optional color for UI display
