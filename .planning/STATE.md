@@ -6,16 +6,16 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 **Core value:** Developers can confidently modify any module without fear of breaking things, and the TUI remains responsive during check execution.
 
-**Current focus:** Milestone complete — run `/gsd:new-milestone` to define next milestone
+**Current focus:** v2.0 Comprehensive Cleanup — test infrastructure, code duplication, module organization
 
 ## Current Position
 
-Phase: v1.0 complete
-Plan: N/A
-Status: Milestone shipped
-Last activity: 2026-01-25 — v1.0 milestone complete
+Phase: Not started (researching)
+Plan: —
+Status: Researching domain
+Last activity: 2026-01-29 — Milestone v2.0 started
 
-Progress: [██████████] 100% (v1.0)
+Progress: [░░░░░░░░░░] 0% (v2.0)
 
 ## Milestone History
 
@@ -54,8 +54,9 @@ Resume file: None
 
 ## Next Steps
 
-1. Run `/gsd:new-milestone` to define v1.1 or v2.0 goals
-2. Or continue with quick tasks as needed
+1. Complete research on Rust testing patterns and module organization
+2. Define requirements from research findings
+3. Create roadmap for v2.0 phases
 
 ---
-*State updated: 2026-01-25 after v1.0 milestone*
+*State updated: 2026-01-29 after starting v2.0 milestone*

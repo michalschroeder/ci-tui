@@ -33,7 +33,12 @@ Developers can confidently modify any module without fear of breaking things, an
 
 ### Active
 
-(None — start next milestone with `/gsd:new-milestone`)
+**v2.0 Comprehensive Cleanup:**
+- [ ] Consolidate test infrastructure — shared fixtures/builders instead of duplicate YAML configs
+- [ ] Eliminate code duplication — duration formatting, container checks
+- [ ] Add unit tests to untested modules — runner.rs, simple.rs, fix.rs
+- [ ] Refactor large functions — determine_checks (155 lines), run functions (150+ lines)
+- [ ] Improve module organization — potentially split large UI module
 
 ### Out of Scope
 
