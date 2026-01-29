@@ -80,6 +80,16 @@ This project uses [Release Please](https://github.com/googleapis/release-please)
 - `release-please-config.json` - Release Please configuration
 - `.release-please-manifest.json` - Current version tracking
 
+## Test Fixtures
+
+Test configs are centralized in `tests/common/configs.rs`:
+
+- **Fixtures**: Use `minimal_config()`, `php_project_config()`, `rust_project_config()` for common scenarios
+- **Builder**: Use `ConfigBuilder::new().with_*().build()` for custom configs
+- **Inline**: Keep truly unique edge-case configs inline with `// Edge case: ...` comment
+
+New tests should require <10 lines of config setup.
+
 ## Architecture
 
 ### Core Flow
