@@ -9,6 +9,7 @@ use ci_tui::runner::CheckStatus;
 use ci_tui::ui::app::App;
 
 // Re-export types used by runner tests
+#[allow(unused_imports)]
 pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
 
 /// Create a mock that returns the given output for any command
