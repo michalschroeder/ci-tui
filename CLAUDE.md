@@ -90,6 +90,14 @@ Test configs are centralized in `tests/common/configs.rs`:
 
 New tests should require <10 lines of config setup.
 
+### Test Architecture Note
+
+**Integration tests** (`tests/*.rs`): Import shared fixtures from `tests/common/configs.rs`
+
+**Library tests** (`src/*.rs #[cfg(test)]`): Use inline structured fixtures. Cannot import from `tests/common/` due to cargo fmt limitations in Docker - the `#[path = "..."]` directive breaks when cargo fmt runs inside containers. This is a known Rust tooling limitation.
+
+The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure of `tests/common/configs.rs` but are defined locally. When adding new library tests, follow the existing inline fixture pattern in that module.
+
 ## Architecture
 
 ### Core Flow
