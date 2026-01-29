@@ -8,6 +8,9 @@ use ci_tui::git::ChangedFiles;
 use ci_tui::runner::CheckStatus;
 use ci_tui::ui::app::App;
 
+// Re-export types used by runner tests
+pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
+
 /// Create a mock that returns the given output for any command
 #[allow(dead_code)]
 pub fn mock_git_with_output(output: &str) -> ci_tui::git::MockGitExecutor {
