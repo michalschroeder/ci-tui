@@ -406,63 +406,214 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    fn minimal_config_yaml() -> &'static str {
-        r#"
-version: 2
+    // Import builder types from the main config module
+    use super::{CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig};
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
 
-docker:
-  project_dir: ./infrastructure
-  service: php
-  shell: bash
-  # container: myproject-php-1  # Optional: explicit container name for docker exec
-
-git:
-  base_branch: development
-  fallback_branch: HEAD~1
-
-file_patterns:
-  php:
-    pattern: '\.php$'
-  php_src:
-    pattern: '^src/'
-    color: blue
-  tests:
-    pattern: 'tests/.*\.php$'
-    color: green
-
-ignore_patterns:
-  - '\.md$'
-  - '\.github/'
-
-checks:
-  fast:
-    name: Fast Checks
-    parallel: true
-    checks:
-      php-lint:
-        name: PHP syntax check
-        command: php-lint {files}
-        triggers:
-          file_pattern: php
-
-  tests:
-    checks:
-      phpunit:
-        name: PHPUnit Tests
-        command: phpunit {files}
-        service: custom-service
-        triggers:
-          file_pattern: tests
-"#
+    // Inline ConfigBuilder for tests (simplified version of tests/common/configs.rs)
+    struct ConfigBuilder {
+        docker_project_dir: String,
+        docker_service: String,
+        git_base: String,
+        git_fallback: String,
+        file_patterns: HashMap<String, FilePattern>,
+        checks: IndexMap<String, GroupConfig>,
+        ignore_patterns: Vec<String>,
     }
 
-    fn parse_test_config() -> CiConfig {
-        serde_yaml::from_str(minimal_config_yaml()).expect("Failed to parse test config")
+    impl ConfigBuilder {
+        fn new() -> Self {
+            Self {
+                docker_project_dir: "./test".to_string(),
+                docker_service: "app".to_string(),
+                git_base: "main".to_string(),
+                git_fallback: "HEAD~1".to_string(),
+                file_patterns: HashMap::new(),
+                checks: IndexMap::new(),
+                ignore_patterns: Vec::new(),
+            }
+        }
+
+        fn with_docker(mut self, project_dir: &str, service: &str) -> Self {
+            self.docker_project_dir = project_dir.to_string();
+            self.docker_service = service.to_string();
+            self
+        }
+
+        fn with_git_branches(mut self, base: &str, fallback: &str) -> Self {
+            self.git_base = base.to_string();
+            self.git_fallback = fallback.to_string();
+            self
+        }
+
+        fn with_file_pattern(mut self, name: &str, pattern: &str, color: Option<&str>) -> Self {
+            self.file_patterns.insert(
+                name.to_string(),
+                FilePattern {
+                    pattern: pattern.to_string(),
+                    color: color.map(String::from),
+                },
+            );
+            self
+        }
+
+        fn with_check(mut self, group_id: &str, check_id: &str, check: CheckDefinition) -> Self {
+            self.checks
+                .entry(group_id.to_string())
+                .or_insert_with(|| GroupConfig {
+                    name: None,
+                    parallel: false,
+                    stop_on_failure: false,
+                    pre_commands: Vec::new(),
+                    checks: IndexMap::new(),
+                })
+                .checks
+                .insert(check_id.to_string(), check);
+            self
+        }
+
+        fn with_parallel_group(mut self, group_id: &str) -> Self {
+            self.checks
+                .entry(group_id.to_string())
+                .or_insert_with(|| GroupConfig {
+                    name: None,
+                    parallel: true,
+                    stop_on_failure: false,
+                    pre_commands: Vec::new(),
+                    checks: IndexMap::new(),
+                })
+                .parallel = true;
+            self
+        }
+
+        fn with_group_name(mut self, group_id: &str, name: &str) -> Self {
+            self.checks
+                .entry(group_id.to_string())
+                .or_insert_with(|| GroupConfig {
+                    name: None,
+                    parallel: false,
+                    stop_on_failure: false,
+                    pre_commands: Vec::new(),
+                    checks: IndexMap::new(),
+                })
+                .name = Some(name.to_string());
+            self
+        }
+
+        fn with_ignore_patterns(mut self, patterns: Vec<&str>) -> Self {
+            self.ignore_patterns = patterns.into_iter().map(String::from).collect();
+            self
+        }
+
+        fn build(self) -> CiConfig {
+            CiConfig {
+                version: 2,
+                docker: DockerConfig {
+                    project_dir: self.docker_project_dir,
+                    service: self.docker_service,
+                    container: None,
+                    image: None,
+                    volume_mount: None,
+                    work_dir: None,
+                    shell: "bash".to_string(),
+                    env: HashMap::new(),
+                },
+                git: GitConfig {
+                    base_branch: self.git_base,
+                    fallback_branch: self.git_fallback,
+                },
+                file_patterns: self.file_patterns,
+                checks: self.checks,
+                ignore_patterns: self.ignore_patterns,
+                compiled_ignore_patterns: OnceLock::new(),
+            }
+        }
+    }
+
+    struct CheckBuilder {
+        name: String,
+        command: String,
+        service: Option<String>,
+        fix_command: Option<String>,
+        triggers: Option<CheckTriggers>,
+    }
+
+    impl CheckBuilder {
+        fn new(name: &str, command: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                command: command.to_string(),
+                service: None,
+                fix_command: None,
+                triggers: None,
+            }
+        }
+
+        fn with_service(mut self, service: &str) -> Self {
+            self.service = Some(service.to_string());
+            self
+        }
+
+        fn with_file_pattern_trigger(mut self, pattern_name: &str) -> Self {
+            let triggers = self.triggers.get_or_insert_with(CheckTriggers::default);
+            triggers.file_pattern = Some(pattern_name.to_string());
+            self
+        }
+
+        fn build(self) -> CheckDefinition {
+            CheckDefinition {
+                name: self.name,
+                command: self.command,
+                service: self.service,
+                container: None,
+                fix_command: self.fix_command,
+                triggers: self.triggers,
+                on_demand: false,
+                env: HashMap::new(),
+            }
+        }
+    }
+
+    // Helper fixtures
+    fn php_project_config() -> CiConfig {
+        ConfigBuilder::new()
+            .with_docker("./infrastructure", "php")
+            .with_git_branches("development", "HEAD~1")
+            .with_file_pattern("php", r"\.php$", None)
+            .with_file_pattern("php_src", r"^src/", Some("blue"))
+            .with_file_pattern("tests", r"tests/.*\.php$", Some("green"))
+            .with_ignore_patterns(vec![r"\.md$", r"\.github/"])
+            .with_check(
+                "fast",
+                "php-lint",
+                CheckBuilder::new("PHP syntax check", "php-lint {files}")
+                    .with_file_pattern_trigger("php")
+                    .build(),
+            )
+            .with_group_name("fast", "Fast Checks")
+            .with_parallel_group("fast")
+            .with_check(
+                "tests",
+                "phpunit",
+                CheckBuilder::new("PHPUnit Tests", "phpunit {files}")
+                    .with_service("custom-service")
+                    .with_file_pattern_trigger("tests")
+                    .build(),
+            )
+            .build()
+    }
+
+    fn config_with_ignore_patterns() -> CiConfig {
+        ConfigBuilder::new()
+            .with_ignore_patterns(vec![r"\.md$", r"\.github/"])
+            .build()
     }
 
     #[test]
     fn test_get_file_pattern() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         assert_eq!(config.get_file_pattern("php"), Some(r"\.php$"));
         assert_eq!(config.get_file_pattern("php_src"), Some("^src/"));
@@ -471,7 +622,7 @@ checks:
 
     #[test]
     fn test_should_ignore_file() {
-        let config = parse_test_config();
+        let config = config_with_ignore_patterns();
 
         // Should ignore markdown files
         assert!(config.should_ignore_file("README.md"));
@@ -487,7 +638,7 @@ checks:
 
     #[test]
     fn test_get_file_color() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         // Files matching patterns with colors
         assert_eq!(config.get_file_color("src/Service/Foo.php"), "blue");
@@ -499,13 +650,15 @@ checks:
 
     #[test]
     fn test_default_service() {
-        let config = parse_test_config();
+        let config = ConfigBuilder::new()
+            .with_docker("./infrastructure", "php")
+            .build();
         assert_eq!(config.default_service(), "php");
     }
 
     #[test]
     fn test_get_group() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let fast = config.get_group("fast");
         assert!(fast.is_some());
@@ -520,7 +673,7 @@ checks:
 
     #[test]
     fn test_groups_preserves_order() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let group_names: Vec<&str> = config.groups().map(|(name, _)| name).collect();
         assert_eq!(group_names, vec!["fast", "tests"]);
@@ -528,7 +681,7 @@ checks:
 
     #[test]
     fn test_group_display_name() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let fast = config.get_group("fast").unwrap();
         assert_eq!(fast.display_name("fast"), "Fast Checks");
@@ -539,7 +692,7 @@ checks:
 
     #[test]
     fn test_check_service_or_default() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let fast = config.get_group("fast").unwrap();
         let php_lint = fast.checks.get("php-lint").unwrap();
@@ -552,30 +705,20 @@ checks:
 
     #[test]
     fn test_check_always_run() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let fast = config.get_group("fast").unwrap();
         let php_lint = fast.checks.get("php-lint").unwrap();
         assert!(!php_lint.always_run()); // Has triggers
 
         // Create a check without triggers to test always_run = true
-        let yaml = r#"
-version: 2
-docker:
-  project_dir: ./infrastructure
-  shell: bash
-git:
-  base_branch: dev
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks:
-  warmup:
-    checks:
-      cache-warmup:
-        name: Cache warmup
-        command: bin/console cache:warmup
-"#;
-        let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = ConfigBuilder::new()
+            .with_check(
+                "warmup",
+                "cache-warmup",
+                CheckBuilder::new("Cache warmup", "bin/console cache:warmup").build(),
+            )
+            .build();
         let warmup = config.get_group("warmup").unwrap();
         let cache = warmup.checks.get("cache-warmup").unwrap();
         assert!(cache.always_run()); // No triggers
@@ -583,7 +726,7 @@ checks:
 
     #[test]
     fn test_parallel_and_stop_on_failure() {
-        let config = parse_test_config();
+        let config = php_project_config();
 
         let fast = config.get_group("fast").unwrap();
         assert!(fast.parallel);
@@ -678,7 +821,7 @@ checks: {}
         #[case("nonexistent", None)]
         #[case("", None)] // Empty key
         fn test_get_file_pattern(#[case] key: &str, #[case] expected: Option<&str>) {
-            let config = parse_test_config();
+            let config = php_project_config();
             assert_eq!(config.get_file_pattern(key), expected);
         }
     }
@@ -694,7 +837,7 @@ checks: {}
         #[case("tests/FooTest.php", false)]
         #[case("", false)] // Empty path
         fn test_should_ignore_file(#[case] path: &str, #[case] should_ignore: bool) {
-            let config = parse_test_config();
+            let config = php_project_config();
             assert_eq!(config.should_ignore_file(path), should_ignore);
         }
     }
@@ -708,7 +851,7 @@ checks: {}
         #[case("composer.json", "white")] // No color defined
         #[case("", "white")] // Empty path
         fn test_get_file_color(#[case] path: &str, #[case] expected_color: &str) {
-            let config = parse_test_config();
+            let config = php_project_config();
             assert_eq!(config.get_file_color(path), expected_color);
         }
     }

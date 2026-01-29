@@ -126,6 +126,21 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the display name for a group
+    pub fn with_group_name(mut self, group_id: &str, name: &str) -> Self {
+        self.checks
+            .entry(group_id.to_string())
+            .or_insert_with(|| GroupConfig {
+                name: None,
+                parallel: false,
+                stop_on_failure: false,
+                pre_commands: Vec::new(),
+                checks: IndexMap::new(),
+            })
+            .name = Some(name.to_string());
+        self
+    }
+
     /// Set ignore patterns for file filtering
     pub fn with_ignore_patterns(mut self, patterns: Vec<&str>) -> Self {
         self.ignore_patterns = patterns.into_iter().map(String::from).collect();
@@ -243,18 +258,30 @@ pub fn minimal_config() -> CiConfig {
     ConfigBuilder::new().build()
 }
 
-/// PHP project with lint check and common patterns
+/// PHP project with lint check and common patterns (matches original minimal_config_yaml from config.rs tests)
 pub fn php_project_config() -> CiConfig {
     ConfigBuilder::new()
+        .with_docker("./infrastructure", "php")
+        .with_git_branches("development", "HEAD~1")
         .with_file_pattern("php", r"\.php$", None)
-        .with_file_pattern("php_src", r"^src/.*\.php$", None)
-        .with_file_pattern("tests", r"tests/.*\.php$", None)
-        .with_parallel_group("lint")
+        .with_file_pattern("php_src", r"^src/", Some("blue"))
+        .with_file_pattern("tests", r"tests/.*\.php$", Some("green"))
+        .with_ignore_patterns(vec![r"\.md$", r"\.github/"])
         .with_check(
-            "lint",
+            "fast",
             "php-lint",
-            CheckBuilder::new("PHP Lint", "php -l")
+            CheckBuilder::new("PHP syntax check", "php-lint {files}")
                 .with_file_pattern_trigger("php")
+                .build(),
+        )
+        .with_group_name("fast", "Fast Checks")
+        .with_parallel_group("fast")
+        .with_check(
+            "tests",
+            "phpunit",
+            CheckBuilder::new("PHPUnit Tests", "phpunit {files}")
+                .with_service("custom-service")
+                .with_file_pattern_trigger("tests")
                 .build(),
         )
         .build()
@@ -291,8 +318,15 @@ pub fn rust_project_config() -> CiConfig {
         .build()
 }
 
+/// Config with common ignore patterns (\.md$, \.github/) - matches test expectations
+pub fn config_with_ignore_patterns() -> CiConfig {
+    ConfigBuilder::new()
+        .with_ignore_patterns(vec![r"\.md$", r"\.github/"])
+        .build()
+}
+
 /// Config with custom ignore patterns for filtering tests
-pub fn config_with_ignore_patterns(patterns: Vec<&str>) -> CiConfig {
+pub fn config_with_custom_ignore_patterns(patterns: Vec<&str>) -> CiConfig {
     ConfigBuilder::new().with_ignore_patterns(patterns).build()
 }
 
@@ -307,6 +341,65 @@ pub fn config_with_always_run_check() -> CiConfig {
         .build()
 }
 
+/// Config for checks.rs tests with warmup, fast, analysis, and test groups
+///
+/// Provides a PHP project config matching the original test_config_yaml() structure:
+/// - warmup group: cache-warmup (always run, no triggers)
+/// - fast group (parallel): php-lint, yaml-lint (with file pattern triggers)
+/// - analysis group: phpstan (with fix_command)
+/// - tests group: phpunit (with tests pattern trigger)
+pub fn checks_test_config() -> CiConfig {
+    ConfigBuilder::new()
+        .with_docker("./infrastructure", "php")
+        .with_git_branches("development", "HEAD~1")
+        .with_file_pattern("php", r"\.php$", None)
+        .with_file_pattern("php_src", r"^src/.*\.php$", None)
+        .with_file_pattern("tests", r"tests/.*\.php$", None)
+        .with_file_pattern("yaml", r"\.ya?ml$", None)
+        // warmup group - always runs (no triggers)
+        .with_check(
+            "warmup",
+            "cache-warmup",
+            CheckBuilder::new("Cache warmup", "bin/console cache:warmup").build(),
+        )
+        .with_group_name("warmup", "Cache Warmup")
+        // fast group - parallel execution
+        .with_parallel_group("fast")
+        .with_group_name("fast", "Fast Checks")
+        .with_check(
+            "fast",
+            "php-lint",
+            CheckBuilder::new("PHP syntax check", "parallel-lint {files}")
+                .with_file_pattern_trigger("php")
+                .build(),
+        )
+        .with_check(
+            "fast",
+            "yaml-lint",
+            CheckBuilder::new("YAML syntax check", "yaml-lint {files}")
+                .with_file_pattern_trigger("yaml")
+                .build(),
+        )
+        // analysis group - has fix command
+        .with_check(
+            "analysis",
+            "phpstan",
+            CheckBuilder::new("PHPStan", "phpstan analyse {files}")
+                .with_fix_command("phpstan fix {files}")
+                .with_file_pattern_trigger("php")
+                .build(),
+        )
+        // tests group
+        .with_check(
+            "tests",
+            "phpunit",
+            CheckBuilder::new("PHPUnit", "phpunit {files}")
+                .with_file_pattern_trigger("tests")
+                .build(),
+        )
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,7 +409,8 @@ mod tests {
         let _ = minimal_config();
         let _ = php_project_config();
         let _ = rust_project_config();
-        let _ = config_with_ignore_patterns(vec![r"\.md$"]);
+        let _ = config_with_ignore_patterns();
+        let _ = config_with_custom_ignore_patterns(vec![r"\.md$"]);
         let _ = config_with_always_run_check();
     }
 
