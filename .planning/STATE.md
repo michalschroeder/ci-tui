@@ -10,12 +10,12 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 ## Current Position
 
-Phase: 7 of 9 (Code Deduplication) - Ready to start
-Plan: 2 of 3 complete in Phase 6
-Status: Phase transition - infrastructure complete
-Last activity: 2026-01-29 — Completed 06-03-PLAN.md (Complete Test Migration)
+Phase: 6 of 9 (Test Infrastructure Consolidation) - COMPLETE
+Plan: 3 of 3 complete in Phase 6
+Status: Phase 6 complete, ready for Phase 7
+Last activity: 2026-01-29 — Completed 06-02-PLAN.md (Migrate config.rs tests)
 
-Progress: [█████████░] 17/18 = 94% overall (15 v1.0 + 2 v2.0)
+Progress: [█████████░] 18/18 = 100% Phase 6 | 18/27 = 67% overall (15 v1.0 + 3 v2.0)
 
 ## Milestone History
 
@@ -34,10 +34,10 @@ Progress: [█████████░] 17/18 = 94% overall (15 v1.0 + 2 v2.0
 - Coverage: 65% overall
 
 **v2.0 Tracking:**
-- Total plans completed: 2 (Phase 6 complete: 06-01, 06-03)
-- Average duration: 10min
-- Total execution time: 0.33 hours (20min)
-- Phase 6 commits: 5
+- Total plans completed: 3 (Phase 6 complete: 06-01, 06-02, 06-03)
+- Average duration: 11min
+- Total execution time: 0.55 hours (33min)
+- Phase 6 commits: 7
 
 ## Accumulated Context
 
@@ -58,12 +58,14 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 - Library tests in src/ use inline structured fixtures (cargo fmt Docker limitation)
 - Integration tests in tests/ use shared fixtures from tests/common/configs.rs
 - Edge case inline YAML marked with comments for clarity
+- compiled_ignore_patterns made pub(crate) for test accessibility
 
 | Decision | Context | Outcome |
 |----------|---------|---------|
 | Inline fixtures in src/ tests | #[path] imports break cargo fmt in Docker | Structured fixtures work, tests pass |
 | widget_test_config() fixture | Widget tests have specific requirements | Clear separation from rust_project_config() |
 | Edge case comment pattern | Distinguish edge cases from migration candidates | All inline YAML properly documented |
+| pub(crate) for cached fields | Tests need struct literal construction | Maintains API boundaries while enabling tests |
 
 ### Pending Todos
 
@@ -81,15 +83,16 @@ None — Phase 6 complete, ready for Phase 7.
 ## Session Continuity
 
 Last session: 2026-01-29
-Stopped at: Completed 06-03-PLAN.md (Complete Test Migration)
+Stopped at: Completed 06-02-PLAN.md (Migrate config.rs tests)
 Resume file: None
 
 ## Next Steps
 
 1. **Phase 6 COMPLETE** ✅
    - ConfigBuilder and fixtures infrastructure (06-01)
-   - Complete test migration (06-03)
-   - All TEST-01 through TEST-06 requirements satisfied
+   - Migrate config.rs tests (06-02)
+   - Complete test migration for checks.rs and widgets (06-03)
+   - All TEST-01 through TEST-04 requirements satisfied
 
 2. **Phase 7: Code Deduplication** (Ready to start)
    - Deduplicate command building logic
