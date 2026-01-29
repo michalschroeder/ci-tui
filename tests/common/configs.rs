@@ -341,6 +341,45 @@ pub fn config_with_always_run_check() -> CiConfig {
         .build()
 }
 
+/// Config for widget tests with Rust lint and test groups
+///
+/// Provides a Rust project config matching the original widget_test_config_yaml():
+/// - lint group (parallel): clippy, fmt (with fix_command)
+/// - test group: unit tests
+pub fn widget_test_config() -> CiConfig {
+    ConfigBuilder::new()
+        .with_docker("./test", "app")
+        .with_git_branches("main", "HEAD~1")
+        .with_file_pattern("rust", r"\.rs$", Some("yellow"))
+        .with_file_pattern("toml", r"\.toml$", Some("cyan"))
+        .with_parallel_group("lint")
+        .with_group_name("lint", "Lint")
+        .with_check(
+            "lint",
+            "clippy",
+            CheckBuilder::new("Clippy", "cargo clippy")
+                .with_file_pattern_trigger("rust")
+                .build(),
+        )
+        .with_check(
+            "lint",
+            "fmt",
+            CheckBuilder::new("Format Check", "cargo fmt --check")
+                .with_fix_command("cargo fmt")
+                .with_file_pattern_trigger("rust")
+                .build(),
+        )
+        .with_group_name("test", "Tests")
+        .with_check(
+            "test",
+            "unit",
+            CheckBuilder::new("Unit Tests", "cargo test")
+                .with_file_pattern_trigger("rust")
+                .build(),
+        )
+        .build()
+}
+
 /// Config for checks.rs tests with warmup, fast, analysis, and test groups
 ///
 /// Provides a PHP project config matching the original test_config_yaml() structure:

@@ -66,61 +66,10 @@ pub fn mock_executor_failure(stderr: &str) -> ci_tui::runner::MockCommandExecuto
     mock
 }
 
-/// Minimal config YAML for widget tests
-#[allow(dead_code)]
-pub fn widget_test_config_yaml() -> &'static str {
-    r#"
-version: 2
-
-docker:
-  project_dir: ./test
-  service: app
-  shell: bash
-
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-
-file_patterns:
-  rust:
-    pattern: '\.rs$'
-    color: yellow
-  toml:
-    pattern: '\.toml$'
-    color: cyan
-
-checks:
-  lint:
-    name: Lint
-    parallel: true
-    checks:
-      clippy:
-        name: Clippy
-        command: cargo clippy
-        triggers:
-          file_pattern: rust
-      fmt:
-        name: Format Check
-        command: cargo fmt --check
-        fix_command: cargo fmt
-        triggers:
-          file_pattern: rust
-
-  test:
-    name: Tests
-    checks:
-      unit:
-        name: Unit Tests
-        command: cargo test
-        triggers:
-          file_pattern: rust
-"#
-}
-
-/// Parse the widget test config
+/// Parse the widget test config (uses shared fixture from configs module)
 #[allow(dead_code)]
 pub fn parse_widget_config() -> CiConfig {
-    serde_yaml::from_str(widget_test_config_yaml()).expect("Failed to parse widget test config")
+    configs::widget_test_config()
 }
 
 /// Create a CheckToRun for testing
