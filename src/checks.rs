@@ -672,6 +672,7 @@ mod tests {
         );
     }
 
+    // Edge case: Tests check behavior when command lacks {files} placeholder - requires raw YAML to verify skipped_no_files=false
     #[test]
     fn test_check_without_files_placeholder_no_matches_not_skipped() {
         // Test config with a check that doesn't use {files} placeholder
@@ -718,6 +719,7 @@ checks:
         );
     }
 
+    // Edge case: Tests skip behavior with {files} and no discovered tests - requires raw YAML with test_discovery to verify skip logic
     #[test]
     fn test_test_discovery_no_matches_with_files_placeholder_is_skipped() {
         // Test scenario: source file changes, test discovery runs but finds no matching tests,
@@ -777,6 +779,7 @@ checks:
         );
     }
 
+    // Edge case: Tests run-all behavior when no {files} placeholder present - requires raw YAML with test_discovery to verify fallback
     #[test]
     fn test_test_discovery_no_matches_without_files_placeholder_runs_all() {
         // Test scenario: source file changes, test discovery runs but finds no matching tests,
@@ -839,6 +842,7 @@ checks:
         );
     }
 
+    // Edge case: Tests deduplication when file matches both file_pattern and test_discovery - requires raw YAML with both trigger types
     #[test]
     fn test_no_duplicate_test_files_from_multiple_triggers() {
         // Test scenario: A test file changes directly (matches file_pattern)
@@ -1021,6 +1025,7 @@ checks:
             }
         }
 
+        // Edge case: Tests behavior with minimal empty config (no checks defined) - requires raw YAML to verify empty check list
         #[test]
         fn test_empty_config_returns_empty() {
             let config_yaml = r#"
@@ -1077,6 +1082,7 @@ checks: {}
             }
         }
 
+        // Edge case: Tests combined file_pattern and test_discovery triggers - requires raw YAML to verify both trigger types work together
         #[test]
         fn test_both_file_pattern_and_test_discovery_triggers() {
             // This test uses the existing test_no_duplicate_test_files_from_multiple_triggers
@@ -1140,6 +1146,7 @@ checks:
             );
         }
 
+        // Edge case: Tests multiple checks sharing the same file pattern trigger - requires raw YAML to verify independent triggering
         #[test]
         fn test_multiple_checks_same_pattern() {
             let config_yaml = r#"
@@ -1248,6 +1255,7 @@ checks:
             );
         }
 
+        // Edge case: Tests command whitespace normalization - requires raw YAML with extra spaces to verify trimming behavior
         #[test]
         fn test_command_trimmed() {
             let config_yaml = r#"
