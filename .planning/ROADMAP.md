@@ -93,7 +93,7 @@ Plans:
 - [x] 06-01-PLAN.md — Create fixture infrastructure (ConfigBuilder, CheckBuilder, base fixtures, docs)
 - [x] 06-02-PLAN.md — Migrate config.rs tests (27 configs)
 - [x] 06-03-PLAN.md — Migrate checks.rs and tests/common tests (10 configs)
-- [ ] 06-04-PLAN.md — Gap closure: Add edge case documentation and architecture notes
+- [x] 06-04-PLAN.md — Gap closure: Add edge case documentation and architecture notes
 
 **Note:** Success criterion 4 (reduced line counts) was not achievable due to cargo fmt Docker limitations requiring inline fixtures in lib tests. This is documented as an accepted tradeoff.
 
@@ -183,11 +183,11 @@ Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 | 3. Code Quality Improvements | v1.0 | 4/4 | Complete | 2026-01-25 |
 | 4. TUI Responsiveness Fix | v1.0 | 2/2 | Complete | 2026-01-25 |
 | 5. Widget Testing & Documentation | v1.0 | 4/4 | Complete | 2026-01-25 |
-| 6. Test Infrastructure Consolidation | v2.0 | 3/4 | Gap closure | - |
+| 6. Test Infrastructure Consolidation | v2.0 | 4/4 | Complete | 2026-01-30 |
 | 7. Code Deduplication | v2.0 | 0/TBD | Not started | - |
 | 8. Complexity Reduction | v2.0 | 0/TBD | Not started | - |
 | 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-30 after Phase 6 gap closure planning*
+*Last updated: 2026-01-30 after Phase 6 complete*
