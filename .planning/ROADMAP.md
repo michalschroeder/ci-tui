@@ -87,10 +87,12 @@ Plans:
 4. Test modules have reduced line counts due to fixture consolidation
 5. Builder pattern enables composable config creation with sensible defaults
 
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 06-01: TBD during plan-phase
+- [ ] 06-01-PLAN.md — Create fixture infrastructure (ConfigBuilder, CheckBuilder, base fixtures, docs)
+- [ ] 06-02-PLAN.md — Migrate config.rs tests (27 configs)
+- [ ] 06-03-PLAN.md — Migrate checks.rs and tests/common tests (10 configs)
 
 #### Phase 7: Code Deduplication
 
@@ -178,11 +180,11 @@ Phases execute in numeric order: 6 → 7 → 8 → 9
 | 3. Code Quality Improvements | v1.0 | 4/4 | Complete | 2026-01-25 |
 | 4. TUI Responsiveness Fix | v1.0 | 2/2 | Complete | 2026-01-25 |
 | 5. Widget Testing & Documentation | v1.0 | 4/4 | Complete | 2026-01-25 |
-| 6. Test Infrastructure Consolidation | v2.0 | 0/TBD | Not started | - |
+| 6. Test Infrastructure Consolidation | v2.0 | 0/3 | Planned | - |
 | 7. Code Deduplication | v2.0 | 0/TBD | Not started | - |
 | 8. Complexity Reduction | v2.0 | 0/TBD | Not started | - |
 | 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-29 after roadmap creation*
+*Last updated: 2026-01-29 after Phase 6 planning*
