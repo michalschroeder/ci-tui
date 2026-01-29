@@ -407,7 +407,9 @@ mod tests {
     use rstest::rstest;
 
     // Import builder types from the main config module
-    use super::{CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig};
+    use super::{
+        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig,
+    };
     use indexmap::IndexMap;
     use std::collections::HashMap;
     use std::sync::OnceLock;
@@ -736,6 +738,7 @@ mod tests {
         assert!(!tests.parallel);
     }
 
+    // Edge case: Tests YAML parsing rejection of unknown fields at top level - requires raw YAML to verify serde deny_unknown_fields behavior
     #[test]
     fn test_unknown_field_rejected_top_level() {
         let yaml = r#"
@@ -760,6 +763,7 @@ typo_field: oops
         );
     }
 
+    // Edge case: Tests YAML parsing rejection of unknown nested fields - requires raw YAML to verify nested struct deny_unknown_fields
     #[test]
     fn test_unknown_field_rejected_nested() {
         let yaml = r#"
@@ -785,6 +789,7 @@ checks: {}
         );
     }
 
+    // Edge case: Tests error message quality for field name typos - requires raw YAML with intentional typo to verify error reporting
     #[test]
     fn test_typo_produces_helpful_error() {
         let yaml = r#"
@@ -859,6 +864,7 @@ checks: {}
     mod test_docker_config {
         use super::*;
 
+        // Edge case: Tests explicit container name configuration - requires raw YAML to verify container field parsing
         #[test]
         fn test_container_name_explicit() {
             let yaml = r#"
@@ -878,6 +884,7 @@ checks: {}
             assert_eq!(config.docker.container_name(), "explicit-container-name");
         }
 
+        // Edge case: Tests container name derivation from project_dir and service - requires raw YAML to verify default derivation logic
         #[test]
         fn test_container_name_derived() {
             let yaml = r#"
@@ -896,6 +903,7 @@ checks: {}
             assert_eq!(config.docker.container_name(), "infrastructure-php-1");
         }
 
+        // Edge case: Tests container name derivation with "." project_dir - requires raw YAML to verify special path handling
         #[test]
         fn test_container_name_current_dir() {
             let yaml = r#"
@@ -917,6 +925,7 @@ checks: {}
             assert_ne!(container_name, ".-app-1"); // Should not use literal "."
         }
 
+        // Edge case: Tests explicit Docker image name configuration - requires raw YAML to verify image field parsing
         #[test]
         fn test_image_name_explicit() {
             let yaml = r#"
@@ -936,6 +945,7 @@ checks: {}
             assert_eq!(config.docker.image_name(), "rust:latest");
         }
 
+        // Edge case: Tests Docker image name derivation from container name - requires raw YAML to verify derivation logic
         #[test]
         fn test_image_name_derived() {
             let yaml = r#"
@@ -955,6 +965,7 @@ checks: {}
             assert_eq!(config.docker.image_name(), "myproject-web");
         }
 
+        // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
         #[test]
         fn test_volume_args() {
             let yaml = r#"
@@ -974,6 +985,7 @@ checks: {}
             assert_eq!(config.docker.volume_args(), Some("-v .:/build".to_string()));
         }
 
+        // Edge case: Tests default working directory when work_dir not specified - requires raw YAML to verify /app default
         #[test]
         fn test_working_dir_default() {
             let yaml = r#"
@@ -992,6 +1004,7 @@ checks: {}
             assert_eq!(config.docker.working_dir(), "/app");
         }
 
+        // Edge case: Tests custom working directory configuration - requires raw YAML to verify work_dir field parsing
         #[test]
         fn test_working_dir_custom() {
             let yaml = r#"
@@ -1011,6 +1024,7 @@ checks: {}
             assert_eq!(config.docker.working_dir(), "/custom/path");
         }
 
+        // Edge case: Tests that shell field is required - requires raw YAML missing shell to verify error handling
         #[test]
         fn test_shell_required() {
             let yaml = r#"
@@ -1034,6 +1048,7 @@ checks: {}
             );
         }
 
+        // Edge case: Tests custom shell configuration (e.g., /bin/sh for Alpine) - requires raw YAML to verify shell field parsing
         #[test]
         fn test_shell_custom() {
             let yaml = r#"
@@ -1056,6 +1071,7 @@ checks: {}
     mod test_yaml_parsing_errors {
         use super::*;
 
+        // Edge case: Parameterized tests for unknown field rejection - requires raw YAML fragments to test multiple error scenarios
         #[rstest]
         #[case("typo_field: oops", "typo_field")] // Unknown top-level field
         #[case("docker:\n  unknown_field: x", "unknown")] // Unknown nested field
@@ -1085,6 +1101,7 @@ checks: {{}}
     mod test_invalid_regex {
         use super::*;
 
+        // Edge case: Tests handling of invalid regex in file_patterns - requires raw YAML with malformed regex to verify graceful handling
         #[test]
         fn test_invalid_regex_in_file_pattern() {
             let yaml = r#"
@@ -1108,6 +1125,7 @@ checks: {}
             // The pattern matching code handles invalid regex gracefully
         }
 
+        // Edge case: Tests handling of invalid regex in ignore_patterns - requires raw YAML with malformed regex to verify skipping behavior
         #[test]
         fn test_invalid_regex_in_ignore_patterns() {
             let yaml = r#"
@@ -1137,6 +1155,7 @@ checks: {}
     mod test_boundary_cases {
         use super::*;
 
+        // Edge case: Tests minimal config with empty file_patterns - requires raw YAML to verify empty map handling
         #[test]
         fn test_empty_file_patterns() {
             let yaml = r#"
@@ -1155,6 +1174,7 @@ checks: {}
             assert_eq!(config.get_file_color("any/file.txt"), "white");
         }
 
+        // Edge case: Tests minimal config with empty checks - requires raw YAML to verify empty map handling
         #[test]
         fn test_empty_checks() {
             let yaml = r#"
@@ -1173,6 +1193,7 @@ checks: {}
             assert!(config.get_group("anything").is_none());
         }
 
+        // Edge case: Tests config with no ignore_patterns - requires raw YAML to verify default empty list behavior
         #[test]
         fn test_empty_ignore_patterns() {
             let yaml = r#"
@@ -1193,6 +1214,7 @@ checks: {}
             assert!(!config.should_ignore_file("src/main.rs"));
         }
 
+        // Edge case: Tests check definition with all optional fields populated - requires raw YAML to verify complete field parsing
         #[test]
         fn test_check_with_all_optional_fields() {
             let yaml = r#"
@@ -1236,6 +1258,7 @@ checks:
             assert!(check.triggers.is_some());
         }
 
+        // Edge case: Tests absolute minimum required config fields - requires raw YAML to verify required vs optional field defaults
         #[test]
         fn test_minimal_valid_config() {
             // Absolute minimum required fields
@@ -1263,6 +1286,7 @@ checks: {}
     mod test_check_definition {
         use super::*;
 
+        // Edge case: Tests always_run() returns false when triggers are defined - requires raw YAML to test trigger presence detection
         #[test]
         fn test_always_run_with_triggers() {
             let yaml = r#"
@@ -1291,6 +1315,7 @@ checks:
             assert!(!check.always_run()); // Has triggers = not always_run
         }
 
+        // Edge case: Tests always_run() returns true when no triggers defined - requires raw YAML to test trigger absence detection
         #[test]
         fn test_always_run_without_triggers() {
             let yaml = r#"
@@ -1315,6 +1340,7 @@ checks:
             assert!(check.always_run()); // No triggers = always_run
         }
 
+        // Edge case: Tests service_or_default() returns explicit service - requires raw YAML to verify service field override
         #[test]
         fn test_service_or_default_with_service() {
             let yaml = r#"
@@ -1340,6 +1366,7 @@ checks:
             assert_eq!(check.service_or_default("default"), "custom");
         }
 
+        // Edge case: Tests service_or_default() returns default when no service specified - requires raw YAML to verify fallback behavior
         #[test]
         fn test_service_or_default_without_service() {
             let yaml = r#"
