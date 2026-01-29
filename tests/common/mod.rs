@@ -1,18 +1,17 @@
 //! Shared test utilities and mock helpers
 
+pub mod configs;
+
 use ci_tui::checks::CheckToRun;
 use ci_tui::config::{CheckDefinition, CiConfig};
 use ci_tui::git::ChangedFiles;
 use ci_tui::runner::CheckStatus;
 use ci_tui::ui::app::App;
 
-// Re-export for convenience
-pub use ci_tui::git::MockGitExecutor;
-pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
-
 /// Create a mock that returns the given output for any command
 #[allow(dead_code)]
-pub fn mock_git_with_output(output: &str) -> MockGitExecutor {
+pub fn mock_git_with_output(output: &str) -> ci_tui::git::MockGitExecutor {
+    use ci_tui::git::MockGitExecutor;
     let output = output.to_string();
     let mut mock = MockGitExecutor::new();
     mock.expect_run_command()
@@ -22,7 +21,8 @@ pub fn mock_git_with_output(output: &str) -> MockGitExecutor {
 
 /// Create a mock that returns an error
 #[allow(dead_code)]
-pub fn mock_git_error(error_msg: &str) -> MockGitExecutor {
+pub fn mock_git_error(error_msg: &str) -> ci_tui::git::MockGitExecutor {
+    use ci_tui::git::MockGitExecutor;
     let error_msg = error_msg.to_string();
     let mut mock = MockGitExecutor::new();
     mock.expect_run_command()
@@ -32,7 +32,8 @@ pub fn mock_git_error(error_msg: &str) -> MockGitExecutor {
 
 /// Create a mock executor that returns success
 #[allow(dead_code)]
-pub fn mock_executor_success(stdout: &str) -> MockCommandExecutor {
+pub fn mock_executor_success(stdout: &str) -> ci_tui::runner::MockCommandExecutor {
+    use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stdout = stdout.to_string();
     let mut mock = MockCommandExecutor::new();
     mock.expect_execute().returning(move |_, _| {
@@ -49,7 +50,8 @@ pub fn mock_executor_success(stdout: &str) -> MockCommandExecutor {
 
 /// Create a mock executor that returns failure
 #[allow(dead_code)]
-pub fn mock_executor_failure(stderr: &str) -> MockCommandExecutor {
+pub fn mock_executor_failure(stderr: &str) -> ci_tui::runner::MockCommandExecutor {
+    use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stderr = stderr.to_string();
     let mut mock = MockCommandExecutor::new();
     mock.expect_execute().returning(move |_, _| {
