@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.1.12](https://github.com/michalschroeder/ci-tui/compare/v0.1.11...v0.1.12) (2026-01-29)
+
+
+### Features
+
+* **06-01:** create ConfigBuilder and CheckBuilder test fixtures ([fa91046](https://github.com/michalschroeder/ci-tui/commit/fa91046d299d3f1c260b41529d5047d4d92a8cba))
+* **06-02:** migrate config.rs tests to use inline ConfigBuilder ([bc029fe](https://github.com/michalschroeder/ci-tui/commit/bc029fe38241fcfdf7c3ed6a075538855aa8df26))
+* **06-03:** migrate checks.rs tests to structured config fixture ([a94f1d5](https://github.com/michalschroeder/ci-tui/commit/a94f1d5e5675baf68491483fc48527e94f7f2e28))
+* **06-03:** migrate widget tests to use fixture ([dd62279](https://github.com/michalschroeder/ci-tui/commit/dd622795b0ed259ebc4116ba9e1db9997838f3f0))
+
+
+### Bug Fixes
+
+* **06-02:** make compiled_ignore_patterns accessible to tests ([df6355e](https://github.com/michalschroeder/ci-tui/commit/df6355e40f993177f10b49e33ff2a0477d599cb9))
+* add CiConfig constructor for test fixture compatibility ([dd737c6](https://github.com/michalschroeder/ci-tui/commit/dd737c667a9d52216a8ddbdce23c343d89a45043))
+* config tui ([8f67a2d](https://github.com/michalschroeder/ci-tui/commit/8f67a2d4700b4e1d2a76650123e09625474b1591))
+* **test:** suppress unused import warning in common module ([e047029](https://github.com/michalschroeder/ci-tui/commit/e047029776364933454df8aac68bf9414c7cd82a))
+
+
+### Code Refactoring
+
+* **test:** re-export runner types in common module ([12e40eb](https://github.com/michalschroeder/ci-tui/commit/12e40eb1cc04d5c4c53b5902f0a63853e6f0a812))
+
+
+### Documentation
+
+* **06-01:** document test fixture usage in CLAUDE.md ([18b2203](https://github.com/michalschroeder/ci-tui/commit/18b22039b00d938f790b8bb908b3d3d315601f2e))
+* **06-02:** complete plan 06-02 summary and state update ([42c6572](https://github.com/michalschroeder/ci-tui/commit/42c65728aa0e347641590972d50fa00a3a170614))
+* **06-03:** complete Phase 6 with SUMMARY and STATE updates ([3db4498](https://github.com/michalschroeder/ci-tui/commit/3db4498a798c8349124ca787910b5e3b129d7515))
+* **06-04:** add edge case comments to checks.rs inline YAML tests ([a0877c3](https://github.com/michalschroeder/ci-tui/commit/a0877c305a5618df085322c75edd7e2a696c7792))
+* **06-04:** add edge case comments to config.rs inline YAML tests ([33440a3](https://github.com/michalschroeder/ci-tui/commit/33440a3a3c1ae75e32d0159900d0de402f37667a))
+* **06-04:** document test fixture architecture in CLAUDE.md ([0cec43b](https://github.com/michalschroeder/ci-tui/commit/0cec43be89fc483413192073e5d33776bb8fe41b))
+* **06:** complete test infrastructure consolidation phase ([8c7fe53](https://github.com/michalschroeder/ci-tui/commit/8c7fe53475e547c3d349f65c07a7df8df699525e))
+* **06:** update roadmap for gap closure plan ([85d5746](https://github.com/michalschroeder/ci-tui/commit/85d574670c4499dd6e4018b9e2cc9fc9856eacd2))
+* **06:** update roadmap with Phase 6 plans ([8ed14ac](https://github.com/michalschroeder/ci-tui/commit/8ed14ac4dc73bb8163136fa8f62f9ef36fd18aff))
+* complete v2.0 cleanup research ([0b87b80](https://github.com/michalschroeder/ci-tui/commit/0b87b80f59b35a6a88a9b0e810cabd1973d6158f))
+* create milestone v2.0 roadmap (4 phases) ([f4a40a3](https://github.com/michalschroeder/ci-tui/commit/f4a40a385f3c0039bac190e6051e2d886ae0cab7))
+* define milestone v2.0 requirements ([ab3d24a](https://github.com/michalschroeder/ci-tui/commit/ab3d24a80f2e68da06c02d2bdca7906a6a3f195a))
+* start milestone v2.0 Comprehensive Cleanup ([b5e8634](https://github.com/michalschroeder/ci-tui/commit/b5e8634cc5fa65e069a8b7a6754cb4480151252b))
+
 ## [0.1.11](https://github.com/michalschroeder/ci-tui/compare/v0.1.10...v0.1.11) (2026-01-28)
 
 

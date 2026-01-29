@@ -1,6 +1,6 @@
 [package]
 name = "ci-tui"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "TUI for running and monitoring CI checks"
 
