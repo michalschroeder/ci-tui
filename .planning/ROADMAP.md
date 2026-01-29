@@ -2,13 +2,13 @@
 
 ## Milestones
 
-- ✅ **v1.0 Code Quality** - Phases 1-5 (shipped 2026-01-25)
-- 🚧 **v2.0 Comprehensive Cleanup** - Phases 6-9 (in progress)
+- v1.0 Code Quality - Phases 1-5 (shipped 2026-01-25)
+- v2.0 Comprehensive Cleanup - Phases 6-9 (in progress)
 
 ## Phases
 
 <details>
-<summary>✅ v1.0 Code Quality (Phases 1-5) - SHIPPED 2026-01-25</summary>
+<summary>v1.0 Code Quality (Phases 1-5) - SHIPPED 2026-01-25</summary>
 
 ### Phase 1: Foundation & Test Infrastructure
 **Goal**: Establish testability patterns for core logic modules
@@ -62,7 +62,7 @@ Plans:
 
 </details>
 
-### 🚧 v2.0 Comprehensive Cleanup (In Progress)
+### v2.0 Comprehensive Cleanup (In Progress)
 
 **Milestone Goal:** Eliminate technical debt from test infrastructure, code duplication, and function complexity to enable confident future modifications.
 
@@ -87,12 +87,15 @@ Plans:
 4. Test modules have reduced line counts due to fixture consolidation
 5. Builder pattern enables composable config creation with sensible defaults
 
-**Plans**: 3 plans
+**Plans**: 4 plans (3 original + 1 gap closure)
 
 Plans:
-- [ ] 06-01-PLAN.md — Create fixture infrastructure (ConfigBuilder, CheckBuilder, base fixtures, docs)
-- [ ] 06-02-PLAN.md — Migrate config.rs tests (27 configs)
-- [ ] 06-03-PLAN.md — Migrate checks.rs and tests/common tests (10 configs)
+- [x] 06-01-PLAN.md — Create fixture infrastructure (ConfigBuilder, CheckBuilder, base fixtures, docs)
+- [x] 06-02-PLAN.md — Migrate config.rs tests (27 configs)
+- [x] 06-03-PLAN.md — Migrate checks.rs and tests/common tests (10 configs)
+- [ ] 06-04-PLAN.md — Gap closure: Add edge case documentation and architecture notes
+
+**Note:** Success criterion 4 (reduced line counts) was not achievable due to cargo fmt Docker limitations requiring inline fixtures in lib tests. This is documented as an accepted tradeoff.
 
 #### Phase 7: Code Deduplication
 
@@ -101,9 +104,9 @@ Plans:
 **Depends on**: Phase 6
 
 **Requirements**:
-- DEDUP-01: Consolidate format_duration() implementations (3 copies → 1 in runner.rs)
-- DEDUP-02: Consolidate format_duration_ms() implementations (2 copies → 1)
-- DEDUP-03: Consolidate is_container_running() implementations (3 copies → 1)
+- DEDUP-01: Consolidate format_duration() implementations (3 copies -> 1 in runner.rs)
+- DEDUP-02: Consolidate format_duration_ms() implementations (2 copies -> 1)
+- DEDUP-03: Consolidate is_container_running() implementations (3 copies -> 1)
 - DEDUP-04: Create src/utils/ module for shared utilities
 - DEDUP-05: Re-export consolidated utilities from lib.rs for crate-wide access
 
@@ -171,7 +174,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 6 → 7 → 8 → 9
+Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -180,11 +183,11 @@ Phases execute in numeric order: 6 → 7 → 8 → 9
 | 3. Code Quality Improvements | v1.0 | 4/4 | Complete | 2026-01-25 |
 | 4. TUI Responsiveness Fix | v1.0 | 2/2 | Complete | 2026-01-25 |
 | 5. Widget Testing & Documentation | v1.0 | 4/4 | Complete | 2026-01-25 |
-| 6. Test Infrastructure Consolidation | v2.0 | 0/3 | Planned | - |
+| 6. Test Infrastructure Consolidation | v2.0 | 3/4 | Gap closure | - |
 | 7. Code Deduplication | v2.0 | 0/TBD | Not started | - |
 | 8. Complexity Reduction | v2.0 | 0/TBD | Not started | - |
 | 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-29 after Phase 6 planning*
+*Last updated: 2026-01-30 after Phase 6 gap closure planning*
