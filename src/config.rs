@@ -335,6 +335,30 @@ pub fn load_config(path: &Path) -> Result<CiConfig> {
 }
 
 impl CiConfig {
+    /// Create a new CiConfig (primarily for tests)
+    ///
+    /// This constructor allows creating CiConfig instances programmatically
+    /// without going through YAML deserialization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        version: u32,
+        docker: DockerConfig,
+        git: GitConfig,
+        file_patterns: HashMap<String, FilePattern>,
+        checks: IndexMap<String, GroupConfig>,
+        ignore_patterns: Vec<String>,
+    ) -> Self {
+        Self {
+            version,
+            docker,
+            git,
+            file_patterns,
+            checks,
+            ignore_patterns,
+            compiled_ignore_patterns: OnceLock::new(),
+        }
+    }
+
     /// Get the regex pattern for a file pattern key
     pub fn get_file_pattern(&self, key: &str) -> Option<&str> {
         self.file_patterns.get(key).map(|fp| fp.pattern.as_str())

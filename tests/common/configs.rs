@@ -34,7 +34,6 @@ use ci_tui::config::{
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 /// Builder for creating `CiConfig` instances in tests
 ///
@@ -149,9 +148,9 @@ impl ConfigBuilder {
 
     /// Build the final CiConfig
     pub fn build(self) -> CiConfig {
-        CiConfig {
-            version: self.version,
-            docker: DockerConfig {
+        CiConfig::new(
+            self.version,
+            DockerConfig {
                 project_dir: self.docker_project_dir,
                 service: self.docker_service,
                 container: None,
@@ -161,15 +160,14 @@ impl ConfigBuilder {
                 shell: self.docker_shell,
                 env: self.docker_env,
             },
-            git: GitConfig {
+            GitConfig {
                 base_branch: self.git_base,
                 fallback_branch: self.git_fallback,
             },
-            file_patterns: self.file_patterns,
-            checks: self.checks,
-            ignore_patterns: self.ignore_patterns,
-            compiled_ignore_patterns: OnceLock::new(),
-        }
+            self.file_patterns,
+            self.checks,
+            self.ignore_patterns,
+        )
     }
 }
 
@@ -226,6 +224,7 @@ impl CheckBuilder {
     }
 
     /// Set test discovery configuration
+    #[allow(dead_code)]
     pub fn with_test_discovery(mut self, config: TestDiscoveryConfig) -> Self {
         let triggers = self.triggers.get_or_insert_with(CheckTriggers::default);
         triggers.test_discovery = Some(config);
@@ -387,6 +386,7 @@ pub fn widget_test_config() -> CiConfig {
 /// - fast group (parallel): php-lint, yaml-lint (with file pattern triggers)
 /// - analysis group: phpstan (with fix_command)
 /// - tests group: phpunit (with tests pattern trigger)
+#[allow(dead_code)]
 pub fn checks_test_config() -> CiConfig {
     ConfigBuilder::new()
         .with_docker("./infrastructure", "php")
