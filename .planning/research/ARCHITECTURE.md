@@ -1,987 +1,424 @@
-# Architecture Patterns for Ratatui Applications
+# Architecture Research: Module Organization & Test Fixtures
 
-**Domain:** Terminal User Interface (TUI) for CI/CD tooling
-**Researched:** 2026-01-22
-**Confidence:** HIGH (based on official Ratatui documentation and community best practices)
+**Project:** CI-TUI
+**Focus:** Rust module organization, test fixture consolidation, refactoring strategy
+**Confidence:** HIGH
 
-## Overview
+## Executive Summary
 
-Ratatui is an immediate-mode rendering library for terminal UIs. Unlike retained-mode UIs, every frame must be fully rendered from scratch. This fundamental characteristic shapes all architectural decisions. Well-structured ratatui applications follow established patterns from GUI development (Elm Architecture, MVC, Component-based) adapted for terminal constraints.
+CI-TUI has a clean modular architecture with 12 modules and no circular dependencies. The primary refactoring opportunity is consolidating ~37 inline YAML test configs into shared fixtures using the `tests/common/mod.rs` pattern. Module splitting is NOT recommended - while several files exceed 1000 lines, they maintain strong cohesion and splitting would reduce maintainability. The codebase follows Rust best practices and should focus on test organization rather than structural changes.
 
-## Recommended Architecture: Modified Elm Architecture with Async Extensions
+## Test Fixture Architecture
 
-For CI/CD TUI applications like CI-TUI, the **Elm Architecture (TEA) with async extensions** provides the best balance of:
-- Predictable state flow
-- Testability through pure functions
-- Non-blocking async operations
-- Maintainability as complexity grows
+### Current State
 
-### Why TEA for CI/CD TUIs
+**Inline YAML configs scattered across modules:**
+- `src/config.rs`: 27 occurrences of `version: 2` (YAML configs)
+- `src/checks.rs`: 9 occurrences
+- `src/ui/app.rs`: 1 occurrence
+- `tests/common/mod.rs`: 1 shared config (widget tests only)
 
-**CI/CD tooling has specific requirements:**
-- Long-running background tasks (check execution, Docker operations)
-- Real-time output streaming
-- User interaction during async operations
-- Complex state transitions (pending → running → passed/failed)
+**Problem:** High duplication, each test module recreates similar configs with minor variations.
 
-TEA's unidirectional data flow and message-driven updates naturally model these requirements as a finite state machine, while async extensions prevent blocking.
+**Current shared utilities location:** `/home/ms/projects/ci-tui/tests/common/mod.rs` (223 lines)
+- Already contains widget test utilities (`make_test_app()`, `parse_widget_config()`)
+- Uses proper Rust convention (subdirectory pattern to avoid test output clutter)
 
----
+### Recommended Structure
 
-## Core Architectural Patterns
+**Location:** Expand `tests/common/` into a fixture library:
 
-### Pattern 1: The Elm Architecture (TEA)
-
-**Structure:**
 ```
-┌─────────────────────────────────────────────┐
-│              User Input / Events            │
-└─────────────────┬───────────────────────────┘
-                  ↓
-         ┌────────────────┐
-         │    Message     │ (enum of all possible actions)
-         └────────┬───────┘
-                  ↓
-         ┌────────────────┐
-         │  Update Fn     │ (Model + Message → New Model)
-         └────────┬───────┘
-                  ↓
-         ┌────────────────┐
-         │     Model      │ (application state)
-         └────────┬───────┘
-                  ↓
-         ┌────────────────┐
-         │   View Fn      │ (Model → UI)
-         └────────┬───────┘
-                  ↓
-         ┌────────────────┐
-         │    Render      │
-         └────────────────┘
+tests/
+├── common/
+│   ├── mod.rs              # Re-export all fixtures
+│   ├── configs.rs          # Shared YAML configurations
+│   ├── builders.rs         # Test data builders (CheckToRun, App state)
+│   └── mocks.rs            # Mock executors (already has some)
+├── git_tests.rs
+├── runner_tests.rs
+├── widget_tests.rs
+└── panic_hook_tests.rs
 ```
 
-**Components:**
+**Rationale:**
+1. **Subdirectory pattern**: Rust official guidance is to use `tests/common/mod.rs` instead of `tests/common.rs` to avoid treating common utilities as a test crate
+2. **Multiple files under common/**: As common utilities grow, split by purpose (configs, builders, mocks) for maintainability
+3. **No fixtures/ directory**: Keep everything under `common/` to maintain simplicity
 
-1. **Model** - Single source of truth for application state
-   ```rust
-   struct App {
-       checks: Vec<CheckToRun>,
-       results: HashMap<String, CheckResult>,
-       selected_check: usize,
-       status_filter: StatusFilter,
-       // ... all state lives here
-   }
-   ```
+### Fixture Categories
 
-2. **Message** - Enum representing all state transitions
-   ```rust
-   enum Message {
-       KeyPress(KeyEvent),
-       CheckStarted { check_id: String },
-       CheckOutput { check_id: String, line: String },
-       CheckFinished { result: CheckResult },
-       AllFinished,
-   }
-   ```
+#### 1. Config Fixtures (`tests/common/configs.rs`)
 
-3. **Update** - Pure function transforming state
-   ```rust
-   fn update(app: &mut App, message: Message) -> Option<Command> {
-       match message {
-           Message::CheckFinished { result } => {
-               app.results.insert(result.check_id.clone(), result);
-               app.needs_redraw = true;
-               None
-           }
-           // ... handle all message types
-       }
-   }
-   ```
+Create canonical YAML configs for common scenarios:
 
-4. **View** - Pure rendering function
-   ```rust
-   fn view(app: &App, frame: &mut Frame) {
-       // Render based solely on app state
-       // No side effects, no mutation
-   }
-   ```
-
-**Benefits:**
-- **Predictability**: Same state always renders identically
-- **Testability**: Update function is pure, easily tested
-- **Debugging**: All state changes happen through messages
-- **Finite State Machine**: Natural representation of check lifecycle
-
-**Trade-offs:**
-- Requires discipline to avoid direct state mutation
-- More boilerplate than ad-hoc state management
-- Learning curve for developers unfamiliar with functional patterns
-
-**When to use:**
-- Applications with complex state transitions
-- Need for time-travel debugging
-- Multiple concurrent operations
-- CI/CD tools, monitoring dashboards, process managers
-
----
-
-### Pattern 2: Component Architecture
-
-**Structure:**
 ```rust
-trait Component {
-    fn init(&mut self) -> Result<()>;
-    fn handle_events(&mut self, event: Event) -> Result<Option<Action>>;
-    fn update(&mut self, action: Action) -> Result<Option<Action>>;
-    fn render(&mut self, f: &mut Frame, area: Rect);
-}
+/// Minimal valid config (for edge case tests)
+pub fn minimal_config_yaml() -> &'static str { ... }
+
+/// PHP project config (current test_config_yaml from checks.rs)
+pub fn php_project_config_yaml() -> &'static str { ... }
+
+/// Rust project config (current widget_test_config_yaml from common/mod.rs)
+pub fn rust_project_config_yaml() -> &'static str { ... }
+
+/// Multi-language config (for complex trigger tests)
+pub fn multi_language_config_yaml() -> &'static str { ... }
+
+/// Config with test discovery (for test_discovery tests)
+pub fn config_with_test_discovery_yaml() -> &'static str { ... }
 ```
 
-**Characteristics:**
-- Each component owns its state
-- Localized event handling
-- Object-oriented organization
-- Composable widget hierarchy
+**Naming convention:** `{domain}_{purpose}_yaml()` returns `&'static str`
 
-**Benefits:**
-- Lower ceremony than TEA
-- Natural for reusable widgets
-- Familiar OOP patterns
-- Co-location of concerns
+**Integration approach:**
+1. Create `configs.rs` with consolidated YAMLs
+2. Add `pub mod configs;` to `tests/common/mod.rs`
+3. Replace inline configs with `use common::configs::*;`
+4. Use rstest for parameterized tests if multiple configs needed
 
-**Trade-offs:**
-- State scattered across components
-- Harder to debug interactions
-- Less predictable data flow
+#### 2. Builder Fixtures (Already Present)
 
-**When to use:**
-- Applications with independent UI sections
-- Need for reusable components
-- Team prefers OOP style
-- Simpler applications without complex state
+**Keep existing builders in `tests/common/mod.rs`:**
+- `make_widget_check()` - Creates CheckToRun for testing
+- `make_test_app()` - Creates App with known state
+- `make_test_app_all_passed()` - Success state variant
+- `make_test_app_running()` - Progress state variant
 
----
+**Why not move to builders.rs?** These are simple, widget-specific. Only split if common/ exceeds ~500 lines.
 
-### Pattern 3: Model-View-Controller (MVC)
+#### 3. Mock Fixtures (Already Present)
 
-**Structure:**
-- **Model**: Data structures (checks, results, config)
-- **View**: Rendering logic (dashboard.rs)
-- **Controller**: Event handling and orchestration (mod.rs)
+**Keep existing mocks in `tests/common/mod.rs`:**
+- `mock_git_with_output()` - MockGitExecutor returning output
+- `mock_git_error()` - MockGitExecutor returning error
+- `mock_executor_success()` - MockCommandExecutor success
+- `mock_executor_failure()` - MockCommandExecutor failure
 
-**CI-TUI's Current Approach:**
-CI-TUI uses a hybrid of MVC and TEA:
-- `app.rs` = Model (state container)
-- `dashboard.rs` = View (pure rendering)
-- `mod.rs` = Controller (event loop + state updates)
-- `runner.rs` = Async execution layer
+### Integration Points
 
-This works but has **responsiveness issues** due to:
-1. Tight coupling between controller and async tasks
-2. Event handling mixed with state management
-3. No clear message queue abstraction
+**From inline tests to shared fixtures:**
 
----
-
-## Async Integration Patterns
-
-### The Critical Challenge
-
-Ratatui's immediate-mode rendering requires the main loop to call `terminal.draw()` regularly (ideally 60fps). Long-running operations that block the main thread freeze the UI.
-
-**Anti-pattern (blocking):**
 ```rust
-loop {
-    let event = events.recv()?; // BLOCKS until event arrives
-    handle_event(event);
-    terminal.draw()?;
+// BEFORE (in src/checks.rs)
+#[test]
+fn test_something() {
+    let config_yaml = r#"
+version: 2
+docker:
+  project_dir: ./infrastructure
+  ...
+"#;
+    let config: CiConfig = serde_yaml::from_str(config_yaml).unwrap();
+    // test logic
+}
+
+// AFTER
+use common::configs::php_project_config_yaml;
+
+#[test]
+fn test_something() {
+    let config: CiConfig = serde_yaml::from_str(php_project_config_yaml()).unwrap();
+    // test logic
+}
+
+// OR with helper function
+use common::configs::parse_php_config;
+
+#[test]
+fn test_something() {
+    let config = parse_php_config();
+    // test logic
 }
 ```
 
-**Problem:** If no events arrive, UI doesn't redraw. Animations stop, timers freeze, output doesn't stream.
+**Dev dependencies already in place:**
+- `rstest = "0.26"` for fixtures and parameterized tests
+- `tempfile = "3"` for filesystem tests
+- `mockall = "0.14"` for trait mocking
+- `pretty_assertions = "1.4"` for test output
 
-### Solution 1: tokio::select! with Non-Blocking Channels
+## Module Splitting Guidelines
 
-**Pattern:**
-```rust
-loop {
-    tokio::select! {
-        Some(key_event) = keyboard_rx.recv() => {
-            handle_key(key_event);
-        }
-        Some(runner_event) = runner_rx.recv() => {
-            handle_runner_event(runner_event);
-        }
-        Some(stats) = stats_rx.recv() => {
-            update_stats(stats);
-        }
-        _ = tick_interval.tick() => {
-            // Force periodic redraws
-        }
-    }
+### When to Split
 
-    if needs_redraw {
-        terminal.draw(|f| render(app, f))?;
-    }
-}
-```
+Rust community has **no official line count standard**. Projects commonly have 2,000-5,000 line files before splitting. The decision should be based on **cohesion and complexity**, not arbitrary limits.
 
-**Benefits:**
-- UI remains responsive
-- Multiple async sources
-- Periodic redraws guaranteed
+**Split when:**
+1. **Multiple unrelated concerns in one file** - Different domains mixed together
+2. **Poor separation makes testing difficult** - Can't isolate functionality
+3. **High cognitive load from context switching** - Reading requires understanding disparate concepts
+4. **Organic growth indicators** - Clear subdomains emerge naturally
 
-**CI-TUI's Approach:**
-CI-TUI uses a **variant** of this pattern:
-```rust
-loop {
-    // Phase 1: Drain keyboard events (std::sync::mpsc, non-blocking)
-    while let Ok(key) = keyboard_rx.try_recv() {
-        handle_key(key);
-    }
+**Signals to split:**
+- "This function doesn't belong here" thoughts while coding
+- Test organization becomes awkward (testing concerns from multiple domains)
+- git blame shows different authors/timeframes for different sections
+- Difficulty naming the module (trying to capture too many purposes)
 
-    // Phase 2: Process runner events (tokio::mpsc, limited per frame)
-    for _ in 0..MAX_EVENTS_PER_FRAME {
-        match runner_rx.try_recv() {
-            Ok(event) => handle_event(event),
-            Err(_) => break,
-        }
-    }
+### When NOT to Split
 
-    // Phase 3: Render if needed
-    if app.needs_redraw {
-        terminal.draw()?;
-    }
+**DO NOT split when:**
+1. **Strong cohesion exists** - All code serves a unified purpose
+2. **Tests are well-organized** - Clear test structure despite file size
+3. **Low coupling to other modules** - File is self-contained
+4. **Single responsibility maintained** - Large but focused
 
-    // Phase 4: Sleep to yield CPU
-    tokio::time::sleep(FRAME_DURATION).await;
-}
-```
+**Why line count is misleading:**
+- `src/checks.rs`: 1261 lines (289 code + 972 tests) - **DON'T SPLIT**
+  - Single responsibility: determine which checks to run
+  - Tests are organized into clear submodules
+  - High cohesion around check determination logic
 
-**Why this works:**
-- `try_recv()` never blocks
-- `MAX_EVENTS_PER_FRAME` prevents UI starvation from event floods
-- Fixed sleep ensures consistent frame timing
-- Dedicated OS thread for keyboard guarantees input responsiveness
+- `src/config.rs`: 1227 lines (404 code + 823 tests) - **DON'T SPLIT**
+  - Single responsibility: config parsing and validation
+  - Tests are well-structured by concern (triggers, patterns, etc.)
+  - Splitting would scatter related config logic
 
-**Trade-off:** More complex than `tokio::select!` but necessary for guaranteeing keyboard responsiveness under extreme CPU load from Docker containers.
+- `src/ui/app.rs`: 1647 lines (874 code + 773 tests) - **DON'T SPLIT**
+  - Single responsibility: application state management
+  - Tests are organized into functional groups
+  - App state is inherently large - splitting creates artificial boundaries
 
-### Solution 2: Message Passing via Channels
+- `src/ui/dashboard.rs`: 993 lines (993 code, 0 tests) - **DON'T SPLIT**
+  - Single responsibility: rendering logic
+  - No inline tests (tested via widget_tests.rs)
+  - Rendering is naturally large - widget composition requires context
 
-**Pattern for spawning async work:**
-```rust
-// In event handler
-(KeyCode::Char('r'), _) => {
-    let tx = self.result_tx.clone();
-    let check = self.selected_check.clone();
+### Analysis of Current Modules
 
-    tokio::spawn(async move {
-        let result = run_check(&check).await;
-        let _ = tx.send(Message::CheckFinished { result }).await;
-    });
-}
+**Module sizes and cohesion assessment:**
 
-// In main loop
-loop {
-    tokio::select! {
-        Some(msg) = message_rx.recv() => {
-            update(&mut app, msg);
-        }
-        // ... other branches
-    }
-}
-```
+| Module | Lines | Code | Tests | Assessment | Action |
+|--------|-------|------|-------|------------|--------|
+| checks.rs | 1261 | 289 | 972 | High cohesion | Keep as-is |
+| config.rs | 1227 | 404 | 823 | High cohesion | Keep as-is |
+| ui/app.rs | 1647 | 874 | 773 | High cohesion | Keep as-is |
+| ui/dashboard.rs | 993 | 993 | 0 | High cohesion | Keep as-is |
+| ui/mod.rs | 855 | 855 | 0 | Event loop logic | Keep as-is |
+| runner.rs | 730 | 730 | 0 | Check execution | Keep as-is |
+| test_discovery.rs | 603 | 603 | 0 | Test finding logic | Keep as-is |
+| git.rs | 404 | 404 | 0 | Git operations | Keep as-is |
+| simple.rs | 382 | 382 | 0 | Non-TUI output | Keep as-is |
+| fix.rs | 281 | 281 | 0 | Fix command logic | Keep as-is |
 
-**Benefits:**
-- Tasks don't block UI
-- Clean separation of concerns
-- Works with TEA message pattern
+**Verdict:** No modules need splitting. All maintain strong cohesion and single responsibility.
 
-**CI-TUI Implementation:**
-```rust
-// Key handler spawns task
-tokio::spawn(async move {
-    let result = run_single_check(&check, ...).await;
-    let _ = retry_tx.send(result).await;
-});
+### UI Module Structure
 
-// Main loop consumes results
-if let Ok(result) = retry_rx.try_recv() {
-    app.results.insert(result.check_id.clone(), result);
-}
-```
+**Current: 3 files, 3,495 total lines**
+- `ui/mod.rs`: Event loop (855 lines)
+- `ui/app.rs`: State management (1647 lines)
+- `ui/dashboard.rs`: Rendering (993 lines)
 
-### Solution 3: Background Workers
+**Should we add more submodules?** NO.
 
-**Pattern for continuous tasks:**
-```rust
-fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        loop {
-            interval.tick().await;
-            let stats = collect_stats();
-            let _ = tx.try_send(stats); // Non-blocking
-        }
-    })
-}
-```
+**Rationale:**
+1. **Clear separation of concerns**: Event loop / State / Rendering
+2. **Low coupling**: Each file has distinct responsibility
+3. **Easy navigation**: Three-file structure is simple
+4. **No stuttering**: Names don't duplicate module name (not `ui::ui_app`)
 
-**CI-TUI Usage:**
-- System stats (CPU/memory) collected in background
-- Main loop consumes with `try_recv()` (non-blocking)
-- No UI impact from slow syscalls
+**Alternative considered and rejected:**
+- Splitting dashboard.rs into widget files (header.rs, status.rs, etc.)
+  - **Why rejected:** Creates fragmentation, rendering needs context across widgets
+  - **When to reconsider:** If adding completely new views (settings screen, help screen)
 
----
+## Recommended Refactoring Order
 
-## State Management Patterns
+### Phase 1: Test Fixture Consolidation (Priority: HIGH)
 
-### Single State Tree (Recommended)
+**Goal:** Eliminate YAML duplication, establish shared fixture pattern
 
-**Pattern:**
-```rust
-pub struct App {
-    // Configuration (immutable)
-    config: CiConfig,
+1. **Create `tests/common/configs.rs`** (1-2 hours)
+   - Extract canonical configs from inline tests
+   - Start with most-duplicated: `php_project_config_yaml()`, `minimal_config_yaml()`
+   - Add helper parsers: `parse_php_config()`, `parse_minimal_config()`
 
-    // Core data
-    checks: Vec<CheckToRun>,
-    results: HashMap<String, CheckResult>,
+2. **Update `tests/common/mod.rs`** (15 minutes)
+   - Add `pub mod configs;`
+   - Re-export key functions: `pub use configs::*;`
 
-    // UI state
-    selected_check: usize,
-    output_scroll: usize,
-    status_filter: StatusFilter,
+3. **Migrate `src/config.rs` tests** (2-3 hours)
+   - Replace 27 inline configs with shared fixtures
+   - Use rstest `#[rstest]` for parameterized tests where needed
+   - Run tests after each migration to ensure correctness
 
-    // Async operation state
-    fix_running: bool,
-    fix_result: Option<CheckResult>,
+4. **Migrate `src/checks.rs` tests** (1-2 hours)
+   - Replace 9 inline configs
+   - Consolidate similar test scenarios
 
-    // System monitoring
-    cpu_history: VecDeque<f32>,
-    mem_history: VecDeque<f32>,
+5. **Migrate `src/ui/app.rs` tests** (30 minutes)
+   - Single config to migrate
+   - May already use `common::widget_test_config_yaml()`
 
-    // Render optimization
-    needs_redraw: bool,
-}
-```
+**Success criteria:**
+- Zero inline YAML configs in src/ modules
+- All configs in `tests/common/configs.rs`
+- Test suite passes with no behavior changes
+- Reduced LOC in test modules
 
-**Benefits:**
-- Single source of truth
-- Easy to serialize/deserialize
-- Straightforward undo/redo
-- Predictable state transitions
+**Risk mitigation:**
+- Migrate one module at a time
+- Run `--simple` validation after each module
+- Keep git commits small (one module per commit)
 
-**Anti-pattern (scattered state):**
-```rust
-// State split across multiple locations - hard to reason about
-let mut checks = Vec::new();
-let results = Arc::new(Mutex::new(HashMap::new()));
-thread_local! { static SCROLL: Cell<usize> = Cell::new(0); }
-```
+### Phase 2: Test Organization Review (Priority: MEDIUM)
 
-### Dirty Flag Pattern
+**Goal:** Improve test discoverability and organization
 
-**Purpose:** Avoid unnecessary redraws in immediate-mode rendering.
+1. **Add module documentation** (1 hour)
+   - Document each fixture in `tests/common/`
+   - Add examples showing typical usage
+   - Update top-level comments
 
-**Implementation:**
-```rust
-pub struct App {
-    needs_redraw: bool,
-    // ... other fields
-}
+2. **Review integration tests** (1 hour)
+   - Ensure `tests/git_tests.rs`, `tests/runner_tests.rs` use shared fixtures
+   - Check for additional duplication opportunities
 
-impl App {
-    fn handle_event(&mut self, event: Event) {
-        self.needs_redraw = true; // Mark dirty
-        // ... update state
-    }
-}
+3. **Consider rstest adoption** (2-3 hours)
+   - Identify parameterized test candidates
+   - Refactor repetitive test patterns to use `#[rstest]` with `#[case]`
+   - Example: testing multiple file patterns with same logic
 
-// Main loop
-if app.needs_redraw {
-    terminal.draw(|f| render(&app, f))?;
-    app.needs_redraw = false; // Clear flag
-}
-```
+**Success criteria:**
+- Clear documentation for all fixtures
+- Reduced test code duplication
+- Easier to add new test cases
 
-**Benefits:**
-- Reduces CPU usage
-- Improves battery life
-- Still responsive (redraws on state change)
+### Phase 3: Documentation and Conventions (Priority: LOW)
 
-### State Validation
+**Goal:** Formalize patterns for future development
 
-**Pattern:**
-```rust
-impl App {
-    fn next_check(&mut self) {
-        let max = self.filtered_checks().len().saturating_sub(1);
-        self.selected_check = self.selected_check.saturating_add(1).min(max);
-        self.needs_redraw = true;
-    }
+1. **Document testing conventions** (1 hour)
+   - Add section to CLAUDE.md about using shared fixtures
+   - Explain when to add new fixtures vs. inline config
+   - Show rstest patterns for the codebase
 
-    fn previous_check(&mut self) {
-        self.selected_check = self.selected_check.saturating_sub(1);
-        self.needs_redraw = true;
-    }
-}
-```
+2. **Add fixture naming conventions** (30 minutes)
+   - Pattern: `{domain}_{purpose}_yaml()` for YAML strings
+   - Pattern: `parse_{domain}_config()` for parsed configs
+   - Pattern: `make_{domain}_{variant}()` for builders
 
-**Benefits:**
-- Bounds checking in methods
-- Prevents invalid states
-- Centralized validation logic
+**Success criteria:**
+- CLAUDE.md has testing section
+- Clear guidance for contributors
+- Consistent patterns established
 
----
+## File/Module Conventions
 
-## Component Boundaries
+### Naming Conventions (Rust API Guidelines)
 
-### Recommended Module Structure
+Following [RFC 430](https://rust-lang.github.io/api-guidelines/naming.html):
 
+| Item | Convention | Example |
+|------|------------|---------|
+| Modules | snake_case | `test_discovery`, `ui` |
+| Types/Traits | UpperCamelCase | `CheckToRun`, `CiConfig` |
+| Functions/Methods | snake_case | `determine_checks()`, `run()` |
+| Constants/Statics | SCREAMING_SNAKE_CASE | `MAX_HISTORY_SAMPLES` |
+| Crate names | snake_case | `ci_tui` (not `ci-tui-rs`) |
+
+**Special rules:**
+- Acronyms in CamelCase: `Uuid` not `UUID`, `Stdin` not `StdIn`
+- Acronyms in snake_case: `is_xid_start` (all lowercase)
+- Single letters in snake_case: Only at end (`btree_map` not `b_tree_map`)
+
+### Module Organization Patterns
+
+**src/ layout (current - maintain this):**
 ```
 src/
-├── main.rs           # Entry point, CLI arg parsing
-├── config.rs         # Configuration types and parsing
-├── ui/
-│   ├── mod.rs        # Main event loop (controller)
-│   ├── app.rs        # State container (model)
-│   ├── dashboard.rs  # Rendering (view)
-│   └── widgets/      # Reusable UI components
-│       ├── check_list.rs
-│       ├── output_panel.rs
-│       └── stats_panel.rs
-├── domain/
-│   ├── checks.rs     # Check determination logic
-│   ├── git.rs        # Git operations
-│   └── runner.rs     # Check execution
-└── utils/
-    └── terminal.rs   # Terminal setup/cleanup
+├── lib.rs           # Public API, re-exports
+├── main.rs          # CLI entry point (thin)
+├── config.rs        # Configuration types
+├── checks.rs        # Check determination
+├── git.rs           # Git operations
+├── test_discovery.rs # Test file discovery
+├── runner.rs        # Check execution
+├── fix.rs           # Fix command logic
+├── simple.rs        # Non-TUI output
+└── ui/              # TUI module
+    ├── mod.rs       # Event loop
+    ├── app.rs       # State management
+    └── dashboard.rs # Rendering
 ```
 
-### Responsibility Boundaries
-
-| Module | Responsibility | Owns | Does NOT |
-|--------|---------------|------|----------|
-| `ui/mod.rs` | Event loop orchestration | Terminal, event sources | Business logic, domain operations |
-| `ui/app.rs` | State container | All UI state, results | Rendering, event handling details |
-| `ui/dashboard.rs` | Rendering | Widget layout | State mutation, I/O |
-| `runner.rs` | Async execution | Check execution, Docker | UI concerns, state management |
-| `checks.rs` | Check determination | Pattern matching logic | Execution, UI |
-| `config.rs` | Configuration | YAML parsing, validation | Runtime state |
-
-### Data Flow
-
+**tests/ layout (recommended):**
 ```
-User Input → Event Loop → State Update → Render
-                ↑                            ↓
-                └────── Background Tasks ────┘
+tests/
+├── common/
+│   ├── mod.rs       # Re-exports
+│   ├── configs.rs   # Shared YAML configs (NEW)
+│   ├── builders.rs  # Test data builders (FUTURE - if needed)
+│   └── mocks.rs     # Mock utilities (FUTURE - if needed)
+├── git_tests.rs
+├── runner_tests.rs
+├── widget_tests.rs
+└── panic_hook_tests.rs
 ```
 
-**Key Principles:**
-1. **One-way data flow**: Events → Updates → State → View
-2. **View is read-only**: Rendering never mutates state
-3. **Updates are centralized**: All mutations through update functions
-4. **Async work is isolated**: Background tasks communicate via messages
-
----
-
-## Handling Async Operations Without Blocking
-
-### Principle: Separate Compute from Coordination
-
-**Compute (slow, blocking):**
-- Docker command execution
-- Git operations
-- File I/O
-- System stats collection
-
-**Coordination (fast, non-blocking):**
-- Event dispatching
-- State updates
-- Rendering
-- Input handling
-
-**Implementation:**
-```rust
-// Coordination layer (main thread, fast)
-async fn run(app: App) {
-    loop {
-        // Non-blocking event consumption
-        while let Ok(event) = rx.try_recv() {
-            handle_event(&mut app, event);
-        }
-
-        // Fast render
-        if app.needs_redraw {
-            terminal.draw(|f| render(&app, f))?;
-        }
-
-        // Yield to prevent busy-loop
-        tokio::time::sleep(Duration::from_millis(16)).await;
-    }
-}
-
-// Compute layer (spawned tasks, slow)
-tokio::spawn(async move {
-    let output = expensive_operation().await; // Can take seconds
-    tx.send(Message::OperationComplete { output }).await?;
-});
-```
-
-### Pattern: Event Rate Limiting
-
-**Problem:** Async tasks can flood the UI with events (e.g., output streaming).
-
-**Solution:**
-```rust
-// Limit events processed per frame
-const MAX_EVENTS_PER_FRAME: usize = 50;
-
-for _ in 0..MAX_EVENTS_PER_FRAME {
-    match event_rx.try_recv() {
-        Ok(event) => handle_event(event),
-        Err(_) => break, // No more events
-    }
-}
-```
-
-**Benefits:**
-- UI stays responsive during output bursts
-- Rendering not starved by event processing
-- Prevents frame drops
-
-### Pattern: Dedicated Input Thread
-
-**Problem:** Under extreme CPU load, Tokio tasks may be starved, making the UI feel frozen.
-
-**Solution:**
-```rust
-fn spawn_keyboard_thread() -> (Receiver<KeyEvent>, JoinHandle<()>) {
-    let (tx, rx) = std::sync::mpsc::channel(); // Unbounded
-
-    let handle = std::thread::spawn(move || {
-        loop {
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    tx.send(key)?;
-                }
-            }
-        }
-    });
-
-    (rx, handle)
-}
-```
-
-**Why std::thread not tokio::spawn:**
-- OS scheduler guarantees execution
-- Independent of Tokio runtime
-- Critical for user experience
-
-**CI-TUI Implementation:**
-This is CI-TUI's key innovation for responsiveness. The dedicated keyboard thread ensures 'q' to quit always works, even when Docker containers max out CPU.
-
----
-
-## Testing Patterns
-
-### Unit Testing State Transitions
-
-**Pattern:**
-```rust
-#[test]
-fn test_check_navigation() {
-    let mut app = make_test_app();
-    assert_eq!(app.selected_check, 0);
-
-    app.next_check();
-    assert_eq!(app.selected_check, 1);
-
-    app.previous_check();
-    assert_eq!(app.selected_check, 0);
-
-    // Can't go below 0
-    app.previous_check();
-    assert_eq!(app.selected_check, 0);
-}
-```
-
-**Benefits:**
-- Fast (no I/O)
-- Deterministic
-- Tests business logic
-
-### Testing Rendering with TestBackend
-
-**Pattern:**
-```rust
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
-
-#[test]
-fn test_render_check_list() {
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
-    let app = make_test_app();
-
-    terminal.draw(|f| render(&app, f))?;
-
-    let buffer = terminal.backend().buffer();
-    assert!(buffer.content.contains("✓ PHP Lint"));
-}
-```
-
-**Benefits:**
-- Tests actual rendering
-- No real terminal needed
-- Can verify layout
-
-**CI-TUI Implementation:**
-CI-TUI has extensive unit tests for `App` state transitions (1000+ lines of tests in `app.rs`). No rendering tests yet (opportunity for improvement).
-
-### Integration Testing with ratatui-testlib
-
-**For testing terminal interactions:**
-- PTY-based harness
-- Real terminal escape sequences
-- User interaction flows
-
-**Not currently used by CI-TUI** but recommended for complex interaction testing.
-
----
-
-## Anti-Patterns to Avoid
-
-### Anti-Pattern 1: Blocking the Main Loop
-
-**Bad:**
-```rust
-loop {
-    let event = events.recv()?; // BLOCKS - UI freezes
-    handle_event(event);
-    terminal.draw()?;
-}
-```
-
-**Good:**
-```rust
-loop {
-    tokio::select! {
-        event = events.recv() => handle_event(event),
-        _ = tick.tick() => {}, // Periodic wakeup
-    }
-    terminal.draw()?;
-}
-```
-
-### Anti-Pattern 2: State Mutation in Render
-
-**Bad:**
-```rust
-fn render(app: &mut App, f: &mut Frame) {
-    app.last_render_time = Instant::now(); // MUTATION
-    // ... render logic
-}
-```
-
-**Good:**
-```rust
-fn render(app: &App, f: &mut Frame) {
-    // Pure function, read-only
-}
-
-// Track last render separately
-app.last_render_time = Instant::now();
-terminal.draw(|f| render(&app, f))?;
-```
-
-### Anti-Pattern 3: Shared Mutable State Without Sync
-
-**Bad:**
-```rust
-let mut results = HashMap::new();
-tokio::spawn(async move {
-    results.insert(...); // Data race!
-});
-```
-
-**Good:**
-```rust
-let (tx, rx) = mpsc::channel();
-tokio::spawn(async move {
-    let result = compute().await;
-    tx.send(result).await?;
-});
-
-// Main thread owns state
-if let Ok(result) = rx.try_recv() {
-    app.results.insert(result);
-}
-```
-
-### Anti-Pattern 4: Unbounded Event Processing
-
-**Bad:**
-```rust
-loop {
-    // Process ALL events before rendering
-    while let Ok(event) = rx.try_recv() {
-        handle_event(event); // Could process 1000s
-    }
-    terminal.draw()?; // UI starved
-}
-```
-
-**Good:**
-```rust
-loop {
-    // Limit events per frame
-    for _ in 0..MAX_EVENTS {
-        match rx.try_recv() {
-            Ok(e) => handle_event(e),
-            Err(_) => break,
-        }
-    }
-    terminal.draw()?; // Regular redraws
-}
-```
-
----
-
-## CI-TUI Architecture Analysis
-
-### Current Structure
-
-CI-TUI uses a **hybrid MVC/TEA architecture** with async extensions:
-
-**Strengths:**
-1. ✅ Dedicated keyboard thread for guaranteed responsiveness
-2. ✅ Comprehensive state container (`App`)
-3. ✅ Separation of concerns (rendering, state, execution)
-4. ✅ Event rate limiting prevents UI starvation
-5. ✅ Extensive unit tests for state transitions
-6. ✅ Dirty flag optimization (`needs_redraw`)
-
-**Weaknesses:**
-1. ❌ No explicit Message enum (implicit event handling)
-2. ❌ Event handling scattered across `handle_key_event()` branches
-3. ❌ Tight coupling between event loop and async task spawning
-4. ❌ No time-travel debugging capability
-5. ❌ Hard to test event sequences
-
-### Recommended Refactoring
-
-**Phase 1: Introduce Message Enum** (Low Risk)
-```rust
-pub enum Message {
-    // Input
-    KeyPress(KeyEvent),
-    Tick,
-
-    // Check execution
-    CheckStarted { check_id: String },
-    CheckOutput { check_id: String, line: String },
-    CheckFinished { result: CheckResult },
-
-    // Fix operations
-    FixStarted,
-    FixFinished { result: CheckResult },
-
-    // System
-    StatsUpdate { cpu: f32, mem_used: u64, mem_total: u64 },
-    AllFinished,
-}
-```
-
-**Benefits:**
-- Explicit state transitions
-- Easier to add logging/debugging
-- Foundation for future improvements
-
-**Phase 2: Centralize Update Logic** (Medium Risk)
-```rust
-fn update(app: &mut App, message: Message) -> Option<Command> {
-    app.needs_redraw = true;
-
-    match message {
-        Message::KeyPress(key) => handle_key(app, key),
-        Message::CheckFinished { result } => {
-            app.results.insert(result.check_id.clone(), result);
-            None
-        }
-        // ... all message types
-    }
-}
-```
-
-**Benefits:**
-- Single place for state mutations
-- Easier to reason about state changes
-- Testable update logic
-
-**Phase 3: Command Pattern for Async** (Medium Risk)
-```rust
-pub enum Command {
-    RunCheck { check: CheckToRun },
-    RunFix { check_id: String, command: String },
-    RefreshGit,
-    None,
-}
-
-fn update(app: &mut App, message: Message) -> Command {
-    match message {
-        Message::KeyPress(KeyCode::Char('r')) => {
-            if let Some(check) = app.selected_check() {
-                Command::RunCheck { check: check.clone() }
-            } else {
-                Command::None
-            }
-        }
-        // ...
-    }
-}
-
-// Event loop
-loop {
-    let message = next_message().await;
-    let command = update(&mut app, message);
-
-    // Execute commands (spawn tasks)
-    match command {
-        Command::RunCheck { check } => {
-            spawn_check_runner(check, tx.clone());
-        }
-        // ...
-    }
-}
-```
-
-**Benefits:**
-- Decouples update logic from async execution
-- Testable without spawning tasks
-- Clear separation of concerns
-
----
-
-## Scalability Considerations
-
-### At 10 Checks
-
-**Current architecture is sufficient:**
-- Simple state management
-- Direct event handling works fine
-
-### At 100 Checks
-
-**Optimizations needed:**
-- Virtual scrolling for check list
-- Incremental rendering
-- Output buffering to limit memory
-
-**Pattern:**
-```rust
-struct App {
-    check_list_viewport: Range<usize>, // Only render visible
-    output_buffer: VecDeque<String>,   // Ring buffer, max 10K lines
-}
-```
-
-### At 1000 Checks
-
-**Architectural changes required:**
-- Paging/filtering at data layer
-- Lazy loading of results
-- Streaming output to disk
-
-**Consider:**
-- Database for results persistence
-- Worker pool for check execution
-- Separate indexing layer
-
----
-
-## Comparison: CI-TUI vs. Recommended Patterns
-
-| Aspect | CI-TUI Current | Recommended TEA | Gap |
-|--------|---------------|-----------------|-----|
-| State container | ✅ Single `App` struct | ✅ Single source of truth | None |
-| Message enum | ❌ Implicit via events | ✅ Explicit `Message` enum | Add Message enum |
-| Update logic | ⚠️ Scattered in handlers | ✅ Centralized `update()` | Refactor Phase 2 |
-| View purity | ✅ Read-only rendering | ✅ Pure function | None |
-| Async handling | ✅ Task spawning via channels | ✅ Command pattern | Optional improvement |
-| Event rate limiting | ✅ `MAX_EVENTS_PER_FRAME` | ✅ Bounded processing | None |
-| Keyboard responsiveness | ✅ Dedicated OS thread | ⚠️ Usually `tokio::select!` | Better than recommended! |
-| Testing | ✅ Extensive unit tests | ✅ Testable update | None |
-
-**Overall:** CI-TUI's architecture is **80% aligned** with TEA best practices. The main gap is lack of explicit Message enum and centralized update function. The dedicated keyboard thread is a **novel improvement** over standard TEA.
-
----
-
-## Suggested Refactoring Order
-
-### Priority 1: No Breaking Changes (Safe)
-1. Add `Message` enum (parallel to current event handling)
-2. Add unit tests for new `update()` function
-3. Gradually migrate event handlers to use `update()`
-
-### Priority 2: Centralize Update Logic (Medium Risk)
-1. Create `update(app: &mut App, msg: Message)` function
-2. Move all state mutations into `update()`
-3. Keep event loop as message dispatcher
-
-### Priority 3: Command Pattern (Optional)
-1. Add `Command` enum for async operations
-2. Return `Command` from `update()`
-3. Execute commands in event loop
-
-### Priority 4: Advanced Improvements (Low Priority)
-1. Add undo/redo via message history
-2. Time-travel debugging
-3. State serialization for crash recovery
-
----
-
-## Resources & References
-
-### Official Documentation
-- [The Elm Architecture | Ratatui](https://ratatui.rs/concepts/application-patterns/the-elm-architecture/)
-- [Component Architecture | Ratatui](https://ratatui.rs/concepts/application-patterns/component-architecture/)
-- [Async Counter App Tutorial](https://ratatui.rs/tutorials/counter-async-app/)
-- [Best Practices Discussion](https://github.com/ratatui/ratatui/discussions/220)
-
-### Async Patterns
-- [Async Event Stream](https://ratatui.rs/tutorials/counter-async-app/async-event-stream/)
-- [Forum: Running Async Tasks](https://forum.ratatui.rs/t/how-do-i-run-an-async-task-and-update-ui-when-finished/129)
-
-### Testing
-- [TestBackend Documentation](https://docs.rs/ratatui/latest/ratatui/backend/struct.TestBackend.html)
-- [ratatui-testlib](https://lib.rs/crates/ratatui-testlib)
-
-### Community Examples
-- [async-ratatui Example](https://github.com/d-holguin/async-ratatui)
-- [Async Template](https://ratatui.github.io/async-template/)
-- [Component Template](https://github.com/ratatui/templates/tree/main/component)
-
----
-
-## Summary
-
-**Recommended Architecture:** Modified Elm Architecture with Async Extensions
-
-**Key Principles:**
-1. **Unidirectional data flow**: Events → Messages → Update → State → View
-2. **Single state tree**: All state in one place (`App`)
-3. **Non-blocking async**: `tokio::select!` or `try_recv()` patterns
-4. **Event rate limiting**: Bounded processing per frame
-5. **Dirty flag optimization**: Only redraw when state changes
-
-**CI-TUI Status:**
-- Already follows 80% of best practices
-- Main improvement: Add explicit Message enum
-- Keyboard thread pattern is better than typical TEA
-- Solid foundation for future enhancements
-
-**Next Steps:**
-1. Add `Message` enum (Phase 1)
-2. Centralize update logic (Phase 2)
-3. Consider Command pattern for testability (Phase 3)
+### Integration Test Organization
+
+**Pattern:** `tests/{module}_tests.rs` tests integration of `src/{module}.rs`
+
+**Current integration tests:**
+- `tests/git_tests.rs` (255 lines) - Tests git operations
+- `tests/runner_tests.rs` (473 lines) - Tests check runner
+- `tests/widget_tests.rs` (504 lines) - Tests UI rendering
+- `tests/panic_hook_tests.rs` (85 lines) - Tests panic handling
+
+**Pattern to maintain:**
+- Integration tests in separate `tests/` directory
+- Unit tests as `#[cfg(test)] mod tests` in source files
+- Shared fixtures in `tests/common/`
+
+### When to Add New Modules
+
+**Add a new module when:**
+1. **New domain emerges** - Distinct responsibility not covered by existing modules
+2. **Clear API boundary** - Can define public interface separate from implementation
+3. **Multiple files needed** - Complex enough to warrant subdirectory
+
+**Don't add a module for:**
+- Line count reduction alone
+- Organizational aesthetics
+- Following arbitrary rules (like "files must be under 500 lines")
+
+**Example of good module addition (if needed in future):**
+- `src/reporting/` - If CI-TUI adds JUnit XML output, coverage reports, etc.
+  - Clear domain: generating reports
+  - Multiple output formats: JUnit, TAP, JSON
+  - Separate from existing concerns
+
+**Example of bad module addition:**
+- `src/checks/determination.rs` + `src/checks/resolution.rs` from current `checks.rs`
+  - Artificial split: both are part of check determination
+  - Increases coupling: both need same config types
+  - Reduces cohesion: related logic separated
+
+## Sources
+
+### Official Rust Documentation
+- [Test Organization - The Rust Programming Language](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
+- [Refactoring to Improve Modularity - The Rust Programming Language](https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html)
+- [Packages, Crates, and Modules - The Rust Programming Language](https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html)
+- [Rust API Guidelines - Naming Conventions](https://rust-lang.github.io/api-guidelines/naming.html)
+- [Rust API Guidelines - Checklist](https://rust-lang.github.io/api-guidelines/checklist.html)
+
+### Testing and Fixtures
+- [rstest - Fixture-based test framework](https://github.com/la10736/rstest)
+- [rstest Documentation](https://docs.rs/rstest)
+- [Testing With Fixtures in Rust](https://dawchihliou.github.io/articles/testing-with-fixtures-in-rust)
+- [Everything you need to know about testing in Rust | Shuttle](https://www.shuttle.dev/blog/2024/03/21/testing-in-rust)
+
+### Module Organization
+- [Best Practices for Structuring Large-Scale Rust Applications](https://www.slingacademy.com/article/best-practices-for-structuring-large-scale-rust-applications-with-modules/)
+- [Using submodules to Split Large Rust Files](https://www.slingacademy.com/article/using-submodules-to-split-large-rust-files-into-manageable-components/)
+- [Rust Project Structure and Best Practices](https://www.djamware.com/post/68b2c7c451ce620c6f5efc56/rust-project-structure-and-best-practices-for-clean-scalable-code)
+- [Do we have standard for LOC per file? - Rust Forum](https://users.rust-lang.org/t/do-we-have-standard-for-loc-per-file/63509)
+
+### Community Resources
+- [Rust for C-Programmers - Test Organization](https://rust-for-c-programmers.com/ch24/24_3_test_organization.html)
+- [Organizing Tests in Rust - KodeKloud](https://notes.kodekloud.com/docs/Rust-Programming/Testing-Continuous-Integration/Organizing-Tests-in-Rust)
+- [Rust Project Structure Example - DEV Community](https://dev.to/ghost/rust-project-structure-example-step-by-step-3ee)

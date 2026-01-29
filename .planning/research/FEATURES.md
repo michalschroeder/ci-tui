@@ -1,195 +1,124 @@
-# Code Quality Patterns for Rust TUI Applications
+# Features Research: Rust Code Quality Patterns
 
-**Domain:** Rust TUI application maintainability and code quality
-**Researched:** 2026-01-22
-**Focus:** What patterns make a Rust TUI codebase maintainable, testable, and idiomatic
+**Domain:** Rust TUI application code quality, test organization, and module boundaries
+**Researched:** 2026-01-29 (Updated)
+**Overall confidence:** HIGH
+**Focus:** Test fixture patterns, shared utilities, and module organization for v2.0 cleanup
 
-## Table Stakes
+## Executive Summary
 
-Code quality features that well-maintained Rust TUI applications must have. Missing these = technical debt accumulates fast.
+Well-maintained Rust projects follow consistent patterns for test organization and code modularity. The official Rust documentation establishes clear conventions: unit tests live alongside code with `#[cfg(test)]`, integration tests use `tests/` directory with `tests/common/mod.rs` (NOT `tests/common.rs`) for shared utilities, and fixture frameworks like `rstest` eliminate test data duplication through parametrized testing. Large modules split along responsibility boundaries when they mix unrelated concerns. Modern tooling like Clippy's `too_many_lines` and `excessive_nesting` lints provide objective complexity gates (while `cognitive_complexity` is deprecated as flawed). For TUI applications specifically, the Ratatui community recommends The Elm Architecture (TEA) with clear separation between state (app), rendering (ui), and event handling.
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| **Clear separation of concerns (Model/View/Update)** | TEA or MVC pattern prevents UI entanglement with business logic | Medium | Ratatui docs explicitly recommend this. View should be pure function, state isolated in Model |
-| **Proper async event handling with tokio::select!** | Prevents UI responsiveness issues during I/O | Medium | Use spawn_blocking for input polling to avoid blocking main loop. Critical for keyboard responsiveness |
-| **Terminal cleanup on panic** | Corrupted terminal state on crash = horrible UX | Low | Install panic hook that restores terminal before displaying error |
-| **Linting with Clippy at deny level** | Catches common mistakes, enforces idioms | Low | Run `cargo clippy -- -D warnings` in CI. Addresses unused code, style issues |
-| **Rustfmt for consistent formatting** | Readability and merge conflicts | Low | Standard 4-space indentation, snake_case naming enforced automatically |
-| **Unit tests for business logic** | Core logic (checks, config parsing, discovery) must be testable in isolation | Medium | Use TestBackend for widget tests, prefer unit tests over integration tests |
-| **Error handling with Result types** | ? operator propagation, no unwrap() in production paths | Low | Use thiserror for library code, anyhow for application code |
-| **No dead code or unused imports** | Sign of incomplete refactoring or AI-generated cruft | Low | Enable dead_code lint, remove during cleanup phase |
-| **Documented non-obvious code paths** | Future maintainers (including yourself) need context | Low | Doc comments with /// for public items, // for complex internal logic |
-| **Idiomatic Rust patterns** | Use if let, while let, iterators over manual loops | Medium | Follow Rust API Guidelines, avoid clone() abuse |
+**Key findings for CI-TUI v2.0:**
+- 40 duplicate YAML configs → Extract to `tests/common/fixtures.rs` or use `rstest` fixtures
+- 3 copies of `format_duration()` → Move to `src/utils/formatting.rs`
+- 155-line functions → Enable `too_many_lines` lint with threshold of ~100 lines
+- 3,495 LOC UI module → Split by responsibility: `ui/app.rs` (state), `ui/dashboard.rs` (rendering), `ui/events.rs` (input)
 
-## Differentiators
+## Table Stakes (Must Have)
 
-Patterns that distinguish high-quality TUI codebases from adequate ones. Not required but highly valued.
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| **Component-based architecture** | Modular UI with isolated components in components/ directory | High | Once set up, most work stays in components/ folder. Scales to complex UIs |
-| **Action/Command mapping system** | Decouple key bindings from business logic | Medium | Define Action enum, map keys to actions, enables configurable keybindings |
-| **File-based logging (tracing/log4rs)** | Debug without interfering with TUI rendering | Medium | XDG-compliant directories for user-shareable debug logs |
-| **State sharing with Arc<Mutex<T>>** | Clean multi-threaded state management | Medium | Wrap shared state, provide accessor methods that handle locking internally |
-| **Immediate-mode rendering at fixed FPS** | Simplifies render logic, ensures consistent responsiveness | Low | Separate tick rate (state updates) from render rate (30-60 FPS) |
-| **Defensive programming with #[must_use]** | Prevents accidentally ignoring important return values | Low | Mark functions where ignoring result is likely a mistake |
-| **Integration tests with ratatui-testlib** | End-to-end TUI testing with real PTY | High | Complement unit tests for full user interaction testing |
-| **XDG-compliant configuration** | Config in ~/.config/app/, follows platform conventions | Low | Use directories or dirs crate, support TOML/YAML with config-rs |
-| **Comprehensive module responsibilities** | Each module has clear, documented scope | Medium | Like CLAUDE.md "Module Responsibilities" section |
-| **TestBackend for widget tests** | Render widgets to buffer, assert output without real terminal | Medium | Preferred over integration tests for widget-level testing |
-
-## Anti-Features
-
-Patterns to explicitly avoid or remove. Common in AI-generated code or premature optimization.
-
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| **Blocking I/O on main thread** | Kills keyboard responsiveness, makes UI feel frozen | Use tokio::spawn_blocking for any blocking operations including input polling |
-| **Over-abstraction layers** | AI loves unnecessary trait hierarchies and generic wrappers | Keep it simple. Two levels of abstraction max for most code |
-| **Using .clone() everywhere** | Top Rust anti-pattern 2025, performance killer | Use references, Arc for shared ownership, Rc for single-threaded |
-| **Unwrap() or expect() in production paths** | Panics = terminal corruption = terrible UX | Return Result, install panic hook as safety net only |
-| **Preludes for application code** | Makes imports unclear, only justified for frameworks | Re-export common types at crate root with pub use instead |
-| **Feature modules with pub(crate) everything** | Hides actual public API surface | Use pub selectively, document intended public interface |
-| **Integration tests in tests/ folder** | Slower, harder to maintain than unit tests | Prefer unit tests and doc tests directly in source files |
-| **Awaiting long operations on main thread** | UI won't receive updates or key events until complete | Spawn separate task/thread, send results via channel |
-| **Manual loops instead of iterators** | Unidiomatic, harder to read, potentially slower | Use .iter(), .filter(), .map(), etc. |
-| **Ignoring clippy::restriction lints** | Some are valuable (e.g., unwrap_used) for production code | Review restriction lints case-by-case, enable selectively |
-| **Global mutable state without synchronization** | Race conditions, undefined behavior | Use Arc<Mutex<T>> or channels for shared state |
-| **Tightly coupled modules** | Can't test in isolation, changes ripple through codebase | Dependency injection via traits or constructor parameters |
-
-## Code Organization Patterns
-
-### Recommended File Structure (Component-Based)
-
-```
-src/
-├── main.rs           # Entry point, initialization
-├── tui.rs            # Terminal setup/teardown, panic hooks
-├── app.rs            # Main application state and event loop
-├── action.rs         # Action/Command enum for key mapping
-├── cli.rs            # CLI argument parsing (clap)
-├── config.rs         # Configuration loading/parsing
-├── errors.rs         # Error types (thiserror)
-├── logging.rs        # Logging setup (tracing)
-├── components/       # Modular UI components
-│   ├── home.rs
-│   ├── fps.rs
-│   └── ...
-└── components.rs     # Component trait definitions
-
-tests/
-└── (minimal integration tests only)
-```
-
-**Key principle:** "Once you have set up the project, you shouldn't need to change the contents of anything outside the `components` folder."
-
-### Module Organization Best Practices
-
-- **One file per module** when possible (utils.rs, config.rs)
-- **Directory with mod.rs** only for grouping related submodules
-- **pub(crate)** to expose items only within crate
-- **pub use at root** to re-export common types cleanly
-- **Module docstrings** explaining responsibility boundaries
-
-## Testing Patterns
-
-### Widget/View Testing
+### 1. Official Test Organization Pattern
+- **What:** Unit tests in `#[cfg(test)] mod tests` alongside code, integration tests in `tests/` directory, shared test utilities in `tests/common/mod.rs` (NOT `tests/common.rs`)
+- **Why table stakes:** This is the official Rust convention from The Rust Book. Files in subdirectories of `tests/` (like `tests/common/mod.rs`) are NOT compiled as separate crates, avoiding empty test section pollution in output.
+- **Complexity:** Low
+- **Current status:** ✅ CI-TUI already follows this pattern
+- **Example:**
 ```rust
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
-
-let mut backend = TestBackend::new(80, 24);
-let mut terminal = Terminal::new(backend)?;
-terminal.draw(|frame| {
-    // Render widget
-})?;
-
-// Assert buffer contents
-let buffer = terminal.backend().buffer();
-assert_eq!(buffer.get(0, 0).symbol(), "expected");
-```
-
-### State Logic Testing
-```rust
-// Business logic functions should take state as parameter
-fn update(model: &mut Model, msg: Message) -> Result<()> {
-    match msg {
-        Message::Tick => model.tick(),
-        // ...
-    }
+// tests/common/mod.rs - shared utilities
+pub fn minimal_config() -> CiConfig {
+    serde_yaml::from_str(include_str!("fixtures/minimal.yaml")).unwrap()
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_update_logic() {
-        let mut model = Model::default();
-        update(&mut model, Message::Tick).unwrap();
-        assert_eq!(model.state, expected);
-    }
+// tests/integration_test.rs
+mod common;
+
+#[test]
+fn test_with_fixture() {
+    let config = common::minimal_config();
+    assert_eq!(config.checks.len(), 1);
 }
 ```
+- **Source:** [Official Rust Book - Test Organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
 
-### Integration Testing Strategy
-- **Unit tests:** Business logic, configuration parsing, data transformations
-- **TestBackend:** Widget rendering, layout calculations
-- **ratatui-testlib:** Full application flow with PTY (expensive, use sparingly)
-
-## Async Responsiveness Patterns
-
-### The Responsiveness Contract
-
-**Critical rule:** Main thread must never block. Rendering and input handling live or die on main thread responsiveness.
-
-### Event Loop Pattern (tokio::select!)
-
+### 2. DRY Test Fixtures - Shared Helper Functions
+- **What:** Extract repeated test setup into shared fixture functions in `tests/common/fixtures.rs` or `#[cfg(test)] mod tests` for unit tests
+- **Why table stakes:** 40 inline YAML test configs that are "nearly identical" violates basic DRY principles. Every mature Rust project consolidates test data. Changes to config structure should require updating ONE fixture, not 40 test strings.
+- **Complexity:** Low to Medium (refactoring existing tests)
+- **Current status:** ❌ CI-TUI has extensive duplication
+- **Example:**
 ```rust
-loop {
-    tokio::select! {
-        // Fixed interval for state updates
-        _ = tick_interval.tick() => {
-            tx.send(Message::Tick).await?;
-        }
+// tests/common/fixtures.rs
+pub fn minimal_config() -> &'static str {
+    include_str!("fixtures/minimal.yaml")
+}
 
-        // Fixed interval for rendering
-        _ = render_interval.tick() => {
-            tx.send(Message::Render).await?;
-        }
+pub fn multi_group_config() -> &'static str {
+    include_str!("fixtures/multi_group.yaml")
+}
 
-        // Non-blocking message processing
-        Some(msg) = event_rx.recv() => {
-            handle_message(msg).await?;
-        }
-
-        // Blocking input on separate task
-        _ = tokio::task::spawn_blocking(|| {
-            crossterm::event::poll(Duration::from_millis(100))
-        }) => {
-            if let Ok(event) = crossterm::event::read() {
-                handle_input(event).await?;
-            }
-        }
-    }
+// Or as actual configs
+pub fn config_with_checks(n: usize) -> CiConfig {
+    let mut config = minimal_config_obj();
+    config.checks = vec![check_definition(); n];
+    config
 }
 ```
+- **Source:** [Official Rust Book - Test Organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
 
-**Key insight:** Input polling uses spawn_blocking so it doesn't freeze async loop. All branches progress concurrently.
+### 3. Clippy Complexity Lints
+- **What:** Enable `too_many_lines` and `excessive_nesting` lints to enforce objective complexity limits. **Avoid `cognitive_complexity`** (flawed, moved to restriction category)
+- **Why table stakes:** Clippy maintainers explicitly state: "The true Cognitive Complexity of a method is not calculable using modern technology." They recommend `too_many_lines` and `excessive_nesting` instead. 155-line functions should trigger warnings.
+- **Complexity:** Low (just configuration)
+- **Current status:** ⚠️ CI-TUI has 155-line functions without lint enforcement
+- **Configuration:**
+```toml
+# In Cargo.toml or clippy.toml
+[lints.clippy]
+too_many_lines = "warn"  # Default threshold: 100 lines
+excessive_nesting = "warn"
+```
+- **Source:** [Clippy Lints Documentation](https://rust-lang.github.io/rust-clippy/master/index.html)
 
-## Error Handling Patterns
+### 4. Module Boundary by Responsibility
+- **What:** Split modules when they mix unrelated responsibilities, not when they hit arbitrary line counts. Extract cross-module utilities to dedicated modules like `src/utils/`.
+- **Why table stakes:** Official Rust guidance: "When modules get large, move definitions to separate file to make code easier to navigate." But split by responsibility, not just size. A 3,495 LOC module that handles state management, rendering, AND event handling violates Single Responsibility Principle.
+- **Complexity:** Medium (requires understanding responsibility boundaries)
+- **Current status:** ⚠️ UI module is 3,495 LOC (70% of codebase), `format_duration()` duplicated 3x
+- **Example:**
+```
+Before:                       After:
+src/                         src/
+├── ui/                      ├── ui/
+│   └── mod.rs (3,495 LOC)   │   ├── mod.rs (re-exports)
+                             │   ├── app.rs (state)
+                             │   ├── dashboard.rs (rendering)
+                             │   ├── events.rs (input handling)
+                             │   └── components/
+                             └── utils/
+                                 └── formatting.rs (format_duration)
+```
+- **Source:** [Rust Book - Separating Modules](https://doc.rust-lang.org/book/ch07-05-separating-modules-into-different-files.html), [Rust Book - Refactoring](https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html)
 
-### Library vs Application Code
+### 5. Private by Default
+- **What:** Keep functions and structs private unless they're part of public API. Use `pub(crate)` for internal visibility across modules within crate.
+- **Why table stakes:** "Keeping functions and structs private prevents implementation details from leaking out of modules, making future refactoring easier."
+- **Complexity:** Low (Rust's default behavior, just be deliberate about `pub`)
+- **Current status:** Unknown (needs audit)
+- **Source:** [Long-term Rust Maintenance](https://corrode.dev/blog/long-term-rust-maintenance/)
 
-| Context | Use | Pattern |
-|---------|-----|---------|
-| **Application code** (main.rs, app.rs) | anyhow::Result<T> | Simple error propagation with context |
-| **Library/reusable modules** | thiserror custom errors | Structured errors caller can match on |
-| **Widget rendering** | Don't panic, return Result or skip | UI should degrade gracefully |
-| **Critical paths** | #[must_use] on Result | Prevent accidentally ignoring errors |
+### 6. Clear separation of concerns (TEA/MVC)
+- **What:** Separate state management (Model/App), rendering logic (View/Dashboard), and event handling (Update/Events) - following The Elm Architecture or similar pattern
+- **Why table stakes:** Ratatui docs explicitly recommend this. Prevents UI entanglement with business logic, makes testing easier (can test state transitions without rendering).
+- **Complexity:** Medium
+- **Current status:** ✅ CI-TUI has `app.rs` and separation (per CLAUDE.md), but UI module size suggests possible entanglement
+- **Source:** [Ratatui - The Elm Architecture](https://ratatui.rs/concepts/application-patterns/the-elm-architecture/)
 
-### Panic Hook Pattern
-
+### 7. Terminal cleanup on panic
+- **What:** Install panic hook that restores terminal state before displaying error
+- **Why table stakes:** Corrupted terminal state on crash = horrible UX. User's terminal becomes unusable.
+- **Complexity:** Low
+- **Pattern:**
 ```rust
-// In tui.rs setup
 let original_hook = std::panic::take_hook();
 std::panic::set_hook(Box::new(move |panic_info| {
     crossterm::terminal::disable_raw_mode().ok();
@@ -197,117 +126,370 @@ std::panic::set_hook(Box::new(move |panic_info| {
     original_hook(panic_info);
 }));
 ```
+- **Source:** Community best practice (multiple TUI examples)
 
-## Linting Configuration
+### 8. Linting with Clippy at deny level
+- **What:** Run `cargo clippy -- -D warnings` in CI. Catches unused code, style issues, common mistakes.
+- **Why table stakes:** Prevents accumulation of dead code, enforces Rust idioms
+- **Complexity:** Low
+- **Current status:** ✅ CI-TUI runs clippy in CI (per CLAUDE.md validation commands)
+- **Source:** [Clippy Documentation](https://doc.rust-lang.org/clippy/usage.html)
 
-### Recommended Clippy Settings
+### 9. Rustfmt for consistent formatting
+- **What:** Run `cargo fmt` automatically, enforce with `cargo fmt --check` in CI
+- **Why table stakes:** Standard 4-space indentation, snake_case naming. Prevents formatting bikeshedding.
+- **Complexity:** Low
+- **Current status:** ✅ CI-TUI runs `cargo fmt --check` in CI (per CLAUDE.md)
+- **Source:** [Rustfmt Documentation](https://github.com/rust-lang/rustfmt)
 
-```toml
-# In Cargo.toml or .cargo/config.toml
-[lints.rust]
-unsafe_code = "forbid"
-dead_code = "deny"
-unused_imports = "deny"
+### 10. Unit tests for business logic
+- **What:** Core logic (checks, config parsing, discovery) must be testable in isolation from UI
+- **Why table stakes:** Can't validate state transitions, edge cases, error handling without unit tests
+- **Complexity:** Medium
+- **Current status:** ✅ 250 tests, 65% coverage (per milestone context)
+- **Source:** [Official Rust Book - Testing](https://doc.rust-lang.org/book/ch11-01-writing-tests.html)
 
-[lints.clippy]
-# Core lints
-all = "deny"
-correctness = "deny"
-style = "warn"      # Opinionated, some teams disable
-complexity = "warn"
+## Differentiators (Excellence)
 
-# Selective restriction lints
-unwrap_used = "deny"         # For production code
-expect_used = "warn"         # expect() better than unwrap()
-panic = "deny"               # No explicit panics
-todo = "warn"                # Track unfinished work
+### 11. Fixture-Based Testing with rstest
+- **What:** Use `rstest` crate for parametrized tests and fixture injection instead of manual setup code or duplicated test functions
+- **Why differentiator:** "The core idea is that you can inject your test dependencies by passing them as test arguments." Eliminates test boilerplate while maintaining clarity. Enables table-driven testing with `#[case]` attributes. One test function can verify 40 different scenarios.
+- **Complexity:** Low (add dependency, refactor tests)
+- **When to use:** When you have multiple similar test cases (like 40 YAML configs) or expensive setup operations
+- **Example:**
+```rust
+use rstest::rstest;
+
+#[rstest]
+#[case("minimal.yaml", 1)]
+#[case("multi_group.yaml", 3)]
+#[case("with_discovery.yaml", 2)]
+fn test_config_parsing(#[case] fixture_name: &str, #[case] expected_checks: usize) {
+    let yaml = std::fs::read_to_string(format!("tests/fixtures/{}", fixture_name)).unwrap();
+    let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(config.checks.len(), expected_checks);
+}
+
+// Instead of 40 separate test functions with inline YAML!
+```
+- **Source:** [rstest GitHub](https://github.com/la10736/rstest)
+
+### 12. Utility Module Hierarchy
+- **What:** Create `src/utils/` module with submodules (`formatting.rs`, `git.rs`, etc.) for cross-cutting concerns that multiple modules need
+- **Why differentiator:** Community best practice: "Separate utility functions by creating new files like src/utils.rs for cleaner code organization"
+- **Complexity:** Low (create directory, move functions)
+- **Current status:** ⚠️ `format_duration()` duplicated 3x across modules
+- **Example:**
+```rust
+// src/utils/mod.rs
+pub mod formatting;
+pub mod git;
+
+// src/utils/formatting.rs
+pub fn format_duration(duration: Duration) -> String {
+    // Single implementation
+}
+
+// Other modules
+use crate::utils::formatting::format_duration;
+```
+- **Source:** [Rust Project Structure Best Practices](https://www.djamware.com/post/68b2c7c451ce620c6f5efc56/rust-project-structure-and-best-practices-for-clean-scalable-code)
+
+### 13. Component-Based TUI Architecture
+- **What:** Organize UI into `components/` directory with isolated, reusable components. Each component has clear rendering responsibility.
+- **Why differentiator:** Ratatui template pattern. "Once set up, most work stays in components/ folder." Scales to complex UIs, makes testing individual widgets easier.
+- **Complexity:** High (architectural refactor)
+- **When to use:** Any non-trivial TUI with multiple distinct UI regions
+- **Structure:**
+```
+src/
+├── app.rs            # Application state
+├── tui.rs            # Terminal management
+├── action.rs         # Action enum for key mapping
+├── components/       # Modular UI components
+│   ├── home.rs
+│   ├── fps.rs
+│   └── status.rs
+└── components.rs     # Component trait
+```
+- **Source:** [Ratatui Project Structure](https://ratatui.rs/templates/component/project-structure/)
+
+### 14. Action/Command mapping system
+- **What:** Define `Action` enum, map keys to actions, separate from business logic
+- **Why differentiator:** Decouples key bindings from implementation. Enables configurable keybindings, testable event handling.
+- **Complexity:** Medium
+- **Pattern:**
+```rust
+pub enum Action {
+    Quit,
+    ToggleCheck(usize),
+    ScrollUp,
+    // ...
+}
+
+// In event handler
+fn handle_key(&mut self, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Up => Action::ScrollUp,
+        // ...
+    }
+}
+
+// In update/business logic
+fn update(&mut self, action: Action) {
+    match action {
+        Action::Quit => self.should_quit = true,
+        Action::ScrollUp => self.scroll_offset -= 1,
+        // ...
+    }
+}
+```
+- **Source:** [Ratatui component template](https://ratatui.rs/templates/component/project-structure/)
+
+### 15. File-based logging (tracing/log4rs)
+- **What:** Log to file (e.g., `~/.local/share/app/app.log`) instead of stdout (which interferes with TUI)
+- **Why differentiator:** Essential for debugging TUI apps. XDG-compliant directories.
+- **Complexity:** Medium
+- **Source:** Community best practice
+
+### 16. Testlib for Integration Testing
+- **What:** Use `ratatui-testlib` for snapshot testing TUI output in a real PTY instead of just TestBackend
+- **Why differentiator:** "Runs your TUI in a real pseudo-terminal (PTY), captures output using a terminal emulator, and provides ergonomic API for assertions and snapshot testing." Bridges gap between unit tests and real-world behavior.
+- **Complexity:** Medium (learning new testing paradigm)
+- **When to use:** When existing test coverage is high (like CI-TUI's 65%) but you want to verify actual rendered output
+- **Source:** [ratatui-testlib](https://lib.rs/crates/ratatui-testlib)
+
+### 17. Clippy Item Ordering Lint
+- **What:** Enable `arbitrary_source_item_ordering` lint for consistent ordering of structs, impls, functions within modules
+- **Why differentiator:** Reduces bikeshedding about file organization. Configurable groupings.
+- **Complexity:** Low (enable lint, auto-fix or manual reorder once)
+- **When to use:** When team debates ordering conventions or new contributors unsure where to add items
+- **Source:** [Clippy Lints](https://rust-lang.github.io/rust-clippy/master/index.html)
+
+### 18. Async responsiveness with tokio::select!
+- **What:** Use `tokio::select!` for event loop with separate tick rate (state updates) and render rate (FPS). Use `spawn_blocking` for input polling.
+- **Why differentiator:** Prevents UI responsiveness issues during I/O. Critical for keyboard responsiveness under high CPU load.
+- **Complexity:** Medium
+- **Current status:** ✅ CI-TUI already does this (per CLAUDE.md Architecture: "Keyboard input runs on dedicated OS thread")
+- **Source:** [async-ratatui example](https://github.com/d-holguin/async-ratatui)
+
+### 19. State sharing with Arc<Mutex<T>>
+- **What:** Wrap shared state in Arc<Mutex<T>>, provide accessor methods that handle locking
+- **Why differentiator:** Clean multi-threaded state management
+- **Complexity:** Medium
+- **Source:** Community pattern
+
+### 20. TestBackend for widget tests
+- **What:** Use ratatui's TestBackend to render widgets to buffer and assert output without real terminal
+- **Why differentiator:** Preferred over full integration tests for widget-level testing. Fast, deterministic.
+- **Complexity:** Medium
+- **Example:**
+```rust
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
+
+let mut backend = TestBackend::new(80, 24);
+let mut terminal = Terminal::new(backend)?;
+terminal.draw(|frame| {
+    render_dashboard(frame, &app_state);
+})?;
+
+let buffer = terminal.backend().buffer();
+assert_eq!(buffer.get(0, 0).symbol(), "Expected");
+```
+- **Source:** [Ratatui TestBackend docs](https://docs.rs/ratatui/latest/ratatui/backend/struct.TestBackend.html)
+
+## Anti-Features (Avoid)
+
+### Anti-Feature 1: tests/common.rs Pattern
+- **What:** Creating `tests/common.rs` for shared integration test utilities
+- **Why avoid:** Cargo treats it as a separate test crate, creating empty test section in output: "Running tests/common.rs ... running 0 tests". Pollutes test output unnecessarily.
+- **What to do instead:** Use `tests/common/mod.rs` - "Files in subdirectories of tests/ are not compiled as separate crates and don't appear in test output"
+- **Source:** [Official Rust Book - Test Organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
+
+### Anti-Feature 2: cognitive_complexity Lint
+- **What:** Relying on Clippy's `cognitive_complexity` lint for complexity measurement
+- **Why avoid:** Clippy maintainers explicitly state it's flawed: "The true Cognitive Complexity of a method is not calculable using modern technology." Has known bugs with macro expansion. Moved to restriction category. Discussion about deprecating it.
+- **What to do instead:** Use `too_many_lines` and `excessive_nesting` lints which measure objective properties
+- **Source:** [Clippy cognitive_complexity](https://rust-lang.github.io/rust-clippy/master/index.html), [GitHub Issue #14417](https://github.com/rust-lang/rust-clippy/issues/14417)
+
+### Anti-Feature 3: Over-modularization by Line Count
+- **What:** Splitting modules purely because they hit arbitrary line counts (e.g., "every file over 500 lines must be split")
+- **Why avoid:** "Don't over-engineer your project structure, but be ready to refactor as the codebase grows." Split by responsibility boundaries, not size. A well-organized 800-line module with single responsibility is better than 4 poorly-organized 200-line modules.
+- **What to do instead:** Split when modules mix unrelated concerns or when "you have a hard time writing tests" (sign code is too complex). CI-TUI's 3,495 LOC UI module should split because it likely mixes state, rendering, AND event handling - that's 3 responsibilities.
+- **Source:** [Best Way to Structure Rust Web Services](https://blog.logrocket.com/best-way-structure-rust-web-services/), [Long-term Rust Maintenance](https://corrode.dev/blog/long-term-rust-maintenance/)
+
+### Anti-Feature 4: Inline Test Data Duplication
+- **What:** Copy-pasting YAML configs, JSON fixtures, or other test data across test functions
+- **Why avoid:** Every change requires updating N locations. Creates maintenance burden and drift (tests start with identical fixtures, then diverge slightly, making it unclear what's intentional vs copy-paste error). CI-TUI's 40 "nearly identical" inline YAML configs are textbook example.
+- **What to do instead:**
+  - **For unit tests:** Helper functions in `#[cfg(test)] mod tests`
+  - **For integration tests:** Fixtures in `tests/common/fixtures/` or `tests/fixtures.yaml` loaded via `include_str!`
+  - **For parametrized tests:** Use `rstest` with `#[case]` attributes
+- **Example:**
+```rust
+// BAD: 40 test functions with inline YAML
+#[test]
+fn test_minimal_config_1() {
+    let yaml = r#"
+docker:
+  project_dir: "."
+  service: "app"
+checks:
+  - name: "test1"
+    # ...
+"#;
+    let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+    // test logic
+}
+
+#[test]
+fn test_minimal_config_2() {
+    let yaml = r#"  // Nearly identical...
+// ... 38 more times
+
+// GOOD: Extract fixture
+fn minimal_config() -> &'static str {
+    include_str!("fixtures/minimal.yaml")
+}
+
+#[rstest]
+#[case("minimal", 1)]
+#[case("multi", 3)]
+fn test_config(#[case] fixture: &str, #[case] expected: usize) {
+    let yaml = include_str!(concat!("fixtures/", fixture, ".yaml"));
+    let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.checks.len(), expected);
+}
+```
+- **Source:** [rstest](https://github.com/la10736/rstest), [Official Rust Book - Test Organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
+
+### Anti-Feature 5: God Modules
+- **What:** Single modules that handle multiple unrelated responsibilities (e.g., a `ui` module that contains state management, event handling, rendering, AND utility functions)
+- **Why avoid:** "Poor separation of concerns, making it hard to test or refactor code." Makes it difficult to understand module boundaries and hard to reason about changes. A 3,495 LOC module almost certainly mixes concerns.
+- **What to do instead:** Apply Single Responsibility Principle at module level. Split by responsibility:
+```
+Before:                       After:
+src/ui/mod.rs (3,495 LOC)    src/ui/
+                              ├── mod.rs (re-exports)
+                              ├── app.rs (state)
+                              ├── dashboard.rs (rendering)
+                              ├── events.rs (input handling)
+                              └── components/ (widgets)
+```
+- **Source:** [Rust Project Structure](https://www.djamware.com/post/68b2c7c451ce620c6f5efc56/rust-project-structure-and-best-practices-for-clean-scalable-code), [Rust Book - Refactoring](https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html)
+
+### Anti-Feature 6: Using .clone() Everywhere
+- **What:** Cloning data instead of using references or smart pointers (Arc/Rc)
+- **Why avoid:** Top Rust anti-pattern 2025, performance killer. Often sign of fighting borrow checker instead of understanding ownership.
+- **What to do instead:** Use references, Arc for shared ownership, Rc for single-threaded
+- **Source:** [7 Rust Anti-Patterns (2025)](https://medium.com/solo-devs/the-7-rust-anti-patterns-that-are-secretly-killing-your-performance-and-how-to-fix-them-in-2025-dcebfdef7b54)
+
+### Anti-Feature 7: Unwrap() in Production Paths
+- **What:** Using `.unwrap()` or `.expect()` where errors can occur during normal operation
+- **Why avoid:** Panics = terminal corruption in TUI = terrible UX
+- **What to do instead:** Return `Result`, propagate with `?`, install panic hook as safety net only
+- **Source:** Community best practice
+
+### Anti-Feature 8: Blocking I/O on Main Thread
+- **What:** Calling blocking operations (file I/O, network, etc.) on the async runtime's main thread
+- **Why avoid:** Kills keyboard responsiveness, makes UI feel frozen
+- **What to do instead:** Use `tokio::spawn_blocking` for any blocking operations
+- **Current status:** ✅ CI-TUI already handles this correctly (per CLAUDE.md: "Keyboard input runs on dedicated OS thread")
+- **Source:** [async-ratatui](https://github.com/d-holguin/async-ratatui)
+
+## Feature Dependencies
+
+```
+Foundation (do first):
+├─ #2 DRY test fixtures (must exist before rstest refactor)
+├─ #3 Clippy lints (enables objective gates)
+└─ #4 Module boundaries (enables further organization)
+
+Build on foundation:
+├─ #11 rstest (requires #2 - fixtures extracted)
+├─ #12 Utils module (requires #4 - boundaries defined)
+├─ #13 Component architecture (requires #4 - module splitting)
+└─ #17 Item ordering (cosmetic, can be done anytime)
+
+Optional/Future:
+├─ #16 Testlib (nice-to-have, new paradigm)
+└─ #14 Action mapping (if keybindings need to be configurable)
 ```
 
-### CI Integration
+## MVP Recommendation for v2.0 Cleanup
 
-```bash
-# In CI pipeline
-cargo fmt -- --check
-cargo clippy -- -D warnings
-cargo test
-```
+Given CI-TUI's specific issues (40 duplicate configs, 3x `format_duration()`, 155-line functions, 3,495 LOC UI module), prioritize:
 
-## Idiomatic Rust Checklist
+### Phase 1: Test Foundation (High Impact, Low Complexity)
+1. **#2 DRY Test Fixtures** - Extract 40 duplicate YAML configs to `tests/common/fixtures.rs` or helper functions. Create `minimal_config()`, `multi_group_config()`, etc.
+2. **#3 Clippy Lints** - Enable `too_many_lines` (threshold ~100) and `excessive_nesting`, fix violations in 155-line functions
 
-- [ ] **Naming:** snake_case (vars/fns), PascalCase (types), SCREAMING_SNAKE_CASE (consts)
-- [ ] **Pattern matching:** Use if let and while let instead of match with single arm
-- [ ] **Error propagation:** ? operator instead of manual match/unwrap
-- [ ] **Iterators:** .iter().filter().map() instead of manual for loops
-- [ ] **Borrowing:** References by default, clone only when ownership needed
-- [ ] **Traits:** Implement standard traits (Debug, Clone, Default, Display)
-- [ ] **Documentation:** /// doc comments for public API, examples in docs
-- [ ] **Edition:** Use Rust 2021 idioms (no extern crate, use for macros)
+**Rationale:** These are table stakes (every mature Rust project does this) and directly address known issues. Low complexity, high value.
 
-## MVP Recommendations for Brownfield Cleanup
+### Phase 2: Module Organization (Medium Impact, Medium Complexity)
+3. **#4 Module Splitting** - Split 3,495 LOC UI module by responsibility:
+   - `ui/app.rs` - Application state
+   - `ui/dashboard.rs` - Rendering logic
+   - `ui/events.rs` - Event handling
+   - Keep `ui/mod.rs` for re-exports
+4. **#12 Utility Module** - Extract `format_duration()` and other duplicated utilities to `src/utils/formatting.rs`
 
-For cleaning up AI-generated TUI code, prioritize in order:
+**Rationale:** Addresses "70% of codebase in one module" issue. Improves navigability and testability.
 
-### Phase 1: Foundation (Must Fix)
-1. Fix async event handling for keyboard responsiveness (blocking I/O to spawn_blocking)
-2. Add panic hook for terminal cleanup
-3. Enable clippy at deny level, fix all warnings
-4. Remove dead code and unused imports
-5. Apply rustfmt consistently
+### Phase 3: Test Excellence (Optional, Nice-to-Have)
+5. **#11 rstest** - Refactor parametrized tests to use fixtures. One test function can replace many duplicate test functions.
 
-### Phase 2: Structure (High Value)
-1. Separate Model/View/Update concerns clearly
-2. Move business logic out of UI rendering
-3. Document module responsibilities
-4. Add unit tests for core logic (config, checks, discovery)
+**Rationale:** Further reduces duplication, but requires new dependency. Can defer if timeline tight.
 
-### Phase 3: Quality (Nice to Have)
-1. Implement Action/Command mapping for extensibility
-2. Add file-based logging for debugging
-3. TestBackend tests for widgets
-4. Refactor clone() abuse to proper borrowing
+**Defer to post-v2.0:**
+- **#16 Testlib** - Snapshot testing is valuable but requires learning new paradigm. Already have 65% coverage.
+- **#13 Component architecture** - Useful but may be overkill if current UI structure works well
+- **#14 Action mapping** - Only if keybindings need to be configurable
 
 ## Confidence Assessment
 
-| Pattern Category | Confidence | Source |
-|-----------------|------------|--------|
-| TEA/MVC architecture | HIGH | Official Ratatui docs, multiple articles |
-| Async responsiveness patterns | HIGH | async-ratatui example, community discussions |
-| Testing with TestBackend | HIGH | Ratatui API docs, contributing guide |
-| Clippy/rustfmt standards | HIGH | Official Rust tooling docs |
-| Error handling (anyhow/thiserror) | HIGH | Multiple 2025 guides, widespread adoption |
-| Component-based structure | MEDIUM | Ratatui templates (newer pattern) |
-| Anti-patterns (clone abuse, blocking I/O) | HIGH | 2025 Rust anti-pattern articles, performance guides |
-| Prelude avoidance | MEDIUM | Community debate, Tokio removed theirs |
+| Area | Confidence | Rationale |
+|------|------------|-----------|
+| Test organization (common/mod.rs) | HIGH | Official Rust Book, verified rust-lang.org |
+| Test fixtures (DRY principle) | HIGH | Official docs + rstest widely adopted |
+| Clippy lints | HIGH | Direct from Clippy docs, maintainer recommendations |
+| Module boundaries | MEDIUM | Community consensus but subjective (when to split) |
+| rstest framework | HIGH | Mature library, well-documented |
+| TUI architecture (TEA) | MEDIUM | Ratatui community pattern, not official "standard" |
+| Utility module pattern | HIGH | Standard Rust practice, multiple sources |
 
 ## Sources
 
-### Official Documentation
-- [Best practices for ratatui apps - GitHub Discussion #220](https://github.com/ratatui/ratatui/discussions/220)
-- [The Elm Architecture (TEA) | Ratatui](https://ratatui.rs/concepts/application-patterns/the-elm-architecture/)
-- [Project Structure | Ratatui](https://ratatui.rs/templates/component/project-structure/)
-- [TestBackend in ratatui::backend - Rust Docs](https://docs.rs/ratatui/latest/ratatui/backend/struct.TestBackend.html)
-- [Clippy Documentation](https://doc.rust-lang.org/clippy/usage.html)
+### Official Documentation (HIGH confidence)
+- [Test Organization - The Rust Programming Language](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
+- [Integration Testing - Rust By Example](https://doc.rust-lang.org/rust-by-example/testing/integration_testing.html)
+- [Separating Modules into Different Files - The Rust Programming Language](https://doc.rust-lang.org/book/ch07-05-separating-modules-into-different-files.html)
+- [Refactoring to Improve Modularity - The Rust Programming Language](https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html)
+- [Clippy Lints](https://rust-lang.github.io/rust-clippy/master/index.html)
 
-### Architecture & Patterns
-- [async-ratatui - Handling multiple events asynchronously](https://github.com/d-holguin/async-ratatui)
+### Authoritative Libraries/Frameworks (HIGH confidence)
+- [rstest - Fixture-based test framework](https://github.com/la10736/rstest)
+- [ratatui - TUI framework](https://github.com/ratatui/ratatui)
+- [Ratatui Project Structure](https://ratatui.rs/templates/component/project-structure/)
+- [Ratatui - The Elm Architecture](https://ratatui.rs/concepts/application-patterns/the-elm-architecture/)
+- [ratatui-testlib](https://lib.rs/crates/ratatui-testlib)
+
+### Best Practices Guides (MEDIUM confidence, verified with official docs)
+- [Long-term Rust Project Maintenance](https://corrode.dev/blog/long-term-rust-maintenance/)
+- [Best Way to Structure Rust Web Services - LogRocket](https://blog.logrocket.com/best-way-structure-rust-web-services/)
+- [Rust Project Structure and Best Practices](https://www.djamware.com/post/68b2c7c451ce620c6f5efc56/rust-project-structure-and-best-practices-for-clean-scalable-code)
+- [Step-by-Step Guide: Refactoring a Large Rust Codebase](https://codenotary.com/blog/step-by-step-guide-refactoring-a-large-rust-codebase-with-aiderdev-and-custom-llms)
+
+### Additional Community Resources (MEDIUM confidence)
 - [Integration testing TUI applications in Rust](https://quantonganh.com/2024/01/21/integration-testing-tui-app-in-rust.md)
 - [7 Rust Idioms for Clean, High-Performance Code (Dec 2025)](https://medium.com/@jamesmiller22871/7-rust-idioms-for-clean-high-performance-code-6d7433e66d65)
-- [Rust Design Patterns - Anti-patterns](https://rust-unofficial.github.io/patterns/anti_patterns/)
+- [7 Rust Anti-Patterns (2025)](https://medium.com/solo-devs/the-7-rust-anti-patterns-that-are-secretly-killing-your-performance-and-how-to-fix-them-in-2025-dcebfdef7b54)
+- [async-ratatui example](https://github.com/d-holguin/async-ratatui)
+- [How To Structure Unit Tests in Rust](https://betterprogramming.pub/how-to-structure-unit-tests-in-rust-cc4945536a32)
 
-### Error Handling
-- [Rust Error Handling Guide 2025: New Techniques and Best Practices](https://markaicode.com/rust-error-handling-2025-guide/)
-- [Rust Error Handling: thiserror, anyhow, and When to Use Each](https://momori.dev/posts/rust-error-handling-thiserror-anyhow/)
-
-### Testing
-- [ratatui-testlib - Integration testing library](https://lib.rs/crates/ratatui-testlib)
-- [Testing - Command Line Applications in Rust](https://rust-cli.github.io/book/tutorial/testing.html)
-
-### Code Quality
-- [The 7 Rust Anti-Patterns Secretly Killing Your Performance (2025)](https://medium.com/solo-devs/the-7-rust-anti-patterns-that-are-secretly-killing-your-performance-and-how-to-fix-them-in-2025-dcebfdef7b54)
-- [Patterns for Defensive Programming in Rust](https://corrode.dev/blog/defensive-programming/)
-- [Don't Use Preludes And Globs](https://corrode.dev/blog/dont-use-preludes-and-globs/)
-- [Rust Project Structure and Best Practices for Clean, Scalable Code](https://www.djamware.com/post/68b2c7c451ce620c6f5efc56/rust-project-structure-and-best-practices-for-clean-scalable-code)
-
-### Responsiveness
-- [Text-mode terminal application with asynchronous input/output](https://users.rust-lang.org/t/text-mode-terminal-application-with-asynchronous-input-output/74760)
-- [r3bl_tui - Async TUI framework](https://docs.rs/r3bl_tui/latest/r3bl_tui/)
+### Clippy GitHub Issues (MEDIUM confidence, directly from maintainers)
+- [Clippy cognitive_complexity discussion](https://github.com/rust-lang/rust-clippy/issues/4470)
+- [cognitive_complexity includes macro code bug](https://github.com/rust-lang/rust-clippy/issues/14417)
+- [Correct cognitive_complexity docs PR](https://github.com/rust-lang/rust-clippy/pull/14915)
