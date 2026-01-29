@@ -6,7 +6,6 @@ docker:
   image: ci-tui-dev:latest
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
-  shell: bash
 
 git:
   base_branch: master

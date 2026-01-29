@@ -295,74 +295,187 @@ mod tests {
     use rstest::rstest;
     use std::path::PathBuf;
 
-    fn test_config_yaml() -> &'static str {
-        r#"
-version: 2
+    // Test fixture matching tests/common/configs.rs::checks_test_config()
+    // NOTE: Cannot use #[path] to import from tests/ due to cargo fmt limitations in Docker
+    // See: https://github.com/rust-lang/rustfmt/issues/4656
+    fn checks_test_config() -> CiConfig {
+        use crate::config::{
+            CheckDefinition, CheckTriggers, DockerConfig, FilePattern, GitConfig, GroupConfig,
+        };
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+        use std::sync::OnceLock;
 
-docker:
-  project_dir: ./infrastructure
-  service: php
-  shell: bash
+        let mut file_patterns = HashMap::new();
+        file_patterns.insert(
+            "php".to_string(),
+            FilePattern {
+                pattern: r"\.php$".to_string(),
+                color: None,
+            },
+        );
+        file_patterns.insert(
+            "php_src".to_string(),
+            FilePattern {
+                pattern: r"^src/.*\.php$".to_string(),
+                color: None,
+            },
+        );
+        file_patterns.insert(
+            "tests".to_string(),
+            FilePattern {
+                pattern: r"tests/.*\.php$".to_string(),
+                color: None,
+            },
+        );
+        file_patterns.insert(
+            "yaml".to_string(),
+            FilePattern {
+                pattern: r"\.ya?ml$".to_string(),
+                color: None,
+            },
+        );
 
-git:
-  base_branch: development
-  fallback_branch: HEAD~1
+        let mut checks = IndexMap::new();
 
-file_patterns:
-  php:
-    pattern: '\.php$'
-  php_src:
-    pattern: '^src/.*\.php$'
-  tests:
-    pattern: 'tests/.*\.php$'
-  yaml:
-    pattern: '\.ya?ml$'
+        // warmup group
+        let mut warmup_group = GroupConfig {
+            name: Some("Cache Warmup".to_string()),
+            parallel: false,
+            stop_on_failure: false,
+            pre_commands: Vec::new(),
+            checks: IndexMap::new(),
+        };
+        warmup_group.checks.insert(
+            "cache-warmup".to_string(),
+            CheckDefinition {
+                name: "Cache warmup".to_string(),
+                command: "bin/console cache:warmup".to_string(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: HashMap::new(),
+            },
+        );
+        checks.insert("warmup".to_string(), warmup_group);
 
-checks:
-  warmup:
-    name: Cache Warmup
-    checks:
-      cache-warmup:
-        name: Cache warmup
-        command: bin/console cache:warmup
+        // fast group (parallel)
+        let mut fast_group = GroupConfig {
+            name: Some("Fast Checks".to_string()),
+            parallel: true,
+            stop_on_failure: false,
+            pre_commands: Vec::new(),
+            checks: IndexMap::new(),
+        };
+        fast_group.checks.insert(
+            "php-lint".to_string(),
+            CheckDefinition {
+                name: "PHP syntax check".to_string(),
+                command: "parallel-lint {files}".to_string(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: Some(CheckTriggers {
+                    file_pattern: Some("php".to_string()),
+                    test_discovery: None,
+                }),
+                on_demand: false,
+                env: HashMap::new(),
+            },
+        );
+        fast_group.checks.insert(
+            "yaml-lint".to_string(),
+            CheckDefinition {
+                name: "YAML syntax check".to_string(),
+                command: "yaml-lint {files}".to_string(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: Some(CheckTriggers {
+                    file_pattern: Some("yaml".to_string()),
+                    test_discovery: None,
+                }),
+                on_demand: false,
+                env: HashMap::new(),
+            },
+        );
+        checks.insert("fast".to_string(), fast_group);
 
-  fast:
-    name: Fast Checks
-    parallel: true
-    checks:
-      php-lint:
-        name: PHP syntax check
-        command: parallel-lint {files}
-        triggers:
-          file_pattern: php
+        // analysis group
+        let mut analysis_group = GroupConfig {
+            name: None,
+            parallel: false,
+            stop_on_failure: false,
+            pre_commands: Vec::new(),
+            checks: IndexMap::new(),
+        };
+        analysis_group.checks.insert(
+            "phpstan".to_string(),
+            CheckDefinition {
+                name: "PHPStan".to_string(),
+                command: "phpstan analyse {files}".to_string(),
+                service: None,
+                container: None,
+                fix_command: Some("phpstan fix {files}".to_string()),
+                triggers: Some(CheckTriggers {
+                    file_pattern: Some("php".to_string()),
+                    test_discovery: None,
+                }),
+                on_demand: false,
+                env: HashMap::new(),
+            },
+        );
+        checks.insert("analysis".to_string(), analysis_group);
 
-      yaml-lint:
-        name: YAML syntax check
-        command: yaml-lint {files}
-        triggers:
-          file_pattern: yaml
+        // tests group
+        let mut tests_group = GroupConfig {
+            name: None,
+            parallel: false,
+            stop_on_failure: false,
+            pre_commands: Vec::new(),
+            checks: IndexMap::new(),
+        };
+        tests_group.checks.insert(
+            "phpunit".to_string(),
+            CheckDefinition {
+                name: "PHPUnit".to_string(),
+                command: "phpunit {files}".to_string(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: Some(CheckTriggers {
+                    file_pattern: Some("tests".to_string()),
+                    test_discovery: None,
+                }),
+                on_demand: false,
+                env: HashMap::new(),
+            },
+        );
+        checks.insert("tests".to_string(), tests_group);
 
-  analysis:
-    checks:
-      phpstan:
-        name: PHPStan
-        command: phpstan analyse {files}
-        fix_command: phpstan fix {files}
-        triggers:
-          file_pattern: php
-
-  tests:
-    checks:
-      phpunit:
-        name: PHPUnit
-        command: phpunit {files}
-        triggers:
-          file_pattern: tests
-"#
-    }
-
-    fn parse_config() -> CiConfig {
-        serde_yaml::from_str(test_config_yaml()).expect("Failed to parse test config")
+        CiConfig {
+            version: 2,
+            docker: DockerConfig {
+                project_dir: "./infrastructure".to_string(),
+                service: "php".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: HashMap::new(),
+            },
+            git: GitConfig {
+                base_branch: "development".to_string(),
+                fallback_branch: "HEAD~1".to_string(),
+            },
+            file_patterns,
+            checks,
+            ignore_patterns: Vec::new(),
+            compiled_ignore_patterns: OnceLock::new(),
+        }
     }
 
     fn make_changed_files(files: Vec<&str>) -> ChangedFiles {
@@ -405,7 +518,7 @@ checks:
 
     #[test]
     fn test_always_run_check() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -421,7 +534,7 @@ checks:
 
     #[test]
     fn test_triggered_check_with_matching_files() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -437,7 +550,7 @@ checks:
 
     #[test]
     fn test_triggered_check_without_matching_files() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["config/services.yaml"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -461,7 +574,7 @@ checks:
 
     #[test]
     fn test_resolve_command_with_files() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php", "src/Service/Bar.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -474,7 +587,7 @@ checks:
 
     #[test]
     fn test_check_has_fix_command() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -490,7 +603,7 @@ checks:
 
     #[test]
     fn test_group_checks_preserves_order() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -504,7 +617,7 @@ checks:
 
     #[test]
     fn test_check_to_run_accessors() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -519,7 +632,7 @@ checks:
 
     #[test]
     fn test_get_command_for_all_files() {
-        let config = parse_config();
+        let config = checks_test_config();
         let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
         let project_root = PathBuf::from("/tmp/project");
 
@@ -535,7 +648,7 @@ checks:
 
     #[test]
     fn test_check_with_files_placeholder_no_matches_is_skipped() {
-        let config = parse_config();
+        let config = checks_test_config();
         // Change only YAML files - no PHP files
         let changed_files = make_changed_files(vec!["config/services.yaml"]);
         let project_root = PathBuf::from("/tmp/project");
@@ -831,7 +944,7 @@ checks:
             #[case] pattern_key: &str,
             #[case] should_trigger: bool,
         ) {
-            let config = parse_config();
+            let config = checks_test_config();
             let changed_files = if file.is_empty() {
                 make_changed_files(vec![])
             } else {
@@ -875,7 +988,7 @@ checks:
 
         #[test]
         fn test_empty_changed_files_returns_only_always_run_checks() {
-            let config = parse_config();
+            let config = checks_test_config();
             let changed_files = make_changed_files(vec![]);
             let project_root = PathBuf::from("/tmp/project");
 
@@ -937,7 +1050,7 @@ checks: {}
 
         #[test]
         fn test_no_matching_patterns_marks_as_on_demand() {
-            let config = parse_config();
+            let config = checks_test_config();
             // Change a file that matches no patterns in config
             let changed_files = make_changed_files(vec!["README.txt", "data.json"]);
             let project_root = PathBuf::from("/tmp/project");
@@ -1096,7 +1209,7 @@ checks:
 
         #[test]
         fn test_files_placeholder_replaced() {
-            let config = parse_config();
+            let config = checks_test_config();
             let check = config
                 .groups()
                 .find_map(|(_, g)| g.checks.get("php-lint"))
@@ -1121,7 +1234,7 @@ checks:
 
         #[test]
         fn test_files_placeholder_empty_when_no_files() {
-            let config = parse_config();
+            let config = checks_test_config();
             let check = config
                 .groups()
                 .find_map(|(_, g)| g.checks.get("php-lint"))
@@ -1185,7 +1298,7 @@ checks:
 
         #[test]
         fn test_fix_command_resolved() {
-            let config = parse_config();
+            let config = checks_test_config();
             let check = config
                 .groups()
                 .find_map(|(_, g)| g.checks.get("phpstan"))
