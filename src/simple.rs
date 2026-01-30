@@ -18,6 +18,7 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
+use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -88,7 +89,7 @@ pub async fn run(
 
     // Print summary
     let elapsed = start_time.elapsed();
-    let elapsed_str = format_duration(elapsed);
+    let elapsed_str = time::format_from_duration(elapsed);
     let passed = all_results
         .iter()
         .filter(|r| r.status == CheckStatus::Passed)
@@ -163,7 +164,7 @@ pub async fn run(
 }
 
 fn print_result(result: &CheckResult) {
-    let duration = format_duration_ms(result.duration_ms);
+    let duration = time::format(result.duration_ms);
 
     match result.status {
         CheckStatus::Passed => {
@@ -351,32 +352,5 @@ async fn run_check(
             started_at: None,
             finished_at: None,
         },
-    }
-}
-
-fn format_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        let mins = secs / 60;
-        let remaining_secs = secs % 60;
-        format!("{}m {}s", mins, remaining_secs)
-    } else {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
-    }
-}
-
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m {}s", mins, secs)
     }
 }

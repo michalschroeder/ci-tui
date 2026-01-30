@@ -16,6 +16,7 @@
 
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
+use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -110,7 +111,7 @@ pub async fn run(
             match result {
                 Ok(duration_ms) => {
                     pass_count += 1;
-                    let duration = format_duration_ms(duration_ms);
+                    let duration = time::format(duration_ms);
                     println!(
                         "  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m",
                         check_id, duration
@@ -132,7 +133,7 @@ pub async fn run(
 
     // Print summary
     let elapsed = start_time.elapsed();
-    let elapsed_str = format_duration(elapsed);
+    let elapsed_str = time::format_from_duration(elapsed);
 
     if fix_count == 0 {
         println!("\x1b[33mNo fix commands found in config.\x1b[0m");
@@ -251,31 +252,4 @@ async fn run_fix_command(
     }
 
     Ok(duration_ms)
-}
-
-fn format_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        let mins = secs / 60;
-        let remaining_secs = secs % 60;
-        format!("{}m {}s", mins, remaining_secs)
-    } else {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
-    }
-}
-
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m {}s", mins, secs)
-    }
 }
