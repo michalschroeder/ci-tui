@@ -13,7 +13,8 @@
 //! 4. **Footer**: Keyboard shortcuts and version info
 
 use super::app::App;
-use crate::runner::{format_duration, CheckStatus};
+use crate::runner::CheckStatus;
+use crate::utils::time;
 use ansi_to_tui::IntoText;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -261,7 +262,7 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             };
 
             let duration = if pre_cmd.duration_ms > 0 {
-                format!(" {}", format_duration(pre_cmd.duration_ms))
+                format!(" {}", time::format(pre_cmd.duration_ms))
             } else {
                 String::new()
             };
@@ -298,7 +299,7 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             let duration = result
                 .map(|r| {
                     if r.duration_ms > 0 {
-                        format!(" {}", format_duration(r.duration_ms))
+                        format!(" {}", time::format(r.duration_ms))
                     } else {
                         String::new()
                     }
@@ -811,7 +812,7 @@ fn render_pre_command_output(
     if pre_cmd.duration_ms > 0 {
         raw_output.push_str(&format!(
             " \x1b[90m({})\x1b[0m",
-            format_duration(pre_cmd.duration_ms)
+            time::format(pre_cmd.duration_ms)
         ));
     }
     raw_output.push_str("\n\n");

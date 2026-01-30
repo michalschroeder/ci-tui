@@ -21,7 +21,6 @@
 /// assert_eq!(format(1500), "1.5s");
 /// assert_eq!(format(90000), "1m 30s");
 /// ```
-#[allow(dead_code)] // Used in Task 2; clippy runs before integration
 pub(crate) fn format(ms: u64) -> String {
     if ms < 1000 {
         format!("{}ms", ms)

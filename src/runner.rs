@@ -15,7 +15,6 @@
 //!
 //! - [`run_single_check`]: Execute a single check (for retry operations)
 //! - [`run_fix_command`]: Execute a fix command for a check
-//! - [`format_duration`]: Format milliseconds as human-readable duration
 
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
@@ -571,19 +570,6 @@ async fn run_docker_check_with_executor(
         executor,
     )
     .await
-}
-
-/// Format duration in human readable format
-pub fn format_duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m {}s", mins, secs)
-    }
 }
 
 /// Execute a command in Docker and return the result (for testing with executor)
