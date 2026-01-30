@@ -6,7 +6,7 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 **Core value:** Developers can confidently modify any module without fear of breaking things, and the TUI remains responsive during check execution.
 
-**Current focus:** v2.0 Comprehensive Cleanup — Phase 7: Code Deduplication (Phase 6 complete with gap closure)
+**Current focus:** v2.0 Comprehensive Cleanup — Phase 8: Complexity Reduction (Phases 6-7 complete)
 
 ## Current Position
 
@@ -118,9 +118,10 @@ Resume file: None
    - 50+ lines of duplicate code eliminated
    - Utils module fully tested and operational
 
-3. **Phase 8: Module Cleanup** (NEXT)
-   - Continue to Phase 8 after Phase 7 complete
-   - Ready for module organization and cleanup work
+3. **Phase 8: Complexity Reduction** (NEXT)
+   - Enable Clippy complexity gates (too_many_lines, excessive_nesting)
+   - Add characterization tests for determine_checks() before refactoring
+   - Split determine_checks() into focused functions (<50 lines each)
 
 ---
 *State updated: 2026-01-30 after completing 07-02-PLAN.md (Complete Code Deduplication)*

@@ -117,10 +117,13 @@ Plans:
 4. src/utils/ module provides crate-wide access to shared utilities
 5. All existing tests pass after consolidation with no behavior changes
 
-**Plans**: TBD
+**Status**: Complete
+
+**Plans**: 2 plans
 
 Plans:
-- [ ] 07-01: TBD during plan-phase
+- [x] 07-01-PLAN.md — Create utils module and migrate time::format(ms) from runner.rs
+- [x] 07-02-PLAN.md — Complete time utilities and migrate docker::is_running()
 
 #### Phase 8: Complexity Reduction
 
@@ -184,10 +187,10 @@ Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 | 4. TUI Responsiveness Fix | v1.0 | 2/2 | Complete | 2026-01-25 |
 | 5. Widget Testing & Documentation | v1.0 | 4/4 | Complete | 2026-01-25 |
 | 6. Test Infrastructure Consolidation | v2.0 | 4/4 | Complete | 2026-01-30 |
-| 7. Code Deduplication | v2.0 | 0/TBD | Not started | - |
+| 7. Code Deduplication | v2.0 | 2/2 | Complete | 2026-01-30 |
 | 8. Complexity Reduction | v2.0 | 0/TBD | Not started | - |
 | 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-30 after Phase 6 complete*
+*Last updated: 2026-01-30 after Phase 7 complete*
