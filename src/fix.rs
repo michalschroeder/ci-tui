@@ -16,7 +16,7 @@
 
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
-use crate::utils::time;
+use crate::utils::{docker, time};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -167,21 +167,6 @@ fn resolve_fix_command(command: &str, files: &[&str]) -> String {
     command.replace("{files}", &files_str).trim().to_string()
 }
 
-/// Check if a Docker container is currently running
-fn is_container_running(container_name: &str) -> bool {
-    let output = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", container_name])
-        .output();
-
-    match output {
-        Ok(output) => {
-            let result = String::from_utf8_lossy(&output.stdout);
-            result.trim() == "true"
-        }
-        Err(_) => false,
-    }
-}
-
 /// Execute a fix command via docker
 async fn run_fix_command(
     command: &str,
@@ -200,7 +185,7 @@ async fn run_fix_command(
     let shell = docker_config.shell();
 
     // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if is_container_running(container_name) {
+    let docker_cmd = if docker::is_running(container_name) {
         // Container is running, use docker exec
         format!(
             "docker exec {} {} -c '{}'",

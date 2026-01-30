@@ -72,17 +72,7 @@ impl CommandExecutor for RealCommandExecutor {
     }
 
     fn is_container_running(&self, container_name: &str) -> bool {
-        let output = std::process::Command::new("docker")
-            .args(["inspect", "-f", "{{.State.Running}}", container_name])
-            .output();
-
-        match output {
-            Ok(output) => {
-                let result = String::from_utf8_lossy(&output.stdout);
-                result.trim() == "true"
-            }
-            Err(_) => false,
-        }
+        crate::utils::docker::is_running(container_name)
     }
 }
 
