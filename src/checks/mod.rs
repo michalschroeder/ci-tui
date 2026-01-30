@@ -15,11 +15,10 @@
 
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
-use crate::test_discovery;
-use std::collections::HashSet;
 use std::path::Path;
 
 mod determine;
+use determine::*;
 
 /// A CI check that has been determined to run, with resolved commands
 #[derive(Debug, Clone)]
@@ -105,138 +104,29 @@ pub fn determine_checks(
 
             // Always run checks with no triggers
             if check.always_run() {
-                let resolved = resolve_command(config, check, &[], false);
-                let resolved_fix = check
-                    .fix_command
-                    .as_ref()
-                    .map(|_| resolve_command(config, check, &[], true));
-                checks_to_run.push(CheckToRun {
-                    id: check_id.clone(),
-                    group: group_name.to_string(),
-                    definition: check.clone(),
+                checks_to_run.push(process_always_run_check(
+                    config,
+                    check_id,
+                    check,
+                    group_name,
                     service,
-                    files: vec![],
-                    resolved_command: resolved,
-                    resolved_fix_command: resolved_fix,
-                    on_demand: false,
-                    skipped_no_files: false,
-                });
+                ));
                 continue;
             }
 
             // Check if this check should run based on triggers
             if let Some(triggers) = &check.triggers {
-                let mut matched_files = Vec::new();
-                let mut has_source_trigger = false;
-
-                // Check file pattern trigger (direct test file changes)
-                if let Some(pattern_key) = &triggers.file_pattern {
-                    if let Some(pattern) = config.get_file_pattern(pattern_key) {
-                        let files = changed_files.filter_by_pattern(pattern);
-                        matched_files.extend(files.into_iter().map(String::from));
-                    }
-                }
-
-                // Check test_discovery trigger (for running tests when src changes)
-                if let Some(discovery) = &triggers.test_discovery {
-                    has_source_trigger = true;
-                    if let Some(pattern) = config.get_file_pattern(&discovery.source_pattern) {
-                        let source_files = changed_files.filter_by_pattern(pattern);
-                        if !source_files.is_empty() {
-                            // Source files changed - find related tests using inline strategies
-                            let related_tests = test_discovery::find_related_tests(
-                                &discovery.strategies,
-                                &source_files,
-                                project_root,
-                            );
-
-                            if !related_tests.is_empty() {
-                                // Found specific tests to run
-                                matched_files.extend(related_tests);
-                            } else if matched_files.is_empty() {
-                                if check.on_demand {
-                                    // Check is configured as on-demand - add but require manual trigger
-                                    let resolved = resolve_command(config, check, &[], false);
-                                    let resolved_fix = check
-                                        .fix_command
-                                        .as_ref()
-                                        .map(|_| resolve_command(config, check, &[], true));
-                                    checks_to_run.push(CheckToRun {
-                                        id: check_id.clone(),
-                                        group: group_name.to_string(),
-                                        definition: check.clone(),
-                                        service: service.clone(),
-                                        files: vec!["(on-demand - press 't' to run)".to_string()],
-                                        resolved_command: resolved,
-                                        resolved_fix_command: resolved_fix,
-                                        on_demand: true,
-                                        skipped_no_files: false,
-                                    });
-                                    continue;
-                                } else if !check.command.contains("{files}") {
-                                    // Fall back to running all when no related tests found
-                                    // BUT only if the command doesn't use {files} placeholder
-                                    // (running with empty {files} would run against entire codebase)
-                                    matched_files
-                                        .push("(source files changed - running all)".to_string());
-                                }
-                                // If command uses {files} and no tests found, matched_files stays empty
-                                // and check will be added as skipped below
-                            }
-                        }
-                    }
-                }
-
-                // Deduplicate matched files (file_pattern and test_discovery may find same file)
-                let matched_files: Vec<String> = matched_files
-                    .into_iter()
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                // If files matched, add this check to run
-                if !matched_files.is_empty() {
-                    let file_list: Vec<&str> = matched_files.iter().map(|s| s.as_str()).collect();
-                    let resolved = resolve_command(config, check, &file_list, false);
-                    let resolved_fix = check
-                        .fix_command
-                        .as_ref()
-                        .map(|_| resolve_command(config, check, &file_list, true));
-                    checks_to_run.push(CheckToRun {
-                        id: check_id.clone(),
-                        group: group_name.to_string(),
-                        definition: check.clone(),
-                        service,
-                        files: matched_files,
-                        resolved_command: resolved,
-                        resolved_fix_command: resolved_fix,
-                        on_demand: false,
-                        skipped_no_files: false,
-                    });
-                } else {
-                    // No files matched - add as skipped (on-demand)
-                    // Only add if it has triggers but none matched
-                    let has_file_trigger = triggers.file_pattern.is_some();
-                    if has_file_trigger || has_source_trigger {
-                        let resolved = resolve_command(config, check, &[], false);
-                        let resolved_fix = check
-                            .fix_command
-                            .as_ref()
-                            .map(|_| resolve_command(config, check, &[], true));
-                        // Check if command uses {files} placeholder
-                        let has_files_placeholder = check.command.contains("{files}");
-                        checks_to_run.push(CheckToRun {
-                            id: check_id.clone(),
-                            group: group_name.to_string(),
-                            definition: check.clone(),
-                            service,
-                            files: vec!["(skipped - no matching files)".to_string()],
-                            resolved_command: resolved,
-                            resolved_fix_command: resolved_fix,
-                            on_demand: true, // Can be run on-demand
-                            skipped_no_files: has_files_placeholder,
-                        });
-                    }
+                if let Some(check_to_run) = process_triggered_check(
+                    config,
+                    changed_files,
+                    project_root,
+                    group_name,
+                    check_id,
+                    check,
+                    &service,
+                    triggers,
+                ) {
+                    checks_to_run.push(check_to_run);
                 }
             }
         }
