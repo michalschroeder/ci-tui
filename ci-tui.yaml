@@ -4,7 +4,6 @@ docker:
   project_dir: .
   service: dev
   image: ci-tui-dev:latest
-  shell: /bin/sh
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
 

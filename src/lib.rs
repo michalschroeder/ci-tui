@@ -21,6 +21,7 @@ pub mod runner;
 pub mod simple;
 pub mod test_discovery;
 pub mod ui;
+mod utils;
 
 // Re-export commonly used types for convenience
 pub use checks::{determine_checks, CheckToRun};
