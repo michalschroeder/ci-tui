@@ -1,0 +1,9 @@
+# Complexity lint thresholds
+# Functions over 100 lines trigger warning
+too-many-lines-threshold = 100
+
+# Nesting depth over 3 levels triggers warning
+excessive-nesting-threshold = 3
+
+# Cognitive complexity over 25 triggers warning
+cognitive-complexity-threshold = 25

@@ -68,6 +68,9 @@ tokio-test = "0.4"            # tokio testing utilities
 
 [lints.clippy]
 all = "deny"
+too_many_lines = "warn"
+excessive_nesting = "warn"
+cognitive_complexity = "warn"
 
 [lints.rust]
 dead_code = "deny"
