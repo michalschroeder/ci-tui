@@ -10,12 +10,12 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 ## Current Position
 
-Phase: 8 of 9 (Complexity Reduction) - IN PROGRESS
-Plan: 1 of 2 complete in Phase 8 (08-01)
-Status: Clippy complexity lints enabled, characterization tests created - ready for refactoring
-Last activity: 2026-01-30 — Completed 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)
+Phase: 8 of 9 (Complexity Reduction) - COMPLETE
+Plan: 2 of 2 complete in Phase 8 (08-02)
+Status: determine_checks() refactored to 46 lines with zero complexity warnings
+Last activity: 2026-01-30 — Completed 08-02-PLAN.md (Refactor determine_checks into Focused Functions)
 
-Progress: [█████████░] 1/2 = 50% Phase 8 | 22/28 = 79% overall (15 v1.0 + 7 v2.0)
+Progress: [██████████] 2/2 = 100% Phase 8 | 23/28 = 82% overall (15 v1.0 + 8 v2.0)
 
 ## Milestone History
 
@@ -34,12 +34,12 @@ Progress: [█████████░] 1/2 = 50% Phase 8 | 22/28 = 79% overa
 - Coverage: 65% overall
 
 **v2.0 Tracking:**
-- Total plans completed: 7 (Phase 6: 4 plans; Phase 7: 2 plans; Phase 8: 1 plan)
-- Average duration: 9min
-- Total execution time: 1.02 hours (61min)
+- Total plans completed: 8 (Phase 6: 4 plans; Phase 7: 2 plans; Phase 8: 2 plans)
+- Average duration: 11min
+- Total execution time: 1.32 hours (79min)
 - Phase 6 commits: 10
 - Phase 7 commits: 4
-- Phase 8 commits: 3
+- Phase 8 commits: 6
 
 ## Accumulated Context
 
@@ -78,6 +78,9 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 - 18 characterization tests before refactoring (safety net for determine_checks)
 - Inline test fixtures in characterization tests (avoids tests/common/ MockExecutor issues)
 - Document on_demand config field quirk in test (field ignored when files match pattern)
+- Function extraction pattern: domain-term naming (process_, match_, build_) with pub(super) visibility (08-02)
+- Submodule structure: Convert module.rs to module/mod.rs when extracting helpers to separate file (08-02)
+- Parameter count limit: 7 parameters (Clippy threshold) - extract data from passed objects when needed (08-02)
 
 | Decision | Context | Outcome |
 |----------|---------|---------|
@@ -93,10 +96,15 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 | Clippy complexity lint thresholds | 100 lines standard, 3 nesting, 25 complexity | 5 functions flagged including determine_checks (155 lines) |
 | Characterization test count | 18 tests cover all determine_checks branches | Complete behavior documentation before refactoring |
 | Inline fixtures for char tests | tests/common/ has MockExecutor issues | Characterization tests compile independently |
+| Function extraction pattern (08-02) | determine_checks at 155 lines needs splitting | 7 focused helpers, main function reduced to 46 lines |
+| Submodule over single file (08-02) | Helper functions belong in separate file | src/checks/ submodule with mod.rs and determine.rs |
+| pub(super) visibility (08-02) | Helpers are implementation details | Private to module, visible across submodule files |
+| Domain-term naming (08-02) | Generic names like "handle" are vague | process_always_run_check, match_file_pattern, build_check_to_run |
+| Parameter count reduction (08-02) | process_triggered_check had 8 params | Extract triggers from check.triggers inside function (7 params) |
 
 ### Pending Todos
 
-None — Phase 8 Plan 01 complete, ready for Plan 02 refactoring.
+None — Phase 8 complete (both plans).
 
 ### Blockers/Concerns
 
@@ -109,10 +117,20 @@ None — Phase 8 Plan 01 complete, ready for Plan 02 refactoring.
 - Does not block work - infrastructure validated via library tests
 - Future fix needed: Integration tests need mockall feature or different mock strategy
 
+**Pre-existing Clippy violations (not blocking):**
+- 4 functions in other modules exceed 100-line threshold:
+  - src/simple.rs::run (102 lines)
+  - src/ui/dashboard.rs::render_checks_list (116 lines)
+  - src/ui/dashboard.rs::render_footer (109 lines)
+  - src/ui/mod.rs::handle_key_event (238 lines)
+- Causes CI clippy check to fail with `-D warnings` flag
+- checks module (Phase 8 scope) has zero violations
+- Options: Address in Phase 9, add targeted allows, or adjust CI config
+
 ## Session Continuity
 
 Last session: 2026-01-30
-Stopped at: Completed 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)
+Stopped at: Completed 08-02-PLAN.md (Refactor determine_checks into Focused Functions)
 Resume file: None
 
 ## Next Steps
@@ -131,15 +149,19 @@ Resume file: None
    - 50+ lines of duplicate code eliminated
    - Utils module fully tested and operational
 
-3. **Phase 8: Complexity Reduction** (IN PROGRESS)
+3. **Phase 8: Complexity Reduction** (FULLY COMPLETE)
    - ✓ 08-01: Enable Clippy complexity lints and characterization tests (COMPLETE)
      - Clippy lints enabled: too_many_lines, excessive_nesting, cognitive_complexity
      - 18 characterization tests for determine_checks()
      - 5 functions flagged for improvement
-   - 08-02: Refactor determine_checks() into focused functions (NEXT)
-     - Extract helper functions
-     - Target: functions under 50 lines each
-     - All characterization tests must pass
+   - ✓ 08-02: Refactor determine_checks() into focused functions (COMPLETE)
+     - determine_checks() reduced from 155 to 46 lines
+     - 7 focused helper functions extracted to src/checks/determine.rs
+     - Zero complexity warnings in checks module
+     - All characterization tests pass (18/18)
+     - All CMPLX-04 and CMPLX-05 requirements satisfied
+
+4. **Phase 9: NEXT** (see ROADMAP.md for next phase)
 
 ---
 *State updated: 2026-01-30 after completing 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)*
