@@ -105,17 +105,13 @@ pub fn determine_checks(
             // Always run checks with no triggers
             if check.always_run() {
                 checks_to_run.push(process_always_run_check(
-                    config,
-                    check_id,
-                    check,
-                    group_name,
-                    service,
+                    config, check_id, check, group_name, service,
                 ));
                 continue;
             }
 
             // Check if this check should run based on triggers
-            if let Some(triggers) = &check.triggers {
+            if check.triggers.is_some() {
                 if let Some(check_to_run) = process_triggered_check(
                     config,
                     changed_files,
@@ -124,7 +120,6 @@ pub fn determine_checks(
                     check_id,
                     check,
                     &service,
-                    triggers,
                 ) {
                     checks_to_run.push(check_to_run);
                 }

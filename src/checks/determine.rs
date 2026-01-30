@@ -6,7 +6,7 @@
 //! - Handling test discovery
 //! - Building CheckToRun instances
 
-use crate::config::{CheckDefinition, CheckTriggers, CiConfig};
+use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
 use std::collections::HashSet;
@@ -199,8 +199,8 @@ pub(super) fn process_triggered_check(
     check_id: &str,
     check: &CheckDefinition,
     service: &str,
-    triggers: &CheckTriggers,
 ) -> Option<CheckToRun> {
+    let triggers = check.triggers.as_ref()?;
     let mut matched_files = Vec::new();
     let mut has_source_trigger = false;
 
@@ -213,9 +213,14 @@ pub(super) fn process_triggered_check(
     // Check test_discovery trigger
     if let Some(discovery) = &triggers.test_discovery {
         has_source_trigger = true;
-        if let Some(result) =
-            process_test_discovery(config, changed_files, project_root, discovery, check, &mut matched_files)
-        {
+        if let Some(result) = process_test_discovery(
+            config,
+            changed_files,
+            project_root,
+            discovery,
+            check,
+            &mut matched_files,
+        ) {
             match result {
                 TestDiscoveryResult::OnDemand => {
                     return Some(build_on_demand_check(

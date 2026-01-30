@@ -646,7 +646,10 @@ checks:
     let check = assert_check_exists(&checks, "phpunit");
     assert!(!check.on_demand, "Check should be triggered");
     assert!(
-        check.files.iter().any(|f: &String| f.contains("FooTest.php")),
+        check
+            .files
+            .iter()
+            .any(|f: &String| f.contains("FooTest.php")),
         "Check should include discovered test file"
     );
 }
@@ -743,7 +746,10 @@ checks:
         "Check should run all when no test found and no {{files}} placeholder"
     );
     assert!(
-        check.files.iter().any(|f: &String| f.contains("running all")),
+        check
+            .files
+            .iter()
+            .any(|f: &String| f.contains("running all")),
         "Should indicate running all tests"
     );
 }
@@ -790,10 +796,7 @@ checks:
         check.on_demand,
         "Check with {{files}} and no tests found should be on-demand"
     );
-    assert!(
-        check.skipped_no_files,
-        "Should have skipped_no_files=true"
-    );
+    assert!(check.skipped_no_files, "Should have skipped_no_files=true");
 }
 
 #[test]
@@ -839,7 +842,10 @@ checks:
         "Check without {{files}} should run all when no tests found"
     );
     assert!(
-        check.files.iter().any(|f: &String| f.contains("running all")),
+        check
+            .files
+            .iter()
+            .any(|f: &String| f.contains("running all")),
         "Should indicate running all tests"
     );
 }
