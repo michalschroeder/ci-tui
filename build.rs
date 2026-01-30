@@ -1,6 +1,16 @@
 use std::env;
 use std::process::Command;
 
+/// Extract stdout from successful command, trim whitespace
+fn extract_command_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 fn main() {
     // Try environment variable first (set by Docker build args), then fall back to git command
     let git_hash = env::var("CI_TUI_GIT_HASH")
@@ -11,14 +21,7 @@ fn main() {
                 .args(["rev-parse", "--short", "HEAD"])
                 .output()
                 .ok()
-                .and_then(|output| {
-                    if output.status.success() {
-                        String::from_utf8(output.stdout).ok()
-                    } else {
-                        None
-                    }
-                })
-                .map(|s| s.trim().to_string())
+                .and_then(extract_command_output)
         })
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -31,14 +34,7 @@ fn main() {
                 .args(["+%Y-%m-%d %H:%M"])
                 .output()
                 .ok()
-                .and_then(|output| {
-                    if output.status.success() {
-                        String::from_utf8(output.stdout).ok()
-                    } else {
-                        None
-                    }
-                })
-                .map(|s| s.trim().to_string())
+                .and_then(extract_command_output)
         })
         .unwrap_or_else(|| "unknown".to_string());
 
