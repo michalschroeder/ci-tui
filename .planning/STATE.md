@@ -10,12 +10,12 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 ## Current Position
 
-Phase: 7 of 9 (Code Deduplication) - COMPLETE
-Plan: 2 of 2 complete in Phase 7 (07-02)
-Status: Phase 7 complete - utils module fully implemented with time and docker utilities
-Last activity: 2026-01-30 — Completed 07-02-PLAN.md (Complete Code Deduplication)
+Phase: 8 of 9 (Complexity Reduction) - IN PROGRESS
+Plan: 1 of 2 complete in Phase 8 (08-01)
+Status: Clippy complexity lints enabled, characterization tests created - ready for refactoring
+Last activity: 2026-01-30 — Completed 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)
 
-Progress: [█████████] 2/2 = 100% Phase 7 | 21/28 = 75% overall (15 v1.0 + 6 v2.0)
+Progress: [█████████░] 1/2 = 50% Phase 8 | 22/28 = 79% overall (15 v1.0 + 7 v2.0)
 
 ## Milestone History
 
@@ -34,11 +34,12 @@ Progress: [█████████] 2/2 = 100% Phase 7 | 21/28 = 75% overall
 - Coverage: 65% overall
 
 **v2.0 Tracking:**
-- Total plans completed: 6 (Phase 6: 06-01 through 06-04; Phase 7: 07-01 through 07-02)
-- Average duration: 8min
-- Total execution time: 0.83 hours (50min)
+- Total plans completed: 7 (Phase 6: 4 plans; Phase 7: 2 plans; Phase 8: 1 plan)
+- Average duration: 9min
+- Total execution time: 1.02 hours (61min)
 - Phase 6 commits: 10
 - Phase 7 commits: 4
+- Phase 8 commits: 3
 
 ## Accumulated Context
 
@@ -71,6 +72,13 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 - RealCommandExecutor delegates to utils::docker::is_running for shared implementation (07-02)
 - Complete deduplication removes 50+ lines of duplicate code across fix.rs, simple.rs, runner.rs (07-02)
 
+**Phase 08 Decisions (Complexity Reduction):**
+- Lint thresholds: 100 lines, 3 nesting levels, 25 cognitive complexity (Clippy defaults, industry standard)
+- Warn level for complexity lints (visibility without build breakage)
+- 18 characterization tests before refactoring (safety net for determine_checks)
+- Inline test fixtures in characterization tests (avoids tests/common/ MockExecutor issues)
+- Document on_demand config field quirk in test (field ignored when files match pattern)
+
 | Decision | Context | Outcome |
 |----------|---------|---------|
 | Inline fixtures in src/ tests | #[path] imports break cargo fmt in Docker | Structured fixtures work, tests pass |
@@ -82,24 +90,29 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 | Incremental utils migration | Start with time, add docker in 07-02 | Focused changes, easier review |
 | Docker utilities centralized | Three modules had identical is_container_running | Single source of truth in utils::docker::is_running |
 | RealCommandExecutor delegation | Keep trait method for mocking, delegate impl | Shared implementation, test flexibility maintained |
+| Clippy complexity lint thresholds | 100 lines standard, 3 nesting, 25 complexity | 5 functions flagged including determine_checks (155 lines) |
+| Characterization test count | 18 tests cover all determine_checks branches | Complete behavior documentation before refactoring |
+| Inline fixtures for char tests | tests/common/ has MockExecutor issues | Characterization tests compile independently |
 
 ### Pending Todos
 
-None — Phase 6 fully complete, ready for Phase 7.
+None — Phase 8 Plan 01 complete, ready for Plan 02 refactoring.
 
 ### Blockers/Concerns
 
 **Pre-existing integration test issue (not blocking):**
 - Integration tests fail to compile with MockGitExecutor/MockCommandExecutor import errors
 - Exists in master before Phase 6 changes
-- Library tests (250) compile and pass successfully
+- Library tests (193) compile and pass successfully
+- Characterization tests (18) compile and pass independently (inline fixtures)
+- Total: 211 passing tests
 - Does not block work - infrastructure validated via library tests
 - Future fix needed: Integration tests need mockall feature or different mock strategy
 
 ## Session Continuity
 
 Last session: 2026-01-30
-Stopped at: Completed 07-02-PLAN.md (Complete Code Deduplication)
+Stopped at: Completed 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)
 Resume file: None
 
 ## Next Steps
@@ -118,10 +131,15 @@ Resume file: None
    - 50+ lines of duplicate code eliminated
    - Utils module fully tested and operational
 
-3. **Phase 8: Complexity Reduction** (NEXT)
-   - Enable Clippy complexity gates (too_many_lines, excessive_nesting)
-   - Add characterization tests for determine_checks() before refactoring
-   - Split determine_checks() into focused functions (<50 lines each)
+3. **Phase 8: Complexity Reduction** (IN PROGRESS)
+   - ✓ 08-01: Enable Clippy complexity lints and characterization tests (COMPLETE)
+     - Clippy lints enabled: too_many_lines, excessive_nesting, cognitive_complexity
+     - 18 characterization tests for determine_checks()
+     - 5 functions flagged for improvement
+   - 08-02: Refactor determine_checks() into focused functions (NEXT)
+     - Extract helper functions
+     - Target: functions under 50 lines each
+     - All characterization tests must pass
 
 ---
-*State updated: 2026-01-30 after completing 07-02-PLAN.md (Complete Code Deduplication)*
+*State updated: 2026-01-30 after completing 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)*
