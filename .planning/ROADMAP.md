@@ -174,10 +174,11 @@ Plans:
 4. Overall test coverage is at 65% or higher
 5. All new tests use shared fixtures from Phase 6
 
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 09-01: TBD during plan-phase
+- [ ] 09-01-PLAN.md — Expand runner.rs tests (CheckRunner, CheckResult factories)
+- [ ] 09-02-PLAN.md — Add simple.rs and fix.rs tests (resolve_fix_command, execution paths)
 
 ## Progress
 
@@ -194,8 +195,8 @@ Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 | 6. Test Infrastructure Consolidation | v2.0 | 4/4 | Complete | 2026-01-30 |
 | 7. Code Deduplication | v2.0 | 2/2 | Complete | 2026-01-30 |
 | 8. Complexity Reduction | v2.0 | 2/2 | Complete | 2026-01-31 |
-| 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
+| 9. Test Coverage Expansion | v2.0 | 0/2 | Planned | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-31 after Phase 8 completion*
+*Last updated: 2026-01-31 after Phase 9 planning*
