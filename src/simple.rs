@@ -163,7 +163,16 @@ pub async fn run(
     Ok(())
 }
 
-fn print_result(result: &CheckResult) {
+/// Print a check result to stdout with colored status indicator.
+///
+/// Formats the result differently based on `CheckStatus`:
+/// - Passed: green checkmark with duration
+/// - Failed: red X with duration
+/// - Running: yellow dot with "(running)"
+/// - Pending: gray circle with "(pending)"
+/// - Skipped: gray slashed circle with "(skipped)"
+/// - OnDemand: cyan diamond with "(on-demand)"
+pub fn print_result(result: &CheckResult) {
     let duration = time::format(result.duration_ms);
 
     match result.status {
