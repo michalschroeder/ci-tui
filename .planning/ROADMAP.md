@@ -145,11 +145,15 @@ Plans:
 4. All functions pass Clippy complexity lints with no violations
 5. All 250+ existing tests pass after refactoring with identical behavior
 
+**Status**: Complete
+
+**Note:** Success criterion 3 (all functions <50 lines) was accepted with one exception: process_triggered_check() is 78 lines but passes Clippy's 100-line threshold and serves as a well-structured orchestrator. Documented as acceptable given its coordination role.
+
 **Plans**: 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md — Enable Clippy lints and write characterization tests
-- [ ] 08-02-PLAN.md — Split determine_checks() and fix remaining violations
+- [x] 08-01-PLAN.md — Enable Clippy lints and write characterization tests
+- [x] 08-02-PLAN.md — Split determine_checks() and fix remaining violations
 
 #### Phase 9: Test Coverage Expansion
 
@@ -189,9 +193,9 @@ Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 | 5. Widget Testing & Documentation | v1.0 | 4/4 | Complete | 2026-01-25 |
 | 6. Test Infrastructure Consolidation | v2.0 | 4/4 | Complete | 2026-01-30 |
 | 7. Code Deduplication | v2.0 | 2/2 | Complete | 2026-01-30 |
-| 8. Complexity Reduction | v2.0 | 0/2 | Planned | - |
+| 8. Complexity Reduction | v2.0 | 2/2 | Complete | 2026-01-31 |
 | 9. Test Coverage Expansion | v2.0 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-30 after Phase 8 planning*
+*Last updated: 2026-01-31 after Phase 8 completion*

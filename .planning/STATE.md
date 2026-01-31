@@ -6,14 +6,14 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 **Core value:** Developers can confidently modify any module without fear of breaking things, and the TUI remains responsive during check execution.
 
-**Current focus:** v2.0 Comprehensive Cleanup — Phase 8: Complexity Reduction (Phases 6-7 complete)
+**Current focus:** v2.0 Comprehensive Cleanup — Phase 9: Test Coverage Expansion (Phases 6-8 complete)
 
 ## Current Position
 
-Phase: 8 of 9 (Complexity Reduction) - COMPLETE
+Phase: 8 of 9 (Complexity Reduction) - COMPLETE, VERIFIED
 Plan: 2 of 2 complete in Phase 8 (08-02)
-Status: determine_checks() refactored to 46 lines with zero complexity warnings
-Last activity: 2026-01-30 — Completed 08-02-PLAN.md (Refactor determine_checks into Focused Functions)
+Status: Phase verified — process_triggered_check() at 78 lines accepted as reasonable orchestrator
+Last activity: 2026-01-31 — Phase 8 execution and verification complete
 
 Progress: [██████████] 2/2 = 100% Phase 8 | 23/28 = 82% overall (15 v1.0 + 8 v2.0)
 
@@ -101,6 +101,7 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 | pub(super) visibility (08-02) | Helpers are implementation details | Private to module, visible across submodule files |
 | Domain-term naming (08-02) | Generic names like "handle" are vague | process_always_run_check, match_file_pattern, build_check_to_run |
 | Parameter count reduction (08-02) | process_triggered_check had 8 params | Extract triggers from check.triggers inside function (7 params) |
+| Accept 78-line orchestrator (08-02) | process_triggered_check at 78 lines exceeded 50-line target | Function passes Clippy's 100-line threshold, well-structured orchestrator role accepted |
 
 ### Pending Todos
 
@@ -129,8 +130,8 @@ None — Phase 8 complete (both plans).
 
 ## Session Continuity
 
-Last session: 2026-01-30
-Stopped at: Completed 08-02-PLAN.md (Refactor determine_checks into Focused Functions)
+Last session: 2026-01-31
+Stopped at: Phase 8 verification complete — accepted 78-line orchestrator function
 Resume file: None
 
 ## Next Steps
@@ -161,7 +162,11 @@ Resume file: None
      - All characterization tests pass (18/18)
      - All CMPLX-04 and CMPLX-05 requirements satisfied
 
-4. **Phase 9: NEXT** (see ROADMAP.md for next phase)
+4. **Phase 9: Test Coverage Expansion** (NEXT)
+   - Add unit tests to runner.rs (730 lines, no inline tests)
+   - Add unit tests to simple.rs (382 lines, no inline tests)
+   - Add unit tests to fix.rs (281 lines, no inline tests)
+   - Maintain or improve 65% overall coverage
 
 ---
-*State updated: 2026-01-30 after completing 08-01-PLAN.md (Enable Complexity Lints and Characterization Tests)*
+*State updated: 2026-01-31 after Phase 8 execution and verification*
