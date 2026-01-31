@@ -3,7 +3,7 @@
 ## Milestones
 
 - v1.0 Code Quality - Phases 1-5 (shipped 2026-01-25)
-- v2.0 Comprehensive Cleanup - Phases 6-9 (in progress)
+- v2.0 Comprehensive Cleanup - Phases 6-9 (complete)
 
 ## Phases
 
@@ -174,11 +174,15 @@ Plans:
 4. Overall test coverage is at 65% or higher
 5. All new tests use shared fixtures from Phase 6
 
+**Status**: Complete
+
+**Note:** Success criteria 1-3 specified "inline unit tests" but tests were placed in `tests/` directory due to cargo fmt Docker limitation documented in CLAUDE.md. Function coverage: 65.34% (meets COV-04). Line coverage: 58.43% (Docker-dependent code not unit testable).
+
 **Plans**: 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md — Expand runner.rs tests (CheckRunner, CheckResult factories)
-- [ ] 09-02-PLAN.md — Add simple.rs and fix.rs tests (resolve_fix_command, execution paths)
+- [x] 09-01-PLAN.md — Expand runner.rs tests (CheckRunner, CheckResult factories)
+- [x] 09-02-PLAN.md — Add simple.rs and fix.rs tests (resolve_fix_command, execution paths)
 
 ## Progress
 
@@ -195,8 +199,8 @@ Phases execute in numeric order: 6 -> 7 -> 8 -> 9
 | 6. Test Infrastructure Consolidation | v2.0 | 4/4 | Complete | 2026-01-30 |
 | 7. Code Deduplication | v2.0 | 2/2 | Complete | 2026-01-30 |
 | 8. Complexity Reduction | v2.0 | 2/2 | Complete | 2026-01-31 |
-| 9. Test Coverage Expansion | v2.0 | 0/2 | Planned | - |
+| 9. Test Coverage Expansion | v2.0 | 2/2 | Complete | 2026-01-31 |
 
 ---
 *Roadmap created: 2026-01-29 for v2.0 milestone*
-*Last updated: 2026-01-31 after Phase 9 planning*
+*Last updated: 2026-01-31 after Phase 9 execution complete*
