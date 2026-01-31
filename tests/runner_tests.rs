@@ -3,10 +3,12 @@
 //! This test file covers:
 //! - Pure command-building functions (no mocks needed)
 //! - Docker command execution (using mocks)
+//! - CheckResult factory methods
+//! - CheckRunner orchestration
 
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_docker_command_with_executor,
-    filter_docker_warnings, CheckStatus,
+    filter_docker_warnings, CheckResult, CheckStatus,
 };
 use rstest::rstest;
 use std::collections::HashMap;
@@ -469,5 +471,358 @@ mod execute_docker_command_tests {
         // Docker warnings should be filtered from error output
         assert!(!result.error_output.contains("variable is not set"));
         assert!(result.error_output.contains("Actual error"));
+    }
+}
+
+mod check_result_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn pending_returns_correct_check_id() {
+        let result = CheckResult::pending("my-check");
+        assert_eq!(result.check_id, "my-check");
+    }
+
+    #[test]
+    fn pending_has_pending_status() {
+        let result = CheckResult::pending("test");
+        assert_eq!(result.status, CheckStatus::Pending);
+    }
+
+    #[test]
+    fn pending_has_empty_output() {
+        let result = CheckResult::pending("test");
+        assert!(result.output.is_empty());
+        assert!(result.error_output.is_empty());
+    }
+
+    #[test]
+    fn pending_has_zero_duration() {
+        let result = CheckResult::pending("test");
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[test]
+    fn pending_has_no_timestamps() {
+        let result = CheckResult::pending("test");
+        assert!(result.started_at.is_none());
+        assert!(result.finished_at.is_none());
+    }
+
+    #[test]
+    fn skipped_returns_correct_check_id() {
+        let result = CheckResult::skipped("skip-check");
+        assert_eq!(result.check_id, "skip-check");
+    }
+
+    #[test]
+    fn skipped_has_skipped_status() {
+        let result = CheckResult::skipped("test");
+        assert_eq!(result.status, CheckStatus::Skipped);
+    }
+
+    #[test]
+    fn skipped_output_contains_no_changes() {
+        let result = CheckResult::skipped("test");
+        assert!(
+            result.output.contains("No changes detected"),
+            "Expected output to contain 'No changes detected', got: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn skipped_has_zero_duration() {
+        let result = CheckResult::skipped("test");
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[test]
+    fn on_demand_returns_correct_check_id() {
+        let result = CheckResult::on_demand("demand-check");
+        assert_eq!(result.check_id, "demand-check");
+    }
+
+    #[test]
+    fn on_demand_has_on_demand_status() {
+        let result = CheckResult::on_demand("test");
+        assert_eq!(result.status, CheckStatus::OnDemand);
+    }
+
+    #[test]
+    fn on_demand_output_contains_press_t() {
+        let result = CheckResult::on_demand("test");
+        assert!(
+            result.output.contains("Press 't'"),
+            "Expected output to contain 'Press 't'', got: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn on_demand_has_zero_duration() {
+        let result = CheckResult::on_demand("test");
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[rstest]
+    #[case("check-1")]
+    #[case("my-clippy-check")]
+    #[case("unit-tests")]
+    fn factory_methods_preserve_check_id(#[case] check_id: &str) {
+        assert_eq!(CheckResult::pending(check_id).check_id, check_id);
+        assert_eq!(CheckResult::skipped(check_id).check_id, check_id);
+        assert_eq!(CheckResult::on_demand(check_id).check_id, check_id);
+    }
+}
+
+mod check_runner_tests {
+    use super::*;
+    use ci_tui::runner::{CheckRunner, CommandOutput, MockCommandExecutor, RunnerEvent};
+    use common::configs::ConfigBuilder;
+    use common::{make_on_demand_check, make_widget_check};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Helper to collect all events from a channel
+    async fn collect_events(mut rx: tokio::sync::mpsc::Receiver<RunnerEvent>) -> Vec<RunnerEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn new_creates_runner_with_real_executor() {
+        let config = ConfigBuilder::new().build();
+        let _runner = CheckRunner::new(config, Path::new("/tmp"));
+        // If we get here without panic, the constructor works
+    }
+
+    #[test]
+    fn with_executor_accepts_custom_executor() {
+        let config = ConfigBuilder::new().build();
+        let mock = MockCommandExecutor::new();
+        let _runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+        // If we get here without panic, the constructor works
+    }
+
+    #[tokio::test]
+    async fn run_checks_sequential_sends_events_in_order() {
+        // Create mock that returns success for any command
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+        });
+
+        let config = ConfigBuilder::new().build();
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("check1", "group1", "Check 1", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // Verify event order for sequential execution:
+        // GroupStarted -> CheckStarted -> CheckFinished -> GroupFinished -> AllFinished
+        assert!(
+            events.len() >= 5,
+            "Expected at least 5 events, got {}",
+            events.len()
+        );
+
+        // Check first event is GroupStarted
+        assert!(
+            matches!(&events[0], RunnerEvent::GroupStarted { group } if group == "group1"),
+            "First event should be GroupStarted, got {:?}",
+            events[0]
+        );
+
+        // Check CheckStarted comes before CheckFinished
+        let check_started_idx = events.iter().position(
+            |e| matches!(e, RunnerEvent::CheckStarted { check_id } if check_id == "check1"),
+        );
+        let check_finished_idx = events.iter().position(
+            |e| matches!(e, RunnerEvent::CheckFinished { result } if result.check_id == "check1"),
+        );
+        assert!(
+            check_started_idx.is_some() && check_finished_idx.is_some(),
+            "Should have CheckStarted and CheckFinished events"
+        );
+        assert!(
+            check_started_idx.unwrap() < check_finished_idx.unwrap(),
+            "CheckStarted should come before CheckFinished"
+        );
+
+        // Check GroupFinished comes before AllFinished
+        let group_finished_idx = events
+            .iter()
+            .position(|e| matches!(e, RunnerEvent::GroupFinished { group } if group == "group1"));
+        let all_finished_idx = events
+            .iter()
+            .position(|e| matches!(e, RunnerEvent::AllFinished));
+        assert!(
+            group_finished_idx.is_some() && all_finished_idx.is_some(),
+            "Should have GroupFinished and AllFinished events"
+        );
+        assert!(
+            group_finished_idx.unwrap() < all_finished_idx.unwrap(),
+            "GroupFinished should come before AllFinished"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_checks_skips_on_demand_checks() {
+        // Create mock that should NOT be called for on-demand checks
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        // No execute expectation for on-demand checks
+
+        let config = ConfigBuilder::new().build();
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_on_demand_check(
+            "on-demand-check",
+            "group1",
+            "On Demand",
+        )];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // Verify no CheckStarted or CheckFinished events for on-demand check
+        let has_check_started = events.iter().any(|e| {
+            matches!(e, RunnerEvent::CheckStarted { check_id } if check_id == "on-demand-check")
+        });
+        let has_check_finished = events.iter().any(|e| {
+            matches!(e, RunnerEvent::CheckFinished { result } if result.check_id == "on-demand-check")
+        });
+
+        assert!(
+            !has_check_started,
+            "On-demand check should not have CheckStarted event"
+        );
+        assert!(
+            !has_check_finished,
+            "On-demand check should not have CheckFinished event"
+        );
+
+        // Should still have GroupStarted, GroupFinished, and AllFinished
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::GroupStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::GroupFinished { .. })));
+        assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
+    }
+
+    #[tokio::test]
+    async fn run_checks_handles_pre_commands_success() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+        });
+
+        // Create config with a pre-command
+        let config = ConfigBuilder::new()
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // Verify PreCommandStarted and PreCommandFinished events are sent
+        let has_pre_started = events.iter().any(|e| {
+            matches!(e, RunnerEvent::PreCommandStarted { group, name }
+                if group == "lint" && name == "warmup")
+        });
+        let has_pre_finished = events.iter().any(|e| {
+            matches!(e, RunnerEvent::PreCommandFinished { group, name, success, .. }
+                if group == "lint" && name == "warmup" && *success)
+        });
+
+        assert!(has_pre_started, "Should have PreCommandStarted event");
+        assert!(
+            has_pre_finished,
+            "Should have PreCommandFinished event with success=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_checks_pre_command_failure_stops_execution() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: false, // Pre-command fails
+            stdout: String::new(),
+            stderr: "pre-command failed".to_string(),
+        });
+
+        // Create config with a failing pre-command
+        let config = ConfigBuilder::new()
+            .with_pre_command("lint", "setup", "failing-command")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // Verify pre-command failure stops execution
+        let has_pre_failed = events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::PreCommandFinished { success, .. } if !*success));
+        assert!(
+            has_pre_failed,
+            "Should have PreCommandFinished with success=false"
+        );
+
+        // No CheckStarted for the check (execution stopped)
+        let has_check_started = events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::CheckStarted { .. }));
+        assert!(
+            !has_check_started,
+            "Check should not start after pre-command failure"
+        );
+
+        // Should still have GroupFinished and AllFinished (cleanup events)
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::GroupFinished { .. })));
+        assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
     }
 }

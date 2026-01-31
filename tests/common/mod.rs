@@ -79,6 +79,24 @@ pub fn parse_widget_config() -> CiConfig {
 /// Create a CheckToRun for testing
 #[allow(dead_code)]
 pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> CheckToRun {
+    make_check_with_options(id, group, name, has_fix, false)
+}
+
+/// Create a CheckToRun with on_demand option for testing
+#[allow(dead_code)]
+pub fn make_on_demand_check(id: &str, group: &str, name: &str) -> CheckToRun {
+    make_check_with_options(id, group, name, false, true)
+}
+
+/// Create a CheckToRun with all options for testing
+#[allow(dead_code)]
+pub fn make_check_with_options(
+    id: &str,
+    group: &str,
+    name: &str,
+    has_fix: bool,
+    on_demand: bool,
+) -> CheckToRun {
     CheckToRun {
         id: id.to_string(),
         group: group.to_string(),
@@ -93,7 +111,7 @@ pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> Ch
                 None
             },
             triggers: None,
-            on_demand: false,
+            on_demand,
             env: std::collections::HashMap::new(),
         },
         service: "app".to_string(),
@@ -104,7 +122,7 @@ pub fn make_widget_check(id: &str, group: &str, name: &str, has_fix: bool) -> Ch
         } else {
             None
         },
-        on_demand: false,
+        on_demand,
         skipped_no_files: false,
     }
 }

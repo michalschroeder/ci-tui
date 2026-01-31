@@ -30,7 +30,7 @@
 
 use ci_tui::config::{
     CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig,
-    TestDiscoveryConfig,
+    PreCommand, TestDiscoveryConfig,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -143,6 +143,30 @@ impl ConfigBuilder {
     /// Set ignore patterns for file filtering
     pub fn with_ignore_patterns(mut self, patterns: Vec<&str>) -> Self {
         self.ignore_patterns = patterns.into_iter().map(String::from).collect();
+        self
+    }
+
+    /// Add a pre-command to a group (creates group if it doesn't exist)
+    #[allow(dead_code)]
+    pub fn with_pre_command(mut self, group_id: &str, name: &str, command: &str) -> Self {
+        self.checks
+            .entry(group_id.to_string())
+            .or_insert_with(|| GroupConfig {
+                name: None,
+                parallel: false,
+                stop_on_failure: false,
+                pre_commands: Vec::new(),
+                checks: IndexMap::new(),
+            })
+            .pre_commands
+            .push(PreCommand {
+                name: name.to_string(),
+                command: command.to_string(),
+                service: None,
+                container: None,
+                exec: false,
+                env: std::collections::HashMap::new(),
+            });
         self
     }
 
