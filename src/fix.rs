@@ -158,7 +158,20 @@ pub async fn run(
 }
 
 /// Resolve {files} placeholder in fix command
-fn resolve_fix_command(command: &str, files: &[&str]) -> String {
+///
+/// Replaces the `{files}` placeholder with a space-separated list of file paths.
+/// If no files are provided and the command contains `{files}`, the placeholder
+/// is removed and the result is trimmed.
+///
+/// # Examples
+///
+/// ```
+/// use ci_tui::fix::resolve_fix_command;
+///
+/// let cmd = resolve_fix_command("cargo fmt -- {files}", &["src/main.rs", "src/lib.rs"]);
+/// assert_eq!(cmd, "cargo fmt -- src/main.rs src/lib.rs");
+/// ```
+pub fn resolve_fix_command(command: &str, files: &[&str]) -> String {
     let files_str = if files.is_empty() {
         String::new()
     } else {
