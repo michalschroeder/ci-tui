@@ -6,16 +6,16 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 **Core value:** Developers can confidently modify any module without fear of breaking things, and the TUI remains responsive during check execution.
 
-**Current focus:** v2.0 Comprehensive Cleanup — Phase 9: Test Coverage Expansion (Phases 6-8 complete)
+**Current focus:** v2.0 Comprehensive Cleanup — Phase 9: Test Coverage Expansion (Plan 02 complete)
 
 ## Current Position
 
-Phase: 8 of 9 (Complexity Reduction) - COMPLETE, VERIFIED
-Plan: 2 of 2 complete in Phase 8 (08-02)
-Status: Phase verified — process_triggered_check() at 78 lines accepted as reasonable orchestrator
-Last activity: 2026-01-31 — Phase 8 execution and verification complete
+Phase: 9 of 9 (Test Coverage Expansion)
+Plan: 2 of 3 complete in Phase 9 (09-02)
+Status: In progress — simple.rs and fix.rs unit tests added
+Last activity: 2026-01-31 — Completed 09-02-PLAN.md
 
-Progress: [██████████] 2/2 = 100% Phase 8 | 23/28 = 82% overall (15 v1.0 + 8 v2.0)
+Progress: [██████████] 2/3 = 67% Phase 9 | 25/28 = 89% overall (15 v1.0 + 10 v2.0)
 
 ## Milestone History
 
@@ -34,12 +34,13 @@ Progress: [██████████] 2/2 = 100% Phase 8 | 23/28 = 82% over
 - Coverage: 65% overall
 
 **v2.0 Tracking:**
-- Total plans completed: 8 (Phase 6: 4 plans; Phase 7: 2 plans; Phase 8: 2 plans)
+- Total plans completed: 10 (Phase 6: 4 plans; Phase 7: 2 plans; Phase 8: 2 plans; Phase 9: 2 plans)
 - Average duration: 11min
-- Total execution time: 1.32 hours (79min)
+- Total execution time: 1.7 hours (109min)
 - Phase 6 commits: 10
 - Phase 7 commits: 4
 - Phase 8 commits: 6
+- Phase 9 commits: 3
 
 ## Accumulated Context
 
@@ -82,6 +83,14 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 - Submodule structure: Convert module.rs to module/mod.rs when extracting helpers to separate file (08-02)
 - Parameter count limit: 7 parameters (Clippy threshold) - extract data from passed objects when needed (08-02)
 
+**Phase 09 Decisions (Test Coverage Expansion):**
+- CheckResult factory testing: comprehensive field verification for all three factory methods (09-01)
+- CheckRunner orchestration testing: event-channel verification pattern for async testing (09-01)
+- Test infrastructure: with_pre_command() builder method, make_on_demand_check() helper (09-01)
+- Make pure functions public for testing: resolve_fix_command and print_result (09-02)
+- Parameterized status testing: rstest covers all 6 CheckStatus variants efficiently (09-02)
+- Verify non-panic over output capture: println! functions tested by successful completion (09-02)
+
 | Decision | Context | Outcome |
 |----------|---------|---------|
 | Inline fixtures in src/ tests | #[path] imports break cargo fmt in Docker | Structured fixtures work, tests pass |
@@ -102,10 +111,14 @@ All v1.0 decisions documented in PROJECT.md Key Decisions table with outcomes.
 | Domain-term naming (08-02) | Generic names like "handle" are vague | process_always_run_check, match_file_pattern, build_check_to_run |
 | Parameter count reduction (08-02) | process_triggered_check had 8 params | Extract triggers from check.triggers inside function (7 params) |
 | Accept 78-line orchestrator (08-02) | process_triggered_check at 78 lines exceeded 50-line target | Function passes Clippy's 100-line threshold, well-structured orchestrator role accepted |
+| Event-channel verification (09-01) | run_checks communicates via mpsc channel | Tests verify event order and content using collect_events() helper |
+| Comprehensive factory testing (09-01) | Factory methods set multiple fields | 16 tests ensure all CheckResult fields correctly initialized |
+| Make pure functions public (09-02) | resolve_fix_command and print_result need testing | Functions made pub with documentation, enables integration tests |
+| Parameterized status testing (09-02) | 6 CheckStatus variants need identical test structure | Single rstest covers all variants cleanly |
 
 ### Pending Todos
 
-None — Phase 8 complete (both plans).
+None — Plan 09-02 complete. Plan 09-03 remaining.
 
 ### Blockers/Concerns
 
@@ -114,7 +127,7 @@ None — Phase 8 complete (both plans).
 - Exists in master before Phase 6 changes
 - Library tests (193) compile and pass successfully
 - Characterization tests (18) compile and pass independently (inline fixtures)
-- Total: 211 passing tests
+- Total: 392 passing tests (including 09-01 and 09-02 tests)
 - Does not block work - infrastructure validated via library tests
 - Future fix needed: Integration tests need mockall feature or different mock strategy
 
@@ -124,14 +137,14 @@ None — Phase 8 complete (both plans).
   - src/ui/dashboard.rs::render_checks_list (116 lines)
   - src/ui/dashboard.rs::render_footer (109 lines)
   - src/ui/mod.rs::handle_key_event (238 lines)
+- Plus excessive_nesting warnings in src/checks/determine.rs (from Phase 8 refactoring)
 - Causes CI clippy check to fail with `-D warnings` flag
-- checks module (Phase 8 scope) has zero violations
-- Options: Address in Phase 9, add targeted allows, or adjust CI config
+- Does not block test coverage work
 
 ## Session Continuity
 
 Last session: 2026-01-31
-Stopped at: Phase 8 verification complete — accepted 78-line orchestrator function
+Stopped at: Completed 09-02-PLAN.md — simple.rs and fix.rs unit tests added
 Resume file: None
 
 ## Next Steps
@@ -144,29 +157,27 @@ Resume file: None
    - All TEST-01 through TEST-04 requirements satisfied
 
 2. **Phase 7 FULLY COMPLETE**
-   - ✓ 07-01: Utils module infrastructure with time formatting (COMPLETE)
-   - ✓ 07-02: Complete code deduplication (COMPLETE)
+   - 07-01: Utils module infrastructure with time formatting (COMPLETE)
+   - 07-02: Complete code deduplication (COMPLETE)
    - All DEDUP-01 through DEDUP-05 requirements satisfied
    - 50+ lines of duplicate code eliminated
    - Utils module fully tested and operational
 
 3. **Phase 8: Complexity Reduction** (FULLY COMPLETE)
-   - ✓ 08-01: Enable Clippy complexity lints and characterization tests (COMPLETE)
-     - Clippy lints enabled: too_many_lines, excessive_nesting, cognitive_complexity
-     - 18 characterization tests for determine_checks()
-     - 5 functions flagged for improvement
-   - ✓ 08-02: Refactor determine_checks() into focused functions (COMPLETE)
-     - determine_checks() reduced from 155 to 46 lines
-     - 7 focused helper functions extracted to src/checks/determine.rs
-     - Zero complexity warnings in checks module
-     - All characterization tests pass (18/18)
-     - All CMPLX-04 and CMPLX-05 requirements satisfied
+   - 08-01: Enable Clippy complexity lints and characterization tests (COMPLETE)
+   - 08-02: Refactor determine_checks() into focused functions (COMPLETE)
+   - All CMPLX-04 and CMPLX-05 requirements satisfied
 
-4. **Phase 9: Test Coverage Expansion** (NEXT)
-   - Add unit tests to runner.rs (730 lines, no inline tests)
-   - Add unit tests to simple.rs (382 lines, no inline tests)
-   - Add unit tests to fix.rs (281 lines, no inline tests)
-   - Maintain or improve 65% overall coverage
+4. **Phase 9: Test Coverage Expansion** (IN PROGRESS)
+   - 09-01: runner.rs CheckResult/CheckRunner tests (COMPLETE)
+     - 22 new tests added (16 CheckResult + 6 CheckRunner)
+     - runner_tests.rs expanded from 34 to 56 tests
+     - Test infrastructure enhanced with pre_command builder and helpers
+   - 09-02: simple.rs and fix.rs tests (COMPLETE)
+     - 32 new tests added (17 fix_tests + 15 simple_tests)
+     - resolve_fix_command and print_result made public for testing
+     - Coverage: 58.43% lines, 65.34% functions
+   - 09-03: Additional coverage gaps (NEXT)
 
 ---
-*State updated: 2026-01-31 after Phase 8 execution and verification*
+*State updated: 2026-01-31 after completing 09-02-PLAN.md*
