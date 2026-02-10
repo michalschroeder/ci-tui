@@ -8,34 +8,32 @@ CI-TUI is a terminal UI application for running CI checks on changed files. It d
 
 ## Code Validation (REQUIRED)
 
-**IMPORTANT:** After writing or modifying code, ALWAYS run these commands to validate:
+**IMPORTANT:** After writing or modifying code, ALWAYS run these commands to validate.
+
+Requires the dev image — build it once with `make build-dev`.
 
 ### Step 1: Auto-fix (before commits)
 
-Run fix mode to auto-apply formatting fixes:
-
 ```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
+make fmt
 ```
 
-This runs `cargo fmt` on changed files to fix formatting issues automatically.
+This runs `cargo fmt` to fix formatting issues automatically.
 
 ### Step 2: Validate
 
-Run validation to check all CI checks pass:
-
 ```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
+make ci
 ```
 
-This runs ci-tui in simple mode (self-hosting) which executes:
+This runs all CI checks in Docker (using the dev image):
 - `cargo fmt --check` - Code formatting check
-- `cargo clippy` - Linter checks
+- `cargo clippy -- -D warnings` - Linter checks
 - `cargo nextest run` - Test suite
 
-**Workflow:** Run `--fix` first, then `--simple` to validate. Both must pass before any commit or push.
+**Workflow:** Run `make fmt` first, then `make ci` to validate. Both must pass before any commit or push.
 
-This is the ONLY command Claude should use to validate code changes. Do not use `make test`, `cargo test`, or other commands directly.
+These are the ONLY commands Claude should use to validate code changes. Do not use `cargo test`, `cargo clippy`, or other commands directly.
 
 ### Failure Handling
 
@@ -50,8 +48,16 @@ Do not keep retrying indefinitely. After 3 failed attempts, always pause and ask
 ## Other Development Commands
 
 ```bash
-# Build Docker image locally
+# Build dev image (required for make ci/fmt/test/clippy)
+make build-dev
+
+# Build production Docker image locally
 make build
+
+# Run individual checks
+make test        # Run tests only
+make fmt-check   # Check formatting without fixing
+make clippy      # Run clippy only
 
 # Run with local cargo (requires Rust installed)
 cargo run -- --config <path-to-config.yaml>
