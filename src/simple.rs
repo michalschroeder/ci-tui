@@ -20,6 +20,7 @@ use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::{docker, time};
 use anyhow::Result;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command;
@@ -114,40 +115,12 @@ pub async fn run(
         println!("\x1b[1;31mFailed checks:\x1b[0m");
         for result in &all_results {
             if result.status == CheckStatus::Failed {
+                let fix_cmd = checks
+                    .iter()
+                    .find(|c| c.id() == result.check_id)
+                    .and_then(|c| c.resolved_fix_command.as_deref());
                 println!();
-                println!("\x1b[31m┌─ {} ─┐\x1b[0m", result.check_id);
-
-                // Show error output
-                if !result.output.is_empty() {
-                    // Limit output to avoid flooding console
-                    let lines: Vec<&str> = result.output.lines().collect();
-                    let show_lines = if lines.len() > 30 { 30 } else { lines.len() };
-                    for line in lines.iter().take(show_lines) {
-                        println!("  {}", line);
-                    }
-                    if lines.len() > 30 {
-                        println!("  \x1b[90m... ({} more lines)\x1b[0m", lines.len() - 30);
-                    }
-                }
-
-                if !result.error_output.is_empty() {
-                    let lines: Vec<&str> = result.error_output.lines().collect();
-                    let show_lines = if lines.len() > 10 { 10 } else { lines.len() };
-                    for line in lines.iter().take(show_lines) {
-                        println!("  \x1b[31m{}\x1b[0m", line);
-                    }
-                }
-
-                // Show fix command if available
-                if let Some(check) = checks.iter().find(|c| c.id() == result.check_id) {
-                    if let Some(fix_cmd) = &check.resolved_fix_command {
-                        println!();
-                        println!("  \x1b[33m💡 Fix command:\x1b[0m");
-                        println!("  \x1b[36m{}\x1b[0m", fix_cmd);
-                    }
-                }
-
-                println!("\x1b[31m└{}┘\x1b[0m", "─".repeat(result.check_id.len() + 4));
+                print!("{}", format_failed_check(result, fix_cmd));
             }
         }
 
@@ -213,6 +186,42 @@ pub fn print_result(result: &CheckResult) {
             );
         }
     }
+}
+
+/// Format a failed check's output for display.
+///
+/// Shows the full stdout and stderr output without truncation, framed with
+/// a box header/footer. Optionally includes a fix command hint.
+pub fn format_failed_check(result: &CheckResult, fix_command: Option<&str>) -> String {
+    let mut buf = String::new();
+
+    let _ = writeln!(buf, "\x1b[31m┌─ {} ─┐\x1b[0m", result.check_id);
+
+    if !result.output.is_empty() {
+        for line in result.output.lines() {
+            let _ = writeln!(buf, "  {}", line);
+        }
+    }
+
+    if !result.error_output.is_empty() {
+        for line in result.error_output.lines() {
+            let _ = writeln!(buf, "  \x1b[31m{}\x1b[0m", line);
+        }
+    }
+
+    if let Some(fix_cmd) = fix_command {
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "  \x1b[33m💡 Fix command:\x1b[0m");
+        let _ = writeln!(buf, "  \x1b[36m{}\x1b[0m", fix_cmd);
+    }
+
+    let _ = writeln!(
+        buf,
+        "\x1b[31m└{}┘\x1b[0m",
+        "─".repeat(result.check_id.len() + 4)
+    );
+
+    buf
 }
 
 async fn run_sequential(

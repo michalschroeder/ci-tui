@@ -8,7 +8,7 @@
 //! mode in CI, which is comprehensive integration testing.
 
 use ci_tui::runner::{CheckResult, CheckStatus};
-use ci_tui::simple::print_result;
+use ci_tui::simple::{format_failed_check, print_result};
 use rstest::rstest;
 
 /// Create a CheckResult with the given status for testing
@@ -19,6 +19,19 @@ fn make_result(check_id: &str, status: CheckStatus, duration_ms: u64) -> CheckRe
         output: String::new(),
         error_output: String::new(),
         duration_ms,
+        started_at: None,
+        finished_at: None,
+    }
+}
+
+/// Create a failed CheckResult with stdout/stderr output
+fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> CheckResult {
+    CheckResult {
+        check_id: check_id.to_string(),
+        status: CheckStatus::Failed,
+        output: output.to_string(),
+        error_output: error_output.to_string(),
+        duration_ms: 1000,
         started_at: None,
         finished_at: None,
     }
@@ -110,4 +123,105 @@ fn print_result_with_large_duration() {
     let result = make_result("slow-check", CheckStatus::Failed, 999_999);
     print_result(&result);
     // Function completes without panic - handles large duration values
+}
+
+// --- format_failed_check tests ---
+
+#[test]
+fn format_failed_check_shows_full_stdout() {
+    let output = "Compiling ci-tui v0.1.0\nwarning: unused variable\nerror: aborting";
+    let result = make_failed_result("clippy", output, "");
+
+    let formatted = format_failed_check(&result, None);
+
+    // All stdout lines must be present (no truncation)
+    assert!(formatted.contains("Compiling ci-tui v0.1.0"));
+    assert!(formatted.contains("warning: unused variable"));
+    assert!(formatted.contains("error: aborting"));
+}
+
+#[test]
+fn format_failed_check_shows_full_stderr() {
+    let stderr = "error[E0433]: failed to resolve\nerror: could not compile";
+    let result = make_failed_result("build", "", stderr);
+
+    let formatted = format_failed_check(&result, None);
+
+    assert!(formatted.contains("error[E0433]: failed to resolve"));
+    assert!(formatted.contains("error: could not compile"));
+}
+
+#[test]
+fn format_failed_check_shows_both_stdout_and_stderr() {
+    let result = make_failed_result("test", "stdout line", "stderr line");
+
+    let formatted = format_failed_check(&result, None);
+
+    assert!(formatted.contains("stdout line"));
+    assert!(formatted.contains("stderr line"));
+}
+
+#[test]
+fn format_failed_check_no_truncation_for_long_output() {
+    // Simulate cargo output: 50 lines of download noise + actual errors
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..50 {
+        lines.push(format!("  Downloaded crate-{} v0.1.{}", i, i));
+    }
+    lines.push("warning: this function has too many lines (232/100)".to_string());
+    lines.push("error: could not compile `ci-tui`".to_string());
+    let output = lines.join("\n");
+
+    let result = make_failed_result("clippy", &output, "");
+    let formatted = format_failed_check(&result, None);
+
+    // Both download noise AND actual errors must be present
+    assert!(formatted.contains("Downloaded crate-0 v0.1.0"));
+    assert!(formatted.contains("Downloaded crate-49 v0.1.49"));
+    assert!(formatted.contains("warning: this function has too many lines (232/100)"));
+    assert!(formatted.contains("error: could not compile `ci-tui`"));
+    // No truncation markers
+    assert!(!formatted.contains("... ("));
+    assert!(!formatted.contains("more lines)"));
+    assert!(!formatted.contains("lines omitted)"));
+}
+
+#[test]
+fn format_failed_check_includes_box_frame() {
+    let result = make_failed_result("clippy", "some output", "");
+
+    let formatted = format_failed_check(&result, None);
+
+    assert!(formatted.contains("┌─ clippy ─┐"));
+    assert!(formatted.contains("└──────────┘"));
+}
+
+#[test]
+fn format_failed_check_includes_fix_command() {
+    let result = make_failed_result("fmt", "bad formatting", "");
+
+    let formatted = format_failed_check(&result, Some("cargo fmt"));
+
+    assert!(formatted.contains("Fix command:"));
+    assert!(formatted.contains("cargo fmt"));
+}
+
+#[test]
+fn format_failed_check_omits_fix_when_none() {
+    let result = make_failed_result("clippy", "warning", "");
+
+    let formatted = format_failed_check(&result, None);
+
+    assert!(!formatted.contains("Fix command:"));
+}
+
+#[test]
+fn format_failed_check_empty_output() {
+    let result = make_failed_result("check", "", "");
+
+    let formatted = format_failed_check(&result, None);
+
+    // Should still have the box frame
+    assert!(formatted.contains("┌─ check ─┐"));
+    assert!(formatted.contains("└─────────┘"));
 }
