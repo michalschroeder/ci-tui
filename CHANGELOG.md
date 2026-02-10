@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.1.13](https://github.com/michalschroeder/ci-tui/compare/v0.1.12...v0.1.13) (2026-02-10)
+
+
+### Features
+
+* **07-01:** create utils module infrastructure with time formatting ([5880941](https://github.com/michalschroeder/ci-tui/commit/5880941c445a36343652b0051a3fba4a0ae75e6f))
+
+
+### Bug Fixes
+
+* **08-01:** resolve excessive nesting and lint priority issues ([ca2f911](https://github.com/michalschroeder/ci-tui/commit/ca2f91125072cc23c4785c92c929e71381595376))
+* **08-02:** reduce process_triggered_check parameter count ([fb73dba](https://github.com/michalschroeder/ci-tui/commit/fb73dbac1f43051cf219cbab12fdd0844c60fe51))
+* **ui:** restore terminal using backend's stdout handle before printing summary ([bca160b](https://github.com/michalschroeder/ci-tui/commit/bca160b1d4a77b8ac1188761f31ca335975f0938))
+
+
+### Code Refactoring
+
+* **07-01:** migrate dashboard.rs to use utils::time::format ([c375557](https://github.com/michalschroeder/ci-tui/commit/c375557a001451fcf73901bd8dca56f33b3ae5ca))
+* **07-02:** migrate docker utilities to utils module ([f5aadf3](https://github.com/michalschroeder/ci-tui/commit/f5aadf30b73325fec4e750410d2a922622dafa85))
+* **07-02:** migrate time formatting to utils module ([91e7df1](https://github.com/michalschroeder/ci-tui/commit/91e7df175b7efe09758e685b2e759d79861c27b7))
+* **08-02:** extract helper functions from determine_checks() ([ae60421](https://github.com/michalschroeder/ci-tui/commit/ae60421674945aa785449aabf1f9e69525374042))
+* fix clippy issues ([b0e4828](https://github.com/michalschroeder/ci-tui/commit/b0e4828a4b2443931e577fdf8eee58ffa7ee53d9))
+* **simple:** show full checks output in simple mode ([a77d5bb](https://github.com/michalschroeder/ci-tui/commit/a77d5bb2953a865b41ba92b85b6fc1d6dd98814c))
+
+
+### Documentation
+
+* **07-02:** complete code deduplication plan ([f8b2f21](https://github.com/michalschroeder/ci-tui/commit/f8b2f2131f4fcb910b3f52a5cbacad3e7f39c5c6))
+* **08-01:** complete complexity lints and characterization tests plan ([d5df03d](https://github.com/michalschroeder/ci-tui/commit/d5df03de2bd915a76cdfaae05ad5c1215804d848))
+* **08-02:** complete code deduplication plan ([035e3eb](https://github.com/michalschroeder/ci-tui/commit/035e3eb69f37d118d6285e370bab4c70784b3197))
+* **09-02:** update project state after simple/fix test coverage ([cd1e92d](https://github.com/michalschroeder/ci-tui/commit/cd1e92dd5587ecae3576014424c02f4512287968))
+* **09:** update roadmap with Phase 9 plan structure ([5374fc3](https://github.com/michalschroeder/ci-tui/commit/5374fc3acc5ca0969214ef46120c97cd523f5591))
+* change time format example to `ignore` code block ([a0e6bee](https://github.com/michalschroeder/ci-tui/commit/a0e6beeabc49d3a6c52fce206babdb32101e1998))
+* **phase-7:** complete code deduplication phase ([80085fa](https://github.com/michalschroeder/ci-tui/commit/80085fae522896d701c5a808aa1c0653f0f37acb))
+* **phase-8:** complete complexity reduction phase ([1936a8e](https://github.com/michalschroeder/ci-tui/commit/1936a8e7b7d5e16782d2a9975fe165ccde315599))
+* **phase-9:** complete test coverage expansion phase ([78c1dea](https://github.com/michalschroeder/ci-tui/commit/78c1dea47f61b13f4f9c292dde0361325d67c00e))
+* update CLAUDE.md validation workflow with make targets ([65bd075](https://github.com/michalschroeder/ci-tui/commit/65bd0757d73f19a112ce0d5fae4a6b6cf74dfa73))
+
 ## [0.1.12](https://github.com/michalschroeder/ci-tui/compare/v0.1.11...v0.1.12) (2026-01-29)
 
 
