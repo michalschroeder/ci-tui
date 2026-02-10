@@ -713,8 +713,17 @@ pub async fn run(
     // Wait for keyboard thread to finish (with timeout to avoid hanging)
     let _ = keyboard_thread.join();
 
-    restore_terminal();
+    // Restore terminal: use the backend's own stdout handle to ensure
+    // LeaveAlternateScreen goes through the same IO path as all TUI writes.
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
+    // Drop terminal before printing to ensure all backend IO is flushed
+    drop(terminal);
 
     // Print summary
     print_summary(&app);
