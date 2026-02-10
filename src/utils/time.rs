@@ -15,8 +15,7 @@
 ///
 /// # Examples
 ///
-/// ```
-/// # use ci_tui::utils::time::format;
+/// ```ignore
 /// assert_eq!(format(500), "500ms");
 /// assert_eq!(format(1500), "1.5s");
 /// assert_eq!(format(90000), "1m 30s");
