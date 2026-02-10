@@ -314,76 +314,41 @@ impl CheckRunner {
         event_tx: mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
         use crate::checks::group_checks;
-
         let grouped = group_checks(&checks);
+        run_check_groups(self, grouped, &event_tx).await
+    }
 
-        for (group_name, group_checks) in grouped {
-            let _ = event_tx
-                .send(RunnerEvent::GroupStarted {
-                    group: group_name.to_string(),
-                })
-                .await;
+    /// Execute a single group: run pre-commands, then checks (parallel or sequential)
+    /// Returns Ok(true) to continue, Ok(false) to stop execution
+    async fn execute_group(
+        &self,
+        group_name: &str,
+        group_checks: Vec<&CheckToRun>,
+        event_tx: &mpsc::Sender<RunnerEvent>,
+    ) -> Result<bool> {
+        let group_config = self.config.get_group(group_name);
 
-            // Get group config
-            let group_config = self.config.get_group(group_name);
+        let has_runnable = group_checks.iter().any(|c| !c.on_demand);
+        let pre_commands = if has_runnable {
+            group_config
+                .map(|g| g.pre_commands.as_slice())
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
 
-            // Only run pre-commands if there are actual checks to run (not all on-demand)
-            let has_runnable_checks = group_checks.iter().any(|c| !c.on_demand);
-
-            // Run pre-commands for this group (only if there are runnable checks)
-            if has_runnable_checks {
-                if let Some(config) = group_config {
-                    for pre_cmd in &config.pre_commands {
-                        let _ = event_tx
-                            .send(RunnerEvent::PreCommandStarted {
-                                group: group_name.to_string(),
-                                name: pre_cmd.name.clone(),
-                            })
-                            .await;
-
-                        let (success, output, duration_ms) = self.run_pre_command(pre_cmd).await;
-
-                        let _ = event_tx
-                            .send(RunnerEvent::PreCommandFinished {
-                                group: group_name.to_string(),
-                                name: pre_cmd.name.clone(),
-                                success,
-                                output,
-                                duration_ms,
-                            })
-                            .await;
-
-                        // Stop if pre-command failed
-                        if !success {
-                            let _ = event_tx
-                                .send(RunnerEvent::GroupFinished {
-                                    group: group_name.to_string(),
-                                })
-                                .await;
-                            let _ = event_tx.send(RunnerEvent::AllFinished).await;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
-
-            if parallel {
-                self.run_parallel(group_checks, &event_tx).await?;
-            } else {
-                self.run_sequential(group_checks, &event_tx).await?;
-            }
-
-            let _ = event_tx
-                .send(RunnerEvent::GroupFinished {
-                    group: group_name.to_string(),
-                })
-                .await;
+        if !run_all_pre_commands(self, group_name, pre_commands, event_tx).await {
+            return Ok(false);
         }
 
-        let _ = event_tx.send(RunnerEvent::AllFinished).await;
-        Ok(())
+        let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
+        if parallel {
+            self.run_parallel(group_checks, event_tx).await?;
+        } else {
+            self.run_sequential(group_checks, event_tx).await?;
+        }
+
+        Ok(true)
     }
 
     async fn run_sequential(
@@ -391,11 +356,8 @@ impl CheckRunner {
         checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
-        for check in checks {
-            // Skip on-demand checks - they require manual trigger
-            if check.on_demand {
-                continue;
-            }
+        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.on_demand).collect();
+        for check in runnable {
             let result = self.run_single_check(check, event_tx).await;
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
         }
@@ -407,49 +369,48 @@ impl CheckRunner {
         checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
+        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.on_demand).collect();
         let mut handles = Vec::new();
-
-        for check in checks {
-            // Skip on-demand checks - they require manual trigger
-            if check.on_demand {
-                continue;
-            }
-            let check = check.clone();
-            let event_tx = event_tx.clone();
-            let project_root = self.project_root.clone();
-            // Use per-check container if specified, otherwise use default
-            let container_name: Arc<str> = check
-                .definition
-                .container
-                .clone()
-                .unwrap_or_else(|| self.container_name.to_string())
-                .into();
-            let docker_config = self.config.docker.clone();
-            let global_env = self.config.docker.env.clone();
-            let executor = self.executor.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = run_docker_check_with_executor(
-                    &check,
-                    &project_root,
-                    &container_name,
-                    &docker_config,
-                    &global_env,
-                    &event_tx,
-                    executor.as_ref(),
-                )
-                .await;
-                let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
-            });
-
-            handles.push(handle);
+        for check in runnable {
+            handles.push(self.spawn_check(check, event_tx));
         }
-
         for handle in handles {
             let _ = handle.await;
         }
-
         Ok(())
+    }
+
+    fn spawn_check(
+        &self,
+        check: &CheckToRun,
+        event_tx: &mpsc::Sender<RunnerEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        let check = check.clone();
+        let event_tx = event_tx.clone();
+        let project_root = self.project_root.clone();
+        let container_name: Arc<str> = check
+            .definition
+            .container
+            .clone()
+            .unwrap_or_else(|| self.container_name.to_string())
+            .into();
+        let docker_config = self.config.docker.clone();
+        let global_env = self.config.docker.env.clone();
+        let executor = self.executor.clone();
+
+        tokio::spawn(async move {
+            let result = run_docker_check_with_executor(
+                &check,
+                &project_root,
+                &container_name,
+                &docker_config,
+                &global_env,
+                &event_tx,
+                executor.as_ref(),
+            )
+            .await;
+            let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
+        })
     }
 
     async fn run_single_check(
@@ -527,6 +488,71 @@ impl CheckRunner {
         };
         (output.success, combined, duration_ms)
     }
+}
+
+/// Run check groups sequentially, sending events via the channel
+async fn run_check_groups<'a>(
+    runner: &CheckRunner,
+    grouped: Vec<(&'a str, Vec<&'a CheckToRun>)>,
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) -> Result<()> {
+    for (group_name, group_checks) in grouped {
+        let _ = event_tx
+            .send(RunnerEvent::GroupStarted {
+                group: group_name.to_string(),
+            })
+            .await;
+
+        let should_continue = runner
+            .execute_group(group_name, group_checks, event_tx)
+            .await?;
+
+        let _ = event_tx
+            .send(RunnerEvent::GroupFinished {
+                group: group_name.to_string(),
+            })
+            .await;
+
+        if !should_continue {
+            break;
+        }
+    }
+    let _ = event_tx.send(RunnerEvent::AllFinished).await;
+    Ok(())
+}
+
+/// Run pre-commands for a group, returns true if all succeeded (or none to run)
+async fn run_all_pre_commands(
+    runner: &CheckRunner,
+    group_name: &str,
+    pre_commands: &[crate::config::PreCommand],
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) -> bool {
+    for pre_cmd in pre_commands {
+        let _ = event_tx
+            .send(RunnerEvent::PreCommandStarted {
+                group: group_name.to_string(),
+                name: pre_cmd.name.clone(),
+            })
+            .await;
+
+        let (success, output, duration_ms) = runner.run_pre_command(pre_cmd).await;
+
+        let _ = event_tx
+            .send(RunnerEvent::PreCommandFinished {
+                group: group_name.to_string(),
+                name: pre_cmd.name.clone(),
+                success,
+                output,
+                duration_ms,
+            })
+            .await;
+
+        if !success {
+            return false;
+        }
+    }
+    true
 }
 
 async fn run_docker_check_with_executor(

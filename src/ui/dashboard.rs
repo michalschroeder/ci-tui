@@ -229,9 +229,118 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
     render_output(app, frame, chunks[1]);
 }
 
-fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
+/// Render a pre-command as a list item
+fn render_pre_command_item(app: &App, pre_cmd: &super::app::PreCommandState) -> ListItem<'static> {
     use super::app::PreCommandStatus;
 
+    let (icon, icon_style) = match pre_cmd.status {
+        PreCommandStatus::Pending => ("◦", Style::default().fg(Color::DarkGray)),
+        PreCommandStatus::Running => ("⚡", Style::default().fg(Color::Yellow)),
+        PreCommandStatus::Passed => ("✓", Style::default().fg(Color::Green)),
+        PreCommandStatus::Failed => ("✗", Style::default().fg(Color::Red)),
+    };
+
+    let duration = if pre_cmd.duration_ms > 0 {
+        format!(" {}", time::format(pre_cmd.duration_ms))
+    } else {
+        String::new()
+    };
+
+    let is_selected = app
+        .selected_pre_command()
+        .map(|p| p.group == pre_cmd.group && p.name == pre_cmd.name)
+        .unwrap_or(false);
+
+    let name_style = if is_selected {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC)
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(icon, icon_style),
+        Span::raw(" "),
+        Span::styled(pre_cmd.name.clone(), name_style),
+        Span::styled(duration, Style::default().fg(Color::DarkGray)),
+    ]))
+}
+
+/// Render a check as a list item
+fn render_check_item(
+    app: &App,
+    check: &crate::checks::CheckToRun,
+    area: Rect,
+) -> ListItem<'static> {
+    let result = app.results.get(check.id());
+    let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
+
+    let duration = result
+        .map(|r| {
+            if r.duration_ms > 0 {
+                format!(" {}", time::format(r.duration_ms))
+            } else {
+                String::new()
+            }
+        })
+        .unwrap_or_default();
+
+    let is_selected = app
+        .selected_check()
+        .map(|c| c.id() == check.id())
+        .unwrap_or(false);
+
+    let is_on_demand = result
+        .map(|r| r.status == CheckStatus::OnDemand)
+        .unwrap_or(false);
+    let is_passed = result
+        .map(|r| r.status == CheckStatus::Passed)
+        .unwrap_or(false);
+    let is_filtered_out =
+        matches!(app.status_filter, super::app::StatusFilter::Failed) && is_passed;
+
+    // Fade out checks that are not relevant in current context
+    let should_fade = is_on_demand || is_filtered_out;
+
+    let name_style = if is_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else if should_fade {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    };
+
+    // Truncate name if needed - calculate based on available width
+    let available_width = area.width.saturating_sub(15) as usize;
+    let max_name_len = available_width.max(20);
+    let name = if check.name().len() > max_name_len {
+        format!("{}…", &check.name()[..max_name_len - 1])
+    } else {
+        check.name().to_string()
+    };
+
+    let final_icon_style = if should_fade && !is_selected {
+        icon_style.add_modifier(Modifier::DIM)
+    } else {
+        icon_style
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(icon, final_icon_style),
+        Span::raw(" "),
+        Span::styled(name, name_style),
+        Span::styled(duration, Style::default().fg(Color::DarkGray)),
+    ]))
+}
+
+fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
     let groups = app.groups();
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -252,111 +361,12 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled("───────────", Style::default().fg(Color::DarkGray)),
         ])));
 
-        // Show pre-commands for this group
         for pre_cmd in app.pre_commands.iter().filter(|p| p.group == group) {
-            let (icon, icon_style) = match pre_cmd.status {
-                PreCommandStatus::Pending => ("◦", Style::default().fg(Color::DarkGray)),
-                PreCommandStatus::Running => ("⚡", Style::default().fg(Color::Yellow)),
-                PreCommandStatus::Passed => ("✓", Style::default().fg(Color::Green)),
-                PreCommandStatus::Failed => ("✗", Style::default().fg(Color::Red)),
-            };
-
-            let duration = if pre_cmd.duration_ms > 0 {
-                format!(" {}", time::format(pre_cmd.duration_ms))
-            } else {
-                String::new()
-            };
-
-            // Check if this pre-command is selected
-            let is_selected = app
-                .selected_pre_command()
-                .map(|p| p.group == pre_cmd.group && p.name == pre_cmd.name)
-                .unwrap_or(false);
-
-            let name_style = if is_selected {
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::ITALIC | Modifier::REVERSED)
-            } else {
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::ITALIC)
-            };
-
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(icon, icon_style),
-                Span::raw(" "),
-                Span::styled(&pre_cmd.name, name_style),
-                Span::styled(duration, Style::default().fg(Color::DarkGray)),
-            ])));
+            items.push(render_pre_command_item(app, pre_cmd));
         }
 
         for check in app.checks_in_group(group) {
-            let result = app.results.get(check.id());
-            let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
-
-            let duration = result
-                .map(|r| {
-                    if r.duration_ms > 0 {
-                        format!(" {}", time::format(r.duration_ms))
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default();
-
-            let is_selected = app
-                .selected_check()
-                .map(|c| c.id() == check.id())
-                .unwrap_or(false);
-
-            let is_on_demand = result
-                .map(|r| r.status == CheckStatus::OnDemand)
-                .unwrap_or(false);
-            let is_passed = result
-                .map(|r| r.status == CheckStatus::Passed)
-                .unwrap_or(false);
-            let is_filtered_out =
-                matches!(app.status_filter, super::app::StatusFilter::Failed) && is_passed;
-
-            // Fade out checks that are not relevant in current context
-            let should_fade = is_on_demand || is_filtered_out;
-
-            let name_style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else if should_fade {
-                // Muted/dim style for on-demand or filtered-out checks
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM)
-            } else {
-                Style::default()
-            };
-
-            // Truncate name if needed - calculate based on available width
-            let available_width = area.width.saturating_sub(15) as usize; // icon + duration + padding
-            let max_name_len = available_width.max(20);
-            let name = if check.name().len() > max_name_len {
-                format!("{}…", &check.name()[..max_name_len - 1])
-            } else {
-                check.name().to_string()
-            };
-
-            // Dim the icon too for faded checks (on-demand or filtered-out)
-            let final_icon_style = if should_fade && !is_selected {
-                icon_style.add_modifier(Modifier::DIM)
-            } else {
-                icon_style
-            };
-
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(icon, final_icon_style),
-                Span::raw(" "),
-                Span::styled(name, name_style),
-                Span::styled(duration, Style::default().fg(Color::DarkGray)),
-            ])));
+            items.push(render_check_item(app, check, area));
         }
     }
 
@@ -560,10 +570,15 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
         };
         raw_output.push_str(&format!("{} {}\n", status_icon, result.check_id));
 
-        if result.status == CheckStatus::Failed && !result.error_output.is_empty() {
-            for line in result.error_output.lines().take(5) {
-                raw_output.push_str(&format!("  \x1b[31m{}\x1b[0m\n", line));
-            }
+        let show_errors = result.status == CheckStatus::Failed && !result.error_output.is_empty();
+        if show_errors {
+            let error_lines: String = result
+                .error_output
+                .lines()
+                .take(5)
+                .map(|line| format!("  \x1b[31m{}\x1b[0m\n", line))
+                .collect();
+            raw_output.push_str(&error_lines);
         }
     }
 
@@ -663,124 +678,138 @@ fn render_fix_running(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render check output details
-fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
-    let (title, content_widget) = if let Some(check) = app.selected_check() {
-        let result = app.results.get(check.id());
-        let base_title = check.name();
+/// Build the output string for a check with results
+fn build_check_output_text(
+    app: &App,
+    check: &crate::checks::CheckToRun,
+    result: &crate::runner::CheckResult,
+    area: Rect,
+) -> String {
+    let mut raw_output = String::with_capacity(1024);
 
-        if let Some(result) = result {
-            let mut raw_output = String::with_capacity(1024);
+    // Command at the top - truncated by default, full on 'e' toggle
+    let command = &check.resolved_command;
+    let max_cmd_len = (area.width as usize).saturating_sub(10);
 
-            // Command at the top - truncated by default, full on 'e' toggle
-            let command = &check.resolved_command;
-            let max_cmd_len = (area.width as usize).saturating_sub(10);
-
-            raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
-            if app.show_full_command || command.len() <= max_cmd_len {
-                raw_output.push_str(command);
-            } else {
-                raw_output.push_str(&command[..max_cmd_len.saturating_sub(3)]);
-                raw_output.push_str("...\x1b[0m \x1b[90m[e=expand]");
-            }
-            raw_output.push_str("\x1b[0m\n\n");
-
-            // Status header
-            let status_line = match result.status {
-                CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
-                CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
-                CheckStatus::Running => "\x1b[33m◉ RUNNING...\x1b[0m",
-                CheckStatus::Pending => "\x1b[90m○ PENDING\x1b[0m",
-                CheckStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
-                CheckStatus::OnDemand => "\x1b[36m◇ ON-DEMAND\x1b[0m",
-            };
-            raw_output.push_str(status_line);
-
-            // Show hints
-            if result.status == CheckStatus::OnDemand {
-                raw_output.push_str("  \x1b[33m← press 't' to run\x1b[0m");
-            } else if result.status == CheckStatus::Failed && check.has_fix() {
-                raw_output.push_str("  \x1b[33m← press 'x' to fix\x1b[0m");
-            }
-            raw_output.push_str("\n\n");
-
-            // Files - truncated by default, full on 'e' toggle
-            if let Some(files) = app
-                .checks
-                .iter()
-                .find(|c| c.id() == check.id())
-                .map(|c| &c.files)
-            {
-                if !files.is_empty() && !files[0].starts_with('(') {
-                    if app.show_full_command {
-                        // Expanded: show all files, one per line
-                        raw_output.push_str("\x1b[90mFiles:\x1b[0m\n");
-                        for file in files {
-                            raw_output.push_str(&format!("\x1b[90m  - {}\x1b[0m\n", file));
-                        }
-                        raw_output.push('\n');
-                    } else {
-                        // Collapsed: show first 3 files (no "+N more")
-                        let display_files = if files.len() <= 3 {
-                            files.join(", ")
-                        } else {
-                            files.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-                        };
-                        raw_output
-                            .push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
-                    }
-                }
-            }
-
-            // Command output
-            if !result.output.is_empty() {
-                raw_output.push_str(&result.output);
-            }
-
-            // Stderr for failed checks
-            if result.status == CheckStatus::Failed && !result.error_output.is_empty() {
-                raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
-                raw_output.push_str(result.error_output.trim_end());
-            }
-
-            if result.status == CheckStatus::Pending {
-                raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
-            }
-
-            // Calculate scroll indicator
-            let total_lines = raw_output.lines().count();
-            let visible_lines = app.output_visible_lines;
-            let title = if total_lines > visible_lines && visible_lines > 0 {
-                // Show scroll position: current top line / total lines
-                let current_line = app.output_scroll + 1;
-                format!(" {} [{}/{}] ", base_title, current_line, total_lines)
-            } else {
-                format!(" {} ", base_title)
-            };
-
-            (title, Some(raw_output.into_text().unwrap_or_default()))
-        } else {
-            let title = format!(" {} ", base_title);
-            (title, None)
-        }
+    raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
+    if app.show_full_command || command.len() <= max_cmd_len {
+        raw_output.push_str(command);
     } else {
-        (" Output ".to_string(), None)
+        raw_output.push_str(&command[..max_cmd_len.saturating_sub(3)]);
+        raw_output.push_str("...\x1b[0m \x1b[90m[e=expand]");
+    }
+    raw_output.push_str("\x1b[0m\n\n");
+
+    // Status header
+    let status_line = match result.status {
+        CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
+        CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
+        CheckStatus::Running => "\x1b[33m◉ RUNNING...\x1b[0m",
+        CheckStatus::Pending => "\x1b[90m○ PENDING\x1b[0m",
+        CheckStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
+        CheckStatus::OnDemand => "\x1b[36m◇ ON-DEMAND\x1b[0m",
+    };
+    raw_output.push_str(status_line);
+
+    // Show hints
+    if result.status == CheckStatus::OnDemand {
+        raw_output.push_str("  \x1b[33m← press 't' to run\x1b[0m");
+    } else if result.status == CheckStatus::Failed && check.has_fix() {
+        raw_output.push_str("  \x1b[33m← press 'x' to fix\x1b[0m");
+    }
+    raw_output.push_str("\n\n");
+
+    // Files
+    append_files_section(&mut raw_output, app, check);
+
+    // Command output
+    if !result.output.is_empty() {
+        raw_output.push_str(&result.output);
+    }
+
+    // Stderr for failed checks
+    if result.status == CheckStatus::Failed && !result.error_output.is_empty() {
+        raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
+        raw_output.push_str(result.error_output.trim_end());
+    }
+
+    if result.status == CheckStatus::Pending {
+        raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
+    }
+
+    raw_output
+}
+
+/// Append the files section to the output string
+fn append_files_section(raw_output: &mut String, app: &App, check: &crate::checks::CheckToRun) {
+    let Some(files) = app
+        .checks
+        .iter()
+        .find(|c| c.id() == check.id())
+        .map(|c| &c.files)
+    else {
+        return;
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    if files.is_empty() || files[0].starts_with('(') {
+        return;
+    }
 
-    if let Some(text) = content_widget {
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((app.output_scroll as u16, 0));
-        frame.render_widget(paragraph, area);
+    if app.show_full_command {
+        raw_output.push_str("\x1b[90mFiles:\x1b[0m\n");
+        for file in files {
+            raw_output.push_str(&format!("\x1b[90m  - {}\x1b[0m\n", file));
+        }
+        raw_output.push('\n');
     } else {
+        let display_files = if files.len() <= 3 {
+            files.join(", ")
+        } else {
+            files.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+        };
+        raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
+    }
+}
+
+/// Render check output details
+fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(check) = app.selected_check() else {
+        let block = Block::default().borders(Borders::ALL).title(" Output ");
         let paragraph = Paragraph::new("Select a check to view details")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
-    }
+        return;
+    };
+
+    let Some(result) = app.results.get(check.id()) else {
+        let title = format!(" {} ", check.name());
+        let block = Block::default().borders(Borders::ALL).title(title);
+        let paragraph = Paragraph::new("Select a check to view details")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    };
+
+    let raw_output = build_check_output_text(app, check, result, area);
+
+    // Calculate scroll indicator
+    let total_lines = raw_output.lines().count();
+    let visible_lines = app.output_visible_lines;
+    let title = if total_lines > visible_lines && visible_lines > 0 {
+        let current_line = app.output_scroll + 1;
+        format!(" {} [{}/{}] ", check.name(), current_line, total_lines)
+    } else {
+        format!(" {} ", check.name())
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.output_scroll as u16, 0));
+    frame.render_widget(paragraph, area);
 }
 
 /// Render pre-command output details
@@ -861,15 +890,14 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    // Show expand hint dynamically based on state
+/// Build keyboard shortcut spans for the footer
+fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     let expand_label = if app.show_full_command {
         "collapse"
     } else {
         "expand"
     };
 
-    // Show filter toggle based on current state
     let filter_spans = if app.status_filter == crate::ui::app::StatusFilter::Failed {
         vec![
             Span::styled("a", Style::default().fg(Color::Yellow)),
@@ -896,7 +924,6 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Span::raw(format!(" {}  ", expand_label)),
     ]);
 
-    // Show trigger option if selected check is on-demand
     if app.can_trigger_selected() {
         spans.push(Span::styled(
             "t",
@@ -908,13 +935,11 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw("  "));
     }
 
-    // Show retry option if selected check can be retried
     if app.can_retry_selected() {
         spans.push(Span::styled("r", Style::default().fg(Color::Cyan)));
         spans.push(Span::raw(" retry  "));
     }
 
-    // Show "run all files" option if selected check can be run for all files
     if app.can_run_all_files() {
         spans.push(Span::styled(
             "A",
@@ -925,7 +950,6 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" all files  "));
     }
 
-    // Always show retry all option
     spans.push(Span::styled(
         "R",
         Style::default()
@@ -934,7 +958,6 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     ));
     spans.push(Span::raw(" RETRY ALL  "));
 
-    // Show fix option if available
     if app.can_fix_selected() {
         spans.push(Span::styled(
             "x",
@@ -946,7 +969,6 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw("  "));
     }
 
-    // Show fix-all option if there are multiple fixable checks
     let fixable_count = app.get_fixable_checks().len();
     if fixable_count > 0 && !app.fix_running && !app.fix_all_running {
         spans.push(Span::styled(
@@ -962,13 +984,15 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw("  "));
     }
 
-    // Add version info at the end
     spans.push(Span::styled(
         format!("  {} (built {})", GIT_HASH, BUILD_DATE),
         Style::default().fg(Color::DarkGray),
     ));
 
-    // If there's a status message, show it prominently instead of shortcuts
+    spans
+}
+
+fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(ref msg) = app.status_message {
         let status_line = Line::from(vec![
             Span::styled(
@@ -987,6 +1011,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         let paragraph = Paragraph::new(status_line);
         frame.render_widget(paragraph, area);
     } else {
+        let spans = build_footer_shortcuts(app);
         let help = Line::from(spans);
         let paragraph = Paragraph::new(help);
         frame.render_widget(paragraph, area);

@@ -27,28 +27,33 @@ pub fn find_related_tests(
     let mut all_tests: HashSet<String> = HashSet::new();
 
     for strategy in strategies {
-        match strategy {
-            TestDiscoveryStrategy::PathMapping { rules } => {
-                for source_file in source_files {
-                    let tests = apply_path_mapping(source_file, rules, project_root);
-                    all_tests.extend(tests);
-                }
-            }
-            TestDiscoveryStrategy::GrepSearch {
-                search_dirs,
-                pattern,
-            } => {
-                for source_file in source_files {
-                    let tests = grep_search(source_file, search_dirs, pattern, project_root);
-                    all_tests.extend(tests);
-                }
-            }
-        }
+        all_tests.extend(apply_strategy(strategy, source_files, project_root));
     }
 
     let mut result: Vec<String> = all_tests.into_iter().collect();
     result.sort();
     result
+}
+
+/// Apply a single discovery strategy to source files
+fn apply_strategy(
+    strategy: &TestDiscoveryStrategy,
+    source_files: &[&str],
+    project_root: &Path,
+) -> Vec<String> {
+    match strategy {
+        TestDiscoveryStrategy::PathMapping { rules } => source_files
+            .iter()
+            .flat_map(|f| apply_path_mapping(f, rules, project_root))
+            .collect(),
+        TestDiscoveryStrategy::GrepSearch {
+            search_dirs,
+            pattern,
+        } => source_files
+            .iter()
+            .flat_map(|f| grep_search(f, search_dirs, pattern, project_root))
+            .collect(),
+    }
 }
 
 /// Apply path mapping rules to find test files
@@ -60,16 +65,14 @@ fn apply_path_mapping(
     let mut found_tests = Vec::new();
 
     for rule in rules {
-        if let Some(path_capture) = extract_path_from_pattern(source_file, &rule.source) {
-            for test_pattern in &rule.tests {
-                let test_path = test_pattern.replace("{path}", &path_capture);
-                let full_path = project_root.join(&test_path);
-
-                if full_path.exists() {
-                    found_tests.push(test_path);
-                }
-            }
-        }
+        let Some(path_capture) = extract_path_from_pattern(source_file, &rule.source) else {
+            continue;
+        };
+        found_tests.extend(rule.tests.iter().filter_map(|test_pattern| {
+            let test_path = test_pattern.replace("{path}", &path_capture);
+            let full_path = project_root.join(&test_path);
+            full_path.exists().then_some(test_path)
+        }));
     }
 
     found_tests
@@ -118,20 +121,22 @@ fn grep_search(
 
         // Use grep to find files containing the pattern
         // Note: "." is required - without a path argument, grep reads from stdin
-        if let Ok(output) = std::process::Command::new("grep")
+        let Ok(output) = std::process::Command::new("grep")
             .args(["-rl", &expanded_pattern, "."])
             .current_dir(&dir_path)
             .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    // Strip "./" prefix that grep adds when searching "."
-                    let relative_path = line.trim().strip_prefix("./").unwrap_or(line.trim());
-                    let test_path = format!("{}/{}", search_dir, relative_path);
-                    found_tests.push(test_path);
-                }
-            }
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            // Strip "./" prefix that grep adds when searching "."
+            let relative_path = line.trim().strip_prefix("./").unwrap_or(line.trim());
+            let test_path = format!("{}/{}", search_dir, relative_path);
+            found_tests.push(test_path);
         }
     }
 

@@ -41,6 +41,35 @@ pub(super) fn process_always_run_check(
     }
 }
 
+/// Process a single check definition and return a CheckToRun if applicable
+pub(super) fn process_check(
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    project_root: &Path,
+    group_name: &str,
+    check_id: &str,
+    check: &CheckDefinition,
+    default_service: &str,
+) -> Option<CheckToRun> {
+    let service = check.service_or_default(default_service).to_string();
+
+    if check.always_run() {
+        return Some(process_always_run_check(
+            config, check_id, check, group_name, service,
+        ));
+    }
+
+    process_triggered_check(
+        config,
+        changed_files,
+        project_root,
+        group_name,
+        check_id,
+        check,
+        &service,
+    )
+}
+
 /// Match changed files against a file pattern trigger
 pub(super) fn match_file_pattern(
     config: &CiConfig,
@@ -67,38 +96,34 @@ pub(super) fn process_test_discovery(
     check: &CheckDefinition,
     matched_files: &mut Vec<String>,
 ) -> Option<TestDiscoveryResult> {
-    if let Some(pattern) = config.get_file_pattern(&discovery.source_pattern) {
-        let source_files = changed_files.filter_by_pattern(pattern);
-        if !source_files.is_empty() {
-            let related_tests = test_discovery::find_related_tests(
-                &discovery.strategies,
-                &source_files,
-                project_root,
-            );
-
-            if !related_tests.is_empty() {
-                matched_files.extend(related_tests);
-                None
-            } else if matched_files.is_empty() {
-                // No tests found and no file_pattern matches
-                if check.on_demand {
-                    Some(TestDiscoveryResult::OnDemand)
-                } else if !check.command.contains("{files}") {
-                    matched_files.push("(source files changed - running all)".to_string());
-                    None
-                } else {
-                    // Command uses {files} - will be skipped below
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
+    let pattern = config.get_file_pattern(&discovery.source_pattern)?;
+    let source_files = changed_files.filter_by_pattern(pattern);
+    if source_files.is_empty() {
+        return None;
     }
+
+    let related_tests =
+        test_discovery::find_related_tests(&discovery.strategies, &source_files, project_root);
+
+    if !related_tests.is_empty() {
+        matched_files.extend(related_tests);
+        return None;
+    }
+
+    if !matched_files.is_empty() {
+        return None;
+    }
+
+    // No tests found and no file_pattern matches
+    if check.on_demand {
+        return Some(TestDiscoveryResult::OnDemand);
+    }
+
+    if !check.command.contains("{files}") {
+        matched_files.push("(source files changed - running all)".to_string());
+    }
+
+    None
 }
 
 /// Result from test discovery processing
@@ -213,25 +238,23 @@ pub(super) fn process_triggered_check(
     // Check test_discovery trigger
     if let Some(discovery) = &triggers.test_discovery {
         has_source_trigger = true;
-        if let Some(result) = process_test_discovery(
+        if process_test_discovery(
             config,
             changed_files,
             project_root,
             discovery,
             check,
             &mut matched_files,
-        ) {
-            match result {
-                TestDiscoveryResult::OnDemand => {
-                    return Some(build_on_demand_check(
-                        config,
-                        check_id,
-                        check,
-                        group_name,
-                        service.to_string(),
-                    ));
-                }
-            }
+        )
+        .is_some()
+        {
+            return Some(build_on_demand_check(
+                config,
+                check_id,
+                check,
+                group_name,
+                service.to_string(),
+            ));
         }
     }
 

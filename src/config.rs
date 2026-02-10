@@ -117,31 +117,24 @@ impl DockerConfig {
         }
 
         // Derive container name from project_dir and service
-        // Extract project name from project_dir (last path component)
-        // Handle "." and relative paths by resolving to absolute path first
-        let path = std::path::Path::new(&self.project_dir);
-        let project_name = if self.project_dir == "." || self.project_dir == ".." {
-            // Resolve relative path to get actual directory name
-            std::env::current_dir()
-                .ok()
-                .and_then(|cwd| {
-                    let resolved = if self.project_dir == "." {
-                        cwd
-                    } else {
-                        cwd.parent()?.to_path_buf()
-                    };
-                    resolved.file_name()?.to_str().map(String::from)
-                })
-                .unwrap_or_else(|| "project".to_string())
-        } else {
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project")
-                .to_string()
-        };
+        let project_name = self.derive_project_name();
 
         // Docker Compose naming convention: {project}-{service}-1
         format!("{}-{}-1", project_name, self.service)
+    }
+
+    /// Extract project name from project_dir (last path component)
+    /// Handle "." and relative paths by resolving to absolute path first
+    fn derive_project_name(&self) -> String {
+        if self.project_dir == "." || self.project_dir == ".." {
+            return resolve_project_name_from_cwd(&self.project_dir)
+                .unwrap_or_else(|| "project".to_string());
+        }
+        let path = std::path::Path::new(&self.project_dir);
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string()
     }
 
     /// Get the Docker image name to use
@@ -176,6 +169,17 @@ impl DockerConfig {
     pub fn shell(&self) -> &str {
         &self.shell
     }
+}
+
+/// Resolve project name from current working directory for "." or ".." project_dir
+fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let resolved = if project_dir == "." {
+        cwd
+    } else {
+        cwd.parent()?.to_path_buf()
+    };
+    resolved.file_name()?.to_str().map(String::from)
 }
 
 fn default_service() -> String {
@@ -377,17 +381,15 @@ impl CiConfig {
 
     /// Get color name for a file based on file_patterns
     pub fn get_file_color(&self, path: &str) -> &str {
-        // Check if any file_pattern with a color matches this file
-        for fp in self.file_patterns.values() {
-            if let Some(ref color) = fp.color {
-                if let Ok(re) = Regex::new(&fp.pattern) {
-                    if re.is_match(path) {
-                        return color.as_str();
-                    }
-                }
-            }
-        }
-        "white"
+        self.file_patterns
+            .values()
+            .filter_map(|fp| {
+                let color = fp.color.as_ref()?;
+                let re = Regex::new(&fp.pattern).ok()?;
+                re.is_match(path).then_some(color.as_str())
+            })
+            .next()
+            .unwrap_or("white")
     }
 
     /// Get the default Docker service (from docker config)

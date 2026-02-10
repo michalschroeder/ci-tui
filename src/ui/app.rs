@@ -93,6 +93,40 @@ pub enum SelectableItem<'a> {
     Check(&'a CheckToRun),
 }
 
+/// Build initial CheckResult for a check based on its state
+fn initial_result_for_check(check: &CheckToRun) -> CheckResult {
+    if check.skipped_no_files {
+        CheckResult::skipped(check.id())
+    } else if check.on_demand {
+        CheckResult::on_demand(check.id())
+    } else {
+        CheckResult::pending(check.id())
+    }
+}
+
+/// Build pre-command state list from config for active groups
+fn build_pre_commands(
+    config: &CiConfig,
+    active_groups: &std::collections::HashSet<&str>,
+) -> Vec<PreCommandState> {
+    let mut pre_commands = Vec::new();
+    for (group_name, group_config) in config.groups() {
+        if !active_groups.contains(group_name) {
+            continue;
+        }
+        for pre_cmd in &group_config.pre_commands {
+            pre_commands.push(PreCommandState {
+                group: group_name.to_string(),
+                name: pre_cmd.name.clone(),
+                status: PreCommandStatus::Pending,
+                output: String::new(),
+                duration_ms: 0,
+            });
+        }
+    }
+    pre_commands
+}
+
 /// Application state for the TUI
 ///
 /// Contains all data needed to render the UI and track check execution,
@@ -177,34 +211,15 @@ impl App {
     ) -> Self {
         // Initialize results - skipped for checks with {files} and no matches,
         // on_demand for manual triggers, pending for auto-run
-        let mut results = HashMap::new();
-        for check in &checks {
-            if check.skipped_no_files {
-                results.insert(check.id().to_string(), CheckResult::skipped(check.id()));
-            } else if check.on_demand {
-                results.insert(check.id().to_string(), CheckResult::on_demand(check.id()));
-            } else {
-                results.insert(check.id().to_string(), CheckResult::pending(check.id()));
-            }
-        }
+        let results: HashMap<String, CheckResult> = checks
+            .iter()
+            .map(|check| (check.id().to_string(), initial_result_for_check(check)))
+            .collect();
 
         // Build pre-commands list from config (only for groups that have checks)
         let active_groups: std::collections::HashSet<&str> =
             checks.iter().map(|c| c.group()).collect();
-        let mut pre_commands = Vec::new();
-        for (group_name, group_config) in config.groups() {
-            if active_groups.contains(group_name) {
-                for pre_cmd in &group_config.pre_commands {
-                    pre_commands.push(PreCommandState {
-                        group: group_name.to_string(),
-                        name: pre_cmd.name.clone(),
-                        status: PreCommandStatus::Pending,
-                        output: String::new(),
-                        duration_ms: 0,
-                    });
-                }
-            }
-        }
+        let pre_commands = build_pre_commands(&config, &active_groups);
 
         Self {
             config,
@@ -244,37 +259,15 @@ impl App {
 
         // Reset results - skipped for checks with {files} and no matches,
         // on_demand for manual triggers, pending for auto-run
-        self.results.clear();
-        for check in &checks {
-            if check.skipped_no_files {
-                self.results
-                    .insert(check.id().to_string(), CheckResult::skipped(check.id()));
-            } else if check.on_demand {
-                self.results
-                    .insert(check.id().to_string(), CheckResult::on_demand(check.id()));
-            } else {
-                self.results
-                    .insert(check.id().to_string(), CheckResult::pending(check.id()));
-            }
-        }
+        self.results = checks
+            .iter()
+            .map(|check| (check.id().to_string(), initial_result_for_check(check)))
+            .collect();
 
         // Reset pre-commands
         let active_groups: std::collections::HashSet<&str> =
             checks.iter().map(|c| c.group()).collect();
-        self.pre_commands.clear();
-        for (group_name, group_config) in self.config.groups() {
-            if active_groups.contains(group_name) {
-                for pre_cmd in &group_config.pre_commands {
-                    self.pre_commands.push(PreCommandState {
-                        group: group_name.to_string(),
-                        name: pre_cmd.name.clone(),
-                        status: PreCommandStatus::Pending,
-                        output: String::new(),
-                        duration_ms: 0,
-                    });
-                }
-            }
-        }
+        self.pre_commands = build_pre_commands(&self.config, &active_groups);
 
         // Reset state
         self.selected_check = 0;
@@ -297,15 +290,12 @@ impl App {
 
     /// Get total elapsed time
     pub fn elapsed_time(&self) -> std::time::Duration {
-        if let Some(started) = self.run_started_at {
-            if let Some(finished) = self.run_finished_at {
-                finished.duration_since(started)
-            } else {
-                started.elapsed()
-            }
-        } else {
-            std::time::Duration::ZERO
-        }
+        let Some(started) = self.run_started_at else {
+            return std::time::Duration::ZERO;
+        };
+        self.run_finished_at
+            .map(|finished| finished.duration_since(started))
+            .unwrap_or_else(|| started.elapsed())
     }
 
     /// Check if selected check can be fixed
@@ -313,26 +303,25 @@ impl App {
         if self.fix_running {
             return false;
         }
-        if let Some(check) = self.selected_check() {
-            if let Some(result) = self.results.get(check.id()) {
-                return result.status == CheckStatus::Failed && check.has_fix();
-            }
-        }
-        false
+        let Some(check) = self.selected_check() else {
+            return false;
+        };
+        let Some(result) = self.results.get(check.id()) else {
+            return false;
+        };
+        result.status == CheckStatus::Failed && check.has_fix()
     }
 
     /// Get fix command and service for selected check
     /// Returns (fix_command, service, container) for the selected check
     pub fn get_selected_fix_command(&self) -> Option<(String, String, Option<String>)> {
-        self.selected_check().and_then(|check| {
-            check.resolved_fix_command.as_ref().map(|cmd| {
-                (
-                    cmd.clone(),
-                    check.service.clone(),
-                    check.definition.container.clone(),
-                )
-            })
-        })
+        let check = self.selected_check()?;
+        let cmd = check.resolved_fix_command.as_ref()?;
+        Some((
+            cmd.clone(),
+            check.service.clone(),
+            check.definition.container.clone(),
+        ))
     }
 
     /// Mark fix as started
@@ -349,17 +338,17 @@ impl App {
         self.needs_redraw = true;
     }
 
+    fn is_fixable(&self, check: &CheckToRun) -> bool {
+        self.results
+            .get(check.id())
+            .is_some_and(|r| r.status == CheckStatus::Failed && check.has_fix())
+    }
+
     /// Get all failed checks that can be fixed
     pub fn get_fixable_checks(&self) -> Vec<&CheckToRun> {
         self.checks
             .iter()
-            .filter(|check| {
-                if let Some(result) = self.results.get(check.id()) {
-                    result.status == CheckStatus::Failed && check.has_fix()
-                } else {
-                    false
-                }
-            })
+            .filter(|check| self.is_fixable(check))
             .collect()
     }
 
@@ -377,14 +366,13 @@ impl App {
         self.get_fixable_checks()
             .iter()
             .filter_map(|check| {
-                check.resolved_fix_command.as_ref().map(|cmd| {
-                    (
-                        check.id().to_string(),
-                        cmd.clone(),
-                        check.service.clone(),
-                        check.definition.container.clone(),
-                    )
-                })
+                let cmd = check.resolved_fix_command.as_ref()?;
+                Some((
+                    check.id().to_string(),
+                    cmd.clone(),
+                    check.service.clone(),
+                    check.definition.container.clone(),
+                ))
             })
             .collect()
     }
@@ -415,14 +403,13 @@ impl App {
         if self.fix_running || self.fix_all_running {
             return false;
         }
-        if let Some(check) = self.selected_check() {
-            if let Some(result) = self.results.get(check.id()) {
-                // Can retry if finished (passed or failed)
-                return result.status == CheckStatus::Passed
-                    || result.status == CheckStatus::Failed;
-            }
-        }
-        false
+        let Some(check) = self.selected_check() else {
+            return false;
+        };
+        let Some(result) = self.results.get(check.id()) else {
+            return false;
+        };
+        result.status == CheckStatus::Passed || result.status == CheckStatus::Failed
     }
 
     /// Check if selected check is on-demand and can be triggered
@@ -430,12 +417,13 @@ impl App {
         if self.fix_running || self.fix_all_running {
             return false;
         }
-        if let Some(check) = self.selected_check() {
-            if let Some(result) = self.results.get(check.id()) {
-                return result.status == CheckStatus::OnDemand;
-            }
-        }
-        false
+        let Some(check) = self.selected_check() else {
+            return false;
+        };
+        let Some(result) = self.results.get(check.id()) else {
+            return false;
+        };
+        result.status == CheckStatus::OnDemand
     }
 
     /// Check if selected check can be run with all files (no filtering)
@@ -443,15 +431,15 @@ impl App {
         if self.fix_running || self.fix_all_running {
             return false;
         }
-        if let Some(check) = self.selected_check() {
-            if let Some(result) = self.results.get(check.id()) {
-                // Can run all files if check is finished (passed/failed) or on-demand
-                return result.status == CheckStatus::Passed
-                    || result.status == CheckStatus::Failed
-                    || result.status == CheckStatus::OnDemand;
-            }
-        }
-        false
+        let Some(check) = self.selected_check() else {
+            return false;
+        };
+        let Some(result) = self.results.get(check.id()) else {
+            return false;
+        };
+        result.status == CheckStatus::Passed
+            || result.status == CheckStatus::Failed
+            || result.status == CheckStatus::OnDemand
     }
 
     /// Mark an on-demand check as running (preparing to execute)
@@ -532,37 +520,17 @@ impl App {
     pub fn handle_runner_event(&mut self, event: RunnerEvent) {
         self.needs_redraw = true;
         match event {
-            RunnerEvent::CheckStarted { check_id } => {
-                if let Some(result) = self.results.get_mut(&check_id) {
-                    result.status = CheckStatus::Running;
-                    result.started_at = Some(chrono::Local::now());
-                }
-            }
-            RunnerEvent::CheckOutput { check_id, line } => {
-                if let Some(result) = self.results.get_mut(&check_id) {
-                    result.output.push_str(&line);
-                    result.output.push('\n');
-                }
-            }
+            RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
+            RunnerEvent::CheckOutput { check_id, line } => self.on_check_output(&check_id, &line),
             RunnerEvent::CheckFinished { result } => {
                 self.results.insert(result.check_id.clone(), result);
             }
             RunnerEvent::GroupStarted { group } => {
                 self.current_group = Some(group);
             }
-            RunnerEvent::GroupFinished { .. } => {
-                // Group finished, will start next
-            }
+            RunnerEvent::GroupFinished { .. } => {}
             RunnerEvent::PreCommandStarted { group, name } => {
-                // Find and update the pre-command status
-                if let Some(idx) = self
-                    .pre_commands
-                    .iter()
-                    .position(|p| p.group == group && p.name == name)
-                {
-                    self.pre_commands[idx].status = PreCommandStatus::Running;
-                    self.current_pre_command = Some(idx);
-                }
+                self.on_pre_command_started(&group, &name);
             }
             RunnerEvent::PreCommandFinished {
                 group,
@@ -571,29 +539,65 @@ impl App {
                 output,
                 duration_ms,
             } => {
-                // Find and update the pre-command status
-                if let Some(idx) = self
-                    .pre_commands
-                    .iter()
-                    .position(|p| p.group == group && p.name == name)
-                {
-                    self.pre_commands[idx].status = if success {
-                        PreCommandStatus::Passed
-                    } else {
-                        PreCommandStatus::Failed
-                    };
-                    self.pre_commands[idx].output = output;
-                    self.pre_commands[idx].duration_ms = duration_ms;
-                }
-                self.current_pre_command = None;
+                self.on_pre_command_finished(&group, &name, success, output, duration_ms);
             }
             RunnerEvent::AllFinished => {
                 self.all_finished = true;
                 self.current_group = None;
-                self.status_message = None; // Clear pre-command status
+                self.status_message = None;
                 self.run_finished_at = Some(Instant::now());
             }
         }
+    }
+
+    fn on_check_started(&mut self, check_id: &str) {
+        if let Some(result) = self.results.get_mut(check_id) {
+            result.status = CheckStatus::Running;
+            result.started_at = Some(chrono::Local::now());
+        }
+    }
+
+    fn on_check_output(&mut self, check_id: &str, line: &str) {
+        if let Some(result) = self.results.get_mut(check_id) {
+            result.output.push_str(line);
+            result.output.push('\n');
+        }
+    }
+
+    fn on_pre_command_started(&mut self, group: &str, name: &str) {
+        if let Some(idx) = self
+            .pre_commands
+            .iter()
+            .position(|p| p.group == group && p.name == name)
+        {
+            self.pre_commands[idx].status = PreCommandStatus::Running;
+            self.current_pre_command = Some(idx);
+        }
+    }
+
+    fn on_pre_command_finished(
+        &mut self,
+        group: &str,
+        name: &str,
+        success: bool,
+        output: String,
+        duration_ms: u64,
+    ) {
+        self.current_pre_command = None;
+        let Some(idx) = self
+            .pre_commands
+            .iter()
+            .position(|p| p.group == group && p.name == name)
+        else {
+            return;
+        };
+        self.pre_commands[idx].status = if success {
+            PreCommandStatus::Passed
+        } else {
+            PreCommandStatus::Failed
+        };
+        self.pre_commands[idx].output = output;
+        self.pre_commands[idx].duration_ms = duration_ms;
     }
 
     pub fn selected_check(&self) -> Option<&CheckToRun> {
@@ -644,10 +648,7 @@ impl App {
                 self.needs_redraw = true;
             }
             AppMessage::ClearStatusMessage => {
-                if self.status_message.is_some() {
-                    self.status_message = None;
-                    self.needs_redraw = true;
-                }
+                self.status_message = None;
             }
         }
         // Automatic dirty flag - every state change triggers redraw
@@ -703,32 +704,36 @@ impl App {
 
     /// Internal scroll method - does not set needs_redraw (handled by update())
     fn scroll_down_internal(&mut self, n: usize) {
-        // Get max scroll based on output content length and visible area
-        // Must count both stdout and stderr since both are rendered in the output panel
-        let visible_lines = self.output_visible_lines;
-        let max_scroll = match self.selected_item() {
-            Some(SelectableItem::Check(check)) => self
-                .results
-                .get(check.id())
-                .map(|result| {
-                    let stdout_lines = result.output.lines().count();
-                    let stderr_lines = result.error_output.lines().count();
-                    // Add 2 for stderr header if stderr is present
-                    let total = if stderr_lines > 0 {
-                        stdout_lines + stderr_lines + 2
-                    } else {
-                        stdout_lines
-                    };
-                    total.saturating_sub(visible_lines)
-                })
-                .unwrap_or(0),
+        let max_scroll = self.compute_max_scroll();
+        self.output_scroll = (self.output_scroll + n).min(max_scroll);
+    }
+
+    /// Compute maximum scroll offset for the currently selected item's output
+    fn compute_max_scroll(&self) -> usize {
+        let visible = self.output_visible_lines;
+        match self.selected_item() {
+            Some(SelectableItem::Check(check)) => {
+                self.check_total_lines(check.id()).saturating_sub(visible)
+            }
             Some(SelectableItem::PreCommand(pc)) => {
-                pc.output.lines().count().saturating_sub(visible_lines)
+                pc.output.lines().count().saturating_sub(visible)
             }
             None => 0,
-        };
+        }
+    }
 
-        self.output_scroll = (self.output_scroll + n).min(max_scroll);
+    /// Count total output lines for a check (stdout + stderr + header)
+    fn check_total_lines(&self, check_id: &str) -> usize {
+        let Some(result) = self.results.get(check_id) else {
+            return 0;
+        };
+        let stdout_lines = result.output.lines().count();
+        let stderr_lines = result.error_output.lines().count();
+        if stderr_lines > 0 {
+            stdout_lines + stderr_lines + 2
+        } else {
+            stdout_lines
+        }
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -774,22 +779,15 @@ impl App {
 
     // Stats
     pub fn count_by_status(&self) -> (usize, usize, usize, usize) {
-        let mut passed = 0;
-        let mut failed = 0;
-        let mut pending = 0;
-        let mut on_demand = 0;
-
-        for result in self.results.values() {
-            match result.status {
-                CheckStatus::Passed => passed += 1,
-                CheckStatus::Failed => failed += 1,
-                CheckStatus::Pending | CheckStatus::Running => pending += 1,
-                CheckStatus::Skipped => {}
-                CheckStatus::OnDemand => on_demand += 1,
-            }
-        }
-
-        (passed, failed, pending, on_demand)
+        self.results
+            .values()
+            .fold((0, 0, 0, 0), |(p, f, pe, o), r| match r.status {
+                CheckStatus::Passed => (p + 1, f, pe, o),
+                CheckStatus::Failed => (p, f + 1, pe, o),
+                CheckStatus::Pending | CheckStatus::Running => (p, f, pe + 1, o),
+                CheckStatus::OnDemand => (p, f, pe, o + 1),
+                CheckStatus::Skipped => (p, f, pe, o),
+            })
     }
 
     pub fn groups(&self) -> Vec<&str> {
@@ -820,35 +818,41 @@ impl App {
     /// Get all selectable items in display order (pre-commands + checks, grouped)
     pub fn get_selectable_items(&self) -> Vec<SelectableItem<'_>> {
         let mut items = Vec::new();
-        let groups = self.groups();
 
-        for group in groups {
-            // Add pre-commands for this group
-            for pre_cmd in self.pre_commands.iter().filter(|p| p.group == group) {
-                let include = match self.status_filter {
-                    StatusFilter::All => true,
-                    StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
-                };
-                if include {
-                    items.push(SelectableItem::PreCommand(pre_cmd));
-                }
-            }
-            // Add checks for this group (respecting filter)
-            for check in self.checks_in_group(group) {
-                let status = self.results.get(check.id());
-                let include = match self.status_filter {
-                    StatusFilter::All => true,
-                    StatusFilter::Failed => status
-                        .map(|r| r.status == CheckStatus::Failed)
-                        .unwrap_or(false),
-                };
-                if include {
-                    items.push(SelectableItem::Check(check));
-                }
-            }
+        for group in self.groups() {
+            items.extend(
+                self.pre_commands
+                    .iter()
+                    .filter(|p| p.group == group && self.should_show_pre_command(p))
+                    .map(SelectableItem::PreCommand),
+            );
+            items.extend(
+                self.checks_in_group(group)
+                    .into_iter()
+                    .filter(|c| self.should_show_check(c))
+                    .map(SelectableItem::Check),
+            );
         }
 
         items
+    }
+
+    fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
+        match self.status_filter {
+            StatusFilter::All => true,
+            StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
+        }
+    }
+
+    fn should_show_check(&self, check: &CheckToRun) -> bool {
+        match self.status_filter {
+            StatusFilter::All => true,
+            StatusFilter::Failed => self
+                .results
+                .get(check.id())
+                .map(|r| r.status == CheckStatus::Failed)
+                .unwrap_or(false),
+        }
     }
 
     /// Get the currently selected item (pre-command or check)

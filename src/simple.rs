@@ -80,9 +80,7 @@ pub async fn run(
 
         for result in results {
             print_result(&result);
-            if result.status == CheckStatus::Failed {
-                has_failures = true;
-            }
+            has_failures |= result.status == CheckStatus::Failed;
             all_results.push(result);
         }
         println!();
@@ -113,15 +111,16 @@ pub async fn run(
         // Show failed checks with details
         println!();
         println!("\x1b[1;31mFailed checks:\x1b[0m");
-        for result in &all_results {
-            if result.status == CheckStatus::Failed {
-                let fix_cmd = checks
-                    .iter()
-                    .find(|c| c.id() == result.check_id)
-                    .and_then(|c| c.resolved_fix_command.as_deref());
-                println!();
-                print!("{}", format_failed_check(result, fix_cmd));
-            }
+        for result in all_results
+            .iter()
+            .filter(|r| r.status == CheckStatus::Failed)
+        {
+            let fix_cmd = checks
+                .iter()
+                .find(|c| c.id() == result.check_id)
+                .and_then(|c| c.resolved_fix_command.as_deref());
+            println!();
+            print!("{}", format_failed_check(result, fix_cmd));
         }
 
         std::process::exit(1);

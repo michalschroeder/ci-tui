@@ -96,34 +96,17 @@ pub fn determine_checks(
     let mut checks_to_run = Vec::new();
     let default_service = config.default_service();
 
-    // Iterate over groups in config order
     for (group_name, group_config) in config.groups() {
-        // Iterate over checks in this group
         for (check_id, check) in &group_config.checks {
-            let service = check.service_or_default(default_service).to_string();
-
-            // Always run checks with no triggers
-            if check.always_run() {
-                checks_to_run.push(process_always_run_check(
-                    config, check_id, check, group_name, service,
-                ));
-                continue;
-            }
-
-            // Check if this check should run based on triggers
-            if check.triggers.is_some() {
-                if let Some(check_to_run) = process_triggered_check(
-                    config,
-                    changed_files,
-                    project_root,
-                    group_name,
-                    check_id,
-                    check,
-                    &service,
-                ) {
-                    checks_to_run.push(check_to_run);
-                }
-            }
+            checks_to_run.extend(process_check(
+                config,
+                changed_files,
+                project_root,
+                group_name,
+                check_id,
+                check,
+                default_service,
+            ));
         }
     }
 

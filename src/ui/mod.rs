@@ -79,6 +79,28 @@ enum Message {
     RetryResult(CheckResult),
 }
 
+/// Read keyboard events and send them through a channel
+///
+/// This runs on a dedicated OS thread for responsiveness under high CPU load.
+fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<KeyEvent>) {
+    while !shutdown.load(Ordering::Relaxed) {
+        if !event::poll(KEYBOARD_POLL_TIMEOUT).unwrap_or(false) {
+            continue;
+        }
+        let Ok(Event::Key(key)) = event::read() else {
+            continue;
+        };
+        // Filter for Press events only (Windows sends Press+Release)
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        // If send fails, receiver is dropped - exit thread
+        if tx.send(key).is_err() {
+            break;
+        }
+    }
+}
+
 /// Spawn a dedicated OS thread for keyboard input handling
 ///
 /// CRITICAL: This uses std::thread (NOT tokio::spawn) to ensure keyboard events
@@ -92,27 +114,11 @@ enum Message {
 fn spawn_keyboard_thread(
     shutdown: Arc<AtomicBool>,
 ) -> (mpsc::UnboundedReceiver<KeyEvent>, thread::JoinHandle<()>) {
-    // Use tokio mpsc unbounded channel for async/await compatibility
     let (tx, rx) = mpsc::unbounded_channel();
 
     let handle = thread::Builder::new()
         .name("keyboard-input".to_string())
-        .spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
-                if event::poll(KEYBOARD_POLL_TIMEOUT).unwrap_or(false) {
-                    if let Ok(Event::Key(key)) = event::read() {
-                        // Filter for Press events only (Windows sends Press+Release)
-                        if key.kind == KeyEventKind::Press {
-                            // If send fails, receiver is dropped - exit thread
-                            // Use blocking_send from std::thread context
-                            if tx.send(key).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        })
+        .spawn(move || keyboard_loop(shutdown, tx))
         .expect("Failed to spawn keyboard thread");
 
     (rx, handle)
@@ -144,11 +150,8 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
                 mem_total: system.total_memory(),
             };
 
-            // Non-blocking send - if channel is full, skip this update
-            // This prevents backpressure from affecting the stats worker
-            if tx.try_send(stats).is_err() {
-                // Channel full or closed, continue anyway
-            }
+            // Non-blocking send - skip if channel is full
+            let _ = tx.try_send(stats);
         }
     })
 }
@@ -232,6 +235,207 @@ fn start_runner(
     (handle, event_rx)
 }
 
+/// Spawn a retry/run task for a check
+fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
+    let retry_tx = channels.retry_tx.clone();
+    let project_root = Arc::clone(&channels.project_root);
+    let container = Arc::clone(&channels.container_name);
+    let docker_config = Arc::clone(&channels.docker_config);
+    let global_env = Arc::clone(&channels.global_env);
+    tokio::spawn(async move {
+        let result = run_single_check(
+            &check,
+            &project_root,
+            &container,
+            &docker_config,
+            &global_env,
+        )
+        .await;
+        let _ = retry_tx.send(result).await;
+    });
+}
+
+/// Spawn a fix task for a check
+fn spawn_fix_task(channels: &EventChannels, fix_cmd: String, container: Option<String>) {
+    let fix_tx = channels.fix_tx.clone();
+    let project_root = Arc::clone(&channels.project_root);
+    let default_container = Arc::clone(&channels.container_name);
+    let docker_config = Arc::clone(&channels.docker_config);
+    let global_env = Arc::clone(&channels.global_env);
+    tokio::spawn(async move {
+        let container_name = container.as_deref().unwrap_or(&default_container);
+        let result = run_fix_command(
+            &fix_cmd,
+            &project_root,
+            container_name,
+            &docker_config,
+            &global_env,
+        )
+        .await;
+        let _ = fix_tx.send(result).await;
+    });
+}
+
+#[cfg(debug_assertions)]
+fn warn_slow_keyboard(start: std::time::Instant) {
+    let elapsed = start.elapsed();
+    if elapsed > std::time::Duration::from_millis(1) {
+        eprintln!("WARN: Keyboard response took {:?}", elapsed);
+    }
+}
+
+/// Handle 'r' key: retry selected check with git refresh
+fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiConfig) -> KeyAction {
+    if !app.can_retry_selected() {
+        return KeyAction::None;
+    }
+    let Some(check) = app.selected_check() else {
+        return KeyAction::None;
+    };
+    let check_id = check.id().to_string();
+    let base_ref = app.changed_files.base_ref.clone();
+
+    let Ok(mut new_changed_files) = get_changed_files(&channels.project_root, &base_ref) else {
+        // Git refresh failed - fall back to running with existing check
+        let check = check.clone();
+        app.update(AppMessage::ResetForRetry(check.id().to_string()));
+        spawn_retry_task(channels, check);
+        return KeyAction::None;
+    };
+
+    new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
+    let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+
+    let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) else {
+        app.update(AppMessage::SetStatusMessage(Some(
+            "Check no longer applicable after git refresh".to_string(),
+        )));
+        return KeyAction::None;
+    };
+    let new_check = new_check.clone();
+
+    app.changed_files = new_changed_files;
+    if let Some(idx) = app.checks.iter().position(|c| c.id() == check_id) {
+        app.checks[idx] = new_check.clone();
+    }
+
+    app.update(AppMessage::ResetForRetry(check_id));
+    spawn_retry_task(channels, new_check);
+    KeyAction::None
+}
+
+/// Handle 't' key: trigger on-demand test
+fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> KeyAction {
+    if !app.can_trigger_selected() {
+        return KeyAction::None;
+    }
+    let Some(check) = app.selected_check() else {
+        return KeyAction::None;
+    };
+    let check = check.clone();
+    app.update(AppMessage::TriggerOnDemand(check.id().to_string()));
+    spawn_retry_task(channels, check);
+    KeyAction::None
+}
+
+/// Handle 'A' key: run selected check for all files
+fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> KeyAction {
+    if !app.can_run_all_files() {
+        return KeyAction::None;
+    }
+    let Some(check) = app.selected_check() else {
+        return KeyAction::None;
+    };
+    let check = check.clone();
+    let all_files_cmd = check.get_command_for_all_files();
+    app.update(AppMessage::ResetForRetry(check.id().to_string()));
+    app.update(AppMessage::SetStatusMessage(Some(
+        "Running for all files...".to_string(),
+    )));
+    let retry_tx = channels.retry_tx.clone();
+    let project_root = Arc::clone(&channels.project_root);
+    let container = Arc::clone(&channels.container_name);
+    let docker_config = Arc::clone(&channels.docker_config);
+    let global_env = Arc::clone(&channels.global_env);
+    tokio::spawn(async move {
+        let result = run_check_with_command(
+            &check,
+            &all_files_cmd,
+            &project_root,
+            &container,
+            &docker_config,
+            &global_env,
+        )
+        .await;
+        let _ = retry_tx.send(result).await;
+    });
+    KeyAction::None
+}
+
+/// Handle 'R' key: retry all checks with git refresh
+fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> KeyAction {
+    let base_ref = app.changed_files.base_ref.clone();
+    let mut new_changed_files =
+        get_changed_files(&channels.project_root, &base_ref).unwrap_or(ChangedFiles {
+            files: vec![],
+            base_ref,
+        });
+    new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
+    let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+
+    KeyAction::RetryAll {
+        new_changed_files,
+        new_checks,
+    }
+}
+
+/// Handle 'x' key: run fix for selected check
+fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> KeyAction {
+    if !app.can_fix_selected() {
+        return KeyAction::None;
+    }
+    let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() else {
+        return KeyAction::None;
+    };
+    app.update(AppMessage::StartFix);
+    spawn_fix_task(channels, fix_cmd, container);
+    KeyAction::None
+}
+
+/// Handle 'X' key: run fix for all failed checks
+fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
+    if !app.can_fix_all() {
+        return KeyAction::None;
+    }
+    let fix_commands = app.get_all_fix_commands();
+    if fix_commands.is_empty() {
+        return KeyAction::None;
+    }
+    let total = fix_commands.len();
+    app.update(AppMessage::StartFixAll(total));
+    let fix_all_tx = channels.fix_all_tx.clone();
+    let project_root = Arc::clone(&channels.project_root);
+    let default_container = Arc::clone(&channels.container_name);
+    let docker_config = Arc::clone(&channels.docker_config);
+    let global_env = Arc::clone(&channels.global_env);
+    tokio::spawn(async move {
+        for (i, (_check_id, fix_cmd, _service, container)) in fix_commands.into_iter().enumerate() {
+            let container_name = container.as_deref().unwrap_or(&default_container);
+            let result = run_fix_command(
+                &fix_cmd,
+                &project_root,
+                container_name,
+                &docker_config,
+                &global_env,
+            )
+            .await;
+            let is_last = i == total - 1;
+            let _ = fix_all_tx.send((result, is_last)).await;
+        }
+    });
+    KeyAction::None
+}
+
 /// Handle a key event and return the action for the main loop
 fn handle_key_event(
     app: &mut App,
@@ -240,9 +444,7 @@ fn handle_key_event(
     config: &CiConfig,
 ) -> KeyAction {
     match (key.code, key.modifiers) {
-        // Quit
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyAction::Quit,
-        // Navigation
         (KeyCode::Up | KeyCode::Char('k'), _) => {
             app.previous_check();
             KeyAction::None
@@ -259,7 +461,6 @@ fn handle_key_event(
             app.scroll_down(10);
             KeyAction::None
         }
-        // Filter by status
         (KeyCode::Char('f'), _) => {
             app.toggle_failed_filter();
             KeyAction::None
@@ -268,243 +469,25 @@ fn handle_key_event(
             app.show_all();
             KeyAction::None
         }
-        // Retry selected check only (with git refresh)
-        (KeyCode::Char('r'), KeyModifiers::NONE) => {
-            if app.can_retry_selected() {
-                if let Some(check) = app.selected_check() {
-                    let check_id = check.id().to_string();
-
-                    // Refresh git changes using same pattern as 'R' handler
-                    let base_ref = app.changed_files.base_ref.clone();
-                    match get_changed_files(&channels.project_root, &base_ref) {
-                        Ok(mut new_changed_files) => {
-                            // Apply ignore patterns
-                            new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
-
-                            // Re-determine checks with fresh git state
-                            let new_checks = determine_checks(
-                                config,
-                                &new_changed_files,
-                                &channels.project_root,
-                            );
-
-                            // Find the matching check by ID
-                            if let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id)
-                            {
-                                let new_check = new_check.clone();
-
-                                // Update app state with new git state and check info
-                                app.changed_files = new_changed_files;
-
-                                // Update the check in app.checks with the new version
-                                if let Some(idx) =
-                                    app.checks.iter().position(|c| c.id() == check_id)
-                                {
-                                    app.checks[idx] = new_check.clone();
-                                }
-
-                                // Reset and run the check with updated state
-                                app.update(AppMessage::ResetForRetry(check_id.clone()));
-                                let retry_tx = channels.retry_tx.clone();
-                                let project_root = Arc::clone(&channels.project_root);
-                                let docker_dir = Arc::clone(&channels.container_name);
-                                let docker_config = Arc::clone(&channels.docker_config);
-                                let global_env = Arc::clone(&channels.global_env);
-                                tokio::spawn(async move {
-                                    let result = run_single_check(
-                                        &new_check,
-                                        &project_root,
-                                        &docker_dir,
-                                        &docker_config,
-                                        &global_env,
-                                    )
-                                    .await;
-                                    let _ = retry_tx.send(result).await;
-                                });
-                            } else {
-                                // Check no longer applicable after git refresh
-                                app.update(AppMessage::SetStatusMessage(Some(
-                                    "Check no longer applicable after git refresh".to_string(),
-                                )));
-                            }
-                        }
-                        Err(_) => {
-                            // Git refresh failed - fall back to running with existing check
-                            let check = check.clone();
-                            app.update(AppMessage::ResetForRetry(check.id().to_string()));
-                            let retry_tx = channels.retry_tx.clone();
-                            let project_root = Arc::clone(&channels.project_root);
-                            let docker_dir = Arc::clone(&channels.container_name);
-                            let docker_config = Arc::clone(&channels.docker_config);
-                            let global_env = Arc::clone(&channels.global_env);
-                            tokio::spawn(async move {
-                                let result = run_single_check(
-                                    &check,
-                                    &project_root,
-                                    &docker_dir,
-                                    &docker_config,
-                                    &global_env,
-                                )
-                                .await;
-                                let _ = retry_tx.send(result).await;
-                            });
-                        }
-                    }
-                }
-            }
-            KeyAction::None
-        }
-        // Trigger on-demand test (functional/integration tests)
-        (KeyCode::Char('t'), KeyModifiers::NONE) => {
-            if app.can_trigger_selected() {
-                if let Some(check) = app.selected_check() {
-                    let check = check.clone();
-                    app.update(AppMessage::TriggerOnDemand(check.id().to_string()));
-                    let retry_tx = channels.retry_tx.clone();
-                    let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.container_name);
-                    let docker_config = Arc::clone(&channels.docker_config);
-                    let global_env = Arc::clone(&channels.global_env);
-                    tokio::spawn(async move {
-                        let result = run_single_check(
-                            &check,
-                            &project_root,
-                            &docker_dir,
-                            &docker_config,
-                            &global_env,
-                        )
-                        .await;
-                        let _ = retry_tx.send(result).await;
-                    });
-                }
-            }
-            KeyAction::None
-        }
-        // Run selected check for ALL files (no filtering)
-        (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
-            if app.can_run_all_files() {
-                if let Some(check) = app.selected_check() {
-                    let check = check.clone();
-                    let all_files_cmd = check.get_command_for_all_files();
-                    app.update(AppMessage::ResetForRetry(check.id().to_string()));
-                    app.update(AppMessage::SetStatusMessage(Some(
-                        "Running for all files...".to_string(),
-                    )));
-                    let retry_tx = channels.retry_tx.clone();
-                    let project_root = Arc::clone(&channels.project_root);
-                    let docker_dir = Arc::clone(&channels.container_name);
-                    let docker_config = Arc::clone(&channels.docker_config);
-                    let global_env = Arc::clone(&channels.global_env);
-                    tokio::spawn(async move {
-                        let result = run_check_with_command(
-                            &check,
-                            &all_files_cmd,
-                            &project_root,
-                            &docker_dir,
-                            &docker_config,
-                            &global_env,
-                        )
-                        .await;
-                        let _ = retry_tx.send(result).await;
-                    });
-                }
-            }
-            KeyAction::None
-        }
-        // Copy command to clipboard (OSC 52)
+        (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, channels, config),
+        (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, channels),
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => handle_run_all_files(app, channels),
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
-                let command = &check.resolved_command;
-                copy_to_clipboard(command);
+                copy_to_clipboard(&check.resolved_command);
                 app.update(AppMessage::SetStatusMessage(Some(
                     "Command copied to clipboard".to_string(),
                 )));
             }
             KeyAction::None
         }
-        // Toggle full command display
         (KeyCode::Char('e'), KeyModifiers::NONE) => {
             app.toggle_full_command();
             KeyAction::None
         }
-        // Retry ALL - refresh git and rerun all checks
-        (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
-            // Refresh git changes and apply ignore patterns
-            let base_ref = app.changed_files.base_ref.clone();
-            let mut new_changed_files = get_changed_files(&channels.project_root, &base_ref)
-                .unwrap_or(ChangedFiles {
-                    files: vec![],
-                    base_ref,
-                });
-            new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
-
-            // Re-determine checks
-            let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
-
-            KeyAction::RetryAll {
-                new_changed_files,
-                new_checks,
-            }
-        }
-        // Run fix for selected check
-        (KeyCode::Char('x'), KeyModifiers::NONE) => {
-            if app.can_fix_selected() {
-                if let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() {
-                    app.update(AppMessage::StartFix);
-                    let fix_tx = channels.fix_tx.clone();
-                    let project_root = Arc::clone(&channels.project_root);
-                    let default_container = Arc::clone(&channels.container_name);
-                    let docker_config = Arc::clone(&channels.docker_config);
-                    let global_env = Arc::clone(&channels.global_env);
-                    tokio::spawn(async move {
-                        let container_name = container.as_deref().unwrap_or(&default_container);
-                        let result = run_fix_command(
-                            &fix_cmd,
-                            &project_root,
-                            container_name,
-                            &docker_config,
-                            &global_env,
-                        )
-                        .await;
-                        let _ = fix_tx.send(result).await;
-                    });
-                }
-            }
-            KeyAction::None
-        }
-        // Run fix for ALL failed checks
-        (KeyCode::Char('X'), KeyModifiers::SHIFT) => {
-            if app.can_fix_all() {
-                let fix_commands = app.get_all_fix_commands();
-                if !fix_commands.is_empty() {
-                    let total = fix_commands.len();
-                    app.update(AppMessage::StartFixAll(total));
-                    let fix_all_tx = channels.fix_all_tx.clone();
-                    let project_root = Arc::clone(&channels.project_root);
-                    let default_container = Arc::clone(&channels.container_name);
-                    let docker_config = Arc::clone(&channels.docker_config);
-                    let global_env = Arc::clone(&channels.global_env);
-                    tokio::spawn(async move {
-                        for (i, (_check_id, fix_cmd, _service, container)) in
-                            fix_commands.into_iter().enumerate()
-                        {
-                            let container_name = container.as_deref().unwrap_or(&default_container);
-                            let result = run_fix_command(
-                                &fix_cmd,
-                                &project_root,
-                                container_name,
-                                &docker_config,
-                                &global_env,
-                            )
-                            .await;
-                            let is_last = i == total - 1;
-                            let _ = fix_all_tx.send((result, is_last)).await;
-                        }
-                    });
-                }
-            }
-            KeyAction::None
-        }
+        (KeyCode::Char('R'), KeyModifiers::SHIFT) => handle_retry_all(app, channels, config),
+        (KeyCode::Char('x'), KeyModifiers::NONE) => handle_fix_selected(app, channels),
+        (KeyCode::Char('X'), KeyModifiers::SHIFT) => handle_fix_all(app, channels),
         _ => KeyAction::None,
     }
 }
@@ -528,12 +511,7 @@ fn handle_message(
                 app.update(AppMessage::ClearStatusMessage);
 
                 #[cfg(debug_assertions)]
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed > std::time::Duration::from_millis(1) {
-                        eprintln!("WARN: Keyboard response took {:?}", elapsed);
-                    }
-                }
+                warn_slow_keyboard(start);
 
                 return Ok(Action::Continue);
             }
@@ -552,12 +530,7 @@ fn handle_message(
             };
 
             #[cfg(debug_assertions)]
-            {
-                let elapsed = start.elapsed();
-                if elapsed > std::time::Duration::from_millis(1) {
-                    eprintln!("WARN: Keyboard response took {:?}", elapsed);
-                }
-            }
+            warn_slow_keyboard(start);
 
             result
         }
@@ -744,17 +717,18 @@ fn print_summary(app: &App) {
             "\n\x1b[32m✓ All {} checks passed in {}\x1b[0m",
             total, elapsed_str
         );
-    } else {
-        println!(
-            "\n\x1b[31m✗ {} of {} checks failed in {}\x1b[0m",
-            failed, total, elapsed_str
-        );
+        return;
+    }
 
-        // Show failed checks
-        for (id, result) in &app.results {
-            if result.status == crate::runner::CheckStatus::Failed {
-                println!("  - {}", id);
-            }
+    println!(
+        "\n\x1b[31m✗ {} of {} checks failed in {}\x1b[0m",
+        failed, total, elapsed_str
+    );
+
+    // Show failed checks
+    for (id, result) in &app.results {
+        if result.status == crate::runner::CheckStatus::Failed {
+            println!("  - {}", id);
         }
     }
 }
