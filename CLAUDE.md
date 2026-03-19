@@ -61,6 +61,7 @@ make clippy      # Run clippy only
 
 # Run with local cargo (requires Rust installed)
 cargo run -- --config <path-to-config.yaml>
+cargo run -- -c <config> --files src/main.rs src/lib.rs  # bypass git, check specific files
 ```
 
 ## Versioning (Release Please)
@@ -107,10 +108,10 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 ## Architecture
 
 ### Core Flow
-1. **main.rs** - CLI entry point using clap. Loads config, detects git changes, determines checks, launches UI or simple mode
+1. **main.rs** - CLI entry point using clap. Loads config, detects git changes (or accepts `--files` to bypass git), determines checks, launches UI or simple mode
 2. **config.rs** - YAML config parsing with `CiConfig` as the root type. Uses `IndexMap` to preserve YAML key ordering for group execution order
 3. **git.rs** - Git change detection comparing against base branch (tries `origin/{base}`, `{base}`, fallback in order)
-4. **checks.rs** - `determine_checks()` matches changed files against file patterns and test discovery rules to build `CheckToRun` list
+4. **checks/** - `determine_checks()` matches changed files against file patterns and test discovery rules to build `CheckToRun` list (`mod.rs` + `determine.rs`)
 5. **runner.rs** - `CheckRunner` executes checks via `docker compose exec` with event streaming through mpsc channels
 6. **ui/mod.rs** - Main TUI event loop using ratatui. Keyboard input runs on dedicated OS thread for responsiveness under high CPU load
 
@@ -129,12 +130,14 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 ### Module Responsibilities
 
 - **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching
-- **checks.rs**: `CheckToRun` struct, `determine_checks()` logic, `group_checks()` for execution grouping
+- **checks/**: `CheckToRun` struct (`mod.rs`), `determine_checks()` logic (`determine.rs`), `group_checks()` for execution grouping
 - **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, Docker command execution, `RunnerEvent` variants
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
+- **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
 - **simple.rs**: Non-TUI console output mode for CI pipelines
+- **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)
 
 ## Config File Structure
 
