@@ -19,6 +19,10 @@ struct Cli {
     /// Run only fix commands (skip checks)
     #[arg(long)]
     fix: bool,
+
+    /// Run checks on specific files instead of git-detected changes
+    #[arg(short, long, num_args = 1..)]
+    files: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -37,8 +41,19 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = config::load_config(&cli.config)?;
 
-    // Detect changed files and apply ignore patterns
-    let mut changed_files = git::detect_changes(&project_root, &config.git)?;
+    // Get changed files: from --files arg or git detection
+    let mut changed_files = if cli.files.is_empty() {
+        git::detect_changes(&project_root, &config.git)?
+    } else {
+        git::ChangedFiles {
+            files: cli
+                .files
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            base_ref: "cli".to_string(),
+        }
+    };
     changed_files.apply_ignore_patterns(&config.ignore_patterns);
 
     // Run fix mode if requested
