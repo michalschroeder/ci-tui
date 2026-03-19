@@ -513,7 +513,7 @@ Pre-commands run sequentially before any checks in the group:
 
 ## Execution Modes
 
-CI-TUI supports three execution modes:
+CI-TUI supports three execution modes, plus a `--files` option to bypass git detection:
 
 ### Normal Mode (default)
 
@@ -559,6 +559,17 @@ ci-tui --config ci-tui.yaml --fix
 # Validate all checks pass
 ci-tui --config ci-tui.yaml --simple
 ```
+
+### Manual File Selection
+
+```bash
+ci-tui --config ci-tui.yaml --files src/foo.rs src/bar.rs
+```
+
+Bypass git change detection and run checks on specific files:
+- Useful when you want to check files regardless of git state
+- Ignore patterns still apply
+- Can be combined with `--simple` or `--fix`
 
 ## Best Practices
 
@@ -710,6 +721,7 @@ This catches configuration mistakes early before running checks.
 - Added: `{files}` placeholder auto-skip behavior
 - Added: `on_demand` check flag
 - Added: `fix_command` and `--fix` mode
+- Added: `--files` flag for manual file selection (bypasses git detection)
 
 **Version 1** (legacy, not documented)
 - Basic docker-compose integration
