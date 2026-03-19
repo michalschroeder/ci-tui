@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.14](https://github.com/michalschroeder/ci-tui/compare/v0.1.13...v0.1.14) (2026-03-19)
+
+
+### Features
+
+* add --files CLI arg to bypass git change detection ([fc3666a](https://github.com/michalschroeder/ci-tui/commit/fc3666a0b08447662da8a3028e8906cc5bfe3650))
+* add --files CLI arg to bypass git detection ([#47](https://github.com/michalschroeder/ci-tui/issues/47)) ([850d605](https://github.com/michalschroeder/ci-tui/commit/850d605fb62823e55d190a5d0cd6ce4545592e1e))
+
+
+### Documentation
+
+* update CLAUDE.md architecture section ([fe2508d](https://github.com/michalschroeder/ci-tui/commit/fe2508d0bc0adae54dba5111a4468e2975f502e7))
+* update CLAUDE.md architecture section ([#49](https://github.com/michalschroeder/ci-tui/issues/49)) ([acdddbe](https://github.com/michalschroeder/ci-tui/commit/acdddbe1cd5712ae41c04f4bc0968257d70cf039))
+
 ## [0.1.13](https://github.com/michalschroeder/ci-tui/compare/v0.1.12...v0.1.13) (2026-02-10)
 
 
