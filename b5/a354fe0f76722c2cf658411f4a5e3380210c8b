@@ -1,0 +1,23 @@
+.gitignore
+  a528262973dab202 18-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "b5a354fe0f76722c2cf658411f4a5e3380210c8b",
+  "prompts": {
+    "a528262973dab202": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5a868f6-0afd-4418-8cfe-01c783293694",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 618,
+      "total_deletions": 0,
+      "accepted_lines": 618,
+      "overriden_lines": 0
+    }
+  }
+}
