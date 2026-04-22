@@ -187,7 +187,8 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let args = vec![
+    // 1. Committed changes since divergence from base_ref.
+    let committed_args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
         "--diff-filter=ACMR".to_string(),
@@ -195,13 +196,29 @@ pub fn get_changed_files_with_executor(
         base_ref.to_string(),
         "HEAD".to_string(),
     ];
-    let output = executor.run_command(project_root, &args)?;
+    let committed = executor.run_command(project_root, &committed_args)?;
 
-    let files = output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect();
+    // 2. Uncommitted changes (staged + unstaged) relative to HEAD.
+    //    Independent of base_ref; runs only after committed call succeeds.
+    let uncommitted_args = vec![
+        "diff".to_string(),
+        "--name-only".to_string(),
+        "--diff-filter=ACMR".to_string(),
+        "HEAD".to_string(),
+    ];
+    let uncommitted = executor.run_command(project_root, &uncommitted_args)?;
+
+    // Union preserving insertion order (committed first).
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for line in committed.lines().chain(uncommitted.lines()) {
+        if line.is_empty() {
+            continue;
+        }
+        if seen.insert(line.to_string()) {
+            files.push(line.to_string());
+        }
+    }
 
     Ok(ChangedFiles {
         files,
@@ -410,7 +427,7 @@ mod tests {
         let mut mock = MockGitExecutor::new();
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
-            .times(1)
+            .times(2)
             .returning(|_, _| Ok(String::new()));
 
         let _ = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
@@ -428,6 +445,53 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(String::new()));
 
+        // Second call: uncommitted diff — no --merge-base
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
         let _ = get_changed_files_with_executor(Path::new("/tmp"), "origin/main", &mock).unwrap();
+    }
+
+    #[test]
+    fn get_changed_files_issues_two_calls_and_unions_results() {
+        use mockall::Sequence;
+        let mut mock = MockGitExecutor::new();
+        let mut seq = Sequence::new();
+
+        // First call: committed (merge-base) — returns a.rs, b.rs
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("a.rs\nb.rs\n".to_string()));
+
+        // Second call: uncommitted — returns b.rs, c.rs
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "HEAD")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("b.rs\nc.rs\n".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+
+        // Committed-first order, deduped
+        assert_eq!(result.files, vec!["a.rs", "b.rs", "c.rs"]);
+        assert_eq!(result.base_ref, "main");
+    }
+
+    #[test]
+    fn get_changed_files_committed_failure_propagates() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("fatal: bad revision 'nope'")));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "nope", &mock);
+        assert!(result.is_err());
     }
 }

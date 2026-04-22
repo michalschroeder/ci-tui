@@ -87,21 +87,25 @@ mod detect_changes {
     fn fallback_from_origin_to_base() {
         let mut mock = MockGitExecutor::new();
 
-        // First call (origin/master) fails
+        // First call: committed diff against origin/master — fails.
         mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "origin/master"))
             .times(1)
-            .returning(|_, args: &[String]| {
-                if args.contains(&"origin/master".to_string()) {
-                    Err(anyhow::anyhow!("Reference not found"))
-                } else {
-                    Ok("file1.rs\n".to_string())
-                }
-            });
+            .returning(|_, _| Err(anyhow::anyhow!("Reference not found")));
 
-        // Second call (master) succeeds
+        // Next: committed diff against master — succeeds.
         mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "master") && args.iter().any(|a| a == "--merge-base")
+            })
             .times(1)
             .returning(|_, _| Ok("file1.rs\n".to_string()));
+
+        // Then: uncommitted diff (no --merge-base) — succeeds.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
             base_branch: "master".to_string(),
@@ -110,23 +114,37 @@ mod detect_changes {
 
         let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
 
-        assert_eq!(result.files.len(), 1);
-        assert!(result.files.contains(&"file1.rs".to_string()));
+        assert_eq!(result.files, vec!["file1.rs"]);
+        assert_eq!(result.base_ref, "master");
     }
 
     #[test]
     fn fallback_to_fallback_branch() {
         let mut mock = MockGitExecutor::new();
 
-        // First two calls fail
+        // First two committed calls (origin/master, master) fail.
         mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && (args.iter().any(|a| a == "origin/master")
+                        || args.iter().any(|a| a == "master"))
+            })
             .times(2)
             .returning(|_, _| Err(anyhow::anyhow!("Reference not found")));
 
-        // Third call (fallback) succeeds
+        // Committed against HEAD~1 — succeeds.
         mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == "HEAD~1")
+            })
             .times(1)
             .returning(|_, _| Ok("file2.rs\n".to_string()));
+
+        // Uncommitted — succeeds with no output.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
             base_branch: "master".to_string(),
@@ -135,8 +153,7 @@ mod detect_changes {
 
         let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
 
-        assert_eq!(result.files.len(), 1);
-        assert!(result.files.contains(&"file2.rs".to_string()));
+        assert_eq!(result.files, vec!["file2.rs"]);
         assert_eq!(result.base_ref, "HEAD~1");
     }
 
@@ -159,16 +176,20 @@ mod detect_changes {
     fn uses_origin_base_first() {
         let mut mock = MockGitExecutor::new();
 
-        // First call (origin/development) succeeds
+        // Committed against origin/development succeeds on first try.
         mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "origin/development")
+            })
             .times(1)
-            .returning(|_, args: &[String]| {
-                if args.contains(&"origin/development".to_string()) {
-                    Ok("src/main.rs\n".to_string())
-                } else {
-                    panic!("Should try origin/development first");
-                }
-            });
+            .returning(|_, _| Ok("src/main.rs\n".to_string()));
+
+        // Uncommitted follows.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
             base_branch: "development".to_string(),
@@ -178,7 +199,7 @@ mod detect_changes {
         let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
 
         assert_eq!(result.base_ref, "origin/development");
-        assert!(result.files.contains(&"src/main.rs".to_string()));
+        assert_eq!(result.files, vec!["src/main.rs"]);
     }
 }
 
