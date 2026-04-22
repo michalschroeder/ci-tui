@@ -439,44 +439,15 @@ impl CheckRunner {
     /// Run a pre-command for a group (e.g., DB initialization)
     /// Returns (success, output, duration_ms)
     async fn run_pre_command(&self, pre_cmd: &crate::config::PreCommand) -> (bool, String, u64) {
-        let service = pre_cmd
-            .service
-            .as_deref()
-            .unwrap_or_else(|| self.config.default_service());
         let start = std::time::Instant::now();
 
-        // Merge global env with pre-command-specific env (command env takes precedence)
-        let mut env = self.config.docker.env.clone();
-        env.extend(pre_cmd.env.clone());
-
-        // Get container name: explicit container > service-based derivation > default
-        let container_name = if let Some(ref container) = pre_cmd.container {
-            // Explicit container name specified
-            container.clone()
-        } else if service != self.config.default_service() {
-            // Different service, derive container name
-            let project_name = std::path::Path::new(&self.config.docker.project_dir)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
-            format!("{}-{}-1", project_name, service)
+        let cmd = if pre_cmd.host {
+            pre_cmd.command.clone()
         } else {
-            self.container_name.to_string()
+            self.build_pre_command_docker_cmd(pre_cmd)
         };
 
-        // Check if container is running, use exec if yes, run if no
-        let docker_cmd = if self.executor.is_container_running(&container_name) {
-            build_docker_exec_command(
-                &container_name,
-                &env,
-                &pre_cmd.command,
-                self.config.docker.shell(),
-            )
-        } else {
-            build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
-        };
-
-        let output = self.executor.execute(&docker_cmd, &self.project_root).await;
+        let output = self.executor.execute(&cmd, &self.project_root).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -487,6 +458,43 @@ impl CheckRunner {
             format!("{}\n{}", output.stdout, stderr)
         };
         (output.success, combined, duration_ms)
+    }
+
+    fn resolve_container_name(&self, explicit: Option<&str>, service: &str) -> String {
+        if let Some(container) = explicit {
+            container.to_string()
+        } else if service != self.config.default_service() {
+            let project_name = std::path::Path::new(&self.config.docker.project_dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            format!("{}-{}-1", project_name, service)
+        } else {
+            self.container_name.to_string()
+        }
+    }
+
+    fn build_pre_command_docker_cmd(&self, pre_cmd: &crate::config::PreCommand) -> String {
+        let service = pre_cmd
+            .service
+            .as_deref()
+            .unwrap_or_else(|| self.config.default_service());
+
+        let mut env = self.config.docker.env.clone();
+        env.extend(pre_cmd.env.clone());
+
+        let container_name = self.resolve_container_name(pre_cmd.container.as_deref(), service);
+
+        if self.executor.is_container_running(&container_name) {
+            build_docker_exec_command(
+                &container_name,
+                &env,
+                &pre_cmd.command,
+                self.config.docker.shell(),
+            )
+        } else {
+            build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
+        }
     }
 }
 

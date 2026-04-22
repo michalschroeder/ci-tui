@@ -476,6 +476,10 @@ checks:
         command: php artisan db:seed --class=TestSeeder
         service: php
         exec: true
+
+      - name: Ensure local cache dir
+        command: mkdir -p .cache/tests
+        host: true
     checks:
       # ... test checks
 ```
@@ -499,6 +503,10 @@ checks:
 **`exec`** (default: `false`)
 - If `true`, uses `docker exec` (requires running container)
 - If `false`, uses `docker run` (creates new container)
+
+**`host`** (default: `false`)
+- If `true`, runs the command directly on the host machine via `sh -c` instead of in Docker
+- When `true`, `service`, `container`, and `exec` are ignored
 
 **`env`** (optional)
 - Additional environment variables

@@ -825,4 +825,63 @@ mod check_runner_tests {
             .any(|e| matches!(e, RunnerEvent::GroupFinished { .. })));
         assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
     }
+
+    #[tokio::test]
+    async fn run_checks_host_pre_command_runs_raw_command() {
+        let mut mock = MockCommandExecutor::new();
+        // Host pre-commands skip the Docker path entirely.
+        mock.expect_is_container_running().times(0);
+        // Executor must receive the raw command, NOT a docker exec/run wrapped version.
+        // Make it fail so the check never runs and we only need one execute expectation.
+        mock.expect_execute()
+            .withf(|cmd, _| cmd == "echo hello")
+            .times(1)
+            .returning(|_, _| CommandOutput {
+                success: false,
+                stdout: "hello".to_string(),
+                stderr: String::new(),
+            });
+
+        let config = ConfigBuilder::new()
+            .with_host_pre_command("lint", "host-warmup", "echo hello")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // Pre-command should have been started and finished with success=false
+        let has_pre_started = events.iter().any(|e| {
+            matches!(e, RunnerEvent::PreCommandStarted { group, name }
+                if group == "lint" && name == "host-warmup")
+        });
+        let has_pre_failed = events.iter().any(|e| {
+            matches!(e, RunnerEvent::PreCommandFinished { group, name, success, .. }
+                if group == "lint" && name == "host-warmup" && !*success)
+        });
+        assert!(has_pre_started, "Should have PreCommandStarted event");
+        assert!(
+            has_pre_failed,
+            "Should have PreCommandFinished with success=false"
+        );
+
+        // Check must NOT have started (pre-command failure stops execution)
+        let has_check_started = events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::CheckStarted { .. }));
+        assert!(
+            !has_check_started,
+            "Check should not start after host pre-command failure"
+        );
+    }
 }
