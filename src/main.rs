@@ -25,6 +25,23 @@ struct Cli {
     files: Vec<PathBuf>,
 }
 
+fn git_detect_changes_or_exit(
+    project_root: &std::path::Path,
+    git_config: &ci_tui::config::GitConfig,
+) -> git::ChangedFiles {
+    match git::detect_changes(project_root, git_config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            eprintln!(
+                "\nNo base ref could be resolved against the current repository. \
+                If this is intentional, bypass git with --files <paths...>."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install color-eyre for better panic handling (errors are ignored if it fails)
@@ -43,7 +60,7 @@ async fn main() -> Result<()> {
 
     // Get changed files: from --files arg or git detection
     let mut changed_files = if cli.files.is_empty() {
-        git::detect_changes(&project_root, &config.git)?
+        git_detect_changes_or_exit(&project_root, &config.git)
     } else {
         git::ChangedFiles {
             files: cli

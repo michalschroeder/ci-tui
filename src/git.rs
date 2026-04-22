@@ -147,26 +147,34 @@ pub fn detect_changes_with_executor(
     git_config: &GitConfig,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    // Try different base refs in order
     let base_refs = [
         format!("origin/{}", git_config.base_branch),
         git_config.base_branch.clone(),
         git_config.fallback_branch.clone(),
     ];
 
+    // Find the first base ref whose committed diff resolves.
+    let mut resolved: Option<(String, String)> = None;
     for base_ref in &base_refs {
-        match get_changed_files_with_executor(project_root, base_ref, executor) {
-            Ok(changed_files) => {
-                return Ok(changed_files);
-            }
-            Err(_) => continue,
+        if let Ok(out) = run_committed_diff(project_root, base_ref, executor) {
+            resolved = Some((base_ref.clone(), out));
+            break;
         }
     }
 
-    // If all fail, return empty
+    let (base_ref, committed) = resolved.ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not resolve any git base ref (tried: {})",
+            base_refs.join(", ")
+        )
+    })?;
+
+    // Uncommitted diff runs once; error here surfaces directly.
+    let uncommitted = run_uncommitted_diff(project_root, executor)?;
+
     Ok(ChangedFiles {
-        files: vec![],
-        base_ref: "HEAD".to_string(),
+        files: union_diff_lines(&committed, &uncommitted),
+        base_ref,
     })
 }
 
@@ -187,23 +195,52 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
+    let committed = run_committed_diff(project_root, base_ref, executor)?;
+    let uncommitted = run_uncommitted_diff(project_root, executor)?;
+    Ok(ChangedFiles {
+        files: union_diff_lines(&committed, &uncommitted),
+        base_ref: base_ref.to_string(),
+    })
+}
+
+fn run_committed_diff(
+    project_root: &Path,
+    base_ref: &str,
+    executor: &impl GitExecutor,
+) -> Result<String> {
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
+        "--diff-filter=ACMR".to_string(),
+        "--merge-base".to_string(),
         base_ref.to_string(),
+        "HEAD".to_string(),
     ];
-    let output = executor.run_command(project_root, &args)?;
+    executor.run_command(project_root, &args)
+}
 
-    let files = output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect();
+fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+    let args = vec![
+        "diff".to_string(),
+        "--name-only".to_string(),
+        "--diff-filter=ACMR".to_string(),
+        "HEAD".to_string(),
+    ];
+    executor.run_command(project_root, &args)
+}
 
-    Ok(ChangedFiles {
-        files,
-        base_ref: base_ref.to_string(),
-    })
+fn union_diff_lines(committed: &str, uncommitted: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for line in committed.lines().chain(uncommitted.lines()) {
+        if line.is_empty() {
+            continue;
+        }
+        if seen.insert(line.to_string()) {
+            files.push(line.to_string());
+        }
+    }
+    files
 }
 
 /// Get the current branch name.
@@ -400,5 +437,79 @@ mod tests {
         };
 
         assert_eq!(files.base_ref, "custom-branch");
+    }
+
+    #[test]
+    fn get_changed_files_passes_diff_filter_acmr() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        let _ = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+    }
+
+    #[test]
+    fn get_changed_files_uses_merge_base_against_head() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "HEAD")
+                    && args.iter().any(|a| a == "origin/main")
+            })
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        // Second call: uncommitted diff — no --merge-base
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let _ = get_changed_files_with_executor(Path::new("/tmp"), "origin/main", &mock).unwrap();
+    }
+
+    #[test]
+    fn get_changed_files_issues_two_calls_and_unions_results() {
+        use mockall::Sequence;
+        let mut mock = MockGitExecutor::new();
+        let mut seq = Sequence::new();
+
+        // First call: committed (merge-base) — returns a.rs, b.rs
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("a.rs\nb.rs\n".to_string()));
+
+        // Second call: uncommitted — returns b.rs, c.rs
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "HEAD")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("b.rs\nc.rs\n".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+
+        // Committed-first order, deduped
+        assert_eq!(result.files, vec!["a.rs", "b.rs", "c.rs"]);
+        assert_eq!(result.base_ref, "main");
+    }
+
+    #[test]
+    fn get_changed_files_committed_failure_propagates() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("fatal: bad revision 'nope'")));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "nope", &mock);
+        assert!(result.is_err());
     }
 }
