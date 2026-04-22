@@ -158,7 +158,7 @@ mod detect_changes {
     }
 
     #[test]
-    fn returns_empty_when_all_refs_fail() {
+    fn errors_when_all_refs_fail_listing_refs_tried() {
         let mock = mock_git_error("fatal: not a git repository");
 
         let config = GitConfig {
@@ -166,10 +166,13 @@ mod detect_changes {
             fallback_branch: "HEAD~1".to_string(),
         };
 
-        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
+        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock);
 
-        assert!(result.files.is_empty());
-        assert_eq!(result.base_ref, "HEAD");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("origin/master"), "msg was: {msg}");
+        assert!(msg.contains("master"), "msg was: {msg}");
+        assert!(msg.contains("HEAD~1"), "msg was: {msg}");
     }
 
     #[test]

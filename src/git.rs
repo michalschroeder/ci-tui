@@ -163,11 +163,10 @@ pub fn detect_changes_with_executor(
         }
     }
 
-    // If all fail, return empty
-    Ok(ChangedFiles {
-        files: vec![],
-        base_ref: "HEAD".to_string(),
-    })
+    anyhow::bail!(
+        "could not resolve any git base ref (tried: {})",
+        base_refs.join(", ")
+    )
 }
 
 /// Get list of files changed compared to a specific git reference.
