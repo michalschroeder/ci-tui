@@ -1,0 +1,36 @@
+docs/superpowers/specs/2026-04-23-diff-semantics-design.md
+  a528262973dab202 1-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "fcb4d0746476a830afc74cab20a885d29caaf868",
+  "prompts": {
+    "72adbc0d9f58cf94": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8240022-8b0f-4150-b296-00bbd9f8074c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 344,
+      "total_deletions": 0,
+      "accepted_lines": 344,
+      "overriden_lines": 0
+    },
+    "a528262973dab202": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5a868f6-0afd-4418-8cfe-01c783293694",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 88,
+      "total_deletions": 0,
+      "accepted_lines": 88,
+      "overriden_lines": 0
+    }
+  }
+}
