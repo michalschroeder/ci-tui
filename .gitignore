@@ -15,3 +15,6 @@ Cargo.lock
 # Planning
 .planning/phases
 .planning/quick
+
+# Git worktrees
+.worktrees/
