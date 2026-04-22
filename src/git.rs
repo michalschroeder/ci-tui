@@ -147,26 +147,35 @@ pub fn detect_changes_with_executor(
     git_config: &GitConfig,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    // Try different base refs in order
     let base_refs = [
         format!("origin/{}", git_config.base_branch),
         git_config.base_branch.clone(),
         git_config.fallback_branch.clone(),
     ];
 
+    // Find the first base ref whose committed diff resolves.
+    let mut resolved: Option<(String, String)> = None;
     for base_ref in &base_refs {
-        match get_changed_files_with_executor(project_root, base_ref, executor) {
-            Ok(changed_files) => {
-                return Ok(changed_files);
-            }
-            Err(_) => continue,
+        if let Ok(out) = run_committed_diff(project_root, base_ref, executor) {
+            resolved = Some((base_ref.clone(), out));
+            break;
         }
     }
 
-    anyhow::bail!(
-        "could not resolve any git base ref (tried: {})",
-        base_refs.join(", ")
-    )
+    let (base_ref, committed) = resolved.ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not resolve any git base ref (tried: {})",
+            base_refs.join(", ")
+        )
+    })?;
+
+    // Uncommitted diff runs once; error here surfaces directly.
+    let uncommitted = run_uncommitted_diff(project_root, executor)?;
+
+    Ok(ChangedFiles {
+        files: union_diff_lines(&committed, &uncommitted),
+        base_ref,
+    })
 }
 
 /// Get list of files changed compared to a specific git reference.
@@ -186,8 +195,20 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    // 1. Committed changes since divergence from base_ref.
-    let committed_args = vec![
+    let committed = run_committed_diff(project_root, base_ref, executor)?;
+    let uncommitted = run_uncommitted_diff(project_root, executor)?;
+    Ok(ChangedFiles {
+        files: union_diff_lines(&committed, &uncommitted),
+        base_ref: base_ref.to_string(),
+    })
+}
+
+fn run_committed_diff(
+    project_root: &Path,
+    base_ref: &str,
+    executor: &impl GitExecutor,
+) -> Result<String> {
+    let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
         "--diff-filter=ACMR".to_string(),
@@ -195,19 +216,20 @@ pub fn get_changed_files_with_executor(
         base_ref.to_string(),
         "HEAD".to_string(),
     ];
-    let committed = executor.run_command(project_root, &committed_args)?;
+    executor.run_command(project_root, &args)
+}
 
-    // 2. Uncommitted changes (staged + unstaged) relative to HEAD.
-    //    Independent of base_ref; runs only after committed call succeeds.
-    let uncommitted_args = vec![
+fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+    let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
         "--diff-filter=ACMR".to_string(),
         "HEAD".to_string(),
     ];
-    let uncommitted = executor.run_command(project_root, &uncommitted_args)?;
+    executor.run_command(project_root, &args)
+}
 
-    // Union preserving insertion order (committed first).
+fn union_diff_lines(committed: &str, uncommitted: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     for line in committed.lines().chain(uncommitted.lines()) {
@@ -218,11 +240,7 @@ pub fn get_changed_files_with_executor(
             files.push(line.to_string());
         }
     }
-
-    Ok(ChangedFiles {
-        files,
-        base_ref: base_ref.to_string(),
-    })
+    files
 }
 
 /// Get the current branch name.
@@ -446,6 +464,7 @@ mod tests {
 
         // Second call: uncommitted diff — no --merge-base
         mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
             .times(1)
             .returning(|_, _| Ok(String::new()));
 
