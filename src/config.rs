@@ -320,6 +320,9 @@ pub struct PreCommand {
     /// If true, use `docker compose exec` (existing container) instead of `run` (new container)
     #[serde(default)]
     pub exec: bool,
+    /// If true, run command directly on host instead of inside Docker
+    #[serde(default)]
+    pub host: bool,
     /// Additional environment variables for this command (merged with global env)
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,

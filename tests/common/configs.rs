@@ -165,6 +165,34 @@ impl ConfigBuilder {
                 service: None,
                 container: None,
                 exec: false,
+                host: false,
+                env: std::collections::HashMap::new(),
+            });
+        self
+    }
+
+    /// Add a host pre-command to a group (creates group if it doesn't exist).
+    /// Same as `with_pre_command` but sets `host: true` so the command runs
+    /// directly on the host instead of being wrapped in `docker exec`/`docker run`.
+    #[allow(dead_code)]
+    pub fn with_host_pre_command(mut self, group_id: &str, name: &str, command: &str) -> Self {
+        self.checks
+            .entry(group_id.to_string())
+            .or_insert_with(|| GroupConfig {
+                name: None,
+                parallel: false,
+                stop_on_failure: false,
+                pre_commands: Vec::new(),
+                checks: IndexMap::new(),
+            })
+            .pre_commands
+            .push(PreCommand {
+                name: name.to_string(),
+                command: command.to_string(),
+                service: None,
+                container: None,
+                exec: false,
+                host: true,
                 env: std::collections::HashMap::new(),
             });
         self
