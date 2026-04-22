@@ -76,9 +76,9 @@ pub(super) fn match_file_pattern(
     changed_files: &ChangedFiles,
     pattern_key: &str,
 ) -> Vec<String> {
-    if let Some(pattern) = config.get_file_pattern(pattern_key) {
+    if let Some(re) = config.get_compiled_file_pattern(pattern_key) {
         changed_files
-            .filter_by_pattern(pattern)
+            .filter_by_pattern(re)
             .into_iter()
             .map(String::from)
             .collect()
@@ -96,8 +96,8 @@ pub(super) fn process_test_discovery(
     check: &CheckDefinition,
     matched_files: &mut Vec<String>,
 ) -> Option<TestDiscoveryResult> {
-    let pattern = config.get_file_pattern(&discovery.source_pattern)?;
-    let source_files = changed_files.filter_by_pattern(pattern);
+    let re = config.get_compiled_file_pattern(&discovery.source_pattern)?;
+    let source_files = changed_files.filter_by_pattern(re);
     if source_files.is_empty() {
         return None;
     }
@@ -258,12 +258,9 @@ pub(super) fn process_triggered_check(
         }
     }
 
-    // Deduplicate matched files
-    let matched_files: Vec<String> = matched_files
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Deduplicate while preserving insertion order — output feeds {files} expansion + UI
+    let mut seen = HashSet::new();
+    matched_files.retain(|f| seen.insert(f.clone()));
 
     // Build appropriate CheckToRun based on whether files matched
     if !matched_files.is_empty() {

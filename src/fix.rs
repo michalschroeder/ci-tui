@@ -168,8 +168,8 @@ fn resolve_matching_files<'a>(
         return changed_files.files.iter().map(|s| s.as_str()).collect();
     };
     config
-        .get_file_pattern(pattern_key)
-        .map(|pattern| changed_files.filter_by_pattern(pattern))
+        .get_compiled_file_pattern(pattern_key)
+        .map(|re| changed_files.filter_by_pattern(re))
         .unwrap_or_default()
 }
 
