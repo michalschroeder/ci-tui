@@ -191,7 +191,9 @@ pub fn get_changed_files_with_executor(
         "diff".to_string(),
         "--name-only".to_string(),
         "--diff-filter=ACMR".to_string(),
+        "--merge-base".to_string(),
         base_ref.to_string(),
+        "HEAD".to_string(),
     ];
     let output = executor.run_command(project_root, &args)?;
 
@@ -412,5 +414,20 @@ mod tests {
             .returning(|_, _| Ok(String::new()));
 
         let _ = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+    }
+
+    #[test]
+    fn get_changed_files_uses_merge_base_against_head() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "HEAD")
+                    && args.iter().any(|a| a == "origin/main")
+            })
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let _ = get_changed_files_with_executor(Path::new("/tmp"), "origin/main", &mock).unwrap();
     }
 }
