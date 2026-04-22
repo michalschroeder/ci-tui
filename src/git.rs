@@ -190,6 +190,7 @@ pub fn get_changed_files_with_executor(
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
+        "--diff-filter=ACMR".to_string(),
         base_ref.to_string(),
     ];
     let output = executor.run_command(project_root, &args)?;
@@ -400,5 +401,16 @@ mod tests {
         };
 
         assert_eq!(files.base_ref, "custom-branch");
+    }
+
+    #[test]
+    fn get_changed_files_passes_diff_filter_acmr() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let _ = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
     }
 }
