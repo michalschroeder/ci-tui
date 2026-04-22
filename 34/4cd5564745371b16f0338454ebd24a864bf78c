@@ -1,0 +1,31 @@
+src/config.rs
+  b8bb26084a60db63 323-325
+src/runner.rs
+  b8bb26084a60db63 444-450,452-465,474-475,477-488,497
+tests/runner_tests.rs
+  b8bb26084a60db63 828-886
+tests/common/configs.rs
+  b8bb26084a60db63 168-195
+docs/configuration.md
+  b8bb26084a60db63 479-482,507-509
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "344cd5564745371b16f0338454ebd24a864bf78c",
+  "prompts": {
+    "b8bb26084a60db63": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59617951-eb76-4881-b04a-8736f7d6c1d6",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 134,
+      "total_deletions": 28,
+      "accepted_lines": 134,
+      "overriden_lines": 0
+    }
+  }
+}
