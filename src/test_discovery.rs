@@ -732,4 +732,168 @@ class OtherTest extends TestCase {}
         );
         assert!(results.is_empty(), "got: {results:?}");
     }
+
+    mod grep_search_runner_tests {
+        use super::*;
+        use tempfile::TempDir;
+
+        #[test]
+        fn spawn_failure_returns_empty() {
+            let temp_dir = TempDir::new().unwrap();
+            let search_dir = temp_dir.path().join("tests/Unit");
+            std::fs::create_dir_all(&search_dir).unwrap();
+
+            let mut mock = MockProcessRunner::new();
+            mock.expect_run().returning(|_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "grep not found",
+                ))
+            });
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests/Unit".to_string()],
+                "CoversClass({basename}::class)",
+                temp_dir.path(),
+                &mock,
+            );
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn exit_code_nonzero_returns_empty() {
+            let temp_dir = TempDir::new().unwrap();
+            let search_dir = temp_dir.path().join("tests/Unit");
+            std::fs::create_dir_all(&search_dir).unwrap();
+
+            let mut mock = MockProcessRunner::new();
+            // Grep exit code 1 (no matches) or >=2 (error) both produce success=false
+            mock.expect_run().returning(|_, _| {
+                Ok(ProcessOutput {
+                    success: false,
+                    stdout: String::new(),
+                })
+            });
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests/Unit".to_string()],
+                "pattern",
+                temp_dir.path(),
+                &mock,
+            );
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn parses_grep_stdout_and_prepends_search_dir() {
+            let temp_dir = TempDir::new().unwrap();
+            let search_dir = temp_dir.path().join("tests/Unit");
+            std::fs::create_dir_all(&search_dir).unwrap();
+
+            let mut mock = MockProcessRunner::new();
+            mock.expect_run().returning(|_, _| {
+                Ok(ProcessOutput {
+                    success: true,
+                    stdout: "./Domain/FooTest.php\n./Domain/BarTest.php\n".into(),
+                })
+            });
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests/Unit".to_string()],
+                "pattern",
+                temp_dir.path(),
+                &mock,
+            );
+            assert_eq!(
+                results,
+                vec![
+                    "tests/Unit/Domain/FooTest.php".to_string(),
+                    "tests/Unit/Domain/BarTest.php".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn trims_whitespace_from_grep_output_lines() {
+            let temp_dir = TempDir::new().unwrap();
+            let search_dir = temp_dir.path().join("tests/Unit");
+            std::fs::create_dir_all(&search_dir).unwrap();
+
+            let mut mock = MockProcessRunner::new();
+            mock.expect_run().returning(|_, _| {
+                Ok(ProcessOutput {
+                    success: true,
+                    stdout: "  ./FooTest.php  \n\t./BarTest.php\t\n".into(),
+                })
+            });
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests".to_string()],
+                "pattern",
+                temp_dir.path(),
+                &mock,
+            );
+            assert_eq!(
+                results,
+                vec![
+                    "tests/FooTest.php".to_string(),
+                    "tests/BarTest.php".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn multiple_search_dirs_each_spawn_runner() {
+            let temp_dir = TempDir::new().unwrap();
+            for d in &["tests/A", "tests/B"] {
+                std::fs::create_dir_all(temp_dir.path().join(d)).unwrap();
+            }
+
+            let mut mock = MockProcessRunner::new();
+            mock.expect_run().times(2).returning(|dir, _| {
+                if dir.ends_with("tests/A") {
+                    Ok(ProcessOutput {
+                        success: true,
+                        stdout: "./FromA.php\n".into(),
+                    })
+                } else {
+                    Ok(ProcessOutput {
+                        success: false,
+                        stdout: String::new(),
+                    })
+                }
+            });
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests/A".to_string(), "tests/B".to_string()],
+                "pattern",
+                temp_dir.path(),
+                &mock,
+            );
+            assert_eq!(results, vec!["tests/A/FromA.php".to_string()]);
+        }
+
+        #[test]
+        fn missing_directory_is_skipped_without_running_runner() {
+            let temp_dir = TempDir::new().unwrap();
+            // tests/Nope doesn't exist on disk
+
+            let mut mock = MockProcessRunner::new();
+            mock.expect_run().times(0);
+
+            let results = grep_search_with_runner(
+                "src/Foo.php",
+                &["tests/Nope".to_string()],
+                "pattern",
+                temp_dir.path(),
+                &mock,
+            );
+            assert!(results.is_empty());
+        }
+    }
 }
