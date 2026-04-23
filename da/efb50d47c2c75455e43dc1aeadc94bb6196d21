@@ -1,0 +1,23 @@
+src/simple.rs
+  b610e85781e816e0 274-278,357,364-382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "daefb50d47c2c75455e43dc1aeadc94bb6196d21",
+  "prompts": {
+    "b610e85781e816e0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a1659a7c-6ca3-4237-98f1-de2f4005b1a3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 461,
+      "overriden_lines": 0
+    }
+  }
+}
