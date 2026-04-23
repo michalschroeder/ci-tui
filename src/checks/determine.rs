@@ -531,4 +531,75 @@ mod tests {
             assert_eq!(matched, vec!["tests/foo_test.rs".to_string()]);
         }
     }
+
+    mod build_check_to_run_tests {
+        use super::*;
+
+        #[test]
+        fn sets_fields_and_resolves_command_with_files() {
+            let cfg = base_config();
+            let def = mk_check("cargo test {files}", Some("cargo fmt {files}"), None, false);
+            let out = build_check_to_run(
+                &cfg,
+                "id",
+                &def,
+                "g",
+                "svc".to_string(),
+                vec!["a.rs".into(), "b.rs".into()],
+            );
+            assert_eq!(out.id, "id");
+            assert_eq!(out.group, "g");
+            assert_eq!(out.service, "svc");
+            assert_eq!(out.files, vec!["a.rs".to_string(), "b.rs".to_string()]);
+            assert_eq!(out.resolved_command, "cargo test a.rs b.rs");
+            assert_eq!(
+                out.resolved_fix_command.as_deref(),
+                Some("cargo fmt a.rs b.rs")
+            );
+            assert!(!out.on_demand);
+            assert!(!out.skipped_no_files);
+        }
+    }
+
+    mod build_skipped_check_tests {
+        use super::*;
+
+        #[test]
+        fn marks_on_demand_and_copies_placeholder_flag() {
+            let cfg = base_config();
+            let def = mk_check("cmd {files}", None, None, false);
+            let out = build_skipped_check(&cfg, "id", &def, "g", "svc".to_string(), true);
+            assert!(out.on_demand);
+            assert!(out.skipped_no_files);
+            assert_eq!(out.files, vec!["(skipped - no matching files)".to_string()]);
+            assert_eq!(out.resolved_command, "cmd");
+        }
+
+        #[test]
+        fn without_placeholder_flag_skipped_no_files_false() {
+            let cfg = base_config();
+            let def = mk_check("always", None, None, false);
+            let out = build_skipped_check(&cfg, "id", &def, "g", "svc".to_string(), false);
+            assert!(out.on_demand);
+            assert!(!out.skipped_no_files);
+        }
+    }
+
+    mod build_on_demand_check_tests {
+        use super::*;
+
+        #[test]
+        fn marks_on_demand_with_prompt_sentinel() {
+            let cfg = base_config();
+            let def = mk_check("slow-test {files}", None, None, false);
+            let out = build_on_demand_check(&cfg, "id", &def, "g", "svc".to_string());
+            assert!(out.on_demand);
+            assert!(!out.skipped_no_files);
+            assert_eq!(
+                out.files,
+                vec!["(on-demand - press 't' to run)".to_string()]
+            );
+            assert_eq!(out.resolved_command, "slow-test");
+        }
+    }
 }
