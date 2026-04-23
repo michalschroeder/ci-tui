@@ -6,6 +6,7 @@
 //! - CheckResult factory methods
 //! - CheckRunner orchestration
 
+use ci_tui::config::DockerConfig;
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_docker_command_with_executor,
     filter_docker_warnings, CheckResult, CheckStatus,
@@ -15,6 +16,21 @@ use std::collections::HashMap;
 
 mod common;
 use common::{mock_executor_success, CommandOutput, MockCommandExecutor};
+
+/// Minimal DockerConfig for mocked-executor tests. Field values are immaterial
+/// beyond being stable strings that mocks can match against.
+fn mocked_docker_config() -> DockerConfig {
+    DockerConfig {
+        project_dir: "/app".into(),
+        service: "app".into(),
+        container: None,
+        image: Some("img:latest".into()),
+        volume_mount: None,
+        work_dir: None,
+        shell: "bash".into(),
+        env: HashMap::new(),
+    }
+}
 
 mod build_docker_exec_command_tests {
     use super::*;
@@ -883,5 +899,302 @@ mod check_runner_tests {
             !has_check_started,
             "Check should not start after host pre-command failure"
         );
+    }
+
+    #[tokio::test]
+    async fn all_on_demand_group_skips_pre_commands() {
+        let mut mock = MockCommandExecutor::new();
+        // has_runnable=false → pre_commands never run → executor never called for execute/is_running
+        mock.expect_is_container_running().times(0);
+        mock.expect_execute().times(0);
+
+        let config = ConfigBuilder::new()
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "expensive",
+                common::configs::CheckBuilder::new("Expensive", "slow-test")
+                    .on_demand()
+                    .build(),
+            )
+            .build();
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_on_demand_check("expensive", "lint", "Expensive")];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        // No PreCommand events — has_runnable=false
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::PreCommandStarted { .. })),
+            "pre-commands must be skipped when group has no runnable checks"
+        );
+        // Group lifecycle still fires
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::GroupStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::GroupFinished { .. })));
+        assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
+    }
+}
+
+mod run_single_check_with_executor_tests {
+    use super::*;
+    use ci_tui::checks::CheckToRun;
+    use ci_tui::config::CheckDefinition;
+    use ci_tui::runner::run_single_check_with_executor;
+    use mockall::predicate::*;
+    use std::path::Path;
+
+    fn mk_check(id: &str, command: &str, per_check_container: Option<&str>) -> CheckToRun {
+        CheckToRun {
+            id: id.into(),
+            group: "g".into(),
+            definition: CheckDefinition {
+                name: id.into(),
+                command: command.into(),
+                service: None,
+                container: per_check_container.map(String::from),
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: HashMap::new(),
+            },
+            service: "app".into(),
+            files: vec![],
+            resolved_command: command.into(),
+            resolved_fix_command: None,
+            on_demand: false,
+            skipped_no_files: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn uses_default_container_when_check_has_none() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("default-container"))
+            .returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.contains("default-container") && cmd.contains("echo hi"))
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: "hi".into(),
+                stderr: String::new(),
+            });
+
+        let check = mk_check("c1", "echo hi", None);
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            "default-container",
+            &cfg,
+            &env,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::Passed);
+        assert_eq!(result.check_id, "c1");
+        assert_eq!(result.output, "hi");
+    }
+
+    #[tokio::test]
+    async fn per_check_container_overrides_default() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .with(eq("override-container"))
+            .returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.contains("override-container"))
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let check = mk_check("c1", "ls", Some("override-container"));
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let _ = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            "default-container",
+            &cfg,
+            &env,
+            &mock,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn merges_global_and_check_env_with_check_taking_precedence() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| {
+                // global FOO=global overridden to FOO=check
+                cmd.contains("-e FOO='check'") && cmd.contains("-e BAR='global'")
+            })
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let mut check = mk_check("c1", "env", None);
+        check.definition.env.insert("FOO".into(), "check".into());
+
+        let cfg = super::mocked_docker_config();
+        let mut env = HashMap::new();
+        env.insert("FOO".into(), "global".into());
+        env.insert("BAR".into(), "global".into());
+
+        let _ =
+            run_single_check_with_executor(&check, Path::new("/app"), "c", &cfg, &env, &mock).await;
+    }
+
+    #[tokio::test]
+    async fn reports_failure_when_exec_fails() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "oops".into(),
+        });
+
+        let check = mk_check("c1", "false", None);
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let result =
+            run_single_check_with_executor(&check, Path::new("/app"), "c", &cfg, &env, &mock).await;
+        assert_eq!(result.status, CheckStatus::Failed);
+        assert!(result.error_output.contains("oops"));
+    }
+}
+
+mod run_check_with_command_with_executor_tests {
+    use super::*;
+    use ci_tui::checks::CheckToRun;
+    use ci_tui::config::CheckDefinition;
+    use ci_tui::runner::run_check_with_command_with_executor;
+    use std::path::Path;
+
+    fn check(id: &str, resolved: &str) -> CheckToRun {
+        CheckToRun {
+            id: id.into(),
+            group: "g".into(),
+            definition: CheckDefinition {
+                name: id.into(),
+                command: "phpunit {files}".into(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: HashMap::new(),
+            },
+            service: "app".into(),
+            files: vec![],
+            resolved_command: resolved.into(),
+            resolved_fix_command: None,
+            on_demand: false,
+            skipped_no_files: false,
+        }
+    }
+
+    // The supplied `command` arg — NOT check.resolved_command — is what gets executed
+    #[tokio::test]
+    async fn uses_supplied_command_not_resolved_command() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.contains("phpunit-all") && !cmd.contains("phpunit a.rs"))
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let c = check("phpunit", "phpunit a.rs");
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let _ = run_check_with_command_with_executor(
+            &c,
+            "phpunit-all",
+            Path::new("/app"),
+            "default",
+            &cfg,
+            &env,
+            &mock,
+        )
+        .await;
+    }
+}
+
+mod run_fix_command_with_executor_tests {
+    use super::*;
+    use ci_tui::runner::run_fix_command_with_executor;
+    use std::path::Path;
+
+    #[tokio::test]
+    async fn check_id_is_literal_fix() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let result = run_fix_command_with_executor(
+            "cargo fmt",
+            Path::new("/app"),
+            "container",
+            &cfg,
+            &env,
+            &mock,
+        )
+        .await;
+        assert_eq!(result.check_id, "fix");
+        assert_eq!(result.status, CheckStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn uses_docker_run_when_container_not_running() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| false);
+        mock.expect_execute()
+            .withf(|cmd: &str, _| cmd.starts_with("docker run") && cmd.contains("cargo fmt"))
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let cfg = super::mocked_docker_config();
+        let env = HashMap::new();
+        let _ = run_fix_command_with_executor(
+            "cargo fmt",
+            Path::new("/app"),
+            "container",
+            &cfg,
+            &env,
+            &mock,
+        )
+        .await;
     }
 }
