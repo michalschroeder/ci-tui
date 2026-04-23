@@ -6,6 +6,7 @@
 //! - CheckResult factory methods
 //! - CheckRunner orchestration
 
+use ci_tui::config::DockerConfig;
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_docker_command_with_executor,
     filter_docker_warnings, CheckResult, CheckStatus,
@@ -15,6 +16,21 @@ use std::collections::HashMap;
 
 mod common;
 use common::{mock_executor_success, CommandOutput, MockCommandExecutor};
+
+/// Minimal DockerConfig for mocked-executor tests. Field values are immaterial
+/// beyond being stable strings that mocks can match against.
+fn mocked_docker_config() -> DockerConfig {
+    DockerConfig {
+        project_dir: "/app".into(),
+        service: "app".into(),
+        container: None,
+        image: Some("img:latest".into()),
+        volume_mount: None,
+        work_dir: None,
+        shell: "bash".into(),
+        env: HashMap::new(),
+    }
+}
 
 mod build_docker_exec_command_tests {
     use super::*;
@@ -933,23 +949,10 @@ mod check_runner_tests {
 mod run_single_check_with_executor_tests {
     use super::*;
     use ci_tui::checks::CheckToRun;
-    use ci_tui::config::{CheckDefinition, DockerConfig};
+    use ci_tui::config::CheckDefinition;
     use ci_tui::runner::run_single_check_with_executor;
     use mockall::predicate::*;
     use std::path::Path;
-
-    fn minimal_docker_config() -> DockerConfig {
-        DockerConfig {
-            project_dir: "/app".into(),
-            service: "app".into(),
-            container: None,
-            image: Some("img:latest".into()),
-            volume_mount: None,
-            work_dir: None,
-            shell: "bash".into(),
-            env: HashMap::new(),
-        }
-    }
 
     fn mk_check(id: &str, command: &str, per_check_container: Option<&str>) -> CheckToRun {
         CheckToRun {
@@ -989,7 +992,7 @@ mod run_single_check_with_executor_tests {
             });
 
         let check = mk_check("c1", "echo hi", None);
-        let cfg = minimal_docker_config();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let result = run_single_check_with_executor(
             &check,
@@ -1021,7 +1024,7 @@ mod run_single_check_with_executor_tests {
             });
 
         let check = mk_check("c1", "ls", Some("override-container"));
-        let cfg = minimal_docker_config();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let _ = run_single_check_with_executor(
             &check,
@@ -1052,7 +1055,7 @@ mod run_single_check_with_executor_tests {
         let mut check = mk_check("c1", "env", None);
         check.definition.env.insert("FOO".into(), "check".into());
 
-        let cfg = minimal_docker_config();
+        let cfg = super::mocked_docker_config();
         let mut env = HashMap::new();
         env.insert("FOO".into(), "global".into());
         env.insert("BAR".into(), "global".into());
@@ -1072,7 +1075,7 @@ mod run_single_check_with_executor_tests {
         });
 
         let check = mk_check("c1", "false", None);
-        let cfg = minimal_docker_config();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let result =
             run_single_check_with_executor(&check, Path::new("/app"), "c", &cfg, &env, &mock).await;
@@ -1084,22 +1087,9 @@ mod run_single_check_with_executor_tests {
 mod run_check_with_command_with_executor_tests {
     use super::*;
     use ci_tui::checks::CheckToRun;
-    use ci_tui::config::{CheckDefinition, DockerConfig};
+    use ci_tui::config::CheckDefinition;
     use ci_tui::runner::run_check_with_command_with_executor;
     use std::path::Path;
-
-    fn docker_cfg() -> DockerConfig {
-        DockerConfig {
-            project_dir: "/app".into(),
-            service: "app".into(),
-            container: None,
-            image: Some("img:latest".into()),
-            volume_mount: None,
-            work_dir: None,
-            shell: "bash".into(),
-            env: HashMap::new(),
-        }
-    }
 
     fn check(id: &str, resolved: &str) -> CheckToRun {
         CheckToRun {
@@ -1138,7 +1128,7 @@ mod run_check_with_command_with_executor_tests {
             });
 
         let c = check("phpunit", "phpunit a.rs");
-        let cfg = docker_cfg();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let _ = run_check_with_command_with_executor(
             &c,
@@ -1155,22 +1145,8 @@ mod run_check_with_command_with_executor_tests {
 
 mod run_fix_command_with_executor_tests {
     use super::*;
-    use ci_tui::config::DockerConfig;
     use ci_tui::runner::run_fix_command_with_executor;
     use std::path::Path;
-
-    fn docker_cfg() -> DockerConfig {
-        DockerConfig {
-            project_dir: "/app".into(),
-            service: "app".into(),
-            container: None,
-            image: Some("img:latest".into()),
-            volume_mount: None,
-            work_dir: None,
-            shell: "bash".into(),
-            env: HashMap::new(),
-        }
-    }
 
     #[tokio::test]
     async fn check_id_is_literal_fix() {
@@ -1182,7 +1158,7 @@ mod run_fix_command_with_executor_tests {
             stderr: String::new(),
         });
 
-        let cfg = docker_cfg();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let result = run_fix_command_with_executor(
             "cargo fmt",
@@ -1209,7 +1185,7 @@ mod run_fix_command_with_executor_tests {
                 stderr: String::new(),
             });
 
-        let cfg = docker_cfg();
+        let cfg = super::mocked_docker_config();
         let env = HashMap::new();
         let _ = run_fix_command_with_executor(
             "cargo fmt",
