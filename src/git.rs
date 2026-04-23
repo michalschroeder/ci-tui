@@ -16,6 +16,7 @@
 
 use crate::config::GitConfig;
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
@@ -85,13 +86,8 @@ impl ChangedFiles {
         self.files.len()
     }
 
-    /// Filter files by regex pattern
-    pub fn filter_by_pattern(&self, pattern: &str) -> Vec<&str> {
-        let re = match regex::Regex::new(pattern) {
-            Ok(r) => r,
-            Err(_) => return vec![],
-        };
-
+    /// Filter files by a pre-compiled regex pattern
+    pub fn filter_by_pattern(&self, re: &Regex) -> Vec<&str> {
         self.files
             .iter()
             .filter(|f| re.is_match(f))
@@ -99,31 +95,13 @@ impl ChangedFiles {
             .collect()
     }
 
-    /// Get unique file extensions
-    pub fn extensions(&self) -> HashSet<&str> {
-        self.files
-            .iter()
-            .filter_map(|f| Path::new(f).extension())
-            .filter_map(|e| e.to_str())
-            .collect()
-    }
-
-    /// Remove files matching ignore patterns from the list
-    pub fn apply_ignore_patterns(&mut self, ignore_patterns: &[String]) {
-        use regex::Regex;
-
-        // Compile all patterns once
-        let compiled: Vec<Regex> = ignore_patterns
-            .iter()
-            .filter_map(|p| Regex::new(p).ok())
-            .collect();
-
-        if compiled.is_empty() {
+    /// Remove files matching any of the given compiled ignore patterns
+    pub fn apply_ignore_patterns(&mut self, ignore_patterns: &[Regex]) {
+        if ignore_patterns.is_empty() {
             return;
         }
-
         self.files
-            .retain(|file| !compiled.iter().any(|re| re.is_match(file)));
+            .retain(|file| !ignore_patterns.iter().any(|re| re.is_match(file)));
     }
 }
 
@@ -322,6 +300,14 @@ mod tests {
         assert_eq!(three_files.len(), 3);
     }
 
+    fn re(pattern: &str) -> Regex {
+        Regex::new(pattern).unwrap()
+    }
+
+    fn res(patterns: &[&str]) -> Vec<Regex> {
+        patterns.iter().map(|p| re(p)).collect()
+    }
+
     #[test]
     fn test_filter_by_pattern_php_files() {
         let files = make_changed_files(vec![
@@ -331,7 +317,7 @@ mod tests {
             "README.md",
         ]);
 
-        let php_files = files.filter_by_pattern(r"\.php$");
+        let php_files = files.filter_by_pattern(&re(r"\.php$"));
         assert_eq!(php_files.len(), 2);
         assert!(php_files.contains(&"src/Service/Foo.php"));
         assert!(php_files.contains(&"tests/Unit/FooTest.php"));
@@ -345,43 +331,17 @@ mod tests {
             "tests/Integration/BarTest.php",
         ]);
 
-        let test_files = files.filter_by_pattern(r"^tests/.*\.php$");
+        let test_files = files.filter_by_pattern(&re(r"^tests/.*\.php$"));
         assert_eq!(test_files.len(), 2);
         assert!(!test_files.contains(&"src/Service/Foo.php"));
     }
 
     #[test]
-    fn test_filter_by_pattern_invalid_regex() {
-        let files = make_changed_files(vec!["src/Foo.php"]);
-
-        // Invalid regex should return empty vec
-        let result = files.filter_by_pattern(r"[invalid");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_extensions() {
-        let files = make_changed_files(vec![
-            "src/Service/Foo.php",
-            "src/Service/Bar.php",
-            "config/services.yaml",
-            "config/routes.yml",
-            "README.md",
-            "Makefile", // No extension
-        ]);
-
-        let extensions = files.extensions();
-        assert_eq!(extensions.len(), 4);
-        assert!(extensions.contains("php"));
-        assert!(extensions.contains("yaml"));
-        assert!(extensions.contains("yml"));
-        assert!(extensions.contains("md"));
-    }
-
-    #[test]
-    fn test_extensions_empty_files() {
-        let empty = make_changed_files(vec![]);
-        assert!(empty.extensions().is_empty());
+    fn test_filter_by_pattern_preserves_order() {
+        let files = make_changed_files(vec!["c.rs", "a.rs", "b.rs", "README.md"]);
+        let matched = files.filter_by_pattern(&re(r"\.rs$"));
+        // Preserves insertion order from ChangedFiles.files
+        assert_eq!(matched, vec!["c.rs", "a.rs", "b.rs"]);
     }
 
     #[test]
@@ -394,9 +354,7 @@ mod tests {
             "tests/Unit/FooTest.php",
         ]);
 
-        let ignore_patterns = vec![r"\.md$".to_string(), r"\.github/".to_string()];
-
-        files.apply_ignore_patterns(&ignore_patterns);
+        files.apply_ignore_patterns(&res(&[r"\.md$", r"\.github/"]));
 
         assert_eq!(files.len(), 2);
         assert!(files.files.contains(&"src/Service/Foo.php".to_string()));
@@ -411,22 +369,6 @@ mod tests {
 
         // Should retain all files when no patterns
         assert_eq!(files.len(), 2);
-    }
-
-    #[test]
-    fn test_apply_ignore_patterns_invalid_regex() {
-        let mut files = make_changed_files(vec!["src/Foo.php", "README.md"]);
-
-        let ignore_patterns = vec![
-            r"[invalid".to_string(), // Invalid regex - should be skipped
-            r"\.md$".to_string(),
-        ];
-
-        files.apply_ignore_patterns(&ignore_patterns);
-
-        // Should still apply valid pattern
-        assert_eq!(files.len(), 1);
-        assert!(files.files.contains(&"src/Foo.php".to_string()));
     }
 
     #[test]

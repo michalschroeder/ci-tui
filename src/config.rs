@@ -43,9 +43,12 @@ pub struct CiConfig {
     pub checks: IndexMap<String, GroupConfig>,
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
-    /// Cached compiled ignore patterns (lazily initialized)
+    /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for test-built configs.
     #[serde(skip)]
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
+    /// Compiled file_patterns regexes keyed by pattern name. Populated eagerly in `load_config`.
+    #[serde(skip)]
+    pub(crate) compiled_file_patterns: OnceLock<HashMap<String, Regex>>,
 }
 
 /// File pattern definition with optional color for UI display
@@ -68,8 +71,9 @@ impl Clone for CiConfig {
             file_patterns: self.file_patterns.clone(),
             checks: self.checks.clone(),
             ignore_patterns: self.ignore_patterns.clone(),
-            // Reset cache on clone - will be lazily recomputed
+            // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
+            compiled_file_patterns: OnceLock::new(),
         }
     }
 }
@@ -333,12 +337,37 @@ pub struct PreCommand {
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or parsed.
+fn compile_file_patterns(
+    patterns: &HashMap<String, FilePattern>,
+) -> Result<HashMap<String, Regex>> {
+    patterns
+        .iter()
+        .map(|(key, fp)| {
+            let re = Regex::new(&fp.pattern).with_context(|| {
+                format!("invalid regex for file_patterns.{key}: '{}'", fp.pattern)
+            })?;
+            Ok((key.clone(), re))
+        })
+        .collect()
+}
+
+fn compile_ignore_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|p| Regex::new(p).with_context(|| format!("invalid regex in ignore_patterns: '{p}'")))
+        .collect()
+}
+
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-    serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))
+    let config: CiConfig = serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    config
+        .validate_and_compile()
+        .with_context(|| format!("Invalid config file: {}", path.display()))?;
+    Ok(config)
 }
 
 impl CiConfig {
@@ -363,32 +392,70 @@ impl CiConfig {
             checks,
             ignore_patterns,
             compiled_ignore_patterns: OnceLock::new(),
+            compiled_file_patterns: OnceLock::new(),
         }
     }
 
-    /// Get the regex pattern for a file pattern key
+    /// Compile and cache every regex in `file_patterns` and `ignore_patterns`.
+    ///
+    /// Called from [`load_config`] so that invalid regexes surface at startup instead
+    /// of being silently dropped on first use.
+    pub fn validate_and_compile(&self) -> Result<()> {
+        let _ = self
+            .compiled_file_patterns
+            .set(compile_file_patterns(&self.file_patterns)?);
+        let _ = self
+            .compiled_ignore_patterns
+            .set(compile_ignore_patterns(&self.ignore_patterns)?);
+        Ok(())
+    }
+
+    /// Get the raw regex string for a file pattern key
     pub fn get_file_pattern(&self, key: &str) -> Option<&str> {
         self.file_patterns.get(key).map(|fp| fp.pattern.as_str())
     }
 
-    /// Check if a file should be ignored based on ignore_patterns
-    pub fn should_ignore_file(&self, path: &str) -> bool {
-        let patterns = self.compiled_ignore_patterns.get_or_init(|| {
+    /// Get the compiled regex for a file pattern key.
+    ///
+    /// Uses the eagerly populated cache from `load_config`. For configs built via
+    /// `CiConfig::new` (tests), lazily compiles on first access, silently dropping
+    /// any invalid patterns — production configs are validated at load time.
+    pub fn get_compiled_file_pattern(&self, key: &str) -> Option<&Regex> {
+        let map = self.compiled_file_patterns.get_or_init(|| {
+            self.file_patterns
+                .iter()
+                .filter_map(|(k, fp)| Regex::new(&fp.pattern).ok().map(|re| (k.clone(), re)))
+                .collect()
+        });
+        map.get(key)
+    }
+
+    /// Get the compiled ignore regexes.
+    ///
+    /// Eagerly populated in `load_config`; lazy fallback for test configs.
+    pub fn compiled_ignore_patterns(&self) -> &[Regex] {
+        self.compiled_ignore_patterns.get_or_init(|| {
             self.ignore_patterns
                 .iter()
                 .filter_map(|p| Regex::new(p).ok())
                 .collect()
-        });
-        patterns.iter().any(|re| re.is_match(path))
+        })
+    }
+
+    /// Check if a file should be ignored based on ignore_patterns
+    pub fn should_ignore_file(&self, path: &str) -> bool {
+        self.compiled_ignore_patterns()
+            .iter()
+            .any(|re| re.is_match(path))
     }
 
     /// Get color name for a file based on file_patterns
     pub fn get_file_color(&self, path: &str) -> &str {
         self.file_patterns
-            .values()
-            .filter_map(|fp| {
+            .iter()
+            .filter_map(|(key, fp)| {
                 let color = fp.color.as_ref()?;
-                let re = Regex::new(&fp.pattern).ok()?;
+                let re = self.get_compiled_file_pattern(key)?;
                 re.is_match(path).then_some(color.as_str())
             })
             .next()
@@ -559,6 +626,7 @@ mod tests {
                 checks: self.checks,
                 ignore_patterns: self.ignore_patterns,
                 compiled_ignore_patterns: OnceLock::new(),
+                compiled_file_patterns: OnceLock::new(),
             }
         }
     }
@@ -1130,9 +1198,9 @@ checks: {{}}
     mod test_invalid_regex {
         use super::*;
 
-        // Edge case: Tests handling of invalid regex in file_patterns - requires raw YAML with malformed regex to verify graceful handling
+        // Invalid regex in file_patterns must fail validate_and_compile (surfaces at load_config)
         #[test]
-        fn test_invalid_regex_in_file_pattern() {
+        fn test_invalid_regex_in_file_pattern_rejected() {
             let yaml = r#"
 version: 2
 docker:
@@ -1146,17 +1214,17 @@ file_patterns:
     pattern: '[unclosed'
 checks: {}
 "#;
-            // Config should parse (regex compiled lazily)
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            // get_file_pattern returns the pattern string (not compiled)
-            assert_eq!(config.get_file_pattern("bad"), Some("[unclosed"));
-            // Actual regex compilation happens at usage time
-            // The pattern matching code handles invalid regex gracefully
+            let err = config.validate_and_compile().unwrap_err().to_string();
+            assert!(
+                err.contains("file_patterns.bad") && err.contains("[unclosed"),
+                "error should name the offending key and pattern: {err}"
+            );
         }
 
-        // Edge case: Tests handling of invalid regex in ignore_patterns - requires raw YAML with malformed regex to verify skipping behavior
+        // Invalid regex in ignore_patterns must fail validate_and_compile
         #[test]
-        fn test_invalid_regex_in_ignore_patterns() {
+        fn test_invalid_regex_in_ignore_patterns_rejected() {
             let yaml = r#"
 version: 2
 docker:
@@ -1169,15 +1237,102 @@ file_patterns: {}
 ignore_patterns:
   - '\.md$'
   - '[unclosed'
-  - '\.txt$'
 checks: {}
 "#;
-            // Config should parse
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            // should_ignore_file handles invalid regex gracefully (skips them)
-            // Valid patterns should still work
+            let err = config.validate_and_compile().unwrap_err().to_string();
+            assert!(
+                err.contains("ignore_patterns") && err.contains("[unclosed"),
+                "error should name ignore_patterns and the bad pattern: {err}"
+            );
+        }
+
+        // After validate_and_compile, compiled patterns are accessible for all valid keys
+        #[test]
+        fn test_compiled_patterns_accessible_after_validation() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  rust:
+    pattern: '\.rs$'
+  toml:
+    pattern: '\.toml$'
+ignore_patterns:
+  - '\.md$'
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            config.validate_and_compile().unwrap();
+
+            let rust_re = config.get_compiled_file_pattern("rust").unwrap();
+            assert!(rust_re.is_match("src/main.rs"));
+            assert!(!rust_re.is_match("Cargo.toml"));
+
+            let toml_re = config.get_compiled_file_pattern("toml").unwrap();
+            assert!(toml_re.is_match("Cargo.toml"));
+
+            assert!(config.get_compiled_file_pattern("missing").is_none());
             assert!(config.should_ignore_file("README.md"));
-            assert!(config.should_ignore_file("notes.txt"));
+        }
+
+        // load_config end-to-end: invalid file_patterns regex fails with a clear message
+        #[test]
+        fn test_load_config_rejects_invalid_file_pattern() {
+            use std::io::Write;
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  foo:
+    pattern: '[invalid'
+checks: {}
+"#;
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml.as_bytes()).unwrap();
+            let err = load_config(tmp.path()).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("file_patterns.foo") && msg.contains("[invalid"),
+                "error chain should mention offending key + pattern: {msg}"
+            );
+        }
+
+        // load_config end-to-end: invalid ignore_patterns regex fails
+        #[test]
+        fn test_load_config_rejects_invalid_ignore_pattern() {
+            use std::io::Write;
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+ignore_patterns:
+  - '[invalid'
+checks: {}
+"#;
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml.as_bytes()).unwrap();
+            let err = load_config(tmp.path()).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("ignore_patterns") && msg.contains("[invalid"),
+                "error chain should mention ignore_patterns: {msg}"
+            );
         }
     }
 

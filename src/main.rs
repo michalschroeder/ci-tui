@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
             base_ref: "cli".to_string(),
         }
     };
-    changed_files.apply_ignore_patterns(&config.ignore_patterns);
+    changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
 
     // Run fix mode if requested
     if cli.fix {

@@ -345,6 +345,7 @@ mod tests {
             checks,
             ignore_patterns: Vec::new(),
             compiled_ignore_patterns: OnceLock::new(),
+            compiled_file_patterns: OnceLock::new(),
         }
     }
 
@@ -709,6 +710,97 @@ checks:
         assert!(
             phpunit.files[0].contains("running all"),
             "Files should indicate running all"
+        );
+    }
+
+    // Matched-files order must be deterministic: insertion order, not HashSet-shuffled.
+    // file_pattern contribution comes first (order of ChangedFiles.files), then test_discovery.
+    #[test]
+    fn test_matched_files_preserve_insertion_order() {
+        let config_yaml = r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+  shell: bash
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  phpunit:
+    pattern: 'tests/.*Test\.php$'
+  php_src:
+    pattern: '^src/.*\.php$'
+
+checks:
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit Tests
+        command: phpunit {files}
+        triggers:
+          file_pattern: phpunit
+          test_discovery:
+            source_pattern: php_src
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/Unit/{path}Test.php
+"#;
+        let config: CiConfig =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse test config");
+
+        // Materialise test files so test_discovery path_mapping resolves them
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        for name in ["AlphaTest.php", "BravoTest.php", "CharlieTest.php"] {
+            let p = temp_dir.path().join("tests/Unit").join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "<?php").unwrap();
+        }
+
+        // Intentional non-alphabetical order for both triggers
+        let changed_files = make_changed_files(vec![
+            "tests/Unit/CharlieTest.php", // file_pattern match (first)
+            "tests/Unit/AlphaTest.php",   // file_pattern match (second)
+            "src/Bravo.php",              // triggers discovery → tests/Unit/BravoTest.php
+            "src/Alpha.php",              // triggers discovery → tests/Unit/AlphaTest.php (dup!)
+        ]);
+
+        // Run multiple times — order must be identical across runs (no HashSet nondeterminism)
+        let expected = {
+            let checks = determine_checks(&config, &changed_files, temp_dir.path());
+            checks
+                .iter()
+                .find(|c| c.id() == "phpunit")
+                .unwrap()
+                .files
+                .clone()
+        };
+
+        for _ in 0..10 {
+            let checks = determine_checks(&config, &changed_files, temp_dir.path());
+            let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
+            assert_eq!(
+                phpunit.files, expected,
+                "matched files must be deterministic across runs"
+            );
+        }
+
+        // file_pattern matches come first (Charlie, Alpha), then discovery adds Bravo.
+        // AlphaTest is a duplicate — dedup keeps the first occurrence, so the discovery
+        // contribution from src/Alpha.php is dropped.
+        assert_eq!(
+            expected,
+            vec![
+                "tests/Unit/CharlieTest.php".to_string(),
+                "tests/Unit/AlphaTest.php".to_string(),
+                "tests/Unit/BravoTest.php".to_string(),
+            ]
         );
     }
 

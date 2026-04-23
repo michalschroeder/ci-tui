@@ -303,7 +303,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
         return KeyAction::None;
     };
 
-    new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
+    new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
     let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
 
     let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) else {
@@ -380,7 +380,7 @@ fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> K
             files: vec![],
             base_ref,
         });
-    new_changed_files.apply_ignore_patterns(&config.ignore_patterns);
+    new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
     let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
 
     KeyAction::RetryAll {
