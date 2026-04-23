@@ -271,6 +271,11 @@ async fn run_parallel(
     results
 }
 
+/// Format the error_output field for a spawn-failed check.
+fn format_exec_error(err: &std::io::Error) -> String {
+    format!("Failed to execute: {}", err)
+}
+
 async fn run_check(
     check: &CheckToRun,
     project_root: &Path,
@@ -349,10 +354,29 @@ async fn run_check(
             check_id,
             status: CheckStatus::Failed,
             output: String::new(),
-            error_output: format!("Failed to execute: {}", e),
+            error_output: format_exec_error(&e),
             duration_ms,
             started_at: None,
             finished_at: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_exec_error_prefixes_failed_to_execute() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "sh not found");
+        assert_eq!(format_exec_error(&err), "Failed to execute: sh not found");
+    }
+
+    #[test]
+    fn format_exec_error_preserves_underlying_message() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
+        let s = format_exec_error(&err);
+        assert!(s.contains("nope"));
+        assert!(s.starts_with("Failed to execute: "));
     }
 }
