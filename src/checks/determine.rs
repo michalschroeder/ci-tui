@@ -289,3 +289,116 @@ pub(super) fn process_triggered_check(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(unused_imports, dead_code)]
+
+    use super::*;
+    use crate::config::{
+        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig,
+        PathMappingRule, TestDiscoveryConfig, TestDiscoveryStrategy,
+    };
+    use crate::git::ChangedFiles;
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn base_config() -> CiConfig {
+        let mut patterns = HashMap::new();
+        patterns.insert(
+            "rust".to_string(),
+            FilePattern {
+                pattern: r"\.rs$".to_string(),
+                color: None,
+            },
+        );
+        patterns.insert(
+            "rust_src".to_string(),
+            FilePattern {
+                pattern: r"^src/.*\.rs$".to_string(),
+                color: None,
+            },
+        );
+        CiConfig::new(
+            2,
+            DockerConfig {
+                project_dir: ".".to_string(),
+                service: "app".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: HashMap::new(),
+            },
+            GitConfig {
+                base_branch: "main".to_string(),
+                fallback_branch: "HEAD~1".to_string(),
+            },
+            patterns,
+            IndexMap::new(),
+            Vec::new(),
+        )
+    }
+
+    fn mk_check(
+        cmd: &str,
+        fix: Option<&str>,
+        triggers: Option<CheckTriggers>,
+        on_demand: bool,
+    ) -> CheckDefinition {
+        CheckDefinition {
+            name: "N".to_string(),
+            command: cmd.to_string(),
+            service: None,
+            container: None,
+            fix_command: fix.map(String::from),
+            triggers,
+            on_demand,
+            env: HashMap::new(),
+        }
+    }
+
+    fn changed(files: &[&str]) -> ChangedFiles {
+        ChangedFiles {
+            files: files.iter().map(|s| s.to_string()).collect(),
+            base_ref: "main".to_string(),
+        }
+    }
+
+    mod process_always_run_check_tests {
+        use super::*;
+
+        #[test]
+        fn builds_check_with_empty_files() {
+            let cfg = base_config();
+            let def = mk_check("cargo check", None, None, false);
+            let out = process_always_run_check(&cfg, "check-id", &def, "g", "svc".to_string());
+            assert_eq!(out.id, "check-id");
+            assert_eq!(out.group, "g");
+            assert_eq!(out.service, "svc");
+            assert!(out.files.is_empty());
+            assert_eq!(out.resolved_command, "cargo check");
+            assert!(out.resolved_fix_command.is_none());
+            assert!(!out.on_demand);
+            assert!(!out.skipped_no_files);
+        }
+
+        #[test]
+        fn populates_resolved_fix_when_present() {
+            let cfg = base_config();
+            let def = mk_check("cargo check", Some("cargo fix"), None, false);
+            let out = process_always_run_check(&cfg, "id", &def, "g", "svc".to_string());
+            assert_eq!(out.resolved_fix_command.as_deref(), Some("cargo fix"));
+        }
+
+        #[test]
+        fn strips_files_placeholder_when_empty() {
+            let cfg = base_config();
+            let def = mk_check("cargo check {files}", None, None, false);
+            let out = process_always_run_check(&cfg, "id", &def, "g", "svc".to_string());
+            assert_eq!(out.resolved_command, "cargo check");
+        }
+    }
+}
