@@ -502,4 +502,60 @@ mod tests {
         let result = get_changed_files_with_executor(Path::new("/tmp"), "nope", &mock);
         assert!(result.is_err());
     }
+
+    fn default_git_config() -> crate::config::GitConfig {
+        crate::config::GitConfig {
+            base_branch: "main".to_string(),
+            fallback_branch: "HEAD~1".to_string(),
+        }
+    }
+
+    #[test]
+    fn detect_changes_errors_when_uncommitted_diff_fails() {
+        let mut mock = MockGitExecutor::new();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok("committed.rs\n".to_string()));
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("uncommitted diff blew up")));
+
+        let result = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("uncommitted diff blew up"), "got: {msg}");
+    }
+
+    #[test]
+    fn detect_changes_errors_when_untracked_list_fails() {
+        let mut mock = MockGitExecutor::new();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Ok("a.rs\n".to_string()));
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("ls-files refused")));
+
+        let result = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("ls-files refused"), "got: {msg}");
+    }
 }
