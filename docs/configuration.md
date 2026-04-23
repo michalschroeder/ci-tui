@@ -157,6 +157,10 @@ file_patterns:
 1. **Check triggers:** Determine which checks run when files change
 2. **UI highlighting:** Color-code changed files in the interface
 
+## Untracked Files
+
+Change detection includes untracked files (new files not yet `git add`ed), excluding anything matching `.gitignore`. This matches the mental model "files I changed locally" — a brand-new source file is checked the moment it lands on disk. If a path needs to be excluded beyond `.gitignore`, add it to `ignore_patterns` below.
+
 ## Ignore Patterns
 
 The `ignore_patterns` section excludes files from change detection.
