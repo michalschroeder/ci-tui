@@ -16,11 +16,10 @@
 
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
-use crate::utils::{docker, time};
+use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 
 /// Run fix commands for all checks with fix_command defined
 pub async fn run(
@@ -236,7 +235,48 @@ fn select_fix_error_message(
     }
 }
 
-/// Execute a fix command via docker
+/// Execute a fix command via the injected executor (test-facing).
+///
+/// Returns `Ok(duration_ms)` on success, or `Err(anyhow::Error)` with a message
+/// selected by [`select_fix_error_message`]. Exit code is `None` at this boundary —
+/// `CommandOutput` only carries a boolean success flag.
+pub async fn run_fix_command_with_executor(
+    command: &str,
+    check_id: &str,
+    project_root: &Path,
+    docker_config: &DockerConfig,
+    check_container: Option<&str>,
+    executor: &dyn crate::runner::CommandExecutor,
+) -> Result<u64> {
+    let start = Instant::now();
+
+    let default_container = docker_config.container_name();
+    let container_name = check_container.unwrap_or(&default_container);
+
+    let env = std::collections::HashMap::new();
+    let docker_cmd = if executor.is_container_running(container_name) {
+        crate::runner::build_docker_exec_command(
+            container_name,
+            &env,
+            command,
+            docker_config.shell(),
+        )
+    } else {
+        crate::runner::build_docker_run_command(docker_config, &env, command)
+    };
+
+    let output = executor.execute(&docker_cmd, project_root).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    if !output.success {
+        let error_msg = select_fix_error_message(&output.stderr, &output.stdout, check_id, None);
+        anyhow::bail!("{}", error_msg);
+    }
+
+    Ok(duration_ms)
+}
+
+/// Execute a fix command via docker (production entry point).
 async fn run_fix_command(
     command: &str,
     check_id: &str,
@@ -244,58 +284,15 @@ async fn run_fix_command(
     docker_config: &DockerConfig,
     check_container: Option<&str>,
 ) -> Result<u64> {
-    let start = Instant::now();
-
-    // Use per-check container if specified, otherwise use default
-    let default_container = docker_config.container_name();
-    let container_name = check_container.unwrap_or(&default_container);
-
-    // Get shell from config (default: bash)
-    let shell = docker_config.shell();
-
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if docker::is_running(container_name) {
-        // Container is running, use docker exec
-        format!(
-            "docker exec {} {} -c '{}'",
-            container_name,
-            shell,
-            command.replace('\'', "'\\''")
-        )
-    } else {
-        // Container not running, use docker run with --rm
-        let image_name = docker_config.image_name();
-        let work_dir = docker_config.working_dir();
-        let mut cmd = format!("docker run --rm -w {}", work_dir);
-        if let Some(ref volume) = docker_config.volume_mount {
-            cmd.push_str(&format!(" -v {}", volume));
-        }
-        cmd.push_str(&format!(
-            " {} {} -c '{}'",
-            image_name,
-            shell,
-            command.replace('\'', "'\\''")
-        ));
-        cmd
-    };
-
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&docker_cmd)
-        .current_dir(project_root)
-        .output()
-        .await?;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let error_msg = select_fix_error_message(&stderr, &stdout, check_id, output.status.code());
-        anyhow::bail!("{}", error_msg);
-    }
-
-    Ok(duration_ms)
+    run_fix_command_with_executor(
+        command,
+        check_id,
+        project_root,
+        docker_config,
+        check_container,
+        &crate::runner::RealCommandExecutor,
+    )
+    .await
 }
 
 #[cfg(test)]
