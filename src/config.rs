@@ -1578,4 +1578,53 @@ checks:
             );
         }
     }
+
+    mod test_expand_env_vars {
+        use super::super::expand_env_vars;
+
+        #[test]
+        fn no_placeholder_returns_input_unchanged() {
+            assert_eq!(expand_env_vars("plain string"), "plain string");
+        }
+
+        #[test]
+        fn empty_input_returns_empty() {
+            assert_eq!(expand_env_vars(""), "");
+        }
+
+        #[test]
+        fn expands_set_variable() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_A", "resolved");
+            assert_eq!(
+                expand_env_vars("prefix-${CI_TUI_TEST_EXPAND_A}-suffix"),
+                "prefix-resolved-suffix"
+            );
+            std::env::remove_var("CI_TUI_TEST_EXPAND_A");
+        }
+
+        #[test]
+        fn missing_variable_is_left_as_literal() {
+            std::env::remove_var("CI_TUI_TEST_EXPAND_MISSING_XYZ");
+            let result = expand_env_vars("a-${CI_TUI_TEST_EXPAND_MISSING_XYZ}-b");
+            assert_eq!(result, "a-${CI_TUI_TEST_EXPAND_MISSING_XYZ}-b");
+        }
+
+        #[test]
+        fn expands_multiple_placeholders() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_X", "one");
+            std::env::set_var("CI_TUI_TEST_EXPAND_Y", "two");
+            let result = expand_env_vars("${CI_TUI_TEST_EXPAND_X}-${CI_TUI_TEST_EXPAND_Y}");
+            assert_eq!(result, "one-two");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_X");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_Y");
+        }
+
+        #[test]
+        fn same_placeholder_repeated_is_replaced_each_time() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_DUP", "X");
+            let result = expand_env_vars("${CI_TUI_TEST_EXPAND_DUP}-${CI_TUI_TEST_EXPAND_DUP}");
+            assert_eq!(result, "X-X");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_DUP");
+        }
+    }
 }
