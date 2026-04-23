@@ -1579,6 +1579,46 @@ checks:
         }
     }
 
+    mod test_resolve_project_name_from_cwd {
+        use super::super::resolve_project_name_from_cwd;
+
+        #[test]
+        fn dot_returns_current_dir_name() {
+            let cwd = std::env::current_dir().unwrap();
+            let expected = cwd.file_name().unwrap().to_string_lossy().to_string();
+            assert_eq!(resolve_project_name_from_cwd("."), Some(expected));
+        }
+
+        #[test]
+        fn dotdot_returns_parent_dir_name() {
+            let cwd = std::env::current_dir().unwrap();
+            let expected_parent = cwd.parent().map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            if let Some(parent_name) = expected_parent {
+                if !parent_name.is_empty() {
+                    assert_eq!(resolve_project_name_from_cwd(".."), Some(parent_name));
+                }
+            }
+        }
+
+        #[test]
+        fn non_dot_input_resolves_to_parent_dir_name() {
+            // Per current impl: any non-"." value takes the cwd.parent() branch.
+            let cwd = std::env::current_dir().unwrap();
+            let expected_parent = cwd
+                .parent()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+            if let Some(parent_name) = expected_parent {
+                if !parent_name.is_empty() {
+                    assert_eq!(resolve_project_name_from_cwd("weird"), Some(parent_name));
+                }
+            }
+        }
+    }
+
     mod test_expand_env_vars {
         use super::super::expand_env_vars;
 
