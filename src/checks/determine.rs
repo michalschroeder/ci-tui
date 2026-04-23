@@ -401,4 +401,43 @@ mod tests {
             assert_eq!(out.resolved_command, "cargo check");
         }
     }
+
+    mod match_file_pattern_tests {
+        use super::*;
+
+        #[test]
+        fn returns_matching_files() {
+            let cfg = base_config();
+            let cf = changed(&["src/main.rs", "README.md", "lib/foo.rs"]);
+            let out = match_file_pattern(&cfg, &cf, "rust");
+            assert_eq!(
+                out,
+                vec!["src/main.rs".to_string(), "lib/foo.rs".to_string()]
+            );
+        }
+
+        #[test]
+        fn returns_empty_when_pattern_key_missing() {
+            let cfg = base_config();
+            let cf = changed(&["src/main.rs"]);
+            let out = match_file_pattern(&cfg, &cf, "nonexistent-key");
+            assert!(out.is_empty());
+        }
+
+        #[test]
+        fn returns_empty_when_no_files_match() {
+            let cfg = base_config();
+            let cf = changed(&["README.md", "doc.txt"]);
+            let out = match_file_pattern(&cfg, &cf, "rust");
+            assert!(out.is_empty());
+        }
+
+        #[test]
+        fn empty_changed_files_returns_empty() {
+            let cfg = base_config();
+            let cf = changed(&[]);
+            let out = match_file_pattern(&cfg, &cf, "rust");
+            assert!(out.is_empty());
+        }
+    }
 }
