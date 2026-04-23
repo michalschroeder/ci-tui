@@ -1623,6 +1623,75 @@ checks:
         }
     }
 
+    mod test_lazy_compiled_fallback {
+        use super::super::{CiConfig, DockerConfig, FilePattern, GitConfig};
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+
+        fn cfg_with_patterns(patterns: Vec<(&str, &str)>, ignore: Vec<&str>) -> CiConfig {
+            let mut file_patterns = HashMap::new();
+            for (k, v) in patterns {
+                file_patterns.insert(
+                    k.to_string(),
+                    FilePattern {
+                        pattern: v.to_string(),
+                        color: None,
+                    },
+                );
+            }
+            CiConfig::new(
+                2,
+                DockerConfig {
+                    project_dir: ".".to_string(),
+                    service: "app".to_string(),
+                    container: None,
+                    image: None,
+                    volume_mount: None,
+                    work_dir: None,
+                    shell: "bash".to_string(),
+                    env: HashMap::new(),
+                },
+                GitConfig {
+                    base_branch: "main".to_string(),
+                    fallback_branch: "HEAD~1".to_string(),
+                },
+                file_patterns,
+                IndexMap::new(),
+                ignore.into_iter().map(String::from).collect(),
+            )
+        }
+
+        #[test]
+        fn valid_file_pattern_compiles_lazily() {
+            let cfg = cfg_with_patterns(vec![("rust", r"\.rs$")], vec![]);
+            let re = cfg
+                .get_compiled_file_pattern("rust")
+                .expect("lazy compile should succeed");
+            assert!(re.is_match("src/main.rs"));
+            assert!(!re.is_match("Cargo.toml"));
+        }
+
+        #[test]
+        fn invalid_file_pattern_is_silently_dropped_on_lazy_path() {
+            let cfg = cfg_with_patterns(vec![("good", r"\.rs$"), ("bad", r"[unclosed")], vec![]);
+            assert!(cfg.get_compiled_file_pattern("good").is_some());
+            assert!(cfg.get_compiled_file_pattern("bad").is_none());
+        }
+
+        #[test]
+        fn unknown_key_returns_none() {
+            let cfg = cfg_with_patterns(vec![("rust", r"\.rs$")], vec![]);
+            assert!(cfg.get_compiled_file_pattern("missing").is_none());
+        }
+
+        #[test]
+        fn invalid_ignore_pattern_silently_dropped_on_lazy_path() {
+            let cfg = cfg_with_patterns(vec![], vec![r"\.md$", r"[unclosed"]);
+            assert!(cfg.should_ignore_file("README.md"));
+            assert!(!cfg.should_ignore_file("src/main.rs"));
+        }
+    }
+
     mod test_resolve_project_name_from_cwd {
         use super::super::resolve_project_name_from_cwd;
 
