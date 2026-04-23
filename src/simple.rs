@@ -18,12 +18,11 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
-use crate::utils::{docker, time};
+use crate::utils::time;
 use anyhow::Result;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 
 /// Run checks in simple console mode (no TUI).
 ///
@@ -271,20 +270,16 @@ async fn run_parallel(
     results
 }
 
-/// Format the error_output field for a spawn-failed check.
-fn format_exec_error(err: &std::io::Error) -> String {
-    format!("Failed to execute: {}", err)
-}
-
-async fn run_check(
+/// Execute a single check via the injected executor (test-facing).
+pub async fn run_check_with_executor(
     check: &CheckToRun,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
 
-    // Use per-check container if specified, otherwise use default
     let default_container = docker_config.container_name();
     let container_name = check
         .definition
@@ -292,91 +287,48 @@ async fn run_check(
         .as_deref()
         .unwrap_or(&default_container);
 
-    // Get shell from config (default: bash)
-    let shell = docker_config.shell();
-
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if docker::is_running(container_name) {
-        // Container is running, use docker exec
-        format!(
-            "docker exec {} {} -c '{}'",
+    let env = std::collections::HashMap::new();
+    let docker_cmd = if executor.is_container_running(container_name) {
+        crate::runner::build_docker_exec_command(
             container_name,
-            shell,
-            check.resolved_command.replace('\'', "'\\''")
+            &env,
+            &check.resolved_command,
+            docker_config.shell(),
         )
     } else {
-        // Container not running, use docker run with --rm
-        let image_name = docker_config.image_name();
-        let work_dir = docker_config.working_dir();
-        let mut cmd = format!("docker run --rm -w {}", work_dir);
-        if let Some(ref volume) = docker_config.volume_mount {
-            cmd.push_str(&format!(" -v {}", volume));
-        }
-        cmd.push_str(&format!(
-            " {} {} -c '{}'",
-            image_name,
-            shell,
-            check.resolved_command.replace('\'', "'\\''")
-        ));
-        cmd
+        crate::runner::build_docker_run_command(docker_config, &env, &check.resolved_command)
     };
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&docker_cmd)
-        .current_dir(project_root)
-        .output()
-        .await;
-
+    let output = executor.execute(&docker_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    match output {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let status = if output.status.success() {
-                CheckStatus::Passed
-            } else {
-                CheckStatus::Failed
-            };
+    let status = if output.success {
+        CheckStatus::Passed
+    } else {
+        CheckStatus::Failed
+    };
 
-            CheckResult {
-                check_id,
-                status,
-                output: stdout,
-                error_output: stderr,
-                duration_ms,
-                started_at: None,
-                finished_at: None,
-            }
-        }
-        Err(e) => CheckResult {
-            check_id,
-            status: CheckStatus::Failed,
-            output: String::new(),
-            error_output: format_exec_error(&e),
-            duration_ms,
-            started_at: None,
-            finished_at: None,
-        },
+    CheckResult {
+        check_id,
+        status,
+        output: output.stdout,
+        error_output: output.stderr,
+        duration_ms,
+        started_at: None,
+        finished_at: None,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_exec_error_prefixes_failed_to_execute() {
-        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "sh not found");
-        assert_eq!(format_exec_error(&err), "Failed to execute: sh not found");
-    }
-
-    #[test]
-    fn format_exec_error_preserves_underlying_message() {
-        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
-        let s = format_exec_error(&err);
-        assert!(s.contains("nope"));
-        assert!(s.starts_with("Failed to execute: "));
-    }
+async fn run_check(
+    check: &CheckToRun,
+    project_root: &Path,
+    docker_config: &DockerConfig,
+) -> CheckResult {
+    run_check_with_executor(
+        check,
+        project_root,
+        docker_config,
+        &crate::runner::RealCommandExecutor,
+    )
+    .await
 }
