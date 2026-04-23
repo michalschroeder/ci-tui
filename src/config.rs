@@ -1163,6 +1163,50 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.docker.shell(), "/bin/sh");
         }
+
+        // volume_args() returns None when no volume_mount is configured
+        #[test]
+        fn test_volume_args_returns_none_without_mount() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.volume_args(), None);
+        }
+
+        // volume_args() expands env vars when present
+        #[test]
+        fn test_volume_args_expands_env_vars() {
+            std::env::set_var("CI_TUI_TEST_VOL", "/tmp/ci-tui-vol");
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  shell: bash
+  volume_mount: "${CI_TUI_TEST_VOL}:/build"
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(
+                config.docker.volume_args(),
+                Some("-v /tmp/ci-tui-vol:/build".to_string())
+            );
+            std::env::remove_var("CI_TUI_TEST_VOL");
+        }
     }
 
     mod test_yaml_parsing_errors {
