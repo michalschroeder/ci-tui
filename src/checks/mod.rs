@@ -1286,6 +1286,52 @@ checks:
                 "Fix command should contain file"
             );
         }
+
+        fn mk_check(command: &str, fix: Option<&str>) -> crate::config::CheckDefinition {
+            crate::config::CheckDefinition {
+                name: "Test".to_string(),
+                command: command.to_string(),
+                service: None,
+                container: None,
+                fix_command: fix.map(String::from),
+                triggers: Some(crate::config::CheckTriggers::default()),
+                on_demand: false,
+                env: std::collections::HashMap::new(),
+            }
+        }
+
+        #[test]
+        fn use_fix_true_with_fix_command_uses_fix() {
+            let cfg = checks_test_config();
+            let check = mk_check("check {files}", Some("fix {files}"));
+            let out = resolve_command(&cfg, &check, &["a.rs", "b.rs"], true);
+            assert_eq!(out, "fix a.rs b.rs");
+        }
+
+        // Silent-fallback branch: use_fix=true but fix_command is None
+        #[test]
+        fn use_fix_true_without_fix_command_falls_back_to_command() {
+            let cfg = checks_test_config();
+            let check = mk_check("check {files}", None);
+            let out = resolve_command(&cfg, &check, &["a.rs"], true);
+            assert_eq!(out, "check a.rs");
+        }
+
+        // Paren-sentinel files (e.g. "(skipped - no matching files)") collapse files_str to empty
+        #[test]
+        fn files_with_paren_sentinel_are_stripped() {
+            let cfg = checks_test_config();
+            let check = mk_check("run {files}", None);
+            let out = resolve_command(&cfg, &check, &["(skipped - no matching files)"], false);
+            assert_eq!(out, "run");
+        }
+
+        #[test]
+        fn empty_files_strips_placeholder_and_trims() {
+            let cfg = checks_test_config();
+            let check = mk_check("cmd {files}", None);
+            assert_eq!(resolve_command(&cfg, &check, &[], false), "cmd");
+        }
     }
 
     mod test_group_checks {

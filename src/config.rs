@@ -1163,6 +1163,50 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.docker.shell(), "/bin/sh");
         }
+
+        // volume_args() returns None when no volume_mount is configured
+        #[test]
+        fn test_volume_args_returns_none_without_mount() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.docker.volume_args(), None);
+        }
+
+        // volume_args() expands env vars when present
+        #[test]
+        fn test_volume_args_expands_env_vars() {
+            std::env::set_var("CI_TUI_TEST_VOL", "/tmp/ci-tui-vol");
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: .
+  service: app
+  shell: bash
+  volume_mount: "${CI_TUI_TEST_VOL}:/build"
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(
+                config.docker.volume_args(),
+                Some("-v /tmp/ci-tui-vol:/build".to_string())
+            );
+            std::env::remove_var("CI_TUI_TEST_VOL");
+        }
     }
 
     mod test_yaml_parsing_errors {
@@ -1576,6 +1620,164 @@ checks:
                 check.service_or_default("default_service"),
                 "default_service"
             );
+        }
+    }
+
+    mod test_lazy_compiled_fallback {
+        use super::super::{CiConfig, DockerConfig, FilePattern, GitConfig};
+        use indexmap::IndexMap;
+        use std::collections::HashMap;
+
+        fn cfg_with_patterns(patterns: Vec<(&str, &str)>, ignore: Vec<&str>) -> CiConfig {
+            let mut file_patterns = HashMap::new();
+            for (k, v) in patterns {
+                file_patterns.insert(
+                    k.to_string(),
+                    FilePattern {
+                        pattern: v.to_string(),
+                        color: None,
+                    },
+                );
+            }
+            CiConfig::new(
+                2,
+                DockerConfig {
+                    project_dir: ".".to_string(),
+                    service: "app".to_string(),
+                    container: None,
+                    image: None,
+                    volume_mount: None,
+                    work_dir: None,
+                    shell: "bash".to_string(),
+                    env: HashMap::new(),
+                },
+                GitConfig {
+                    base_branch: "main".to_string(),
+                    fallback_branch: "HEAD~1".to_string(),
+                },
+                file_patterns,
+                IndexMap::new(),
+                ignore.into_iter().map(String::from).collect(),
+            )
+        }
+
+        #[test]
+        fn valid_file_pattern_compiles_lazily() {
+            let cfg = cfg_with_patterns(vec![("rust", r"\.rs$")], vec![]);
+            let re = cfg
+                .get_compiled_file_pattern("rust")
+                .expect("lazy compile should succeed");
+            assert!(re.is_match("src/main.rs"));
+            assert!(!re.is_match("Cargo.toml"));
+        }
+
+        #[test]
+        fn invalid_file_pattern_is_silently_dropped_on_lazy_path() {
+            let cfg = cfg_with_patterns(vec![("good", r"\.rs$"), ("bad", r"[unclosed")], vec![]);
+            assert!(cfg.get_compiled_file_pattern("good").is_some());
+            assert!(cfg.get_compiled_file_pattern("bad").is_none());
+        }
+
+        #[test]
+        fn unknown_key_returns_none() {
+            let cfg = cfg_with_patterns(vec![("rust", r"\.rs$")], vec![]);
+            assert!(cfg.get_compiled_file_pattern("missing").is_none());
+        }
+
+        #[test]
+        fn invalid_ignore_pattern_silently_dropped_on_lazy_path() {
+            let cfg = cfg_with_patterns(vec![], vec![r"\.md$", r"[unclosed"]);
+            assert!(cfg.should_ignore_file("README.md"));
+            assert!(!cfg.should_ignore_file("src/main.rs"));
+        }
+    }
+
+    mod test_resolve_project_name_from_cwd {
+        use super::super::resolve_project_name_from_cwd;
+
+        #[test]
+        fn dot_returns_current_dir_name() {
+            let cwd = std::env::current_dir().unwrap();
+            let expected = cwd.file_name().unwrap().to_string_lossy().to_string();
+            assert_eq!(resolve_project_name_from_cwd("."), Some(expected));
+        }
+
+        #[test]
+        fn dotdot_returns_parent_dir_name() {
+            let cwd = std::env::current_dir().unwrap();
+            let expected_parent = cwd.parent().map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            if let Some(parent_name) = expected_parent {
+                if !parent_name.is_empty() {
+                    assert_eq!(resolve_project_name_from_cwd(".."), Some(parent_name));
+                }
+            }
+        }
+
+        #[test]
+        fn non_dot_input_resolves_to_parent_dir_name() {
+            // Per current impl: any non-"." value takes the cwd.parent() branch.
+            let cwd = std::env::current_dir().unwrap();
+            let expected_parent = cwd
+                .parent()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+            if let Some(parent_name) = expected_parent {
+                if !parent_name.is_empty() {
+                    assert_eq!(resolve_project_name_from_cwd("weird"), Some(parent_name));
+                }
+            }
+        }
+    }
+
+    mod test_expand_env_vars {
+        use super::super::expand_env_vars;
+
+        #[test]
+        fn no_placeholder_returns_input_unchanged() {
+            assert_eq!(expand_env_vars("plain string"), "plain string");
+        }
+
+        #[test]
+        fn empty_input_returns_empty() {
+            assert_eq!(expand_env_vars(""), "");
+        }
+
+        #[test]
+        fn expands_set_variable() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_A", "resolved");
+            assert_eq!(
+                expand_env_vars("prefix-${CI_TUI_TEST_EXPAND_A}-suffix"),
+                "prefix-resolved-suffix"
+            );
+            std::env::remove_var("CI_TUI_TEST_EXPAND_A");
+        }
+
+        #[test]
+        fn missing_variable_is_left_as_literal() {
+            std::env::remove_var("CI_TUI_TEST_EXPAND_MISSING_XYZ");
+            let result = expand_env_vars("a-${CI_TUI_TEST_EXPAND_MISSING_XYZ}-b");
+            assert_eq!(result, "a-${CI_TUI_TEST_EXPAND_MISSING_XYZ}-b");
+        }
+
+        #[test]
+        fn expands_multiple_placeholders() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_X", "one");
+            std::env::set_var("CI_TUI_TEST_EXPAND_Y", "two");
+            let result = expand_env_vars("${CI_TUI_TEST_EXPAND_X}-${CI_TUI_TEST_EXPAND_Y}");
+            assert_eq!(result, "one-two");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_X");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_Y");
+        }
+
+        #[test]
+        fn same_placeholder_repeated_is_replaced_each_time() {
+            std::env::set_var("CI_TUI_TEST_EXPAND_DUP", "X");
+            let result = expand_env_vars("${CI_TUI_TEST_EXPAND_DUP}-${CI_TUI_TEST_EXPAND_DUP}");
+            assert_eq!(result, "X-X");
+            std::env::remove_var("CI_TUI_TEST_EXPAND_DUP");
         }
     }
 }
