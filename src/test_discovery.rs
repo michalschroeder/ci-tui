@@ -18,6 +18,38 @@ use crate::config::{PathMappingRule, TestDiscoveryStrategy};
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Output of a grep-style process invocation.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessOutput {
+    pub success: bool,
+    pub stdout: String,
+}
+
+/// Abstraction over the grep invocation so tests can inject controlled outputs.
+#[allow(dead_code)]
+#[cfg_attr(any(test, feature = "test"), mockall::automock)]
+pub(crate) trait ProcessRunner: Send + Sync {
+    fn run(&self, dir: &Path, args: &[String]) -> std::io::Result<ProcessOutput>;
+}
+
+/// Production implementation — shells out to `grep`.
+#[allow(dead_code)]
+pub(crate) struct RealProcessRunner;
+
+impl ProcessRunner for RealProcessRunner {
+    fn run(&self, dir: &Path, args: &[String]) -> std::io::Result<ProcessOutput> {
+        let output = std::process::Command::new("grep")
+            .args(args)
+            .current_dir(dir)
+            .output()?;
+        Ok(ProcessOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        })
+    }
+}
+
 /// Find related test files for a list of source files using provided strategies
 pub fn find_related_tests(
     strategies: &[TestDiscoveryStrategy],
