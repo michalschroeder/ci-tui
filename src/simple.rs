@@ -24,6 +24,42 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Orchestrate check execution with the supplied executor (test-facing).
+///
+/// Groups checks by config-declared groups, runs parallel groups via
+/// [`run_parallel`] and sequential groups via [`run_sequential`]. Returns the
+/// full list of results in group order (within parallel groups, order is
+/// non-deterministic).
+pub async fn run_with_executor(
+    config: CiConfig,
+    checks: Vec<CheckToRun>,
+    project_root: PathBuf,
+    executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
+) -> Result<Vec<CheckResult>> {
+    let docker_config = &config.docker;
+    let grouped = group_checks(&checks);
+    let mut all_results: Vec<CheckResult> = Vec::new();
+    for (group_name, group_checks) in grouped {
+        let parallel = config
+            .get_group(group_name)
+            .map(|g| g.parallel)
+            .unwrap_or(false);
+        let results = if parallel {
+            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
+        } else {
+            run_sequential(
+                group_checks,
+                &project_root,
+                docker_config,
+                executor.as_ref(),
+            )
+            .await
+        };
+        all_results.extend(results);
+    }
+    Ok(all_results)
+}
+
 /// Run checks in simple console mode (no TUI).
 ///
 /// Prints results directly to stdout with colored output. Exits with code 1
@@ -41,7 +77,6 @@ pub async fn run(
     let start_time = Instant::now();
     let docker_config = &config.docker;
 
-    // Print header
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
         changed_files.len(),
@@ -54,6 +89,8 @@ pub async fn run(
         return Ok(());
     }
 
+    let executor: std::sync::Arc<dyn crate::runner::CommandExecutor> =
+        std::sync::Arc::new(crate::runner::RealCommandExecutor);
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     let mut has_failures = false;
@@ -65,16 +102,21 @@ pub async fn run(
             .unwrap_or(group_name);
         println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
-        // Check if group runs in parallel
         let parallel = config
             .get_group(group_name)
             .map(|g| g.parallel)
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, docker_config).await
+            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
         } else {
-            run_sequential(group_checks, &project_root, docker_config).await
+            run_sequential(
+                group_checks,
+                &project_root,
+                docker_config,
+                executor.as_ref(),
+            )
+            .await
         };
 
         for result in results {
@@ -85,7 +127,6 @@ pub async fn run(
         println!();
     }
 
-    // Print summary
     let elapsed = start_time.elapsed();
     let elapsed_str = time::format_from_duration(elapsed);
     let passed = all_results
@@ -107,7 +148,6 @@ pub async fn run(
             elapsed_str
         );
 
-        // Show failed checks with details
         println!();
         println!("\x1b[1;31mFailed checks:\x1b[0m");
         for result in all_results
@@ -226,14 +266,14 @@ async fn run_sequential(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
-        // Skip on-demand checks in simple mode
         if check.on_demand {
             continue;
         }
-        let result = run_check(check, project_root, docker_config).await;
+        let result = run_check_with_executor(check, project_root, docker_config, executor).await;
         results.push(result);
     }
     results
@@ -243,26 +283,27 @@ async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
 
     for check in checks {
-        // Skip on-demand checks in simple mode
         if check.on_demand {
             continue;
         }
-        let check_id = check.id().to_string();
         let check = check.clone();
         let project_root = project_root.to_path_buf();
         let docker_config = docker_config.clone();
+        let executor = executor.clone();
 
-        let handle =
-            tokio::spawn(async move { run_check(&check, &project_root, &docker_config).await });
-        handles.push((check_id, handle));
+        let handle = tokio::spawn(async move {
+            run_check_with_executor(&check, &project_root, &docker_config, executor.as_ref()).await
+        });
+        handles.push(handle);
     }
 
     let mut results = Vec::new();
-    for (_id, handle) in handles {
+    for handle in handles {
         if let Ok(result) = handle.await {
             results.push(result);
         }
@@ -317,18 +358,4 @@ pub async fn run_check_with_executor(
         started_at: None,
         finished_at: None,
     }
-}
-
-async fn run_check(
-    check: &CheckToRun,
-    project_root: &Path,
-    docker_config: &DockerConfig,
-) -> CheckResult {
-    run_check_with_executor(
-        check,
-        project_root,
-        docker_config,
-        &crate::runner::RealCommandExecutor,
-    )
-    .await
 }
