@@ -639,27 +639,6 @@ pub async fn execute_docker_command_with_executor(
     }
 }
 
-/// Execute a command in Docker and return the result (backward-compatible wrapper)
-async fn execute_docker_command(
-    check_id: String,
-    command: &str,
-    project_root: &std::path::Path,
-    container_name: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
-) -> CheckResult {
-    execute_docker_command_with_executor(
-        check_id,
-        command,
-        project_root,
-        container_name,
-        docker_config,
-        env,
-        &RealCommandExecutor,
-    )
-    .await
-}
-
 /// Run a single check (for retry single)
 pub async fn run_single_check(
     check: &CheckToRun,
@@ -668,22 +647,43 @@ pub async fn run_single_check(
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    // Use per-check container if specified, otherwise use default
+    run_single_check_with_executor(
+        check,
+        project_root,
+        default_container,
+        docker_config,
+        env,
+        &RealCommandExecutor,
+    )
+    .await
+}
+
+/// Run a single check with a custom executor (test-facing).
+///
+/// Behaviour matches [`run_single_check`] except the caller supplies the executor.
+pub async fn run_single_check_with_executor(
+    check: &CheckToRun,
+    project_root: &std::path::Path,
+    default_container: &str,
+    docker_config: &crate::config::DockerConfig,
+    env: &std::collections::HashMap<String, String>,
+    executor: &dyn CommandExecutor,
+) -> CheckResult {
     let container_name = check
         .definition
         .container
         .as_deref()
         .unwrap_or(default_container);
-    // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());
-    execute_docker_command(
+    execute_docker_command_with_executor(
         check.id().to_string(),
         &check.resolved_command,
         project_root,
         container_name,
         docker_config,
         &merged_env,
+        executor,
     )
     .await
 }
@@ -696,13 +696,34 @@ pub async fn run_fix_command(
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    execute_docker_command(
+    run_fix_command_with_executor(
+        fix_command,
+        project_root,
+        container_name,
+        docker_config,
+        env,
+        &RealCommandExecutor,
+    )
+    .await
+}
+
+/// Run a fix command with a custom executor (test-facing).
+pub async fn run_fix_command_with_executor(
+    fix_command: &str,
+    project_root: &std::path::Path,
+    container_name: &str,
+    docker_config: &crate::config::DockerConfig,
+    env: &std::collections::HashMap<String, String>,
+    executor: &dyn CommandExecutor,
+) -> CheckResult {
+    execute_docker_command_with_executor(
         "fix".to_string(),
         fix_command,
         project_root,
         container_name,
         docker_config,
         env,
+        executor,
     )
     .await
 }
@@ -719,22 +740,43 @@ pub async fn run_check_with_command(
     docker_config: &crate::config::DockerConfig,
     env: &std::collections::HashMap<String, String>,
 ) -> CheckResult {
-    // Use per-check container if specified, otherwise use default
+    run_check_with_command_with_executor(
+        check,
+        command,
+        project_root,
+        default_container,
+        docker_config,
+        env,
+        &RealCommandExecutor,
+    )
+    .await
+}
+
+/// Run a check with a custom command and custom executor (test-facing).
+pub async fn run_check_with_command_with_executor(
+    check: &CheckToRun,
+    command: &str,
+    project_root: &std::path::Path,
+    default_container: &str,
+    docker_config: &crate::config::DockerConfig,
+    env: &std::collections::HashMap<String, String>,
+    executor: &dyn CommandExecutor,
+) -> CheckResult {
     let container_name = check
         .definition
         .container
         .as_deref()
         .unwrap_or(default_container);
-    // Merge global env with check-specific env (check env takes precedence)
     let mut merged_env = env.clone();
     merged_env.extend(check.definition.env.clone());
-    execute_docker_command(
+    execute_docker_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
         container_name,
         docker_config,
         &merged_env,
+        executor,
     )
     .await
 }
