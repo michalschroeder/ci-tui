@@ -215,6 +215,27 @@ pub fn resolve_fix_command(command: &str, files: &[&str]) -> String {
     command.replace("{files}", &files_str).trim().to_string()
 }
 
+/// Select the error message for a failed Docker command.
+///
+/// Precedence: non-empty stderr > non-empty stdout > formatted fallback with exit code.
+fn select_fix_error_message(
+    stderr: &str,
+    stdout: &str,
+    check_id: &str,
+    exit_code: Option<i32>,
+) -> String {
+    if !stderr.is_empty() {
+        stderr.to_string()
+    } else if !stdout.is_empty() {
+        stdout.to_string()
+    } else {
+        format!(
+            "Fix command '{}' failed with exit code {:?}",
+            check_id, exit_code
+        )
+    }
+}
+
 /// Execute a fix command via docker
 async fn run_fix_command(
     command: &str,
@@ -270,19 +291,210 @@ async fn run_fix_command(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let error_msg = if !stderr.is_empty() {
-            stderr.to_string()
-        } else if !stdout.is_empty() {
-            stdout.to_string()
-        } else {
-            format!(
-                "Fix command '{}' failed with exit code {:?}",
-                check_id,
-                output.status.code()
-            )
-        };
+        let error_msg = select_fix_error_message(&stderr, &stdout, check_id, output.status.code());
         anyhow::bail!("{}", error_msg);
     }
 
     Ok(duration_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig,
+    };
+    use crate::git::ChangedFiles;
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+
+    fn cfg_with_pattern(key: &str, pattern: &str) -> CiConfig {
+        let mut patterns = HashMap::new();
+        patterns.insert(
+            key.to_string(),
+            FilePattern {
+                pattern: pattern.to_string(),
+                color: None,
+            },
+        );
+        CiConfig::new(
+            2,
+            DockerConfig {
+                project_dir: ".".into(),
+                service: "app".into(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".into(),
+                env: HashMap::new(),
+            },
+            GitConfig {
+                base_branch: "main".into(),
+                fallback_branch: "HEAD~1".into(),
+            },
+            patterns,
+            IndexMap::new(),
+            Vec::new(),
+        )
+    }
+
+    fn mk_check_with_triggers(triggers: Option<CheckTriggers>) -> CheckDefinition {
+        CheckDefinition {
+            name: "N".into(),
+            command: "cmd".into(),
+            service: None,
+            container: None,
+            fix_command: Some("fix {files}".into()),
+            triggers,
+            on_demand: false,
+            env: HashMap::new(),
+        }
+    }
+
+    fn changed(files: &[&str]) -> ChangedFiles {
+        ChangedFiles {
+            files: files.iter().map(|s| s.to_string()).collect(),
+            base_ref: "main".into(),
+        }
+    }
+
+    mod select_fix_error_message {
+        use super::*;
+
+        #[test]
+        fn stderr_preferred_over_stdout() {
+            let msg = select_fix_error_message("bad things", "also things", "fmt", Some(1));
+            assert_eq!(msg, "bad things");
+        }
+
+        #[test]
+        fn stdout_used_when_stderr_empty() {
+            let msg = select_fix_error_message("", "stdout-only", "fmt", Some(1));
+            assert_eq!(msg, "stdout-only");
+        }
+
+        #[test]
+        fn fallback_when_both_streams_empty() {
+            let msg = select_fix_error_message("", "", "clippy", Some(42));
+            assert_eq!(msg, "Fix command 'clippy' failed with exit code Some(42)");
+        }
+
+        #[test]
+        fn fallback_uses_none_when_exit_code_missing() {
+            let msg = select_fix_error_message("", "", "test", None);
+            assert_eq!(msg, "Fix command 'test' failed with exit code None");
+        }
+    }
+
+    mod resolve_matching_files_tests {
+        use super::*;
+
+        #[test]
+        fn no_triggers_returns_all_files() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(None);
+            let cf = changed(&["src/main.rs", "README.md"]);
+            let files = resolve_matching_files(&cfg, &check, &cf);
+            assert_eq!(files, vec!["src/main.rs", "README.md"]);
+        }
+
+        #[test]
+        fn triggers_present_but_no_file_pattern_returns_all_files() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers::default()));
+            let cf = changed(&["src/main.rs", "README.md"]);
+            let files = resolve_matching_files(&cfg, &check, &cf);
+            assert_eq!(files, vec!["src/main.rs", "README.md"]);
+        }
+
+        #[test]
+        fn file_pattern_filters_changed_files() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                test_discovery: None,
+            }));
+            let cf = changed(&["src/main.rs", "README.md", "lib/a.rs"]);
+            let files = resolve_matching_files(&cfg, &check, &cf);
+            assert_eq!(files, vec!["src/main.rs", "lib/a.rs"]);
+        }
+
+        #[test]
+        fn unknown_file_pattern_key_returns_empty() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("nonexistent".into()),
+                test_discovery: None,
+            }));
+            let cf = changed(&["src/main.rs"]);
+            let files = resolve_matching_files(&cfg, &check, &cf);
+            assert!(files.is_empty());
+        }
+    }
+
+    mod resolve_check_fix_tests {
+        use super::*;
+
+        #[test]
+        fn returns_none_when_no_fix_command() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let mut check = mk_check_with_triggers(None);
+            check.fix_command = None;
+            let cf = changed(&["src/main.rs"]);
+            assert!(resolve_check_fix(&cfg, &check, &cf).is_none());
+        }
+
+        #[test]
+        fn returns_none_when_no_files_match_and_command_uses_files_placeholder() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                test_discovery: None,
+            }));
+            let cf = changed(&["README.md"]);
+            assert!(resolve_check_fix(&cfg, &check, &cf).is_none());
+        }
+
+        #[test]
+        fn returns_resolved_command_when_files_match() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                test_discovery: None,
+            }));
+            let cf = changed(&["src/main.rs", "README.md"]);
+            let out = resolve_check_fix(&cfg, &check, &cf).unwrap();
+            assert_eq!(out, "fix src/main.rs");
+        }
+
+        #[test]
+        fn runs_when_command_has_no_files_placeholder_even_with_no_matches() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let mut check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                test_discovery: None,
+            }));
+            check.fix_command = Some("fmt-all".into());
+            let cf = changed(&["README.md"]);
+            let out = resolve_check_fix(&cfg, &check, &cf).unwrap();
+            assert_eq!(out, "fmt-all");
+        }
+    }
+
+    mod print_fix_result_tests {
+        use super::*;
+
+        #[test]
+        fn returns_true_on_ok() {
+            let ok: anyhow::Result<u64> = Ok(1234);
+            assert!(print_fix_result("fmt", &ok));
+        }
+
+        #[test]
+        fn returns_false_on_err() {
+            let err: anyhow::Result<u64> = Err(anyhow::anyhow!("boom"));
+            assert!(!print_fix_result("fmt", &err));
+        }
+    }
 }
