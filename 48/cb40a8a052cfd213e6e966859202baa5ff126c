@@ -1,0 +1,25 @@
+tests/fix_executor_tests.rs
+  a7d38180d824bf76 1-109
+src/fix.rs
+  a7d38180d824bf76 19,238-243,249,256-258,260-262,265,268,271-272,279-295
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "48cb40a8a052cfd213e6e966859202baa5ff126c",
+  "prompts": {
+    "a7d38180d824bf76": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1945cc0b-0771-4018-9795-0fb7d128c6fb",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 185,
+      "total_deletions": 79,
+      "accepted_lines": 146,
+      "overriden_lines": 0
+    }
+  }
+}
