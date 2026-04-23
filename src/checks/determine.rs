@@ -440,4 +440,95 @@ mod tests {
             assert!(out.is_empty());
         }
     }
+
+    mod process_test_discovery_tests {
+        use super::*;
+
+        fn discovery_cfg() -> TestDiscoveryConfig {
+            TestDiscoveryConfig {
+                source_pattern: "rust_src".to_string(),
+                strategies: vec![TestDiscoveryStrategy::PathMapping {
+                    rules: vec![PathMappingRule {
+                        source: "src/{path}.rs".to_string(),
+                        tests: vec!["tests/{path}_test.rs".to_string()],
+                    }],
+                }],
+            }
+        }
+
+        #[test]
+        fn returns_none_when_no_source_files_match() {
+            let cfg = base_config();
+            let cf = changed(&["README.md"]);
+            let check = mk_check("cmd {files}", None, None, false);
+            let disc = discovery_cfg();
+            let mut matched = Vec::new();
+            let out = process_test_discovery(
+                &cfg,
+                &cf,
+                &PathBuf::from("/tmp"),
+                &disc,
+                &check,
+                &mut matched,
+            );
+            assert!(out.is_none());
+            assert!(matched.is_empty());
+        }
+
+        #[test]
+        fn returns_on_demand_when_no_tests_found_and_on_demand() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = base_config();
+            let cf = changed(&["src/foo.rs"]);
+            let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
+            let disc = discovery_cfg();
+            let mut matched = Vec::new();
+            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
+            assert!(matches!(out, Some(TestDiscoveryResult::OnDemand)));
+        }
+
+        #[test]
+        fn pushes_sentinel_when_no_tests_and_command_has_no_files_placeholder() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = base_config();
+            let cf = changed(&["src/foo.rs"]);
+            let check = mk_check("run-all-tests", None, None, false);
+            let disc = discovery_cfg();
+            let mut matched = Vec::new();
+            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
+            assert!(out.is_none());
+            assert_eq!(matched.len(), 1);
+            assert!(matched[0].contains("source files changed"));
+        }
+
+        #[test]
+        fn no_sentinel_when_command_has_files_placeholder() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = base_config();
+            let cf = changed(&["src/foo.rs"]);
+            let check = mk_check("test {files}", None, None, false);
+            let disc = discovery_cfg();
+            let mut matched = Vec::new();
+            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
+            assert!(out.is_none());
+            assert!(matched.is_empty());
+        }
+
+        #[test]
+        fn extends_matched_files_when_tests_found() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let test_path = tmp.path().join("tests/foo_test.rs");
+            std::fs::create_dir_all(test_path.parent().unwrap()).unwrap();
+            std::fs::write(&test_path, "").unwrap();
+
+            let cfg = base_config();
+            let cf = changed(&["src/foo.rs"]);
+            let check = mk_check("cmd {files}", None, None, false);
+            let disc = discovery_cfg();
+            let mut matched = Vec::new();
+            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
+            assert!(out.is_none());
+            assert_eq!(matched, vec!["tests/foo_test.rs".to_string()]);
+        }
+    }
 }
