@@ -107,3 +107,120 @@ async fn uses_docker_run_when_container_not_running() {
         .await
         .unwrap();
 }
+
+use ci_tui::fix::{run_with_executor, FixSummary};
+use ci_tui::git::ChangedFiles;
+
+fn rust_fmt_with_fix_config() -> ci_tui::config::CiConfig {
+    common::configs::ConfigBuilder::new()
+        .with_file_pattern("rust", r"\.rs$", None)
+        .with_check(
+            "lint",
+            "fmt",
+            common::configs::CheckBuilder::new("Format", "cargo fmt --check {files}")
+                .with_fix_command("cargo fmt {files}")
+                .with_file_pattern_trigger("rust")
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn all_fixes_pass_summary_is_clean() {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_execute().returning(|_, _| CommandOutput {
+        success: true,
+        stdout: String::new(),
+        stderr: String::new(),
+    });
+
+    let config = rust_fmt_with_fix_config();
+    let changed = ChangedFiles {
+        files: vec!["src/main.rs".into()],
+        base_ref: "main".into(),
+    };
+
+    let summary: FixSummary =
+        run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+            .await
+            .unwrap();
+
+    assert_eq!(summary.fix_count, 1);
+    assert_eq!(summary.pass_count, 1);
+    assert_eq!(summary.fail_count, 0);
+    assert!(!summary.has_failures);
+}
+
+#[tokio::test]
+async fn failing_fix_recorded_in_summary() {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_execute().returning(|_, _| CommandOutput {
+        success: false,
+        stdout: String::new(),
+        stderr: "diff found, rejecting".into(),
+    });
+
+    let config = rust_fmt_with_fix_config();
+    let changed = ChangedFiles {
+        files: vec!["src/main.rs".into()],
+        base_ref: "main".into(),
+    };
+
+    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.fix_count, 1);
+    assert_eq!(summary.pass_count, 0);
+    assert_eq!(summary.fail_count, 1);
+    assert!(summary.has_failures);
+}
+
+#[tokio::test]
+async fn skips_check_without_fix_command() {
+    // Executor should never be invoked — no fix_command means nothing to run
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().times(0);
+
+    let config = common::configs::ConfigBuilder::new()
+        .with_file_pattern("rust", r"\.rs$", None)
+        .with_check(
+            "lint",
+            "clippy",
+            common::configs::CheckBuilder::new("Clippy", "cargo clippy {files}")
+                .with_file_pattern_trigger("rust")
+                .build(),
+        )
+        .build();
+
+    let changed = ChangedFiles {
+        files: vec!["src/main.rs".into()],
+        base_ref: "main".into(),
+    };
+
+    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.fix_count, 0);
+}
+
+#[tokio::test]
+async fn skips_fix_when_files_placeholder_has_no_matches() {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().times(0);
+
+    let config = rust_fmt_with_fix_config();
+    let changed = ChangedFiles {
+        files: vec!["README.md".into()],
+        base_ref: "main".into(),
+    };
+
+    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.fix_count, 0);
+}

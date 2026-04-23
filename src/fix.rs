@@ -21,38 +21,41 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Run fix commands for all checks with fix_command defined
-pub async fn run(
+/// Summary of a fix run — consumed by `run` (prints + exits) or by tests.
+#[derive(Debug, Clone)]
+pub struct FixSummary {
+    pub fix_count: usize,
+    pub pass_count: usize,
+    pub fail_count: usize,
+    pub has_failures: bool,
+    pub elapsed: std::time::Duration,
+}
+
+/// Run fix commands for all checks using the supplied executor (test-facing).
+pub async fn run_with_executor(
     config: CiConfig,
     changed_files: ChangedFiles,
     project_root: PathBuf,
-) -> Result<()> {
+    executor: &dyn crate::runner::CommandExecutor,
+) -> Result<FixSummary> {
     let start_time = Instant::now();
     let docker_config = &config.docker;
-
-    // Print header
-    println!(
-        "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
-        changed_files.len(),
-        changed_files.base_ref
-    );
-    println!();
 
     let mut fix_count = 0;
     let mut pass_count = 0;
     let mut fail_count = 0;
     let mut has_failures = false;
 
-    // Iterate through all groups and checks to find fix commands
     for (group_name, group_config) in config.groups() {
         let display_name = group_config.display_name(group_name);
-        let (fc, pc, flc, hf) = run_group_fixes(
+        let (fc, pc, flc, hf) = run_group_fixes_with_executor(
             &config,
             group_config,
             display_name,
             &changed_files,
             &project_root,
             docker_config,
+            executor,
         )
         .await;
         fix_count += fc;
@@ -61,26 +64,53 @@ pub async fn run(
         has_failures |= hf;
     }
 
-    // Print summary
-    let elapsed = start_time.elapsed();
-    let elapsed_str = time::format_from_duration(elapsed);
+    Ok(FixSummary {
+        fix_count,
+        pass_count,
+        fail_count,
+        has_failures,
+        elapsed: start_time.elapsed(),
+    })
+}
 
-    if fix_count == 0 {
+/// Run fix commands for all checks with fix_command defined
+pub async fn run(
+    config: CiConfig,
+    changed_files: ChangedFiles,
+    project_root: PathBuf,
+) -> Result<()> {
+    println!(
+        "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
+        changed_files.len(),
+        changed_files.base_ref
+    );
+    println!();
+
+    let summary = run_with_executor(
+        config,
+        changed_files,
+        project_root,
+        &crate::runner::RealCommandExecutor,
+    )
+    .await?;
+
+    let elapsed_str = time::format_from_duration(summary.elapsed);
+    if summary.fix_count == 0 {
         println!("\x1b[33mNo fix commands found in config.\x1b[0m");
         return Ok(());
     }
 
     println!("\x1b[1m── Summary ──\x1b[0m");
-    if has_failures {
+    if summary.has_failures {
         println!(
             "\x1b[31m✗ {}/{} fixes passed, {} failed in {}\x1b[0m",
-            pass_count, fix_count, fail_count, elapsed_str
+            summary.pass_count, summary.fix_count, summary.fail_count, elapsed_str
         );
         std::process::exit(1);
     } else {
         println!(
             "\x1b[32m✓ All {} fixes passed in {}\x1b[0m",
-            fix_count, elapsed_str
+            summary.fix_count, elapsed_str
         );
     }
 
@@ -102,13 +132,14 @@ fn resolve_check_fix(
 }
 
 /// Run fix commands for a single group, returns (fix_count, pass_count, fail_count, has_failures)
-async fn run_group_fixes(
+async fn run_group_fixes_with_executor(
     config: &CiConfig,
     group_config: &crate::config::GroupConfig,
     display_name: &str,
     changed_files: &ChangedFiles,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> (usize, usize, usize, bool) {
     let mut fix_count = 0;
     let mut pass_count = 0;
@@ -131,12 +162,13 @@ async fn run_group_fixes(
             check_id
         );
 
-        let result = run_fix_command(
+        let result = run_fix_command_with_executor(
             &resolved_command,
             check_id,
             project_root,
             docker_config,
             check.container.as_deref(),
+            executor,
         )
         .await;
 
@@ -274,25 +306,6 @@ pub async fn run_fix_command_with_executor(
     }
 
     Ok(duration_ms)
-}
-
-/// Execute a fix command via docker (production entry point).
-async fn run_fix_command(
-    command: &str,
-    check_id: &str,
-    project_root: &Path,
-    docker_config: &DockerConfig,
-    check_container: Option<&str>,
-) -> Result<u64> {
-    run_fix_command_with_executor(
-        command,
-        check_id,
-        project_root,
-        docker_config,
-        check_container,
-        &crate::runner::RealCommandExecutor,
-    )
-    .await
 }
 
 #[cfg(test)]
