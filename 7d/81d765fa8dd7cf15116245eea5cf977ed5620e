@@ -1,0 +1,23 @@
+src/git.rs
+  d83c1251f1bdaac2 505-587
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "7d81d765fa8dd7cf15116245eea5cf977ed5620e",
+  "prompts": {
+    "d83c1251f1bdaac2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8038d26-7d37-4151-8967-d7e7a4744326",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 175,
+      "total_deletions": 2,
+      "accepted_lines": 173,
+      "overriden_lines": 0
+    }
+  }
+}
