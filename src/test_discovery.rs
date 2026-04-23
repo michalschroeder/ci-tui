@@ -197,8 +197,8 @@ mod tests {
         #[case("src/Foo.php", "", None)] // Empty pattern
         #[case("src/Foo.php", "no-placeholder", None)] // No {path} placeholder
         #[case("src/.php", "src/{path}.php", None)] // Empty path capture
-        #[case("src/Foo/Foo.php", "src/{path}/{path}.php", None)] // Two placeholders → None
-        #[case("a/b/c.php", "{path}{path}", None)] // Adjacent double placeholder → None
+        #[case("src/Foo/Foo.php", "src/{path}/{path}.php", None)]
+        #[case("a/b/c.php", "{path}{path}", None)]
         fn test_extract_path(
             #[case] file: &str,
             #[case] pattern: &str,
@@ -265,15 +265,14 @@ mod tests {
 
         #[test]
         fn test_empty_source_returns_empty_placeholders() {
-            // Empty source: basename, filename, extension, dirname, path all empty
             let result = expand_placeholders("[{basename}][{filename}][{dirname}]", "");
             assert_eq!(result, "[][][]");
         }
 
         #[test]
         fn test_bare_filename_has_empty_dirname() {
+            // Path::parent for "Cargo.toml" returns Some(""), not None — dirname resolves to "".
             let result = expand_placeholders("{dirname}|{basename}|{extension}", "Cargo.toml");
-            // Path::parent for "Cargo.toml" returns Some(""), so dirname resolves to ""
             assert_eq!(result, "|Cargo|toml");
         }
     }
@@ -380,7 +379,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let rules = vec![PathMappingRule {
                 source: "src/{path}.php".to_string(),
-                tests: vec![], // no test patterns
+                tests: vec![],
             }];
 
             let result = apply_path_mapping("src/Foo.php", &rules, temp_dir.path());
@@ -390,7 +389,6 @@ mod tests {
         #[test]
         fn test_rule_matches_but_test_files_missing_returns_empty() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            // Rule's source matches, but the target test file does not exist on disk
             let rules = vec![PathMappingRule {
                 source: "src/{path}.php".to_string(),
                 tests: vec!["tests/Unit/{path}Test.php".to_string()],
@@ -513,14 +511,8 @@ mod tests {
 
         #[test]
         fn test_empty_strategies_returns_empty() {
-            let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            // Create a candidate test file that *would* match if any strategy were defined
-            let test_path = temp_dir.path().join("tests/Unit/FooTest.php");
-            std::fs::create_dir_all(test_path.parent().unwrap()).unwrap();
-            std::fs::write(&test_path, "<?php").unwrap();
-
             let strategies: Vec<TestDiscoveryStrategy> = vec![];
-            let result = find_related_tests(&strategies, &["src/Foo.php"], temp_dir.path());
+            let result = find_related_tests(&strategies, &["src/Foo.php"], Path::new("/"));
             assert!(result.is_empty());
         }
     }
@@ -662,15 +654,12 @@ class OtherTest extends TestCase {}
 
     #[test]
     fn test_grep_search_empty_search_dirs() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-
-        let source_file = "src/Domain/Attachment.php";
-        let search_dirs: Vec<String> = vec![]; // empty — loop body never runs
-        let pattern = "CoversClass({basename}::class)";
-
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search(
+            "src/Domain/Attachment.php",
+            &[],
+            "CoversClass({basename}::class)",
+            Path::new("/"),
+        );
         assert!(results.is_empty());
     }
 
@@ -680,19 +669,14 @@ class OtherTest extends TestCase {}
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let search_dir = temp_dir.path().join("tests/Empty");
-        fs::create_dir_all(&search_dir).unwrap();
-        // Directory exists but contains no files — grep -rl returns exit 1
+        fs::create_dir_all(temp_dir.path().join("tests/Empty")).unwrap();
 
-        let source_file = "src/Foo.php";
-        let search_dirs = vec!["tests/Empty".to_string()];
-        let pattern = "CoversClass({basename}::class)";
-
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
-        assert!(
-            results.is_empty(),
-            "empty directory should produce no matches, got: {:?}",
-            results
+        let results = grep_search(
+            "src/Foo.php",
+            &["tests/Empty".to_string()],
+            "CoversClass({basename}::class)",
+            temp_dir.path(),
         );
+        assert!(results.is_empty(), "got: {results:?}");
     }
 }
