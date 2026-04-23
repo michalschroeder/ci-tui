@@ -19,7 +19,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// Output of a grep-style process invocation.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProcessOutput {
     pub success: bool,
@@ -27,14 +26,12 @@ pub(crate) struct ProcessOutput {
 }
 
 /// Abstraction over the grep invocation so tests can inject controlled outputs.
-#[allow(dead_code)]
 #[cfg_attr(any(test, feature = "test"), mockall::automock)]
 pub(crate) trait ProcessRunner: Send + Sync {
     fn run(&self, dir: &Path, args: &[String]) -> std::io::Result<ProcessOutput>;
 }
 
 /// Production implementation — shells out to `grep`.
-#[allow(dead_code)]
 pub(crate) struct RealProcessRunner;
 
 impl ProcessRunner for RealProcessRunner {
@@ -56,10 +53,24 @@ pub fn find_related_tests(
     source_files: &[&str],
     project_root: &Path,
 ) -> Vec<String> {
+    find_related_tests_with_runner(strategies, source_files, project_root, &RealProcessRunner)
+}
+
+pub(crate) fn find_related_tests_with_runner(
+    strategies: &[TestDiscoveryStrategy],
+    source_files: &[&str],
+    project_root: &Path,
+    runner: &dyn ProcessRunner,
+) -> Vec<String> {
     let mut all_tests: HashSet<String> = HashSet::new();
 
     for strategy in strategies {
-        all_tests.extend(apply_strategy(strategy, source_files, project_root));
+        all_tests.extend(apply_strategy_with_runner(
+            strategy,
+            source_files,
+            project_root,
+            runner,
+        ));
     }
 
     let mut result: Vec<String> = all_tests.into_iter().collect();
@@ -68,10 +79,11 @@ pub fn find_related_tests(
 }
 
 /// Apply a single discovery strategy to source files
-fn apply_strategy(
+fn apply_strategy_with_runner(
     strategy: &TestDiscoveryStrategy,
     source_files: &[&str],
     project_root: &Path,
+    runner: &dyn ProcessRunner,
 ) -> Vec<String> {
     match strategy {
         TestDiscoveryStrategy::PathMapping { rules } => source_files
@@ -83,7 +95,7 @@ fn apply_strategy(
             pattern,
         } => source_files
             .iter()
-            .flat_map(|f| grep_search(f, search_dirs, pattern, project_root))
+            .flat_map(|f| grep_search_with_runner(f, search_dirs, pattern, project_root, runner))
             .collect(),
     }
 }
@@ -134,15 +146,15 @@ fn extract_path_from_pattern(file: &str, pattern: &str) -> Option<String> {
 }
 
 /// Search test files for content matching a pattern with placeholders
-fn grep_search(
+fn grep_search_with_runner(
     source_file: &str,
     search_dirs: &[String],
     pattern: &str,
     project_root: &Path,
+    runner: &dyn ProcessRunner,
 ) -> Vec<String> {
-    // Expand placeholders in the pattern
     let expanded_pattern = expand_placeholders(pattern, source_file);
-
+    let args = ["-rl".to_string(), expanded_pattern, ".".to_string()];
     let mut found_tests = Vec::new();
 
     for search_dir in search_dirs {
@@ -151,21 +163,14 @@ fn grep_search(
             continue;
         }
 
-        // Use grep to find files containing the pattern
-        // Note: "." is required - without a path argument, grep reads from stdin
-        let Ok(output) = std::process::Command::new("grep")
-            .args(["-rl", &expanded_pattern, "."])
-            .current_dir(&dir_path)
-            .output()
-        else {
-            continue;
+        let output = match runner.run(&dir_path, &args) {
+            Ok(o) => o,
+            Err(_) => continue,
         };
-        if !output.status.success() {
+        if !output.success {
             continue;
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            // Strip "./" prefix that grep adds when searching "."
+        for line in output.stdout.lines() {
             let relative_path = line.trim().strip_prefix("./").unwrap_or(line.trim());
             let test_path = format!("{}/{}", search_dir, relative_path);
             found_tests.push(test_path);
@@ -173,6 +178,22 @@ fn grep_search(
     }
 
     found_tests
+}
+
+#[cfg(test)]
+fn grep_search(
+    source_file: &str,
+    search_dirs: &[String],
+    pattern: &str,
+    project_root: &Path,
+) -> Vec<String> {
+    grep_search_with_runner(
+        source_file,
+        search_dirs,
+        pattern,
+        project_root,
+        &RealProcessRunner,
+    )
 }
 
 /// Expand placeholders in pattern based on source file path
