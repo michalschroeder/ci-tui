@@ -602,4 +602,154 @@ mod tests {
             assert_eq!(out.resolved_command, "slow-test");
         }
     }
+
+    mod process_check_tests {
+        use super::*;
+
+        #[test]
+        fn always_run_path_used_when_no_triggers() {
+            let cfg = base_config();
+            let def = mk_check("cargo bench", None, None, false);
+            let cf = changed(&[]);
+            let out = process_check(
+                &cfg,
+                &cf,
+                &PathBuf::from("/tmp"),
+                "g",
+                "id",
+                &def,
+                "default-svc",
+            );
+            let run = out.expect("always-run should produce CheckToRun");
+            assert!(run.files.is_empty());
+            assert_eq!(run.resolved_command, "cargo bench");
+            assert_eq!(run.service, "default-svc");
+        }
+
+        #[test]
+        fn service_override_wins_over_default() {
+            let cfg = base_config();
+            let mut def = mk_check("cmd", None, None, false);
+            def.service = Some("special".to_string());
+            let cf = changed(&[]);
+            let out = process_check(
+                &cfg,
+                &cf,
+                &PathBuf::from("/tmp"),
+                "g",
+                "id",
+                &def,
+                "default-svc",
+            );
+            assert_eq!(out.unwrap().service, "special");
+        }
+    }
+
+    mod process_triggered_check_tests {
+        use super::*;
+
+        fn triggers_file_pattern(key: &str) -> CheckTriggers {
+            CheckTriggers {
+                file_pattern: Some(key.to_string()),
+                test_discovery: None,
+            }
+        }
+
+        #[test]
+        fn returns_none_when_no_triggers_match() {
+            let cfg = base_config();
+            let def = mk_check("cmd", None, Some(CheckTriggers::default()), false);
+            let cf = changed(&["src/main.rs"]);
+            let out =
+                process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc");
+            assert!(out.is_none());
+        }
+
+        #[test]
+        fn file_pattern_match_builds_check() {
+            let cfg = base_config();
+            let def = mk_check(
+                "cargo check {files}",
+                None,
+                Some(triggers_file_pattern("rust")),
+                false,
+            );
+            let cf = changed(&["src/main.rs", "README.md"]);
+            let out =
+                process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc");
+            let run = out.expect("file_pattern match should produce CheckToRun");
+            assert_eq!(run.files, vec!["src/main.rs".to_string()]);
+            assert_eq!(run.resolved_command, "cargo check src/main.rs");
+            assert!(!run.on_demand);
+        }
+
+        #[test]
+        fn file_pattern_no_match_builds_skipped() {
+            let cfg = base_config();
+            let def = mk_check(
+                "cargo check {files}",
+                None,
+                Some(triggers_file_pattern("rust")),
+                false,
+            );
+            let cf = changed(&["README.md"]);
+            let out =
+                process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc");
+            let run = out.expect("should produce skipped CheckToRun");
+            assert!(run.on_demand);
+            assert!(run.skipped_no_files);
+            assert_eq!(run.files, vec!["(skipped - no matching files)".to_string()]);
+        }
+
+        #[test]
+        fn duplicates_are_deduplicated_preserving_order() {
+            let cfg = base_config();
+            let def = mk_check(
+                "cmd {files}",
+                None,
+                Some(triggers_file_pattern("rust")),
+                false,
+            );
+            let cf = changed(&["src/a.rs", "src/b.rs", "src/a.rs"]);
+            let out =
+                process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc")
+                    .unwrap();
+            assert_eq!(
+                out.files,
+                vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+            );
+        }
+
+        #[test]
+        fn test_discovery_no_tests_on_demand_builds_on_demand() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = base_config();
+            let triggers = CheckTriggers {
+                file_pattern: None,
+                test_discovery: Some(TestDiscoveryConfig {
+                    source_pattern: "rust_src".to_string(),
+                    strategies: vec![TestDiscoveryStrategy::PathMapping {
+                        rules: vec![PathMappingRule {
+                            source: "src/{path}.rs".to_string(),
+                            tests: vec!["tests/{path}_test.rs".to_string()],
+                        }],
+                    }],
+                }),
+            };
+            let def = mk_check(
+                "slow {files}",
+                None,
+                Some(triggers),
+                /*on_demand=*/ true,
+            );
+            let cf = changed(&["src/foo.rs"]);
+            let out =
+                process_triggered_check(&cfg, &cf, tmp.path(), "g", "id", &def, "svc").unwrap();
+            assert!(out.on_demand);
+            assert_eq!(
+                out.files,
+                vec!["(on-demand - press 't' to run)".to_string()]
+            );
+        }
+    }
 }
