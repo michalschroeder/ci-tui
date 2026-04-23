@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.15](https://github.com/michalschroeder/ci-tui/compare/v0.1.14...v0.1.15) (2026-04-23)
+
+
+### Features
+
+* add host mode for pre-commands ([#60](https://github.com/michalschroeder/ci-tui/issues/60)) ([e605121](https://github.com/michalschroeder/ci-tui/commit/e605121b64682d0cb09751cabeaac42e07854fc7))
+* **config:** validate regex at load + deterministic pattern handling ([#63](https://github.com/michalschroeder/ci-tui/issues/63)) ([0ba872d](https://github.com/michalschroeder/ci-tui/commit/0ba872db2d0e9a66ef68364380d51a4ce7509d8f))
+* **git:** include untracked files in change detection ([#64](https://github.com/michalschroeder/ci-tui/issues/64)) ([f450433](https://github.com/michalschroeder/ci-tui/commit/f450433895238e4c8867e9e0c7e1f774ee636c2f))
+
+
+### Bug Fixes
+
+* **git:** correct diff semantics for changed-file detection ([#62](https://github.com/michalschroeder/ci-tui/issues/62)) ([935b797](https://github.com/michalschroeder/ci-tui/commit/935b797313c68337e6773af2ab52412b6a13ac04))
+
+
+### Documentation
+
+* spec for correct git diff semantics ([fcb4d07](https://github.com/michalschroeder/ci-tui/commit/fcb4d0746476a830afc74cab20a885d29caaf868))
+
 ## [0.1.14](https://github.com/michalschroeder/ci-tui/compare/v0.1.13...v0.1.14) (2026-03-19)
 
 
