@@ -1,0 +1,23 @@
+src/test_discovery.rs
+  6a9c687e00be102d 56-63,68-73,82,86,98,149,154,157,166-168,170,173,183-196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "6f6fcb0c4224337f4718b9fd66753418de8bc941",
+  "prompts": {
+    "6a9c687e00be102d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f4bc2783-de98-40f2-81db-c96ff9bdaddc",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 47,
+      "total_deletions": 26,
+      "accepted_lines": 42,
+      "overriden_lines": 0
+    }
+  }
+}
