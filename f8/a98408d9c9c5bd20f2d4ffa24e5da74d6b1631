@@ -1,0 +1,23 @@
+tests/runner_tests.rs
+  b610e85781e816e0 9,20-34,952,995,1027,1058,1078,1090,1131,1161,1188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "f8a98408d9c9c5bd20f2d4ffa24e5da74d6b1631",
+  "prompts": {
+    "b610e85781e816e0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a1659a7c-6ca3-4237-98f1-de2f4005b1a3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 25,
+      "total_deletions": 49,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  }
+}
