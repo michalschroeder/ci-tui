@@ -18,12 +18,47 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
-use crate::utils::{docker, time};
+use crate::utils::time;
 use anyhow::Result;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
+
+/// Orchestrate check execution with the supplied executor (test-facing).
+///
+/// Groups checks by config-declared groups, runs parallel groups via
+/// [`run_parallel`] and sequential groups via [`run_sequential`]. Returns the
+/// full list of results in group order (within parallel groups, order is
+/// non-deterministic).
+pub async fn run_with_executor(
+    config: CiConfig,
+    checks: Vec<CheckToRun>,
+    project_root: PathBuf,
+    executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
+) -> Result<Vec<CheckResult>> {
+    let docker_config = &config.docker;
+    let grouped = group_checks(&checks);
+    let mut all_results: Vec<CheckResult> = Vec::new();
+    for (group_name, group_checks) in grouped {
+        let parallel = config
+            .get_group(group_name)
+            .map(|g| g.parallel)
+            .unwrap_or(false);
+        let results = if parallel {
+            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
+        } else {
+            run_sequential(
+                group_checks,
+                &project_root,
+                docker_config,
+                executor.as_ref(),
+            )
+            .await
+        };
+        all_results.extend(results);
+    }
+    Ok(all_results)
+}
 
 /// Run checks in simple console mode (no TUI).
 ///
@@ -42,7 +77,6 @@ pub async fn run(
     let start_time = Instant::now();
     let docker_config = &config.docker;
 
-    // Print header
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
         changed_files.len(),
@@ -55,6 +89,8 @@ pub async fn run(
         return Ok(());
     }
 
+    let executor: std::sync::Arc<dyn crate::runner::CommandExecutor> =
+        std::sync::Arc::new(crate::runner::RealCommandExecutor);
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     let mut has_failures = false;
@@ -66,16 +102,21 @@ pub async fn run(
             .unwrap_or(group_name);
         println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
-        // Check if group runs in parallel
         let parallel = config
             .get_group(group_name)
             .map(|g| g.parallel)
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, docker_config).await
+            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
         } else {
-            run_sequential(group_checks, &project_root, docker_config).await
+            run_sequential(
+                group_checks,
+                &project_root,
+                docker_config,
+                executor.as_ref(),
+            )
+            .await
         };
 
         for result in results {
@@ -86,7 +127,6 @@ pub async fn run(
         println!();
     }
 
-    // Print summary
     let elapsed = start_time.elapsed();
     let elapsed_str = time::format_from_duration(elapsed);
     let passed = all_results
@@ -108,7 +148,6 @@ pub async fn run(
             elapsed_str
         );
 
-        // Show failed checks with details
         println!();
         println!("\x1b[1;31mFailed checks:\x1b[0m");
         for result in all_results
@@ -227,14 +266,14 @@ async fn run_sequential(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
-        // Skip on-demand checks in simple mode
         if check.on_demand {
             continue;
         }
-        let result = run_check(check, project_root, docker_config).await;
+        let result = run_check_with_executor(check, project_root, docker_config, executor).await;
         results.push(result);
     }
     results
@@ -244,26 +283,27 @@ async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
 
     for check in checks {
-        // Skip on-demand checks in simple mode
         if check.on_demand {
             continue;
         }
-        let check_id = check.id().to_string();
         let check = check.clone();
         let project_root = project_root.to_path_buf();
         let docker_config = docker_config.clone();
+        let executor = executor.clone();
 
-        let handle =
-            tokio::spawn(async move { run_check(&check, &project_root, &docker_config).await });
-        handles.push((check_id, handle));
+        let handle = tokio::spawn(async move {
+            run_check_with_executor(&check, &project_root, &docker_config, executor.as_ref()).await
+        });
+        handles.push(handle);
     }
 
     let mut results = Vec::new();
-    for (_id, handle) in handles {
+    for handle in handles {
         if let Ok(result) = handle.await {
             results.push(result);
         }
@@ -271,20 +311,16 @@ async fn run_parallel(
     results
 }
 
-/// Format the error_output field for a spawn-failed check.
-fn format_exec_error(err: &std::io::Error) -> String {
-    format!("Failed to execute: {}", err)
-}
-
-async fn run_check(
+/// Execute a single check via the injected executor (test-facing).
+pub async fn run_check_with_executor(
     check: &CheckToRun,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
 
-    // Use per-check container if specified, otherwise use default
     let default_container = docker_config.container_name();
     let container_name = check
         .definition
@@ -292,91 +328,34 @@ async fn run_check(
         .as_deref()
         .unwrap_or(&default_container);
 
-    // Get shell from config (default: bash)
-    let shell = docker_config.shell();
-
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if docker::is_running(container_name) {
-        // Container is running, use docker exec
-        format!(
-            "docker exec {} {} -c '{}'",
+    let env = std::collections::HashMap::new();
+    let docker_cmd = if executor.is_container_running(container_name) {
+        crate::runner::build_docker_exec_command(
             container_name,
-            shell,
-            check.resolved_command.replace('\'', "'\\''")
+            &env,
+            &check.resolved_command,
+            docker_config.shell(),
         )
     } else {
-        // Container not running, use docker run with --rm
-        let image_name = docker_config.image_name();
-        let work_dir = docker_config.working_dir();
-        let mut cmd = format!("docker run --rm -w {}", work_dir);
-        if let Some(ref volume) = docker_config.volume_mount {
-            cmd.push_str(&format!(" -v {}", volume));
-        }
-        cmd.push_str(&format!(
-            " {} {} -c '{}'",
-            image_name,
-            shell,
-            check.resolved_command.replace('\'', "'\\''")
-        ));
-        cmd
+        crate::runner::build_docker_run_command(docker_config, &env, &check.resolved_command)
     };
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&docker_cmd)
-        .current_dir(project_root)
-        .output()
-        .await;
-
+    let output = executor.execute(&docker_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    match output {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let status = if output.status.success() {
-                CheckStatus::Passed
-            } else {
-                CheckStatus::Failed
-            };
+    let status = if output.success {
+        CheckStatus::Passed
+    } else {
+        CheckStatus::Failed
+    };
 
-            CheckResult {
-                check_id,
-                status,
-                output: stdout,
-                error_output: stderr,
-                duration_ms,
-                started_at: None,
-                finished_at: None,
-            }
-        }
-        Err(e) => CheckResult {
-            check_id,
-            status: CheckStatus::Failed,
-            output: String::new(),
-            error_output: format_exec_error(&e),
-            duration_ms,
-            started_at: None,
-            finished_at: None,
-        },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_exec_error_prefixes_failed_to_execute() {
-        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "sh not found");
-        assert_eq!(format_exec_error(&err), "Failed to execute: sh not found");
-    }
-
-    #[test]
-    fn format_exec_error_preserves_underlying_message() {
-        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
-        let s = format_exec_error(&err);
-        assert!(s.contains("nope"));
-        assert!(s.starts_with("Failed to execute: "));
+    CheckResult {
+        check_id,
+        status,
+        output: output.stdout,
+        error_output: output.stderr,
+        duration_ms,
+        started_at: None,
+        finished_at: None,
     }
 }

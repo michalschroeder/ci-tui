@@ -16,44 +16,46 @@
 
 use crate::config::{CiConfig, DockerConfig};
 use crate::git::ChangedFiles;
-use crate::utils::{docker, time};
+use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 
-/// Run fix commands for all checks with fix_command defined
-pub async fn run(
+/// Summary of a fix run — consumed by `run` (prints + exits) or by tests.
+#[derive(Debug, Clone)]
+pub struct FixSummary {
+    pub fix_count: usize,
+    pub pass_count: usize,
+    pub fail_count: usize,
+    pub has_failures: bool,
+    pub elapsed: std::time::Duration,
+}
+
+/// Run fix commands for all checks using the supplied executor (test-facing).
+pub async fn run_with_executor(
     config: CiConfig,
     changed_files: ChangedFiles,
     project_root: PathBuf,
-) -> Result<()> {
+    executor: &dyn crate::runner::CommandExecutor,
+) -> Result<FixSummary> {
     let start_time = Instant::now();
     let docker_config = &config.docker;
-
-    // Print header
-    println!(
-        "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
-        changed_files.len(),
-        changed_files.base_ref
-    );
-    println!();
 
     let mut fix_count = 0;
     let mut pass_count = 0;
     let mut fail_count = 0;
     let mut has_failures = false;
 
-    // Iterate through all groups and checks to find fix commands
     for (group_name, group_config) in config.groups() {
         let display_name = group_config.display_name(group_name);
-        let (fc, pc, flc, hf) = run_group_fixes(
+        let (fc, pc, flc, hf) = run_group_fixes_with_executor(
             &config,
             group_config,
             display_name,
             &changed_files,
             &project_root,
             docker_config,
+            executor,
         )
         .await;
         fix_count += fc;
@@ -62,26 +64,53 @@ pub async fn run(
         has_failures |= hf;
     }
 
-    // Print summary
-    let elapsed = start_time.elapsed();
-    let elapsed_str = time::format_from_duration(elapsed);
+    Ok(FixSummary {
+        fix_count,
+        pass_count,
+        fail_count,
+        has_failures,
+        elapsed: start_time.elapsed(),
+    })
+}
 
-    if fix_count == 0 {
+/// Run fix commands for all checks with fix_command defined
+pub async fn run(
+    config: CiConfig,
+    changed_files: ChangedFiles,
+    project_root: PathBuf,
+) -> Result<()> {
+    println!(
+        "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
+        changed_files.len(),
+        changed_files.base_ref
+    );
+    println!();
+
+    let summary = run_with_executor(
+        config,
+        changed_files,
+        project_root,
+        &crate::runner::RealCommandExecutor,
+    )
+    .await?;
+
+    let elapsed_str = time::format_from_duration(summary.elapsed);
+    if summary.fix_count == 0 {
         println!("\x1b[33mNo fix commands found in config.\x1b[0m");
         return Ok(());
     }
 
     println!("\x1b[1m── Summary ──\x1b[0m");
-    if has_failures {
+    if summary.has_failures {
         println!(
             "\x1b[31m✗ {}/{} fixes passed, {} failed in {}\x1b[0m",
-            pass_count, fix_count, fail_count, elapsed_str
+            summary.pass_count, summary.fix_count, summary.fail_count, elapsed_str
         );
         std::process::exit(1);
     } else {
         println!(
             "\x1b[32m✓ All {} fixes passed in {}\x1b[0m",
-            fix_count, elapsed_str
+            summary.fix_count, elapsed_str
         );
     }
 
@@ -103,13 +132,14 @@ fn resolve_check_fix(
 }
 
 /// Run fix commands for a single group, returns (fix_count, pass_count, fail_count, has_failures)
-async fn run_group_fixes(
+async fn run_group_fixes_with_executor(
     config: &CiConfig,
     group_config: &crate::config::GroupConfig,
     display_name: &str,
     changed_files: &ChangedFiles,
     project_root: &Path,
     docker_config: &DockerConfig,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> (usize, usize, usize, bool) {
     let mut fix_count = 0;
     let mut pass_count = 0;
@@ -132,12 +162,13 @@ async fn run_group_fixes(
             check_id
         );
 
-        let result = run_fix_command(
+        let result = run_fix_command_with_executor(
             &resolved_command,
             check_id,
             project_root,
             docker_config,
             check.container.as_deref(),
+            executor,
         )
         .await;
 
@@ -236,62 +267,41 @@ fn select_fix_error_message(
     }
 }
 
-/// Execute a fix command via docker
-async fn run_fix_command(
+/// Execute a fix command via the injected executor (test-facing).
+///
+/// Returns `Ok(duration_ms)` on success, or `Err(anyhow::Error)` with a message
+/// selected by [`select_fix_error_message`]. Exit code is `None` at this boundary —
+/// `CommandOutput` only carries a boolean success flag.
+pub async fn run_fix_command_with_executor(
     command: &str,
     check_id: &str,
     project_root: &Path,
     docker_config: &DockerConfig,
     check_container: Option<&str>,
+    executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<u64> {
     let start = Instant::now();
 
-    // Use per-check container if specified, otherwise use default
     let default_container = docker_config.container_name();
     let container_name = check_container.unwrap_or(&default_container);
 
-    // Get shell from config (default: bash)
-    let shell = docker_config.shell();
-
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if docker::is_running(container_name) {
-        // Container is running, use docker exec
-        format!(
-            "docker exec {} {} -c '{}'",
+    let env = std::collections::HashMap::new();
+    let docker_cmd = if executor.is_container_running(container_name) {
+        crate::runner::build_docker_exec_command(
             container_name,
-            shell,
-            command.replace('\'', "'\\''")
+            &env,
+            command,
+            docker_config.shell(),
         )
     } else {
-        // Container not running, use docker run with --rm
-        let image_name = docker_config.image_name();
-        let work_dir = docker_config.working_dir();
-        let mut cmd = format!("docker run --rm -w {}", work_dir);
-        if let Some(ref volume) = docker_config.volume_mount {
-            cmd.push_str(&format!(" -v {}", volume));
-        }
-        cmd.push_str(&format!(
-            " {} {} -c '{}'",
-            image_name,
-            shell,
-            command.replace('\'', "'\\''")
-        ));
-        cmd
+        crate::runner::build_docker_run_command(docker_config, &env, command)
     };
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&docker_cmd)
-        .current_dir(project_root)
-        .output()
-        .await?;
-
+    let output = executor.execute(&docker_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let error_msg = select_fix_error_message(&stderr, &stdout, check_id, output.status.code());
+    if !output.success {
+        let error_msg = select_fix_error_message(&output.stderr, &output.stdout, check_id, None);
         anyhow::bail!("{}", error_msg);
     }
 
