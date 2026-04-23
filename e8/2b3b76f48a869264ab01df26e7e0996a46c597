@@ -1,0 +1,36 @@
+src/fix.rs
+  b610e85781e816e0 218-238,294,300-500
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "e82b3b76f48a869264ab01df26e7e0996a46c597",
+  "prompts": {
+    "a3554041bf11b004": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5328edd-a626-48d6-b676-357e24cb3067",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "b610e85781e816e0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a1659a7c-6ca3-4237-98f1-de2f4005b1a3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 663,
+      "total_deletions": 48,
+      "accepted_lines": 655,
+      "overriden_lines": 0
+    }
+  }
+}
