@@ -502,4 +502,87 @@ mod tests {
         let result = get_changed_files_with_executor(Path::new("/tmp"), "nope", &mock);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn detect_changes_errors_when_uncommitted_diff_fails() {
+        use mockall::Sequence;
+        let mut mock = MockGitExecutor::new();
+        let mut seq = Sequence::new();
+
+        // 1st: committed diff against origin/main — succeeds (returns one file)
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == "origin/main")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("committed.rs\n".to_string()));
+
+        // 2nd: uncommitted diff — FAILS
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Err(anyhow::anyhow!("uncommitted diff blew up")));
+
+        let config = crate::config::GitConfig {
+            base_branch: "main".to_string(),
+            fallback_branch: "HEAD~1".to_string(),
+        };
+
+        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock);
+        assert!(result.is_err(), "uncommitted failure must surface as Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("uncommitted diff blew up"),
+            "err should include underlying message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn detect_changes_errors_when_untracked_list_fails() {
+        use mockall::Sequence;
+        let mut mock = MockGitExecutor::new();
+        let mut seq = Sequence::new();
+
+        // 1st: committed diff succeeds
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("a.rs\n".to_string()));
+
+        // 2nd: uncommitted diff succeeds (empty)
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                !args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(String::new()));
+
+        // 3rd: untracked ls-files — FAILS
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Err(anyhow::anyhow!("ls-files refused")));
+
+        let config = crate::config::GitConfig {
+            base_branch: "main".to_string(),
+            fallback_branch: "HEAD~1".to_string(),
+        };
+
+        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("ls-files refused"),
+            "err should include underlying: {msg}"
+        );
+    }
 }
