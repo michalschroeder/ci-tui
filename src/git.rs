@@ -149,9 +149,10 @@ pub fn detect_changes_with_executor(
 
     // Uncommitted diff runs once; error here surfaces directly.
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
+    let untracked = run_untracked_list(project_root, executor)?;
 
     Ok(ChangedFiles {
-        files: union_diff_lines(&committed, &uncommitted),
+        files: union_lines(&[&committed, &uncommitted, &untracked]),
         base_ref,
     })
 }
@@ -175,8 +176,9 @@ pub fn get_changed_files_with_executor(
 ) -> Result<ChangedFiles> {
     let committed = run_committed_diff(project_root, base_ref, executor)?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
+    let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {
-        files: union_diff_lines(&committed, &uncommitted),
+        files: union_lines(&[&committed, &uncommitted, &untracked]),
         base_ref: base_ref.to_string(),
     })
 }
@@ -207,10 +209,19 @@ fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Res
     executor.run_command(project_root, &args)
 }
 
-fn union_diff_lines(committed: &str, uncommitted: &str) -> Vec<String> {
+fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
+    let args = vec![
+        "ls-files".to_string(),
+        "--others".to_string(),
+        "--exclude-standard".to_string(),
+    ];
+    executor.run_command(project_root, &args)
+}
+
+fn union_lines(sources: &[&str]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for line in committed.lines().chain(uncommitted.lines()) {
+    for line in sources.iter().flat_map(|s| s.lines()) {
         if line.is_empty() {
             continue;
         }
@@ -389,6 +400,12 @@ mod tests {
             .times(2)
             .returning(|_, _| Ok(String::new()));
 
+        // ls-files (untracked) doesn't use --diff-filter
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
         let _ = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
     }
 
@@ -404,17 +421,17 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(String::new()));
 
-        // Second call: uncommitted diff — no --merge-base
+        // Remaining calls (uncommitted diff + untracked ls-files) — no --merge-base
         mock.expect_run_command()
             .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
-            .times(1)
+            .times(2)
             .returning(|_, _| Ok(String::new()));
 
         let _ = get_changed_files_with_executor(Path::new("/tmp"), "origin/main", &mock).unwrap();
     }
 
     #[test]
-    fn get_changed_files_issues_two_calls_and_unions_results() {
+    fn get_changed_files_issues_three_calls_and_unions_results() {
         use mockall::Sequence;
         let mut mock = MockGitExecutor::new();
         let mut seq = Sequence::new();
@@ -437,11 +454,42 @@ mod tests {
             .in_sequence(&mut seq)
             .returning(|_, _| Ok("b.rs\nc.rs\n".to_string()));
 
+        // Third call: untracked (ls-files --others --exclude-standard) — returns c.rs, d.rs
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "ls-files")
+                    && args.iter().any(|a| a == "--others")
+                    && args.iter().any(|a| a == "--exclude-standard")
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok("c.rs\nd.rs\n".to_string()));
+
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
 
-        // Committed-first order, deduped
-        assert_eq!(result.files, vec!["a.rs", "b.rs", "c.rs"]);
+        // Committed-first order, untracked appended, deduped across all three sources
+        assert_eq!(result.files, vec!["a.rs", "b.rs", "c.rs", "d.rs"]);
         assert_eq!(result.base_ref, "main");
+    }
+
+    #[test]
+    fn get_changed_files_includes_untracked_when_no_diff() {
+        let mut mock = MockGitExecutor::new();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        // Mock returns only non-gitignored paths — the real git binary applies
+        // --exclude-standard, we just test plumbing.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
+            .times(1)
+            .returning(|_, _| Ok("new_file.rs\nsrc/new_mod.rs\n".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+        assert_eq!(result.files, vec!["new_file.rs", "src/new_mod.rs"]);
     }
 
     #[test]

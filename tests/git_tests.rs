@@ -101,10 +101,10 @@ mod detect_changes {
             .times(1)
             .returning(|_, _| Ok("file1.rs\n".to_string()));
 
-        // Then: uncommitted diff (no --merge-base) — succeeds.
+        // Then: uncommitted diff + untracked ls-files (no --merge-base) — succeed.
         mock.expect_run_command()
             .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
-            .times(1)
+            .times(2)
             .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
@@ -140,10 +140,10 @@ mod detect_changes {
             .times(1)
             .returning(|_, _| Ok("file2.rs\n".to_string()));
 
-        // Uncommitted — succeeds with no output.
+        // Uncommitted + untracked — succeed with no output.
         mock.expect_run_command()
             .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
-            .times(1)
+            .times(2)
             .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
@@ -188,10 +188,10 @@ mod detect_changes {
             .times(1)
             .returning(|_, _| Ok("src/main.rs\n".to_string()));
 
-        // Uncommitted follows.
+        // Uncommitted + untracked follow.
         mock.expect_run_command()
             .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
-            .times(1)
+            .times(2)
             .returning(|_, _| Ok(String::new()));
 
         let config = GitConfig {
