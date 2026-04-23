@@ -1,0 +1,23 @@
+src/checks/determine.rs
+  a3554041bf11b004 404-442
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "c77a8f89864df463d914345feb728cfefe9f6bbc",
+  "prompts": {
+    "a3554041bf11b004": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5328edd-a626-48d6-b676-357e24cb3067",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 0,
+      "accepted_lines": 39,
+      "overriden_lines": 0
+    }
+  }
+}
