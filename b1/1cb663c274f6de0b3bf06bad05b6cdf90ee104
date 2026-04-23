@@ -1,0 +1,36 @@
+src/config.rs
+  a3554041bf11b004 1581-1629
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "b11cb663c274f6de0b3bf06bad05b6cdf90ee104",
+  "prompts": {
+    "a3554041bf11b004": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5328edd-a626-48d6-b676-357e24cb3067",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 49,
+      "total_deletions": 0,
+      "accepted_lines": 49,
+      "overriden_lines": 0
+    },
+    "a93082b2ab486808": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "64e68254-653b-49e1-b0ae-ec195d46b5b7",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "michal.schroeder",
+      "messages": [],
+      "total_additions": 4137,
+      "total_deletions": 113,
+      "accepted_lines": 4024,
+      "overriden_lines": 0
+    }
+  }
+}
