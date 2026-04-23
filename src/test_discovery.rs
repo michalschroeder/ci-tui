@@ -180,22 +180,6 @@ fn grep_search_with_runner(
     found_tests
 }
 
-#[cfg(test)]
-fn grep_search(
-    source_file: &str,
-    search_dirs: &[String],
-    pattern: &str,
-    project_root: &Path,
-) -> Vec<String> {
-    grep_search_with_runner(
-        source_file,
-        search_dirs,
-        pattern,
-        project_root,
-        &RealProcessRunner,
-    )
-}
-
 /// Expand placeholders in pattern based on source file path
 ///
 /// Available placeholders:
@@ -603,7 +587,13 @@ class AttachmentTest extends TestCase
         let search_dirs = vec!["tests/Unit".to_string()];
         let pattern = "CoversClass({basename}::class)";
 
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search_with_runner(
+            source_file,
+            &search_dirs,
+            pattern,
+            temp_dir.path(),
+            &RealProcessRunner,
+        );
 
         assert_eq!(results.len(), 1);
         assert!(results[0].ends_with("AttachmentTest.php"));
@@ -633,7 +623,13 @@ class OtherTest extends TestCase {}
         let search_dirs = vec!["tests/Unit".to_string()];
         let pattern = "CoversClass({basename}::class)";
 
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search_with_runner(
+            source_file,
+            &search_dirs,
+            pattern,
+            temp_dir.path(),
+            &RealProcessRunner,
+        );
 
         assert!(results.is_empty());
     }
@@ -659,7 +655,13 @@ class OtherTest extends TestCase {}
         let search_dirs = vec!["tests/Unit".to_string()];
         let pattern = "CoversClass({basename}::class)";
 
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search_with_runner(
+            source_file,
+            &search_dirs,
+            pattern,
+            temp_dir.path(),
+            &RealProcessRunner,
+        );
 
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("Domain/Communication/AttachmentTest.php"));
@@ -675,7 +677,13 @@ class OtherTest extends TestCase {}
         let search_dirs = vec!["nonexistent/dir".to_string()];
         let pattern = "CoversClass({basename}::class)";
 
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search_with_runner(
+            source_file,
+            &search_dirs,
+            pattern,
+            temp_dir.path(),
+            &RealProcessRunner,
+        );
 
         assert!(results.is_empty());
     }
@@ -700,18 +708,25 @@ class OtherTest extends TestCase {}
         let search_dirs = vec!["tests/Unit".to_string()];
         let pattern = "CoversClass({basename}::class)";
 
-        let results = grep_search(source_file, &search_dirs, pattern, temp_dir.path());
+        let results = grep_search_with_runner(
+            source_file,
+            &search_dirs,
+            pattern,
+            temp_dir.path(),
+            &RealProcessRunner,
+        );
 
         assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn test_grep_search_empty_search_dirs() {
-        let results = grep_search(
+        let results = grep_search_with_runner(
             "src/Domain/Attachment.php",
             &[],
             "CoversClass({basename}::class)",
             Path::new("/"),
+            &RealProcessRunner,
         );
         assert!(results.is_empty());
     }
@@ -724,11 +739,12 @@ class OtherTest extends TestCase {}
         let temp_dir = TempDir::new().unwrap();
         fs::create_dir_all(temp_dir.path().join("tests/Empty")).unwrap();
 
-        let results = grep_search(
+        let results = grep_search_with_runner(
             "src/Foo.php",
             &["tests/Empty".to_string()],
             "CoversClass({basename}::class)",
             temp_dir.path(),
+            &RealProcessRunner,
         );
         assert!(results.is_empty(), "got: {results:?}");
     }
