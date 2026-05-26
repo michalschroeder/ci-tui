@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.16](https://github.com/michalschroeder/ci-tui/compare/v0.1.15...v0.1.16) (2026-05-26)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate sysinfo to 0.39 ([#71](https://github.com/michalschroeder/ci-tui/issues/71)) ([14c57ba](https://github.com/michalschroeder/ci-tui/commit/14c57bacc746034eb0dd02742e681eaee9aa5d43))
+
+
+### Code Refactoring
+
+* route fix.rs + simple.rs through CommandExecutor ([#68](https://github.com/michalschroeder/ci-tui/issues/68)) ([82addf1](https://github.com/michalschroeder/ci-tui/commit/82addf1b7fa3c7267a16bddb85bdccb35616aa15))
+* **test_discovery:** inject ProcessRunner into grep_search ([#70](https://github.com/michalschroeder/ci-tui/issues/70)) ([5fd6b4a](https://github.com/michalschroeder/ci-tui/commit/5fd6b4a82dea89781db28799b3f12b5481cf880b))
+
 ## [0.1.15](https://github.com/michalschroeder/ci-tui/compare/v0.1.14...v0.1.15) (2026-04-23)
 
 
