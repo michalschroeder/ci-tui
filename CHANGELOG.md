@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/michalschroeder/ci-tui/compare/v0.1.16...v0.1.17) (2026-06-28)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate mockall to 0.15 ([#87](https://github.com/michalschroeder/ci-tui/issues/87)) ([1d9ebe2](https://github.com/michalschroeder/ci-tui/commit/1d9ebe20d7b81dcbf3bc47113b926b0b26b6ac04))
+
 ## [0.1.16](https://github.com/michalschroeder/ci-tui/compare/v0.1.15...v0.1.16) (2026-05-26)
 
 
