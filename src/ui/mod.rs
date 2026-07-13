@@ -305,9 +305,13 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
     let base_ref = app.changed_files.base_ref.clone();
 
     let Ok(mut new_changed_files) = get_changed_files(&channels.project_root, &base_ref) else {
-        // Git refresh failed - fall back to running with existing check
+        // Git refresh failed - fall back to running with existing check,
+        // but tell the user the file list may be stale
         let check = check.clone();
         app.update(AppMessage::ResetForRetry(check.id().to_string()));
+        app.update(AppMessage::SetStatusMessage(Some(
+            "Git refresh failed - retrying with previous file list".to_string(),
+        )));
         spawn_retry_task(channels, check);
         return KeyAction::None;
     };
@@ -821,6 +825,55 @@ checks:
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::empty(),
         }
+    }
+
+    fn make_test_check(id: &str, group: &str) -> crate::checks::CheckToRun {
+        crate::checks::CheckToRun {
+            id: id.to_string(),
+            group: group.to_string(),
+            definition: crate::config::CheckDefinition {
+                name: id.to_string(),
+                command: format!("{} {{files}}", id),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: std::collections::HashMap::new(),
+            },
+            service: "php".to_string(),
+            files: vec!["src/Foo.php".to_string()],
+            resolved_command: format!("{} src/Foo.php", id),
+            resolved_fix_command: None,
+            on_demand: false,
+            skipped_no_files: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_selected_git_failure_sets_status_message() {
+        let config = test_config();
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        let checks = vec![make_test_check("php-lint", "fast")];
+        let mut app = App::new(config.clone(), changed_files, checks, "main".to_string());
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
+        let channels = make_test_channels(&config); // project_root does not exist -> git fails
+
+        let action = handle_retry_selected(&mut app, &channels, &config);
+
+        assert!(matches!(action, KeyAction::None));
+        assert!(
+            app.status_message.is_some(),
+            "git refresh failure must surface a status message"
+        );
+        // Fallback still retried the check with the previous file list
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Running
+        );
     }
 
     #[tokio::test]
