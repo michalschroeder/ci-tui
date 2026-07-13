@@ -75,8 +75,17 @@ enum Message {
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
     FixResult(CheckResult),
-    FixAllResult(CheckResult, bool), // (result, is_last)
+    FixAll(FixAllEvent),
     RetryResult(CheckResult),
+}
+
+/// Events from the fix-all background task
+#[derive(Debug)]
+enum FixAllEvent {
+    /// One fix command finished
+    Result(CheckResult),
+    /// The whole fix-all loop finished (sent unconditionally after the loop)
+    Done,
 }
 
 /// Read keyboard events and send them through a channel
@@ -182,7 +191,7 @@ enum Action {
 /// Channels for spawning async operations from key handlers
 struct EventChannels {
     fix_tx: mpsc::Sender<CheckResult>,
-    fix_all_tx: mpsc::Sender<(CheckResult, bool)>,
+    fix_all_tx: mpsc::Sender<FixAllEvent>,
     retry_tx: mpsc::Sender<CheckResult>,
     project_root: Arc<PathBuf>,
     /// Container name for docker exec/run commands (Arc for cheap cloning into async tasks)
@@ -419,7 +428,7 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
     let docker_config = Arc::clone(&channels.docker_config);
     let global_env = Arc::clone(&channels.global_env);
     tokio::spawn(async move {
-        for (i, (_check_id, fix_cmd, _service, container)) in fix_commands.into_iter().enumerate() {
+        for (_check_id, fix_cmd, _service, container) in fix_commands {
             let container_name = container.as_deref().unwrap_or(&default_container);
             let result = run_fix_command(
                 &fix_cmd,
@@ -429,9 +438,12 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
                 &global_env,
             )
             .await;
-            let is_last = i == total - 1;
-            let _ = fix_all_tx.send((result, is_last)).await;
+            let _ = fix_all_tx.send(FixAllEvent::Result(result)).await;
         }
+        // Always signal completion, decoupled from per-result send success.
+        // Previously completion rode on an is_last flag on the final result;
+        // a failed send left fix_all_running=true and disabled r/t/x/X forever.
+        let _ = fix_all_tx.send(FixAllEvent::Done).await;
     });
     KeyAction::None
 }
@@ -557,11 +569,12 @@ fn handle_message(
             app.update(AppMessage::FinishFix(result));
             Ok(Action::Continue)
         }
-        Message::FixAllResult(result, is_last) => {
+        Message::FixAll(FixAllEvent::Result(result)) => {
             app.update(AppMessage::AddFixAllResult(result));
-            if is_last {
-                app.update(AppMessage::FinishFixAll);
-            }
+            Ok(Action::Continue)
+        }
+        Message::FixAll(FixAllEvent::Done) => {
+            app.update(AppMessage::FinishFixAll);
             Ok(Action::Continue)
         }
         Message::RetryResult(result) => {
@@ -598,7 +611,7 @@ pub async fn run(
 
     // Create event channels for async operations
     let (fix_tx, mut fix_rx) = mpsc::channel(1);
-    let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<(CheckResult, bool)>(10);
+    let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<FixAllEvent>(10);
     let (retry_tx, mut retry_rx) = mpsc::channel::<CheckResult>(1);
     let project_root = Arc::new(project_root);
     let container_name: Arc<str> = config.docker.container_name().into();
@@ -652,7 +665,7 @@ pub async fn run(
             Some(result) = fix_rx.recv() => Message::FixResult(result),
 
             // Fix-all command results
-            Some((result, is_last)) = fix_all_rx.recv() => Message::FixAllResult(result, is_last),
+            Some(event) = fix_all_rx.recv() => Message::FixAll(event),
 
             // Retry command results
             Some(result) = retry_rx.recv() => Message::RetryResult(result),
@@ -953,5 +966,51 @@ checks:
             other_checked_first, 0,
             "Other channel should never be checked when keyboard has events (biased; priority)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_fix_all_done_clears_running_flag() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let channels = make_test_channels(&config);
+
+        app.update(AppMessage::StartFixAll(2));
+        assert!(app.fix_all_running);
+
+        // Done arrives even if individual result sends were lost
+        let action = handle_message(
+            &mut app,
+            Message::FixAll(FixAllEvent::Done),
+            &channels,
+            &config,
+        )
+        .unwrap();
+
+        assert!(matches!(action, Action::Continue));
+        assert!(!app.fix_all_running, "Done must clear fix_all_running");
+    }
+
+    #[tokio::test]
+    async fn test_fix_all_result_does_not_finish_run() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let channels = make_test_channels(&config);
+
+        app.update(AppMessage::StartFixAll(2));
+
+        let result = CheckResult::pending("some-check");
+        handle_message(
+            &mut app,
+            Message::FixAll(FixAllEvent::Result(result)),
+            &channels,
+            &config,
+        )
+        .unwrap();
+
+        assert!(
+            app.fix_all_running,
+            "intermediate results must not finish the run"
+        );
+        assert_eq!(app.fix_all_results.len(), 1);
     }
 }
