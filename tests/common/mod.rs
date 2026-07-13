@@ -3,7 +3,7 @@
 pub mod configs;
 
 use ci_tui::checks::CheckToRun;
-use ci_tui::config::{CheckDefinition, CiConfig};
+use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig};
 use ci_tui::git::ChangedFiles;
 use ci_tui::runner::CheckStatus;
 use ci_tui::ui::app::App;
@@ -123,6 +123,48 @@ pub fn make_check_with_options(
             None
         },
         on_demand,
+        skipped_no_files: false,
+    }
+}
+
+/// Minimal DockerConfig for mocked-executor tests. Field values are immaterial
+/// beyond being stable strings that mocks can match against.
+#[allow(dead_code)]
+pub fn test_docker_config(image: &str) -> DockerConfig {
+    DockerConfig {
+        project_dir: "/app".to_string(),
+        service: "app".to_string(),
+        container: None,
+        image: Some(image.to_string()),
+        volume_mount: None,
+        work_dir: None,
+        shell: "bash".to_string(),
+        env: std::collections::HashMap::new(),
+    }
+}
+
+/// CheckToRun whose resolved_command equals `command`, for executor tests.
+/// `container` sets the per-check container override.
+#[allow(dead_code)]
+pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> CheckToRun {
+    CheckToRun {
+        id: id.to_string(),
+        group: "g".to_string(),
+        definition: CheckDefinition {
+            name: id.to_string(),
+            command: command.to_string(),
+            service: None,
+            container: container.map(String::from),
+            fix_command: None,
+            triggers: None,
+            on_demand: false,
+            env: std::collections::HashMap::new(),
+        },
+        service: "app".to_string(),
+        files: vec![],
+        resolved_command: command.to_string(),
+        resolved_fix_command: None,
+        on_demand: false,
         skipped_no_files: false,
     }
 }

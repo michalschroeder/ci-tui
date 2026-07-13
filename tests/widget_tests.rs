@@ -109,10 +109,19 @@ fn test_header_shows_elapsed_time() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    // Should show time in seconds format (0s, 1s, etc.)
+    // Header renders elapsed time as "<digits>s" (e.g. "0s", "12s")
+    let has_elapsed = (0..HEIGHT).any(|y| {
+        let line: String = (0..WIDTH)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        line.as_bytes()
+            .windows(2)
+            .any(|w| w[0].is_ascii_digit() && w[1] == b's')
+    });
     assert!(
-        buffer_contains(buffer, "s"),
-        "Elapsed time should appear in header"
+        has_elapsed,
+        "Elapsed time like '0s' should appear in header"
     );
 }
 
@@ -127,6 +136,21 @@ fn test_header_shows_progress() {
     assert!(
         buffer_contains(buffer, "Running") || buffer_contains(buffer, "passed"),
         "Progress status should appear in header"
+    );
+}
+
+#[test]
+fn test_header_shows_on_demand_count() {
+    let mut app = make_test_app();
+    // Flip one check's result to OnDemand; header shows "+1 on-demand"
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(
+        buffer_contains(buffer, "+1 on-demand"),
+        "Header should show on-demand count when an on-demand check exists"
     );
 }
 
