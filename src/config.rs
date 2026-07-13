@@ -335,11 +335,7 @@ pub struct PreCommand {
     pub env: std::collections::HashMap<String, String>,
 }
 
-/// Load configuration from a YAML file.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or parsed.
+/// Compile every entry in `file_patterns` into a Regex, erroring on the first invalid pattern.
 fn compile_file_patterns(
     patterns: &HashMap<String, FilePattern>,
 ) -> Result<HashMap<String, Regex>> {
@@ -361,6 +357,11 @@ fn compile_ignore_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
         .collect()
 }
 
+/// Load configuration from a YAML file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, parsed, or contains invalid regexes.
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -403,6 +404,10 @@ impl CiConfig {
     ///
     /// Called from [`load_config`] so that invalid regexes surface at startup instead
     /// of being silently dropped on first use.
+    ///
+    /// First call wins: the `OnceLock::set` results are deliberately discarded, so a
+    /// second call never replaces already-cached patterns (even if `file_patterns`
+    /// was mutated in between). Call at most once per config instance.
     pub fn validate_and_compile(&self) -> Result<()> {
         let _ = self
             .compiled_file_patterns

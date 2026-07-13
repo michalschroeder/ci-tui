@@ -108,11 +108,11 @@ impl ChangedFiles {
 /// Detect changed files by trying multiple base references in order of preference.
 ///
 /// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`.
-/// Returns empty list if all references fail.
 ///
 /// # Errors
 ///
-/// Returns an error if git operations fail unexpectedly.
+/// Returns an error if none of the base references resolve, or if the
+/// uncommitted-diff / untracked-files git commands fail.
 pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<ChangedFiles> {
     detect_changes_with_executor(project_root, git_config, &RealGitExecutor)
 }
