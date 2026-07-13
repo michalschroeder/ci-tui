@@ -126,6 +126,29 @@ mod build_docker_exec_command_tests {
         assert!(cmd.contains("/bin/sh -c"));
         assert!(!cmd.contains("bash"));
     }
+
+    #[test]
+    fn invalid_env_key_is_skipped() {
+        let mut env = HashMap::new();
+        env.insert("GOOD_KEY".to_string(), "v1".to_string());
+        env.insert("bad key'; rm -rf /".to_string(), "v2".to_string());
+        let cmd = build_docker_exec_command("container", &env, "test", "bash");
+
+        assert!(cmd.contains("-e GOOD_KEY='v1'"));
+        assert!(
+            !cmd.contains("rm -rf"),
+            "invalid key must not reach the command: {cmd}"
+        );
+        assert!(!cmd.contains("bad key"));
+    }
+
+    #[test]
+    fn all_env_keys_invalid_behaves_like_no_env() {
+        let mut env = HashMap::new();
+        env.insert("has space".to_string(), "v".to_string());
+        let cmd = build_docker_exec_command("my-container", &env, "cargo test", "bash");
+        assert_eq!(cmd, "docker exec my-container bash -c 'cargo test'");
+    }
 }
 
 mod build_docker_run_command_tests {

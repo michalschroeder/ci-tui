@@ -88,39 +88,38 @@ pub fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
-/// Build a docker exec command with environment variables
+/// True if `key` is a valid environment variable identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Build a docker exec command with environment variables.
+///
+/// Values are single-quoted (with `'` escaped) to survive the outer shell.
+/// Keys cannot be quoted in `-e KEY=...`, so keys that are not valid env
+/// identifiers are skipped entirely to prevent shell injection.
 pub fn build_docker_exec_command(
     container_name: &str,
     env: &std::collections::HashMap<String, String>,
     command: &str,
     shell: &str,
 ) -> String {
-    // Build env flags for docker exec (-e KEY='VALUE' for each)
-    // Values are quoted to handle special characters like & ? in URLs
     let env_flags: String = env
         .iter()
-        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .filter(|(k, _)| is_valid_env_key(k))
+        .map(|(k, v)| format!("-e {}='{}' ", k, v.replace('\'', "'\\''")))
+        .collect();
 
-    // Build docker exec command
-    // Use configured shell with single quotes to prevent outer shell from expanding variables
-    if env_flags.is_empty() {
-        format!(
-            "docker exec {} {} -c '{}'",
-            container_name,
-            shell,
-            command.replace('\'', "'\\''")
-        )
-    } else {
-        format!(
-            "docker exec {} {} {} -c '{}'",
-            env_flags,
-            container_name,
-            shell,
-            command.replace('\'', "'\\''")
-        )
-    }
+    // Single format path: env_flags is either empty or ends with a trailing space.
+    format!(
+        "docker exec {}{} {} -c '{}'",
+        env_flags,
+        container_name,
+        shell,
+        command.replace('\'', "'\\''")
+    )
 }
 
 /// Build a docker run command with environment variables
