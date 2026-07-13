@@ -1,59 +1,12 @@
-//! Tests for fix.rs - fix command resolution and execution
+//! Tests for fix.rs - fix command resolution
 //!
-//! This test file covers:
-//! - resolve_fix_command: placeholder substitution for {files}
-//!
-//! Note: run_fix_command and run() are not tested directly as they require
-//! Docker execution. These are validated via --fix mode in CI.
+//! Covers resolve_fix_command placeholder substitution. Execution paths
+//! (run_fix_command_with_executor, run_with_executor) are covered in
+//! tests/fix_executor_tests.rs via MockCommandExecutor.
 
 use ci_tui::fix::resolve_fix_command;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-
-#[test]
-fn empty_files_with_placeholder_returns_trimmed_command() {
-    let result = resolve_fix_command("cargo fmt -- {files}", &[]);
-    assert_eq!(result, "cargo fmt --");
-}
-
-#[test]
-fn single_file_substitutes_correctly() {
-    let result = resolve_fix_command("cargo fmt -- {files}", &["src/main.rs"]);
-    assert_eq!(result, "cargo fmt -- src/main.rs");
-}
-
-#[test]
-fn multiple_files_are_space_separated() {
-    let result = resolve_fix_command(
-        "cargo fmt -- {files}",
-        &["src/main.rs", "src/lib.rs", "src/config.rs"],
-    );
-    assert_eq!(result, "cargo fmt -- src/main.rs src/lib.rs src/config.rs");
-}
-
-#[test]
-fn command_without_placeholder_is_unchanged() {
-    let result = resolve_fix_command("cargo fmt", &["src/main.rs"]);
-    assert_eq!(result, "cargo fmt");
-}
-
-#[test]
-fn leading_whitespace_is_trimmed_after_substitution() {
-    let result = resolve_fix_command("{files} cargo fmt", &[]);
-    assert_eq!(result, "cargo fmt");
-}
-
-#[test]
-fn trailing_whitespace_is_trimmed_after_substitution() {
-    let result = resolve_fix_command("cargo fmt {files}", &[]);
-    assert_eq!(result, "cargo fmt");
-}
-
-#[test]
-fn placeholder_in_middle_of_command() {
-    let result = resolve_fix_command("php-cs-fixer fix {files} --dry-run", &["src/App.php"]);
-    assert_eq!(result, "php-cs-fixer fix src/App.php --dry-run");
-}
 
 #[rstest]
 #[case("cmd {files}", &[], "cmd")]
@@ -62,6 +15,8 @@ fn placeholder_in_middle_of_command() {
 #[case("{files} cmd", &[], "cmd")]
 #[case("{files} cmd", &["a.rs"], "a.rs cmd")]
 #[case("cmd", &["a.rs", "b.rs"], "cmd")]
+#[case("cargo fmt -- {files}", &[], "cargo fmt --")]
+#[case("php-cs-fixer fix {files} --dry-run", &["src/App.php"], "php-cs-fixer fix src/App.php --dry-run")]
 fn parameterized_placeholder_substitution(
     #[case] template: &str,
     #[case] files: &[&str],
