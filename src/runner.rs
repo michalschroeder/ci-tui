@@ -459,15 +459,25 @@ impl CheckRunner {
         (output.success, combined, duration_ms)
     }
 
+    /// Resolve the container for a check/pre-command.
+    ///
+    /// Precedence: explicit `container:` > compose-convention name for a
+    /// non-default service > cached default container.
+    ///
+    /// LIMITATION: assumes the Docker Compose v2 naming convention
+    /// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
+    /// override inside the compose file is not. Non-UTF8 project paths fall
+    /// back to the literal project name "project". Future work: resolve via
+    /// `docker compose ps -q <service>` instead of string construction.
     fn resolve_container_name(&self, explicit: Option<&str>, service: &str) -> String {
         if let Some(container) = explicit {
             container.to_string()
         } else if service != self.config.default_service() {
-            let project_name = std::path::Path::new(&self.config.docker.project_dir)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
-            format!("{}-{}-1", project_name, service)
+            format!(
+                "{}-{}-1",
+                self.config.docker.compose_project_name(),
+                service
+            )
         } else {
             self.container_name.to_string()
         }

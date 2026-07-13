@@ -122,10 +122,23 @@ impl DockerConfig {
         }
 
         // Derive container name from project_dir and service
-        let project_name = self.derive_project_name();
+        let project_name = self.compose_project_name();
 
         // Docker Compose naming convention: {project}-{service}-1
         format!("{}-{}-1", project_name, self.service)
+    }
+
+    /// Compose project name: `COMPOSE_PROJECT_NAME` env var if set (compose's own
+    /// precedence), otherwise derived from `project_dir`'s last path component.
+    ///
+    /// LIMITATION: a `name:` key inside the compose file is NOT detected — deriving
+    /// the real project name would require running `docker compose ps`.
+    /// Future work: resolve containers via `docker compose ps -q <service>`.
+    pub(crate) fn compose_project_name(&self) -> String {
+        std::env::var("COMPOSE_PROJECT_NAME")
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.derive_project_name())
     }
 
     /// Extract project name from project_dir (last path component)
@@ -1067,6 +1080,29 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             // Image derived from container name by stripping -1 suffix
             assert_eq!(config.docker.image_name(), "myproject-web");
+        }
+
+        // Edge case: COMPOSE_PROJECT_NAME overrides project_dir-derived compose project name.
+        // Uses a unique var value; test mutates process env, so restore afterwards.
+        #[test]
+        fn test_container_name_honors_compose_project_name_env() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./myproject
+  service: web
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            std::env::set_var("COMPOSE_PROJECT_NAME", "customproj");
+            let name = config.docker.container_name();
+            std::env::remove_var("COMPOSE_PROJECT_NAME");
+            assert_eq!(name, "customproj-web-1");
         }
 
         // Edge case: container name itself ending in -1 must lose only ONE -1 suffix
