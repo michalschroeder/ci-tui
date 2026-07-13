@@ -88,39 +88,38 @@ pub fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
-/// Build a docker exec command with environment variables
+/// True if `key` is a valid environment variable identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Build a docker exec command with environment variables.
+///
+/// Values are single-quoted (with `'` escaped) to survive the outer shell.
+/// Keys cannot be quoted in `-e KEY=...`, so keys that are not valid env
+/// identifiers are skipped entirely to prevent shell injection.
 pub fn build_docker_exec_command(
     container_name: &str,
     env: &std::collections::HashMap<String, String>,
     command: &str,
     shell: &str,
 ) -> String {
-    // Build env flags for docker exec (-e KEY='VALUE' for each)
-    // Values are quoted to handle special characters like & ? in URLs
     let env_flags: String = env
         .iter()
-        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .filter(|(k, _)| is_valid_env_key(k))
+        .map(|(k, v)| format!("-e {}='{}' ", k, v.replace('\'', "'\\''")))
+        .collect();
 
-    // Build docker exec command
-    // Use configured shell with single quotes to prevent outer shell from expanding variables
-    if env_flags.is_empty() {
-        format!(
-            "docker exec {} {} -c '{}'",
-            container_name,
-            shell,
-            command.replace('\'', "'\\''")
-        )
-    } else {
-        format!(
-            "docker exec {} {} {} -c '{}'",
-            env_flags,
-            container_name,
-            shell,
-            command.replace('\'', "'\\''")
-        )
-    }
+    // Single format path: env_flags is either empty or ends with a trailing space.
+    format!(
+        "docker exec {}{} {} -c '{}'",
+        env_flags,
+        container_name,
+        shell,
+        command.replace('\'', "'\\''")
+    )
 }
 
 /// Build a docker run command with environment variables
@@ -143,7 +142,7 @@ pub fn build_docker_run_command(
     let work_dir = docker_config.working_dir();
 
     // Get shell from config (default: bash)
-    let shell = docker_config.shell();
+    let shell = &docker_config.shell;
 
     // Get volume mount args if configured
     let volume_args = docker_config.volume_args().unwrap_or_default();
@@ -460,15 +459,25 @@ impl CheckRunner {
         (output.success, combined, duration_ms)
     }
 
+    /// Resolve the container for a check/pre-command.
+    ///
+    /// Precedence: explicit `container:` > compose-convention name for a
+    /// non-default service > cached default container.
+    ///
+    /// LIMITATION: assumes the Docker Compose v2 naming convention
+    /// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
+    /// override inside the compose file is not. Non-UTF8 project paths fall
+    /// back to the literal project name "project". Future work: resolve via
+    /// `docker compose ps -q <service>` instead of string construction.
     fn resolve_container_name(&self, explicit: Option<&str>, service: &str) -> String {
         if let Some(container) = explicit {
             container.to_string()
         } else if service != self.config.default_service() {
-            let project_name = std::path::Path::new(&self.config.docker.project_dir)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
-            format!("{}-{}-1", project_name, service)
+            format!(
+                "{}-{}-1",
+                self.config.docker.compose_project_name(),
+                service
+            )
         } else {
             self.container_name.to_string()
         }
@@ -490,7 +499,7 @@ impl CheckRunner {
                 &container_name,
                 &env,
                 &pre_cmd.command,
-                self.config.docker.shell(),
+                &self.config.docker.shell,
             )
         } else {
             build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
@@ -611,7 +620,7 @@ pub async fn execute_docker_command_with_executor(
 
     // Check if container is running, use exec if yes, run if no
     let docker_cmd = if executor.is_container_running(container_name) {
-        build_docker_exec_command(container_name, env, command, docker_config.shell())
+        build_docker_exec_command(container_name, env, command, &docker_config.shell)
     } else {
         build_docker_run_command(docker_config, env, command)
     };

@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
-            base_ref: "cli".to_string(),
+            base_ref: git::CLI_FILES_BASE_REF.to_string(),
         }
     };
     changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());

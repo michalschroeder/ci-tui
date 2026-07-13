@@ -334,7 +334,7 @@ pub async fn run_check_with_executor(
             container_name,
             &env,
             &check.resolved_command,
-            docker_config.shell(),
+            &docker_config.shell,
         )
     } else {
         crate::runner::build_docker_run_command(docker_config, &env, &check.resolved_command)

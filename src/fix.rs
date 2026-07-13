@@ -291,7 +291,7 @@ pub async fn run_fix_command_with_executor(
             container_name,
             &env,
             command,
-            docker_config.shell(),
+            &docker_config.shell,
         )
     } else {
         crate::runner::build_docker_run_command(docker_config, &env, command)

@@ -43,7 +43,8 @@ pub struct CiConfig {
     pub checks: IndexMap<String, GroupConfig>,
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
-    /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for test-built configs.
+    /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
+    /// test-built/cloned configs panics on invalid patterns.
     #[serde(skip)]
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
     /// Compiled file_patterns regexes keyed by pattern name. Populated eagerly in `load_config`.
@@ -121,10 +122,23 @@ impl DockerConfig {
         }
 
         // Derive container name from project_dir and service
-        let project_name = self.derive_project_name();
+        let project_name = self.compose_project_name();
 
         // Docker Compose naming convention: {project}-{service}-1
         format!("{}-{}-1", project_name, self.service)
+    }
+
+    /// Compose project name: `COMPOSE_PROJECT_NAME` env var if set (compose's own
+    /// precedence), otherwise derived from `project_dir`'s last path component.
+    ///
+    /// LIMITATION: a `name:` key inside the compose file is NOT detected — deriving
+    /// the real project name would require running `docker compose ps`.
+    /// Future work: resolve containers via `docker compose ps -q <service>`.
+    pub(crate) fn compose_project_name(&self) -> String {
+        std::env::var("COMPOSE_PROJECT_NAME")
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.derive_project_name())
     }
 
     /// Extract project name from project_dir (last path component)
@@ -142,14 +156,15 @@ impl DockerConfig {
     }
 
     /// Get the Docker image name to use
-    /// Returns explicit image if set, otherwise derives from container_name by stripping -1 suffix
+    /// Returns explicit image if set, otherwise derives from container_name by stripping the trailing "-1"
     pub fn image_name(&self) -> String {
         if let Some(ref image) = self.image {
             return image.clone();
         }
 
-        // Derive image from container name (strip -1 suffix)
-        self.container_name().trim_end_matches("-1").to_string()
+        // Derive image from container name (strip exactly one trailing "-1")
+        let name = self.container_name();
+        name.strip_suffix("-1").unwrap_or(&name).to_string()
     }
 
     /// Get volume mount arguments for docker run
@@ -167,21 +182,16 @@ impl DockerConfig {
     pub fn working_dir(&self) -> &str {
         self.work_dir.as_deref().unwrap_or("/app")
     }
-
-    /// Get the shell to use inside containers
-    /// Returns configured shell (defaults to "bash" for backward compatibility)
-    pub fn shell(&self) -> &str {
-        &self.shell
-    }
 }
 
-/// Resolve project name from current working directory for "." or ".." project_dir
+/// Resolve project name from current working directory.
+/// Only `"."` (cwd) and `".."` (cwd's parent) are meaningful; any other input returns `None`.
 fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let resolved = if project_dir == "." {
-        cwd
-    } else {
-        cwd.parent()?.to_path_buf()
+    let resolved = match project_dir {
+        "." => cwd,
+        ".." => cwd.parent()?.to_path_buf(),
+        _ => return None,
     };
     resolved.file_name()?.to_str().map(String::from)
 }
@@ -192,9 +202,10 @@ fn default_service() -> String {
 
 /// Expand environment variables in format ${VAR_NAME}
 fn expand_env_vars(input: &str) -> String {
-    let mut result = input.to_string();
-    let re = Regex::new(r"\$\{([^}]+)\}").unwrap();
+    static ENV_VAR_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ENV_VAR_RE.get_or_init(|| Regex::new(r"\$\{([^}]+)\}").expect("static regex"));
 
+    let mut result = input.to_string();
     for cap in re.captures_iter(input) {
         let var_name = &cap[1];
         if let Ok(value) = std::env::var(var_name) {
@@ -332,11 +343,7 @@ pub struct PreCommand {
     pub env: std::collections::HashMap<String, String>,
 }
 
-/// Load configuration from a YAML file.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or parsed.
+/// Compile every entry in `file_patterns` into a Regex, erroring on the first invalid pattern.
 fn compile_file_patterns(
     patterns: &HashMap<String, FilePattern>,
 ) -> Result<HashMap<String, Regex>> {
@@ -358,6 +365,11 @@ fn compile_ignore_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
         .collect()
 }
 
+/// Load configuration from a YAML file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, parsed, or contains invalid regexes.
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -400,6 +412,10 @@ impl CiConfig {
     ///
     /// Called from [`load_config`] so that invalid regexes surface at startup instead
     /// of being silently dropped on first use.
+    ///
+    /// First call wins: the `OnceLock::set` results are deliberately discarded, so a
+    /// second call never replaces already-cached patterns (even if `file_patterns`
+    /// was mutated in between). Call at most once per config instance.
     pub fn validate_and_compile(&self) -> Result<()> {
         let _ = self
             .compiled_file_patterns
@@ -418,27 +434,25 @@ impl CiConfig {
     /// Get the compiled regex for a file pattern key.
     ///
     /// Uses the eagerly populated cache from `load_config`. For configs built via
-    /// `CiConfig::new` (tests), lazily compiles on first access, silently dropping
-    /// any invalid patterns — production configs are validated at load time.
+    /// `CiConfig::new` or cloned (caches reset on clone), lazily compiles on first
+    /// access and PANICS on an invalid pattern — production configs are validated
+    /// at load time, so a panic here indicates a broken test fixture.
     pub fn get_compiled_file_pattern(&self, key: &str) -> Option<&Regex> {
         let map = self.compiled_file_patterns.get_or_init(|| {
-            self.file_patterns
-                .iter()
-                .filter_map(|(k, fp)| Regex::new(&fp.pattern).ok().map(|re| (k.clone(), re)))
-                .collect()
+            compile_file_patterns(&self.file_patterns)
+                .expect("invalid regex in file_patterns (validate_and_compile not called)")
         });
         map.get(key)
     }
 
     /// Get the compiled ignore regexes.
     ///
-    /// Eagerly populated in `load_config`; lazy fallback for test configs.
+    /// Eagerly populated in `load_config`; lazy fallback for test/cloned configs
+    /// PANICS on invalid patterns instead of silently dropping them.
     pub fn compiled_ignore_patterns(&self) -> &[Regex] {
         self.compiled_ignore_patterns.get_or_init(|| {
-            self.ignore_patterns
-                .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect()
+            compile_ignore_patterns(&self.ignore_patterns)
+                .expect("invalid regex in ignore_patterns (validate_and_compile not called)")
         })
     }
 
@@ -1062,6 +1076,49 @@ checks: {}
             assert_eq!(config.docker.image_name(), "myproject-web");
         }
 
+        // Edge case: COMPOSE_PROJECT_NAME overrides project_dir-derived compose project name.
+        // Uses a unique var value; test mutates process env, so restore afterwards.
+        #[test]
+        fn test_container_name_honors_compose_project_name_env() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./myproject
+  service: web
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            std::env::set_var("COMPOSE_PROJECT_NAME", "customproj");
+            let name = config.docker.container_name();
+            std::env::remove_var("COMPOSE_PROJECT_NAME");
+            assert_eq!(name, "customproj-web-1");
+        }
+
+        // Edge case: container name itself ending in -1 must lose only ONE -1 suffix
+        #[test]
+        fn test_image_name_derived_strips_single_dash_one_suffix() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./proj
+  service: x-1
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // container_name = "proj-x-1-1"; image must be "proj-x-1", not "proj-x"
+            assert_eq!(config.docker.image_name(), "proj-x-1");
+        }
+
         // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
         #[test]
         fn test_volume_args() {
@@ -1161,7 +1218,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker.shell(), "/bin/sh");
+            assert_eq!(config.docker.shell, "/bin/sh");
         }
 
         // volume_args() returns None when no volume_mount is configured
@@ -1672,10 +1729,10 @@ checks:
         }
 
         #[test]
-        fn invalid_file_pattern_is_silently_dropped_on_lazy_path() {
+        #[should_panic(expected = "invalid regex")]
+        fn invalid_file_pattern_panics_on_lazy_path() {
             let cfg = cfg_with_patterns(vec![("good", r"\.rs$"), ("bad", r"[unclosed")], vec![]);
-            assert!(cfg.get_compiled_file_pattern("good").is_some());
-            assert!(cfg.get_compiled_file_pattern("bad").is_none());
+            let _ = cfg.get_compiled_file_pattern("bad");
         }
 
         #[test]
@@ -1685,10 +1742,10 @@ checks:
         }
 
         #[test]
-        fn invalid_ignore_pattern_silently_dropped_on_lazy_path() {
+        #[should_panic(expected = "invalid regex")]
+        fn invalid_ignore_pattern_panics_on_lazy_path() {
             let cfg = cfg_with_patterns(vec![], vec![r"\.md$", r"[unclosed"]);
-            assert!(cfg.should_ignore_file("README.md"));
-            assert!(!cfg.should_ignore_file("src/main.rs"));
+            let _ = cfg.should_ignore_file("README.md");
         }
     }
 
@@ -1718,17 +1775,9 @@ checks:
         }
 
         #[test]
-        fn non_dot_input_resolves_to_parent_dir_name() {
-            // Per current impl: any non-"." value takes the cwd.parent() branch.
-            let cwd = std::env::current_dir().unwrap();
-            let expected_parent = cwd
-                .parent()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
-            if let Some(parent_name) = expected_parent {
-                if !parent_name.is_empty() {
-                    assert_eq!(resolve_project_name_from_cwd("weird"), Some(parent_name));
-                }
-            }
+        fn non_dot_input_returns_none() {
+            assert_eq!(resolve_project_name_from_cwd("weird"), None);
+            assert_eq!(resolve_project_name_from_cwd("./sub"), None);
         }
     }
 
