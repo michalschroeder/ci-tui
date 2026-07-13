@@ -655,6 +655,15 @@ impl App {
                 self.status_message = None;
             }
         }
+        // Keep selection valid: the filtered item list can shrink after any
+        // state change (e.g. a Failed check flips to Passed while the Failed
+        // filter is active). An out-of-range index made selected_item() return
+        // None and blanked the output panel.
+        let max = self.get_selectable_items().len().saturating_sub(1);
+        if self.selected_check > max {
+            self.selected_check = max;
+        }
+
         // Automatic dirty flag - every state change triggers redraw
         // (some handlers already set this, but redundant sets are harmless)
         self.needs_redraw = true;
@@ -836,14 +845,14 @@ impl App {
         items
     }
 
-    fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
+    pub(crate) fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
         match self.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
         }
     }
 
-    fn should_show_check(&self, check: &CheckToRun) -> bool {
+    pub(crate) fn should_show_check(&self, check: &CheckToRun) -> bool {
         match self.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => self
@@ -1481,6 +1490,38 @@ checks:
         assert_eq!(
             pre_cmds[0].name, "setup-env",
             "Should only show the failed pre-command"
+        );
+    }
+
+    #[test]
+    fn test_selection_clamped_when_filtered_list_shrinks() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+        app.status_filter = StatusFilter::Failed;
+        app.selected_check = 1; // phpunit, second item in the filtered list
+
+        // phpunit passes on retry - the filtered list shrinks to 1 item
+        let result = CheckResult {
+            check_id: "phpunit".to_string(),
+            status: CheckStatus::Passed,
+            output: String::new(),
+            error_output: String::new(),
+            duration_ms: 10,
+            started_at: None,
+            finished_at: None,
+        };
+        app.update(AppMessage::RunnerEvent(RunnerEvent::CheckFinished {
+            result,
+        }));
+
+        assert_eq!(
+            app.selected_check, 0,
+            "selection must be clamped to list length"
+        );
+        assert!(
+            app.selected_item().is_some(),
+            "output panel must not go blank after list shrinks"
         );
     }
 
