@@ -195,9 +195,10 @@ fn default_service() -> String {
 
 /// Expand environment variables in format ${VAR_NAME}
 fn expand_env_vars(input: &str) -> String {
-    let mut result = input.to_string();
-    let re = Regex::new(r"\$\{([^}]+)\}").unwrap();
+    static ENV_VAR_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ENV_VAR_RE.get_or_init(|| Regex::new(r"\$\{([^}]+)\}").expect("static regex"));
 
+    let mut result = input.to_string();
     for cap in re.captures_iter(input) {
         let var_name = &cap[1];
         if let Ok(value) = std::env::var(var_name) {
