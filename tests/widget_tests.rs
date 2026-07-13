@@ -250,6 +250,34 @@ fn test_checks_list_shows_group_names() {
     );
 }
 
+#[test]
+fn test_failed_filter_hides_non_failed_checks() {
+    let mut app = make_test_app();
+    app.toggle_failed_filter();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // Only the failed check remains visible
+    assert!(
+        buffer_contains(buffer, "Unit Tests"),
+        "Failed check should be rendered"
+    );
+    assert!(
+        !buffer_contains(buffer, "Format Check"),
+        "Passed check should be hidden under Failed filter"
+    );
+    assert!(
+        !buffer_contains(buffer, "Clippy"),
+        "Pending check should be hidden under Failed filter"
+    );
+    // Group with no failed checks hides its header entirely
+    assert!(
+        !buffer_contains(buffer, "LINT"),
+        "Group with no visible items should not render its header"
+    );
+}
+
 // ============================================================================
 // Status Colors Verification
 // ============================================================================

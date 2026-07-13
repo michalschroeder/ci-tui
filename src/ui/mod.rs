@@ -75,8 +75,17 @@ enum Message {
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
     FixResult(CheckResult),
-    FixAllResult(CheckResult, bool), // (result, is_last)
+    FixAll(FixAllEvent),
     RetryResult(CheckResult),
+}
+
+/// Events from the fix-all background task
+#[derive(Debug)]
+enum FixAllEvent {
+    /// One fix command finished
+    Result(CheckResult),
+    /// The whole fix-all loop finished (sent unconditionally after the loop)
+    Done,
 }
 
 /// Read keyboard events and send them through a channel
@@ -182,7 +191,7 @@ enum Action {
 /// Channels for spawning async operations from key handlers
 struct EventChannels {
     fix_tx: mpsc::Sender<CheckResult>,
-    fix_all_tx: mpsc::Sender<(CheckResult, bool)>,
+    fix_all_tx: mpsc::Sender<FixAllEvent>,
     retry_tx: mpsc::Sender<CheckResult>,
     project_root: Arc<PathBuf>,
     /// Container name for docker exec/run commands (Arc for cheap cloning into async tasks)
@@ -296,9 +305,13 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
     let base_ref = app.changed_files.base_ref.clone();
 
     let Ok(mut new_changed_files) = get_changed_files(&channels.project_root, &base_ref) else {
-        // Git refresh failed - fall back to running with existing check
+        // Git refresh failed - fall back to running with existing check,
+        // but tell the user the file list may be stale
         let check = check.clone();
         app.update(AppMessage::ResetForRetry(check.id().to_string()));
+        app.update(AppMessage::SetStatusMessage(Some(
+            "Git refresh failed - retrying with previous file list".to_string(),
+        )));
         spawn_retry_task(channels, check);
         return KeyAction::None;
     };
@@ -419,7 +432,7 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
     let docker_config = Arc::clone(&channels.docker_config);
     let global_env = Arc::clone(&channels.global_env);
     tokio::spawn(async move {
-        for (i, (_check_id, fix_cmd, _service, container)) in fix_commands.into_iter().enumerate() {
+        for (_check_id, fix_cmd, _service, container) in fix_commands {
             let container_name = container.as_deref().unwrap_or(&default_container);
             let result = run_fix_command(
                 &fix_cmd,
@@ -429,9 +442,12 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
                 &global_env,
             )
             .await;
-            let is_last = i == total - 1;
-            let _ = fix_all_tx.send((result, is_last)).await;
+            let _ = fix_all_tx.send(FixAllEvent::Result(result)).await;
         }
+        // Always signal completion, decoupled from per-result send success.
+        // Previously completion rode on an is_last flag on the final result;
+        // a failed send left fix_all_running=true and disabled r/t/x/X forever.
+        let _ = fix_all_tx.send(FixAllEvent::Done).await;
     });
     KeyAction::None
 }
@@ -506,8 +522,15 @@ fn handle_message(
             #[cfg(debug_assertions)]
             let start = std::time::Instant::now();
 
-            // Clear status message on any key press
-            if app.status_message.is_some() {
+            // Quit keys must always work, even while a status message is
+            // displayed - previously they were swallowed by the dismiss logic
+            let is_quit = matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            );
+
+            // Clear status message on any other key press
+            if app.status_message.is_some() && !is_quit {
                 app.update(AppMessage::ClearStatusMessage);
 
                 #[cfg(debug_assertions)]
@@ -550,11 +573,12 @@ fn handle_message(
             app.update(AppMessage::FinishFix(result));
             Ok(Action::Continue)
         }
-        Message::FixAllResult(result, is_last) => {
+        Message::FixAll(FixAllEvent::Result(result)) => {
             app.update(AppMessage::AddFixAllResult(result));
-            if is_last {
-                app.update(AppMessage::FinishFixAll);
-            }
+            Ok(Action::Continue)
+        }
+        Message::FixAll(FixAllEvent::Done) => {
+            app.update(AppMessage::FinishFixAll);
             Ok(Action::Continue)
         }
         Message::RetryResult(result) => {
@@ -591,7 +615,7 @@ pub async fn run(
 
     // Create event channels for async operations
     let (fix_tx, mut fix_rx) = mpsc::channel(1);
-    let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<(CheckResult, bool)>(10);
+    let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<FixAllEvent>(10);
     let (retry_tx, mut retry_rx) = mpsc::channel::<CheckResult>(1);
     let project_root = Arc::new(project_root);
     let container_name: Arc<str> = config.docker.container_name().into();
@@ -645,7 +669,7 @@ pub async fn run(
             Some(result) = fix_rx.recv() => Message::FixResult(result),
 
             // Fix-all command results
-            Some((result, is_last)) = fix_all_rx.recv() => Message::FixAllResult(result, is_last),
+            Some(event) = fix_all_rx.recv() => Message::FixAll(event),
 
             // Retry command results
             Some(result) = retry_rx.recv() => Message::RetryResult(result),
@@ -736,6 +760,167 @@ fn print_summary(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config() -> CiConfig {
+        serde_yaml::from_str(
+            r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+  shell: bash
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  fast:
+    checks:
+      php-lint:
+        name: PHP syntax check
+        command: php-lint {files}
+        triggers:
+          file_pattern: php
+"#,
+        )
+        .expect("Failed to parse test config")
+    }
+
+    /// Build EventChannels for handle_message tests. Receivers are dropped;
+    /// the tests below never depend on sends succeeding. project_root points
+    /// at a nonexistent path so git operations fail deterministically.
+    fn make_test_channels(config: &CiConfig) -> EventChannels {
+        let (fix_tx, _fix_rx) = mpsc::channel(1);
+        let (fix_all_tx, _fix_all_rx) = mpsc::channel(10);
+        let (retry_tx, _retry_rx) = mpsc::channel(1);
+        EventChannels {
+            fix_tx,
+            fix_all_tx,
+            retry_tx,
+            project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
+            container_name: "app".into(),
+            docker_config: Arc::new(config.docker.clone()),
+            global_env: Arc::new(config.docker.env.clone()),
+        }
+    }
+
+    fn make_test_app(config: &CiConfig) -> App {
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        App::new(config.clone(), changed_files, vec![], "main".to_string())
+    }
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        }
+    }
+
+    fn make_test_check(id: &str, group: &str) -> crate::checks::CheckToRun {
+        crate::checks::CheckToRun {
+            id: id.to_string(),
+            group: group.to_string(),
+            definition: crate::config::CheckDefinition {
+                name: id.to_string(),
+                command: format!("{} {{files}}", id),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: std::collections::HashMap::new(),
+            },
+            service: "php".to_string(),
+            files: vec!["src/Foo.php".to_string()],
+            resolved_command: format!("{} src/Foo.php", id),
+            resolved_fix_command: None,
+            on_demand: false,
+            skipped_no_files: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_selected_git_failure_sets_status_message() {
+        let config = test_config();
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        let checks = vec![make_test_check("php-lint", "fast")];
+        let mut app = App::new(config.clone(), changed_files, checks, "main".to_string());
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
+        let channels = make_test_channels(&config); // project_root does not exist -> git fails
+
+        let action = handle_retry_selected(&mut app, &channels, &config);
+
+        assert!(matches!(action, KeyAction::None));
+        assert!(
+            app.status_message.is_some(),
+            "git refresh failure must surface a status message"
+        );
+        // Fallback still retried the check with the previous file list
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quit_key_works_while_status_message_shown() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("Command copied to clipboard".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(
+            matches!(action, Action::Quit),
+            "q must quit even while a status message is displayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_c_works_while_status_message_shown() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("some message".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(matches!(action, Action::Quit));
+    }
+
+    #[tokio::test]
+    async fn test_other_key_dismisses_status_message() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("some message".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(matches!(action, Action::Continue));
+        assert!(
+            app.status_message.is_none(),
+            "non-quit key clears the message"
+        );
+    }
 
     /// Test that keyboard events are processed immediately even under heavy load
     /// This verifies the tokio::select! with biased; provides <1ms keyboard response
@@ -834,5 +1019,51 @@ mod tests {
             other_checked_first, 0,
             "Other channel should never be checked when keyboard has events (biased; priority)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_fix_all_done_clears_running_flag() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let channels = make_test_channels(&config);
+
+        app.update(AppMessage::StartFixAll(2));
+        assert!(app.fix_all_running);
+
+        // Done arrives even if individual result sends were lost
+        let action = handle_message(
+            &mut app,
+            Message::FixAll(FixAllEvent::Done),
+            &channels,
+            &config,
+        )
+        .unwrap();
+
+        assert!(matches!(action, Action::Continue));
+        assert!(!app.fix_all_running, "Done must clear fix_all_running");
+    }
+
+    #[tokio::test]
+    async fn test_fix_all_result_does_not_finish_run() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let channels = make_test_channels(&config);
+
+        app.update(AppMessage::StartFixAll(2));
+
+        let result = CheckResult::pending("some-check");
+        handle_message(
+            &mut app,
+            Message::FixAll(FixAllEvent::Result(result)),
+            &channels,
+            &config,
+        )
+        .unwrap();
+
+        assert!(
+            app.fix_all_running,
+            "intermediate results must not finish the run"
+        );
+        assert_eq!(app.fix_all_results.len(), 1);
     }
 }

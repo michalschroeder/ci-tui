@@ -150,6 +150,9 @@ pub struct App {
     pub output_scroll: usize,
     /// Number of visible lines in output area (updated during render)
     pub output_visible_lines: usize,
+    /// Width of the output panel area (updated during render, used for
+    /// command-line truncation when counting rendered lines)
+    pub output_area_width: u16,
     /// Current filter for check list
     pub status_filter: StatusFilter,
 
@@ -230,6 +233,7 @@ impl App {
             selected_check: 0,
             output_scroll: 0,
             output_visible_lines: 20,
+            output_area_width: 80,
             status_filter: StatusFilter::All,
             current_group: None,
             all_finished: false,
@@ -651,6 +655,15 @@ impl App {
                 self.status_message = None;
             }
         }
+        // Keep selection valid: the filtered item list can shrink after any
+        // state change (e.g. a Failed check flips to Passed while the Failed
+        // filter is active). An out-of-range index made selected_item() return
+        // None and blanked the output panel.
+        let max = self.get_selectable_items().len().saturating_sub(1);
+        if self.selected_check > max {
+            self.selected_check = max;
+        }
+
         // Automatic dirty flag - every state change triggers redraw
         // (some handlers already set this, but redundant sets are harmless)
         self.needs_redraw = true;
@@ -712,9 +725,9 @@ impl App {
     fn compute_max_scroll(&self) -> usize {
         let visible = self.output_visible_lines;
         match self.selected_item() {
-            Some(SelectableItem::Check(check)) => {
-                self.check_total_lines(check.id()).saturating_sub(visible)
-            }
+            Some(SelectableItem::Check(check)) => self
+                .check_rendered_line_count(check)
+                .saturating_sub(visible),
             Some(SelectableItem::PreCommand(pc)) => {
                 pc.output.lines().count().saturating_sub(visible)
             }
@@ -722,18 +735,13 @@ impl App {
         }
     }
 
-    /// Count total output lines for a check (stdout + stderr + header)
-    fn check_total_lines(&self, check_id: &str) -> usize {
-        let Some(result) = self.results.get(check_id) else {
+    /// Count the rendered lines for a check's output panel (see
+    /// [`super::dashboard::check_output_line_count`]).
+    fn check_rendered_line_count(&self, check: &CheckToRun) -> usize {
+        let Some(result) = self.results.get(check.id()) else {
             return 0;
         };
-        let stdout_lines = result.output.lines().count();
-        let stderr_lines = result.error_output.lines().count();
-        if stderr_lines > 0 {
-            stdout_lines + stderr_lines + 2
-        } else {
-            stdout_lines
-        }
+        super::dashboard::check_output_line_count(self, check, result, self.output_area_width)
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -837,14 +845,14 @@ impl App {
         items
     }
 
-    fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
+    pub(crate) fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
         match self.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
         }
     }
 
-    fn should_show_check(&self, check: &CheckToRun) -> bool {
+    pub(crate) fn should_show_check(&self, check: &CheckToRun) -> bool {
         match self.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => self
@@ -1405,6 +1413,29 @@ checks:
     }
 
     #[test]
+    fn test_scroll_max_includes_rendered_header_lines() {
+        let mut app = make_app();
+        {
+            let r = app.results.get_mut("php-lint").unwrap();
+            r.status = CheckStatus::Passed;
+            r.output = (1..=20)
+                .map(|i| format!("line {}", i))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+
+        app.scroll_down(1000);
+
+        // Rendered text prepends 6 lines before the 20 output lines:
+        // "$ php-lint test.php", blank, "PASSED", blank, "Files: test.php", blank.
+        // max scroll = 26 total - 5 visible = 21. The old clamp
+        // (stdout-only count) allowed only 20 - 5 = 15.
+        assert_eq!(app.output_scroll, 21);
+    }
+
+    #[test]
     fn test_failed_filter_excludes_passed_pre_commands() {
         let mut app = make_app();
 
@@ -1459,6 +1490,38 @@ checks:
         assert_eq!(
             pre_cmds[0].name, "setup-env",
             "Should only show the failed pre-command"
+        );
+    }
+
+    #[test]
+    fn test_selection_clamped_when_filtered_list_shrinks() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+        app.status_filter = StatusFilter::Failed;
+        app.selected_check = 1; // phpunit, second item in the filtered list
+
+        // phpunit passes on retry - the filtered list shrinks to 1 item
+        let result = CheckResult {
+            check_id: "phpunit".to_string(),
+            status: CheckStatus::Passed,
+            output: String::new(),
+            error_output: String::new(),
+            duration_ms: 10,
+            started_at: None,
+            finished_at: None,
+        };
+        app.update(AppMessage::RunnerEvent(RunnerEvent::CheckFinished {
+            result,
+        }));
+
+        assert_eq!(
+            app.selected_check, 0,
+            "selection must be clamped to list length"
+        );
+        assert!(
+            app.selected_item().is_some(),
+            "output panel must not go blank after list shrinks"
         );
     }
 

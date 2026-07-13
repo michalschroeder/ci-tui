@@ -297,14 +297,9 @@ fn render_check_item(
     let is_on_demand = result
         .map(|r| r.status == CheckStatus::OnDemand)
         .unwrap_or(false);
-    let is_passed = result
-        .map(|r| r.status == CheckStatus::Passed)
-        .unwrap_or(false);
-    let is_filtered_out =
-        matches!(app.status_filter, super::app::StatusFilter::Failed) && is_passed;
 
     // Fade out checks that are not relevant in current context
-    let should_fade = is_on_demand || is_filtered_out;
+    let should_fade = is_on_demand;
 
     let name_style = if is_selected {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -345,6 +340,22 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     for group in groups {
+        let visible_pre_commands: Vec<_> = app
+            .pre_commands
+            .iter()
+            .filter(|p| p.group == group && app.should_show_pre_command(p))
+            .collect();
+        let visible_checks: Vec<_> = app
+            .checks_in_group(group)
+            .into_iter()
+            .filter(|c| app.should_show_check(c))
+            .collect();
+
+        // Hide groups with nothing to show under the current filter
+        if visible_pre_commands.is_empty() && visible_checks.is_empty() {
+            continue;
+        }
+
         let group_style = if Some(group.to_string()) == app.current_group {
             Style::default()
                 .fg(Color::Yellow)
@@ -361,11 +372,11 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled("───────────", Style::default().fg(Color::DarkGray)),
         ])));
 
-        for pre_cmd in app.pre_commands.iter().filter(|p| p.group == group) {
+        for pre_cmd in visible_pre_commands {
             items.push(render_pre_command_item(app, pre_cmd));
         }
 
-        for check in app.checks_in_group(group) {
+        for check in visible_checks {
             items.push(render_check_item(app, check, area));
         }
     }
@@ -683,13 +694,13 @@ fn build_check_output_text(
     app: &App,
     check: &crate::checks::CheckToRun,
     result: &crate::runner::CheckResult,
-    area: Rect,
+    width: u16,
 ) -> String {
     let mut raw_output = String::with_capacity(1024);
 
     // Command at the top - truncated by default, full on 'e' toggle
     let command = &check.resolved_command;
-    let max_cmd_len = (area.width as usize).saturating_sub(10);
+    let max_cmd_len = (width as usize).saturating_sub(10);
 
     raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
     if app.show_full_command || command.len() <= max_cmd_len {
@@ -738,6 +749,22 @@ fn build_check_output_text(
     }
 
     raw_output
+}
+
+/// Count the lines of the fully rendered output text for a check.
+///
+/// Used by [`App`] scroll clamping so the max scroll offset matches what
+/// [`render_check_output`] actually draws (command line, status header,
+/// files section, output, stderr).
+pub fn check_output_line_count(
+    app: &App,
+    check: &crate::checks::CheckToRun,
+    result: &crate::runner::CheckResult,
+    width: u16,
+) -> usize {
+    build_check_output_text(app, check, result, width)
+        .lines()
+        .count()
 }
 
 /// Append the files section to the output string
@@ -792,7 +819,7 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
         return;
     };
 
-    let raw_output = build_check_output_text(app, check, result, area);
+    let raw_output = build_check_output_text(app, check, result, area.width);
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
@@ -873,6 +900,7 @@ fn render_pre_command_output(
 fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // Update the visible lines for scroll calculations (subtract 2 for borders)
     app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
+    app.output_area_width = area.width;
 
     // Dispatch to appropriate sub-renderer based on state
     if !app.fix_all_results.is_empty() && !app.fix_all_running {
