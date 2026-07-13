@@ -182,12 +182,6 @@ impl DockerConfig {
     pub fn working_dir(&self) -> &str {
         self.work_dir.as_deref().unwrap_or("/app")
     }
-
-    /// Get the shell to use inside containers
-    /// Returns configured shell (defaults to "bash" for backward compatibility)
-    pub fn shell(&self) -> &str {
-        &self.shell
-    }
 }
 
 /// Resolve project name from current working directory.
@@ -1224,7 +1218,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker.shell(), "/bin/sh");
+            assert_eq!(config.docker.shell, "/bin/sh");
         }
 
         // volume_args() returns None when no volume_mount is configured

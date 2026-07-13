@@ -142,7 +142,7 @@ pub fn build_docker_run_command(
     let work_dir = docker_config.working_dir();
 
     // Get shell from config (default: bash)
-    let shell = docker_config.shell();
+    let shell = &docker_config.shell;
 
     // Get volume mount args if configured
     let volume_args = docker_config.volume_args().unwrap_or_default();
@@ -499,7 +499,7 @@ impl CheckRunner {
                 &container_name,
                 &env,
                 &pre_cmd.command,
-                self.config.docker.shell(),
+                &self.config.docker.shell,
             )
         } else {
             build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
@@ -620,7 +620,7 @@ pub async fn execute_docker_command_with_executor(
 
     // Check if container is running, use exec if yes, run if no
     let docker_cmd = if executor.is_container_running(container_name) {
-        build_docker_exec_command(container_name, env, command, docker_config.shell())
+        build_docker_exec_command(container_name, env, command, &docker_config.shell)
     } else {
         build_docker_run_command(docker_config, env, command)
     };
