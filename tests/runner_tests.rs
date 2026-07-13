@@ -50,8 +50,16 @@ mod build_docker_exec_command_tests {
         let cmd = build_docker_exec_command("container", &env, "test", "bash");
 
         // Both env vars should be present
-        assert!(cmd.contains("-e FOO='bar'") || cmd.contains("-e BAZ='qux'"));
-        assert!(cmd.contains("-e FOO='bar'") || cmd.contains("-e BAZ='qux'"));
+        assert!(
+            cmd.contains("-e FOO='bar'"),
+            "Command '{}' missing FOO",
+            cmd
+        );
+        assert!(
+            cmd.contains("-e BAZ='qux'"),
+            "Command '{}' missing BAZ",
+            cmd
+        );
     }
 
     #[test]
