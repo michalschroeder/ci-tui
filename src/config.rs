@@ -43,7 +43,8 @@ pub struct CiConfig {
     pub checks: IndexMap<String, GroupConfig>,
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
-    /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for test-built configs.
+    /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
+    /// test-built/cloned configs panics on invalid patterns.
     #[serde(skip)]
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
     /// Compiled file_patterns regexes keyed by pattern name. Populated eagerly in `load_config`.
@@ -419,27 +420,25 @@ impl CiConfig {
     /// Get the compiled regex for a file pattern key.
     ///
     /// Uses the eagerly populated cache from `load_config`. For configs built via
-    /// `CiConfig::new` (tests), lazily compiles on first access, silently dropping
-    /// any invalid patterns — production configs are validated at load time.
+    /// `CiConfig::new` or cloned (caches reset on clone), lazily compiles on first
+    /// access and PANICS on an invalid pattern — production configs are validated
+    /// at load time, so a panic here indicates a broken test fixture.
     pub fn get_compiled_file_pattern(&self, key: &str) -> Option<&Regex> {
         let map = self.compiled_file_patterns.get_or_init(|| {
-            self.file_patterns
-                .iter()
-                .filter_map(|(k, fp)| Regex::new(&fp.pattern).ok().map(|re| (k.clone(), re)))
-                .collect()
+            compile_file_patterns(&self.file_patterns)
+                .expect("invalid regex in file_patterns (validate_and_compile not called)")
         });
         map.get(key)
     }
 
     /// Get the compiled ignore regexes.
     ///
-    /// Eagerly populated in `load_config`; lazy fallback for test configs.
+    /// Eagerly populated in `load_config`; lazy fallback for test/cloned configs
+    /// PANICS on invalid patterns instead of silently dropping them.
     pub fn compiled_ignore_patterns(&self) -> &[Regex] {
         self.compiled_ignore_patterns.get_or_init(|| {
-            self.ignore_patterns
-                .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect()
+            compile_ignore_patterns(&self.ignore_patterns)
+                .expect("invalid regex in ignore_patterns (validate_and_compile not called)")
         })
     }
 
@@ -1693,10 +1692,10 @@ checks:
         }
 
         #[test]
-        fn invalid_file_pattern_is_silently_dropped_on_lazy_path() {
+        #[should_panic(expected = "invalid regex")]
+        fn invalid_file_pattern_panics_on_lazy_path() {
             let cfg = cfg_with_patterns(vec![("good", r"\.rs$"), ("bad", r"[unclosed")], vec![]);
-            assert!(cfg.get_compiled_file_pattern("good").is_some());
-            assert!(cfg.get_compiled_file_pattern("bad").is_none());
+            let _ = cfg.get_compiled_file_pattern("bad");
         }
 
         #[test]
@@ -1706,10 +1705,10 @@ checks:
         }
 
         #[test]
-        fn invalid_ignore_pattern_silently_dropped_on_lazy_path() {
+        #[should_panic(expected = "invalid regex")]
+        fn invalid_ignore_pattern_panics_on_lazy_path() {
             let cfg = cfg_with_patterns(vec![], vec![r"\.md$", r"[unclosed"]);
-            assert!(cfg.should_ignore_file("README.md"));
-            assert!(!cfg.should_ignore_file("src/main.rs"));
+            let _ = cfg.should_ignore_file("README.md");
         }
     }
 
