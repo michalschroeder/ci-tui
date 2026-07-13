@@ -506,8 +506,15 @@ fn handle_message(
             #[cfg(debug_assertions)]
             let start = std::time::Instant::now();
 
-            // Clear status message on any key press
-            if app.status_message.is_some() {
+            // Quit keys must always work, even while a status message is
+            // displayed - previously they were swallowed by the dismiss logic
+            let is_quit = matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            );
+
+            // Clear status message on any other key press
+            if app.status_message.is_some() && !is_quit {
                 app.update(AppMessage::ClearStatusMessage);
 
                 #[cfg(debug_assertions)]
@@ -736,6 +743,118 @@ fn print_summary(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config() -> CiConfig {
+        serde_yaml::from_str(
+            r#"
+version: 2
+
+docker:
+  project_dir: ./infrastructure
+  service: php
+  shell: bash
+
+git:
+  base_branch: development
+  fallback_branch: HEAD~1
+
+file_patterns:
+  php:
+    pattern: '\.php$'
+
+checks:
+  fast:
+    checks:
+      php-lint:
+        name: PHP syntax check
+        command: php-lint {files}
+        triggers:
+          file_pattern: php
+"#,
+        )
+        .expect("Failed to parse test config")
+    }
+
+    /// Build EventChannels for handle_message tests. Receivers are dropped;
+    /// the tests below never depend on sends succeeding. project_root points
+    /// at a nonexistent path so git operations fail deterministically.
+    fn make_test_channels(config: &CiConfig) -> EventChannels {
+        let (fix_tx, _fix_rx) = mpsc::channel(1);
+        let (fix_all_tx, _fix_all_rx) = mpsc::channel(10);
+        let (retry_tx, _retry_rx) = mpsc::channel(1);
+        EventChannels {
+            fix_tx,
+            fix_all_tx,
+            retry_tx,
+            project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
+            container_name: "app".into(),
+            docker_config: Arc::new(config.docker.clone()),
+            global_env: Arc::new(config.docker.env.clone()),
+        }
+    }
+
+    fn make_test_app(config: &CiConfig) -> App {
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        App::new(config.clone(), changed_files, vec![], "main".to_string())
+    }
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quit_key_works_while_status_message_shown() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("Command copied to clipboard".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(
+            matches!(action, Action::Quit),
+            "q must quit even while a status message is displayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_c_works_while_status_message_shown() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("some message".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(matches!(action, Action::Quit));
+    }
+
+    #[tokio::test]
+    async fn test_other_key_dismisses_status_message() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.status_message = Some("some message".to_string());
+        let channels = make_test_channels(&config);
+
+        let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
+        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+
+        assert!(matches!(action, Action::Continue));
+        assert!(
+            app.status_message.is_none(),
+            "non-quit key clears the message"
+        );
+    }
 
     /// Test that keyboard events are processed immediately even under heavy load
     /// This verifies the tokio::select! with biased; provides <1ms keyboard response
