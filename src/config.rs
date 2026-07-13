@@ -142,14 +142,15 @@ impl DockerConfig {
     }
 
     /// Get the Docker image name to use
-    /// Returns explicit image if set, otherwise derives from container_name by stripping -1 suffix
+    /// Returns explicit image if set, otherwise derives from container_name by stripping the trailing "-1"
     pub fn image_name(&self) -> String {
         if let Some(ref image) = self.image {
             return image.clone();
         }
 
-        // Derive image from container name (strip -1 suffix)
-        self.container_name().trim_end_matches("-1").to_string()
+        // Derive image from container name (strip exactly one trailing "-1")
+        let name = self.container_name();
+        name.strip_suffix("-1").unwrap_or(&name).to_string()
     }
 
     /// Get volume mount arguments for docker run
@@ -1060,6 +1061,26 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             // Image derived from container name by stripping -1 suffix
             assert_eq!(config.docker.image_name(), "myproject-web");
+        }
+
+        // Edge case: container name itself ending in -1 must lose only ONE -1 suffix
+        #[test]
+        fn test_image_name_derived_strips_single_dash_one_suffix() {
+            let yaml = r#"
+version: 2
+docker:
+  project_dir: ./proj
+  service: x-1
+  shell: bash
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+checks: {}
+"#;
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            // container_name = "proj-x-1-1"; image must be "proj-x-1", not "proj-x"
+            assert_eq!(config.docker.image_name(), "proj-x-1");
         }
 
         // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
