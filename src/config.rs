@@ -177,13 +177,14 @@ impl DockerConfig {
     }
 }
 
-/// Resolve project name from current working directory for "." or ".." project_dir
+/// Resolve project name from current working directory.
+/// Only `"."` (cwd) and `".."` (cwd's parent) are meaningful; any other input returns `None`.
 fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let resolved = if project_dir == "." {
-        cwd
-    } else {
-        cwd.parent()?.to_path_buf()
+    let resolved = match project_dir {
+        "." => cwd,
+        ".." => cwd.parent()?.to_path_buf(),
+        _ => return None,
     };
     resolved.file_name()?.to_str().map(String::from)
 }
@@ -1738,17 +1739,9 @@ checks:
         }
 
         #[test]
-        fn non_dot_input_resolves_to_parent_dir_name() {
-            // Per current impl: any non-"." value takes the cwd.parent() branch.
-            let cwd = std::env::current_dir().unwrap();
-            let expected_parent = cwd
-                .parent()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
-            if let Some(parent_name) = expected_parent {
-                if !parent_name.is_empty() {
-                    assert_eq!(resolve_project_name_from_cwd("weird"), Some(parent_name));
-                }
-            }
+        fn non_dot_input_returns_none() {
+            assert_eq!(resolve_project_name_from_cwd("weird"), None);
+            assert_eq!(resolve_project_name_from_cwd("./sub"), None);
         }
     }
 
