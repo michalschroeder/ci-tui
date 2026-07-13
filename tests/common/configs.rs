@@ -438,6 +438,10 @@ pub fn widget_test_config() -> CiConfig {
 /// - fast group (parallel): php-lint, yaml-lint (with file pattern triggers)
 /// - analysis group: phpstan (with fix_command)
 /// - tests group: phpunit (with tests pattern trigger)
+///
+/// Kept `#[allow(dead_code)]`: `common` is compiled into every integration test
+/// binary, but this fixture is consumed only by `characterization_tests.rs`, so
+/// the other binaries would otherwise flag it as unused under `-D warnings`.
 #[allow(dead_code)]
 pub fn checks_test_config() -> CiConfig {
     ConfigBuilder::new()
