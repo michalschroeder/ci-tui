@@ -139,6 +139,21 @@ fn test_header_shows_progress() {
     );
 }
 
+#[test]
+fn test_header_shows_on_demand_count() {
+    let mut app = make_test_app();
+    // Flip one check's result to OnDemand; header shows "+1 on-demand"
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(
+        buffer_contains(buffer, "+1 on-demand"),
+        "Header should show on-demand count when an on-demand check exists"
+    );
+}
+
 // ============================================================================
 // Checks List Tests
 // ============================================================================
