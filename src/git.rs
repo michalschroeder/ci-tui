@@ -66,6 +66,10 @@ impl GitExecutor for RealGitExecutor {
     }
 }
 
+/// Sentinel `base_ref` used when files come from the `--files` CLI flag
+/// instead of git change detection. Rendered in headers as "vs --files (manual)".
+pub const CLI_FILES_BASE_REF: &str = "--files (manual)";
+
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
 pub struct ChangedFiles {
@@ -557,5 +561,11 @@ mod tests {
         let result = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock);
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("ls-files refused"), "got: {msg}");
+    }
+
+    #[test]
+    fn cli_files_base_ref_is_human_readable() {
+        assert_eq!(CLI_FILES_BASE_REF, "--files (manual)");
+        assert_ne!(CLI_FILES_BASE_REF, "cli");
     }
 }
