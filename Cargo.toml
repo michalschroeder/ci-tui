@@ -38,7 +38,7 @@ color-eyre = "0.6"
 # Utilities
 regex = "1"
 chrono = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 
 # System monitoring
 sysinfo = "0.39"
