@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.27
 # Version arguments (global scope)
 ARG ALPINE_VERSION=3.24
 ARG CI_TUI_GIT_HASH=unknown
