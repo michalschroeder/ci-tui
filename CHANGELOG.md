@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.18](https://github.com/michalschroeder/ci-tui/compare/v0.1.17...v0.1.18) (2026-09-08)
+
+
+### Bug Fixes
+
+* config module & small independent defect sweep ([#95](https://github.com/michalschroeder/ci-tui/issues/95)) ([1e38aac](https://github.com/michalschroeder/ci-tui/commit/1e38aac232529818cfa1f8d98cfc6347179f6b1f))
+* **deps:** update rust crate base64 to 0.23 ([#102](https://github.com/michalschroeder/ci-tui/issues/102)) ([5607137](https://github.com/michalschroeder/ci-tui/commit/5607137568310f5b99e363c8841c103c4fa866b7))
+* **ui:** 5 TUI bug fixes (scroll clamp, failed filter, quit, fix-all, retry) ([#97](https://github.com/michalschroeder/ci-tui/issues/97)) ([4898a6c](https://github.com/michalschroeder/ci-tui/commit/4898a6cca375cdd19c08b276b1e624e75b28c161))
+
 ## [0.1.17](https://github.com/michalschroeder/ci-tui/compare/v0.1.16...v0.1.17) (2026-06-28)
 
 
