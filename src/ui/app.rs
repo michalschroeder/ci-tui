@@ -95,9 +95,9 @@ pub enum SelectableItem<'a> {
 
 /// Build initial CheckResult for a check based on its state
 fn initial_result_for_check(check: &CheckToRun) -> CheckResult {
-    if check.skipped_no_files {
+    if check.is_skipped_no_files() {
         CheckResult::skipped(check.id())
-    } else if check.on_demand {
+    } else if check.is_on_demand() {
         CheckResult::on_demand(check.id())
     } else {
         CheckResult::pending(check.id())
@@ -954,15 +954,17 @@ checks:
                 env: std::collections::HashMap::new(),
             },
             service: "php".to_string(),
-            files: CheckFiles::Files(vec!["test.php".to_string()]),
+            files: if on_demand {
+                CheckFiles::OnDemand
+            } else {
+                CheckFiles::Files(vec!["test.php".to_string()])
+            },
             resolved_command: format!("{} test.php", id),
             resolved_fix_command: if has_fix {
                 Some(format!("{} --fix test.php", id))
             } else {
                 None
             },
-            on_demand,
-            skipped_no_files: false,
         }
     }
 
@@ -1533,9 +1535,9 @@ checks:
             base_ref: "development".to_string(),
         };
 
-        // Create a check with skipped_no_files=true
+        // SkippedNoMatch + `{files}` command => skipped_no_files
         let mut check = make_check("php-lint", "fast", "PHP Lint", false, true);
-        check.skipped_no_files = true;
+        check.files = CheckFiles::SkippedNoMatch;
 
         let checks = vec![check];
 

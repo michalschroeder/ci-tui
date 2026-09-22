@@ -845,8 +845,6 @@ checks:
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
-            on_demand: false,
-            skipped_no_files: false,
         }
     }
 

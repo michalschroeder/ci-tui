@@ -270,7 +270,7 @@ async fn run_sequential(
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
-        if check.on_demand {
+        if check.is_on_demand() {
             continue;
         }
         let result = run_check_with_executor(check, project_root, docker_config, executor).await;
@@ -288,7 +288,7 @@ async fn run_parallel(
     let mut handles = Vec::new();
 
     for check in checks {
-        if check.on_demand {
+        if check.is_on_demand() {
             continue;
         }
         let check = check.clone();

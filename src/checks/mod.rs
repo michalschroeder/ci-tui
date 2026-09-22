@@ -28,7 +28,9 @@ use determine::*;
 pub enum CheckFiles {
     /// Concrete file paths that triggered the check (empty for always-run checks)
     Files(Vec<String>),
-    /// Triggered check skipped: no changed files matched its triggers
+    /// Triggered check with nothing to run: no changed file matched its
+    /// file_pattern / source_pattern (or the pattern key is unknown), or
+    /// test discovery found no tests for a `{files}` command
     SkippedNoMatch,
     /// Test-discovery found no tests; check requires manual trigger ('t' key)
     OnDemand,
@@ -68,10 +70,6 @@ pub struct CheckToRun {
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
     pub resolved_fix_command: Option<String>,
-    /// If true, this check won't run automatically - user must trigger it manually
-    pub on_demand: bool,
-    /// If true, this check was skipped because it uses {files} placeholder but no files matched
-    pub skipped_no_files: bool,
 }
 
 impl CheckToRun {
@@ -97,7 +95,12 @@ impl CheckToRun {
 
     /// Check if this is an on-demand check (requires manual trigger)
     pub fn is_on_demand(&self) -> bool {
-        self.on_demand
+        self.files.is_on_demand()
+    }
+
+    /// True when the check was skipped because it needs `{files}` but has none
+    pub fn is_skipped_no_files(&self) -> bool {
+        self.files == CheckFiles::SkippedNoMatch && self.definition.command.contains("{files}")
     }
 
     /// Get command with {files} placeholder removed (for running against all files)
@@ -143,26 +146,13 @@ pub fn determine_checks(
 /// Resolve placeholders in check command
 ///
 /// Supported placeholders:
-/// - `{files}` - replaced with space-separated list of matched files
+/// - `{files}` - replaced with space-separated list of shell-quoted matched files
 fn resolve_command(check: &CheckDefinition, files: &[&str], use_fix: bool) -> String {
-    let mut command = if use_fix {
-        check
-            .fix_command
-            .clone()
-            .unwrap_or_else(|| check.command.clone())
-    } else {
-        check.command.clone()
+    let command = match (use_fix, &check.fix_command) {
+        (true, Some(fix)) => fix,
+        _ => &check.command,
     };
-
-    // Replace {files} placeholder
-    let files_str = if files.is_empty() {
-        String::new()
-    } else {
-        files.join(" ")
-    };
-    command = command.replace("{files}", &files_str);
-
-    command.trim().to_string()
+    crate::utils::shell::expand_files(command, files)
 }
 
 /// Group checks by their execution group
@@ -379,14 +369,7 @@ mod tests {
     }
 
     // Helper to create CheckToRun for tests
-    fn make_check(
-        id: &str,
-        group: &str,
-        name: &str,
-        command: &str,
-        on_demand: bool,
-        skipped_no_files: bool,
-    ) -> CheckToRun {
+    fn make_check(id: &str, group: &str, name: &str, command: &str) -> CheckToRun {
         CheckToRun {
             id: id.to_string(),
             group: group.to_string(),
@@ -404,8 +387,6 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
-            on_demand,
-            skipped_no_files,
         }
     }
 
@@ -421,7 +402,7 @@ mod tests {
         let cache_warmup = checks.iter().find(|c| c.id() == "cache-warmup");
         assert!(cache_warmup.is_some());
         let cache_warmup = cache_warmup.unwrap();
-        assert!(!cache_warmup.on_demand);
+        assert!(!cache_warmup.is_on_demand());
         assert!(cache_warmup.files.paths().is_empty());
     }
 
@@ -437,7 +418,7 @@ mod tests {
         let php_lint = checks.iter().find(|c| c.id() == "php-lint");
         assert!(php_lint.is_some());
         let php_lint = php_lint.unwrap();
-        assert!(!php_lint.on_demand);
+        assert!(!php_lint.is_on_demand());
         assert!(php_lint
             .files
             .paths()
@@ -456,13 +437,13 @@ mod tests {
         let php_lint = checks.iter().find(|c| c.id() == "php-lint");
         assert!(php_lint.is_some());
         let php_lint = php_lint.unwrap();
-        assert!(php_lint.on_demand);
+        assert!(php_lint.is_on_demand());
 
         // YAML lint should be triggered
         let yaml_lint = checks.iter().find(|c| c.id() == "yaml-lint");
         assert!(yaml_lint.is_some());
         let yaml_lint = yaml_lint.unwrap();
-        assert!(!yaml_lint.on_demand);
+        assert!(!yaml_lint.is_on_demand());
         assert!(yaml_lint
             .files
             .paths()
@@ -545,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_get_command_for_all_files_matches_resolve_command_policy() {
-        let check = make_check("id", "g", "N", "cmd {files} --flag", false, false);
+        let check = make_check("id", "g", "N", "cmd {files} --flag");
         // Must equal resolve_command with empty files: trim-only, placeholder stripped
         assert_eq!(
             check.get_command_for_all_files(),
@@ -565,17 +546,17 @@ mod tests {
 
         // php-lint uses {files} placeholder and no PHP files matched
         let php_lint = checks.iter().find(|c| c.id() == "php-lint").unwrap();
-        assert!(php_lint.on_demand, "Check should be on-demand");
+        assert!(php_lint.is_on_demand(), "Check should be on-demand");
         assert!(
-            php_lint.skipped_no_files,
+            php_lint.is_skipped_no_files(),
             "Check should have skipped_no_files=true"
         );
 
         // phpstan also uses {files} placeholder and no PHP files matched
         let phpstan = checks.iter().find(|c| c.id() == "phpstan").unwrap();
-        assert!(phpstan.on_demand, "Check should be on-demand");
+        assert!(phpstan.is_on_demand(), "Check should be on-demand");
         assert!(
-            phpstan.skipped_no_files,
+            phpstan.is_skipped_no_files(),
             "Check should have skipped_no_files=true"
         );
     }
@@ -620,9 +601,9 @@ checks:
 
         // phpunit doesn't use {{files}} placeholder, so shouldn't be auto-skipped
         let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
-        assert!(phpunit.on_demand, "Check should be on-demand");
+        assert!(phpunit.is_on_demand(), "Check should be on-demand");
         assert!(
-            !phpunit.skipped_no_files,
+            !phpunit.is_skipped_no_files(),
             "Check should NOT have skipped_no_files=true (no {{files}} placeholder)"
         );
     }
@@ -676,9 +657,9 @@ checks:
         // phpunit uses {files} placeholder and no tests were found
         // should be skipped to avoid running entire test suite
         let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
-        assert!(phpunit.on_demand, "Check should be on-demand");
+        assert!(phpunit.is_on_demand(), "Check should be on-demand");
         assert!(
-            phpunit.skipped_no_files,
+            phpunit.is_skipped_no_files(),
             "Check should have skipped_no_files=true (uses {{files}} but no tests found)"
         );
         assert_eq!(
@@ -738,11 +719,11 @@ checks:
         // should fall back to running all tests
         let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
         assert!(
-            !phpunit.on_demand,
+            !phpunit.is_on_demand(),
             "Check should NOT be on-demand (runs all)"
         );
         assert!(
-            !phpunit.skipped_no_files,
+            !phpunit.is_skipped_no_files(),
             "Check should NOT have skipped_no_files=true"
         );
         assert_eq!(
@@ -907,8 +888,11 @@ checks:
 
         // Should have exactly one phpunit check
         let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
-        assert!(!phpunit.on_demand, "Check should not be on-demand");
-        assert!(!phpunit.skipped_no_files, "Check should not be skipped");
+        assert!(!phpunit.is_on_demand(), "Check should not be on-demand");
+        assert!(
+            !phpunit.is_skipped_no_files(),
+            "Check should not be skipped"
+        );
 
         // The key assertion: files should contain NO duplicates
         let files = phpunit.files.paths();
@@ -976,7 +960,7 @@ checks:
 
             if should_trigger {
                 // At least one check with this pattern should not be on-demand
-                let has_triggered = matching_checks.iter().any(|c| !c.on_demand);
+                let has_triggered = matching_checks.iter().any(|c| !c.is_on_demand());
                 assert!(
                     has_triggered,
                     "Expected file '{}' to trigger pattern '{}', but all checks are on-demand",
@@ -984,7 +968,7 @@ checks:
                 );
             } else {
                 // All checks with this pattern should be on-demand (skipped)
-                let all_on_demand = matching_checks.iter().all(|c| c.on_demand);
+                let all_on_demand = matching_checks.iter().all(|c| c.is_on_demand());
                 assert!(
                     all_on_demand,
                     "Expected file '{}' NOT to trigger pattern '{}', but found triggered checks",
@@ -1002,7 +986,7 @@ checks:
             let checks = determine_checks(&config, &changed_files, &project_root);
 
             // Should have at least the cache-warmup check (always run)
-            let always_run_checks: Vec<_> = checks.iter().filter(|c| !c.on_demand).collect();
+            let always_run_checks: Vec<_> = checks.iter().filter(|c| !c.is_on_demand()).collect();
             assert!(
                 !always_run_checks.is_empty(),
                 "Should have always-run checks"
@@ -1012,7 +996,7 @@ checks:
             let cache_warmup = checks.iter().find(|c| c.id() == "cache-warmup");
             assert!(cache_warmup.is_some(), "Cache warmup should be present");
             assert!(
-                !cache_warmup.unwrap().on_demand,
+                !cache_warmup.unwrap().is_on_demand(),
                 "Cache warmup should not be on-demand"
             );
 
@@ -1020,7 +1004,7 @@ checks:
             for check in checks.iter() {
                 if check.definition.triggers.is_some() {
                     assert!(
-                        check.on_demand,
+                        check.is_on_demand(),
                         "Check '{}' with triggers should be on-demand when no files match",
                         check.id()
                     );
@@ -1078,7 +1062,7 @@ checks: {}
 
             for check in checks_with_triggers {
                 assert!(
-                    check.on_demand,
+                    check.is_on_demand(),
                     "Check '{}' should be on-demand when no files match its patterns",
                     check.id()
                 );
@@ -1140,7 +1124,7 @@ checks:
             let checks = determine_checks(&config, &changed_files, temp_dir.path());
 
             let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
-            assert!(!phpunit.on_demand, "Check should be triggered");
+            assert!(!phpunit.is_on_demand(), "Check should be triggered");
             assert!(
                 phpunit
                     .files
@@ -1200,8 +1184,8 @@ checks:
             let check1 = check1.unwrap();
             let check2 = check2.unwrap();
 
-            assert!(!check1.on_demand, "check1 should be triggered");
-            assert!(!check2.on_demand, "check2 should be triggered");
+            assert!(!check1.is_on_demand(), "check1 should be triggered");
+            assert!(!check2.is_on_demand(), "check2 should be triggered");
 
             assert!(
                 check1.files.paths().contains(&"src/Foo.php".to_string()),
@@ -1368,7 +1352,7 @@ checks:
         fn paren_prefixed_path_is_kept() {
             let check = mk_check("run {files}", None);
             let out = resolve_command(&check, &["(weird).rs"], false);
-            assert_eq!(out, "run (weird).rs");
+            assert_eq!(out, "run '(weird).rs'");
         }
     }
 
@@ -1387,9 +1371,9 @@ checks:
         #[test]
         fn test_single_group() {
             let checks = vec![
-                make_check("check1", "group1", "Check 1", "cmd1", false, false),
-                make_check("check2", "group1", "Check 2", "cmd2", false, false),
-                make_check("check3", "group1", "Check 3", "cmd3", false, false),
+                make_check("check1", "group1", "Check 1", "cmd1"),
+                make_check("check2", "group1", "Check 2", "cmd2"),
+                make_check("check3", "group1", "Check 3", "cmd3"),
             ];
 
             let grouped = group_checks(&checks);
@@ -1402,10 +1386,10 @@ checks:
         #[test]
         fn test_multiple_groups_preserve_order() {
             let checks = vec![
-                make_check("check1", "warmup", "Check 1", "cmd1", false, false),
-                make_check("check2", "fast", "Check 2", "cmd2", false, false),
-                make_check("check3", "analysis", "Check 3", "cmd3", false, false),
-                make_check("check4", "fast", "Check 4", "cmd4", false, false),
+                make_check("check1", "warmup", "Check 1", "cmd1"),
+                make_check("check2", "fast", "Check 2", "cmd2"),
+                make_check("check3", "analysis", "Check 3", "cmd3"),
+                make_check("check4", "fast", "Check 4", "cmd4"),
             ];
 
             let grouped = group_checks(&checks);

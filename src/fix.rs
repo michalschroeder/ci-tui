@@ -225,7 +225,7 @@ fn print_fix_result(check_id: &str, result: &Result<u64>) -> bool {
 
 /// Resolve {files} placeholder in fix command
 ///
-/// Replaces the `{files}` placeholder with a space-separated list of file paths.
+/// Replaces the `{files}` placeholder with a space-separated list of shell-quoted file paths.
 /// If no files are provided and the command contains `{files}`, the placeholder
 /// is removed and the result is trimmed.
 ///
@@ -238,12 +238,7 @@ fn print_fix_result(check_id: &str, result: &Result<u64>) -> bool {
 /// assert_eq!(cmd, "cargo fmt -- src/main.rs src/lib.rs");
 /// ```
 pub fn resolve_fix_command(command: &str, files: &[&str]) -> String {
-    let files_str = if files.is_empty() {
-        String::new()
-    } else {
-        files.join(" ")
-    };
-    command.replace("{files}", &files_str).trim().to_string()
+    crate::utils::shell::expand_files(command, files)
 }
 
 /// Select the error message for a failed Docker command.

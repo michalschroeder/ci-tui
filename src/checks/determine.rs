@@ -20,9 +20,7 @@ pub(super) fn new_check_to_run(
     group_name: &str,
     service: String,
     files: CheckFiles,
-    skipped_no_files: bool,
 ) -> CheckToRun {
-    let on_demand = files.is_on_demand();
     let file_list: Vec<&str> = files.paths().iter().map(|s| s.as_str()).collect();
     let resolved_command = resolve_command(check, &file_list, false);
     let resolved_fix_command = check
@@ -38,8 +36,6 @@ pub(super) fn new_check_to_run(
         files,
         resolved_command,
         resolved_fix_command,
-        on_demand,
-        skipped_no_files,
     }
 }
 
@@ -62,7 +58,6 @@ pub(super) fn process_check(
             group_name,
             service,
             CheckFiles::Files(vec![]),
-            false,
         ));
     }
 
@@ -174,7 +169,6 @@ pub(super) fn process_triggered_check(
                     group_name,
                     service.to_string(),
                     CheckFiles::OnDemand,
-                    false,
                 ));
             }
             DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
@@ -184,7 +178,6 @@ pub(super) fn process_triggered_check(
                     group_name,
                     service.to_string(),
                     CheckFiles::RunAll,
-                    false,
                 ));
             }
             DiscoveryOutcome::NoTestsOnDemand | DiscoveryOutcome::NoTestsRunAll => {}
@@ -203,19 +196,16 @@ pub(super) fn process_triggered_check(
             group_name,
             service.to_string(),
             CheckFiles::Files(matched_files),
-            false,
         ))
     } else {
         let has_file_trigger = triggers.file_pattern.is_some();
         if has_file_trigger || has_source_trigger {
-            let has_files_placeholder = check.command.contains("{files}");
             Some(new_check_to_run(
                 check_id,
                 check,
                 group_name,
                 service.to_string(),
                 CheckFiles::SkippedNoMatch,
-                has_files_placeholder,
             ))
         } else {
             None
@@ -437,7 +427,6 @@ mod tests {
                 "g",
                 "svc".to_string(),
                 CheckFiles::Files(vec!["a.rs".into(), "b.rs".into()]),
-                false,
             );
             assert_eq!(out.id, "id");
             assert_eq!(out.group, "g");
@@ -451,8 +440,8 @@ mod tests {
                 out.resolved_fix_command.as_deref(),
                 Some("cargo fmt a.rs b.rs")
             );
-            assert!(!out.on_demand);
-            assert!(!out.skipped_no_files);
+            assert!(!out.is_on_demand());
+            assert!(!out.is_skipped_no_files());
         }
 
         #[test]
@@ -464,7 +453,6 @@ mod tests {
                 "g",
                 "svc".to_string(),
                 CheckFiles::Files(vec![]),
-                false,
             );
             assert!(out.files.paths().is_empty());
             assert_eq!(out.resolved_command, "cargo check");
@@ -472,17 +460,25 @@ mod tests {
         }
 
         #[test]
-        fn on_demand_derived_from_variant() {
-            let def = mk_check("cmd {files}", None, None, false);
-            for (files, expected) in [
-                (CheckFiles::Files(vec![]), false),
-                (CheckFiles::RunAll, false),
-                (CheckFiles::SkippedNoMatch, true),
-                (CheckFiles::OnDemand, true),
+        fn flags_derived_from_variant() {
+            let with_files = mk_check("cmd {files}", None, None, false);
+            let without_files = mk_check("cmd", None, None, false);
+            // (variant, on_demand, skipped_no_files for a `{files}` command)
+            for (files, on_demand, skipped) in [
+                (CheckFiles::Files(vec![]), false, false),
+                (CheckFiles::RunAll, false, false),
+                (CheckFiles::SkippedNoMatch, true, true),
+                (CheckFiles::OnDemand, true, false),
             ] {
-                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, true);
-                assert_eq!(out.on_demand, expected);
-                assert!(out.skipped_no_files);
+                let out =
+                    new_check_to_run("id", &with_files, "g", "svc".to_string(), files.clone());
+                assert_eq!(out.is_on_demand(), on_demand);
+                assert_eq!(out.is_skipped_no_files(), skipped);
+
+                // Without {files} the check is never skipped, only on-demand
+                let out = new_check_to_run("id", &without_files, "g", "svc".to_string(), files);
+                assert_eq!(out.is_on_demand(), on_demand);
+                assert!(!out.is_skipped_no_files());
             }
         }
 
@@ -494,7 +490,7 @@ mod tests {
                 CheckFiles::OnDemand,
                 CheckFiles::RunAll,
             ] {
-                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, false);
+                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files);
                 assert_eq!(out.resolved_command, "cmd");
             }
         }
@@ -509,9 +505,8 @@ mod tests {
                 "g",
                 "svc".to_string(),
                 CheckFiles::Files(vec!["(x).rs".into()]),
-                false,
             );
-            assert!(out.resolved_command.contains("(x).rs"));
+            assert_eq!(out.resolved_command, "run '(x).rs'");
         }
     }
 
@@ -536,6 +531,32 @@ mod tests {
             assert!(run.files.paths().is_empty());
             assert_eq!(run.resolved_command, "cargo bench");
             assert_eq!(run.service, "default-svc");
+        }
+
+        #[test]
+        fn always_run_resolves_fix_command_without_files() {
+            let cfg = base_config();
+            let def = mk_check(
+                "cargo clippy",
+                Some("cargo clippy --fix {files}"),
+                None,
+                false,
+            );
+            let run = process_check(
+                &cfg,
+                &changed(&[]),
+                &PathBuf::from("/tmp"),
+                "g",
+                "id",
+                &def,
+                "svc",
+            )
+            .unwrap();
+            assert_eq!(
+                run.resolved_fix_command.as_deref(),
+                Some("cargo clippy --fix")
+            );
+            assert!(!run.is_on_demand());
         }
 
         #[test]
@@ -595,7 +616,7 @@ mod tests {
                 CheckFiles::Files(vec!["src/main.rs".to_string()])
             );
             assert_eq!(run.resolved_command, "cargo check src/main.rs");
-            assert!(!run.on_demand);
+            assert!(!run.is_on_demand());
         }
 
         #[test]
@@ -611,9 +632,27 @@ mod tests {
             let out =
                 process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc");
             let run = out.expect("should produce skipped CheckToRun");
-            assert!(run.on_demand);
-            assert!(run.skipped_no_files);
+            assert!(run.is_on_demand());
+            assert!(run.is_skipped_no_files());
             assert_eq!(run.files, CheckFiles::SkippedNoMatch);
+        }
+
+        #[test]
+        fn file_pattern_no_match_without_placeholder_is_on_demand_not_skipped() {
+            let cfg = base_config();
+            let def = mk_check(
+                "cargo test",
+                None,
+                Some(triggers_file_pattern("rust")),
+                false,
+            );
+            let cf = changed(&["README.md"]);
+            let run =
+                process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc")
+                    .unwrap();
+            assert_eq!(run.files, CheckFiles::SkippedNoMatch);
+            assert!(run.is_on_demand());
+            assert!(!run.is_skipped_no_files());
         }
 
         #[test]
@@ -660,7 +699,7 @@ mod tests {
             let cf = changed(&["src/foo.rs"]);
             let out =
                 process_triggered_check(&cfg, &cf, tmp.path(), "g", "id", &def, "svc").unwrap();
-            assert!(out.on_demand);
+            assert!(out.is_on_demand());
             assert_eq!(out.files, CheckFiles::OnDemand);
         }
     }

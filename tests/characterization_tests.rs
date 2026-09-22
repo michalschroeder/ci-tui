@@ -33,7 +33,7 @@ fn assert_check_triggered(checks: &[CheckToRun], id: &str) {
     );
     let check = check.unwrap();
     assert!(
-        !check.on_demand,
+        !check.is_on_demand(),
         "Check '{}' should be triggered (not on-demand), but was on-demand",
         id
     );
@@ -49,7 +49,7 @@ fn assert_check_on_demand(checks: &[CheckToRun], id: &str) {
     );
     let check = check.unwrap();
     assert!(
-        check.on_demand,
+        check.is_on_demand(),
         "Check '{}' should be on-demand, but was triggered",
         id
     );
@@ -168,7 +168,7 @@ fn test_on_demand_config_field_ignored_when_files_match() {
     // when files match the pattern, the check is triggered (not on-demand)
     let check = assert_check_exists(&checks, "expensive-check");
     assert!(
-        !check.on_demand,
+        !check.is_on_demand(),
         "Check marked on_demand in config becomes triggered when files match (current behavior)"
     );
 }
@@ -221,7 +221,7 @@ checks:
 
     // Test discovery should find the exact mapped test file
     let check = assert_check_exists(&checks, "phpunit");
-    assert!(!check.on_demand, "Check should be triggered");
+    assert!(!check.is_on_demand(), "Check should be triggered");
     assert!(
         check
             .files
@@ -270,10 +270,13 @@ checks:
 
     let check = assert_check_exists(&checks, "phpunit");
     assert!(
-        check.on_demand,
+        check.is_on_demand(),
         "Check with {{files}} and no tests found should be on-demand"
     );
-    assert!(check.skipped_no_files, "Should have skipped_no_files=true");
+    assert!(
+        check.is_skipped_no_files(),
+        "Should have skipped_no_files=true"
+    );
 }
 
 #[test]
@@ -316,7 +319,7 @@ checks:
     let check = assert_check_exists(&checks, "phpunit");
     // Command doesn't have {files}, so should fall back to running all
     assert!(
-        !check.on_demand,
+        !check.is_on_demand(),
         "Check without {{files}} should run all when no tests found"
     );
     assert_eq!(
