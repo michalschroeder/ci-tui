@@ -178,7 +178,7 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
     let mem_inner = mem_block.inner(chunks[1]);
 
     // CPU sparkline
-    let cpu_data = prepare_sparkline_data(&app.cpu_history, cpu_inner.width as usize);
+    let cpu_data = prepare_sparkline_data(&app.sys.cpu_history, cpu_inner.width as usize);
     let cpu_sparkline = Sparkline::default()
         .block(cpu_block)
         .data(&cpu_data)
@@ -188,7 +188,7 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(cpu_sparkline, chunks[0]);
 
     // Memory sparkline
-    let mem_data = prepare_sparkline_data(&app.mem_history, mem_inner.width as usize);
+    let mem_data = prepare_sparkline_data(&app.sys.mem_history, mem_inner.width as usize);
     let mem_sparkline = Sparkline::default()
         .block(mem_block)
         .data(&mem_data)

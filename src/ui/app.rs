@@ -72,6 +72,30 @@ pub struct FixState {
     pub all_total: usize,
 }
 
+/// System monitoring history (updated by background stats worker)
+#[derive(Debug)]
+pub struct SysStats {
+    /// CPU usage history for sparkline (percentage values)
+    pub cpu_history: VecDeque<f32>,
+    /// Memory usage history for sparkline (percentage values)
+    pub mem_history: VecDeque<f32>,
+    /// Current memory usage in bytes
+    pub mem_used_bytes: u64,
+    /// Total memory in bytes (0 until first stats sample arrives)
+    pub mem_total_bytes: u64,
+}
+
+impl Default for SysStats {
+    fn default() -> Self {
+        Self {
+            cpu_history: VecDeque::with_capacity(64),
+            mem_history: VecDeque::with_capacity(64),
+            mem_used_bytes: 0,
+            mem_total_bytes: 0,
+        }
+    }
+}
+
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
@@ -161,15 +185,8 @@ pub struct App {
     /// State for fix and fix-all operations
     pub fix: FixState,
 
-    // System monitoring (updated by background task)
-    /// CPU usage history for sparkline (percentage values)
-    pub cpu_history: VecDeque<f32>,
-    /// Memory usage history for sparkline (percentage values)
-    pub mem_history: VecDeque<f32>,
-    /// Current memory usage in bytes
-    pub mem_used_bytes: u64,
-    /// Total memory in bytes
-    pub mem_total_bytes: u64,
+    /// System monitoring history (updated by background stats worker)
+    pub sys: SysStats,
 
     /// Status message shown to user (clears on next keypress)
     pub status_message: Option<String>,
@@ -219,10 +236,7 @@ impl App {
             pre_commands,
             current_pre_command: None,
             fix: FixState::default(),
-            cpu_history: VecDeque::with_capacity(64),
-            mem_history: VecDeque::with_capacity(64),
-            mem_used_bytes: 0,
-            mem_total_bytes: 1, // Avoid division by zero
+            sys: SysStats::default(),
             status_message: None,
             show_full_command: false,
             needs_redraw: true, // Initial render needed
@@ -256,6 +270,7 @@ impl App {
         self.run_finished_at = None;
         self.current_pre_command = None;
         self.fix = FixState::default();
+        // sys stats deliberately survive retries
         self.status_message = None;
         self.show_full_command = false;
         self.needs_redraw = true;
@@ -471,8 +486,8 @@ impl App {
     /// The actual sysinfo queries happen in a separate task to avoid
     /// blocking the UI thread.
     pub fn update_stats(&mut self, cpu_usage: f32, mem_used: u64, mem_total: u64) {
-        self.mem_used_bytes = mem_used;
-        self.mem_total_bytes = mem_total;
+        self.sys.mem_used_bytes = mem_used;
+        self.sys.mem_total_bytes = mem_total;
 
         // Memory usage percentage
         let mem_usage = if mem_total > 0 {
@@ -482,14 +497,14 @@ impl App {
         };
 
         // Add to history (keep last 60 samples) - VecDeque for O(1) pop_front
-        self.cpu_history.push_back(cpu_usage);
-        if self.cpu_history.len() > MAX_HISTORY_SAMPLES {
-            self.cpu_history.pop_front();
+        self.sys.cpu_history.push_back(cpu_usage);
+        if self.sys.cpu_history.len() > MAX_HISTORY_SAMPLES {
+            self.sys.cpu_history.pop_front();
         }
 
-        self.mem_history.push_back(mem_usage);
-        if self.mem_history.len() > MAX_HISTORY_SAMPLES {
-            self.mem_history.pop_front();
+        self.sys.mem_history.push_back(mem_usage);
+        if self.sys.mem_history.len() > MAX_HISTORY_SAMPLES {
+            self.sys.mem_history.pop_front();
         }
 
         self.clamp_selection();
@@ -497,19 +512,19 @@ impl App {
     }
 
     pub fn cpu_usage(&self) -> f32 {
-        self.cpu_history.back().copied().unwrap_or(0.0)
+        self.sys.cpu_history.back().copied().unwrap_or(0.0)
     }
 
     pub fn mem_usage(&self) -> f32 {
-        self.mem_history.back().copied().unwrap_or(0.0)
+        self.sys.mem_history.back().copied().unwrap_or(0.0)
     }
 
     pub fn mem_used_gb(&self) -> f64 {
-        self.mem_used_bytes as f64 / 1_073_741_824.0
+        self.sys.mem_used_bytes as f64 / 1_073_741_824.0
     }
 
     pub fn mem_total_gb(&self) -> f64 {
-        self.mem_total_bytes as f64 / 1_073_741_824.0
+        self.sys.mem_total_bytes as f64 / 1_073_741_824.0
     }
 
     /// Keep selection valid: the filtered item list can shrink when a Failed
@@ -1154,8 +1169,8 @@ checks:
 
         assert_eq!(app.cpu_usage(), 50.0);
         assert_eq!(app.mem_usage(), 50.0); // 8/16 = 50%
-        assert_eq!(app.mem_used_bytes, 8_000_000_000);
-        assert_eq!(app.mem_total_bytes, 16_000_000_000);
+        assert_eq!(app.sys.mem_used_bytes, 8_000_000_000);
+        assert_eq!(app.sys.mem_total_bytes, 16_000_000_000);
     }
 
     #[test]
@@ -1168,8 +1183,8 @@ checks:
         }
 
         // Should be capped at MAX_HISTORY_SAMPLES
-        assert_eq!(app.cpu_history.len(), MAX_HISTORY_SAMPLES);
-        assert_eq!(app.mem_history.len(), MAX_HISTORY_SAMPLES);
+        assert_eq!(app.sys.cpu_history.len(), MAX_HISTORY_SAMPLES);
+        assert_eq!(app.sys.mem_history.len(), MAX_HISTORY_SAMPLES);
 
         // Most recent should be 69
         assert_eq!(app.cpu_usage(), 69.0);
