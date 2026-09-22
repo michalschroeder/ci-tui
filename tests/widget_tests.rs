@@ -7,7 +7,7 @@ use ci_tui::ui::dashboard;
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
 mod common;
-use common::{make_test_app, make_test_app_all_passed, make_test_app_running};
+use common::{make_test_app, make_test_app_all_passed, make_test_app_running, make_widget_check};
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
@@ -552,5 +552,55 @@ fn test_files_list_shows_count() {
     assert!(
         buffer_contains(buffer, "Files (2)"),
         "Files count should appear"
+    );
+}
+
+// ============================================================================
+// Regression Tests
+// ============================================================================
+
+/// Helper: text of the left (checks) column of the buffer
+fn left_column_contains(buffer: &Buffer, text: &str) -> bool {
+    (0..buffer.area.height).any(|y| {
+        let line: String = (0..WIDTH * 4 / 10)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        line.contains(text)
+    })
+}
+
+#[test]
+fn test_multibyte_command_truncation_does_not_panic() {
+    let mut app = make_test_app();
+    let check = &mut app.checks[0];
+    check.resolved_command = format!("clippy {}", "src/Zażółć_gęślą.rs ".repeat(20));
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(buffer_contains(terminal.backend().buffer(), "[e=expand]"));
+}
+
+#[test]
+fn test_checks_list_scrolls_to_selected_check() {
+    let mut app = make_test_app();
+    for i in 0..6 {
+        let id = format!("extra{}", i);
+        app.checks.push(make_widget_check(
+            &id,
+            "test",
+            &format!("Extra {}", i),
+            false,
+        ));
+        app.results
+            .insert(id.clone(), ci_tui::runner::CheckResult::pending(&id));
+    }
+    let last = app.get_selectable_items().len() - 1;
+    for _ in 0..last {
+        app.next_check();
+    }
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(
+        left_column_contains(terminal.backend().buffer(), "Extra 5"),
+        "selected last check must be scrolled into view"
     );
 }

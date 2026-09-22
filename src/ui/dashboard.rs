@@ -12,9 +12,9 @@
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
 
-use super::app::App;
+use super::app::{App, PreCommandState, SelectableItem};
 use crate::checks::CheckFiles;
-use crate::runner::CheckStatus;
+use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -22,7 +22,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Sparkline, Wrap},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap},
     Frame,
 };
 use std::collections::VecDeque;
@@ -80,6 +80,17 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
         Some(CheckStatus::OnDemand) => ("◇", Style::default().fg(Color::Cyan)),
         None => ("?", Style::default().fg(Color::DarkGray)),
     }
+}
+
+/// Longest prefix of `s` with at most `max` chars (never splits a UTF-8 char)
+fn prefix_chars(s: &str, max: usize) -> &str {
+    s.char_indices().nth(max).map_or(s, |(i, _)| &s[..i])
+}
+
+/// Longest suffix of `s` with at most `max` chars (never splits a UTF-8 char)
+fn suffix_chars(s: &str, max: usize) -> &str {
+    let skip = s.chars().count().saturating_sub(max);
+    s.char_indices().nth(skip).map_or("", |(i, _)| &s[i..])
 }
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -245,10 +256,7 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a pre-command as a list item
-fn render_pre_command_item(
-    pre_cmd: &super::app::PreCommandState,
-    is_selected: bool,
-) -> ListItem<'static> {
+fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> ListItem<'static> {
     use super::app::PreCommandStatus;
 
     let (icon, icon_style) = match pre_cmd.status {
@@ -323,8 +331,8 @@ fn render_check_item(
     // Truncate name if needed - calculate based on available width
     let available_width = area.width.saturating_sub(CHECK_NAME_RESERVED_COLS) as usize;
     let max_name_len = available_width.max(CHECK_NAME_MIN_COLS);
-    let name = if check.name().len() > max_name_len {
-        format!("{}…", &check.name()[..max_name_len - 1])
+    let name = if check.name().chars().count() > max_name_len {
+        format!("{}…", prefix_chars(check.name(), max_name_len - 1))
     } else {
         check.name().to_string()
     };
@@ -344,11 +352,38 @@ fn render_check_item(
     ]))
 }
 
-fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
+fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
+    let (items, selected_row) = build_checks_list_items(app, area);
+
+    let filter_info = match app.view.status_filter {
+        super::app::StatusFilter::All => "",
+        super::app::StatusFilter::Failed => " [failed]",
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Checks{} ", filter_info)),
+    );
+
+    // Persist the scroll offset so the list scrolls only when the selection
+    // leaves the visible window
+    let mut state = ListState::default()
+        .with_offset(app.view.checks_list_offset)
+        .with_selected(selected_row);
+    frame.render_stateful_widget(list, area, &mut state);
+    app.view.checks_list_offset = state.offset();
+}
+
+/// Build the checks list rows and the row index of the selected item.
+///
+/// Rows follow [`App::get_selectable_items`] order (plus group headers), so
+/// the n-th selectable row is the selected one when n == `selected_check`.
+fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Option<usize>) {
     let groups = app.groups();
     let mut items: Vec<ListItem> = Vec::new();
-    let selected_check_id = app.selected_check().map(|c| c.id());
-    let selected_pre_cmd = app.selected_pre_command();
+    // Row index of each selectable item, in selection order
+    let mut selectable_rows: Vec<usize> = Vec::new();
 
     for group in groups {
         let visible_pre_commands: Vec<_> = app
@@ -384,29 +419,20 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
         ])));
 
         for pre_cmd in visible_pre_commands {
-            let is_selected = selected_pre_cmd
-                .is_some_and(|p| p.group == pre_cmd.group && p.name == pre_cmd.name);
+            let is_selected = selectable_rows.len() == app.view.selected_check;
+            selectable_rows.push(items.len());
             items.push(render_pre_command_item(pre_cmd, is_selected));
         }
 
         for check in visible_checks {
-            let is_selected = selected_check_id == Some(check.id());
+            let is_selected = selectable_rows.len() == app.view.selected_check;
+            selectable_rows.push(items.len());
             items.push(render_check_item(app, check, area, is_selected));
         }
     }
 
-    let filter_info = match app.view.status_filter {
-        super::app::StatusFilter::All => "",
-        super::app::StatusFilter::Failed => " [failed]",
-    };
-
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Checks{} ", filter_info)),
-    );
-
-    frame.render_widget(list, area);
+    let selected_row = selectable_rows.get(app.view.selected_check).copied();
+    (items, selected_row)
 }
 
 fn render_files_list(app: &App, frame: &mut Frame, area: Rect) {
@@ -519,7 +545,7 @@ pub fn format_elapsed(duration: std::time::Duration) -> String {
 
 /// Smart path truncation that keeps the filename visible and truncates directory path
 fn truncate_path(path: &str, max_width: usize) -> String {
-    if path.len() <= max_width {
+    if path.chars().count() <= max_width {
         return path.to_string();
     }
 
@@ -527,17 +553,15 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     if let Some(last_sep) = path.rfind('/') {
         let filename = &path[last_sep + 1..];
         let dir_path = &path[..last_sep];
+        let filename_len = filename.chars().count();
 
         // If filename alone is too long, truncate it
-        if filename.len() >= max_width {
-            return format!(
-                "…{}",
-                &filename[filename.len().saturating_sub(max_width - 1)..]
-            );
+        if filename_len >= max_width {
+            return format!("…{}", suffix_chars(filename, max_width.saturating_sub(1)));
         }
 
         // Calculate space for directory (max_width - filename - "/" - "…")
-        let dir_space = max_width.saturating_sub(filename.len() + 2);
+        let dir_space = max_width.saturating_sub(filename_len + 2);
 
         if dir_space < 3 {
             // Not enough space for directory, just show filename
@@ -545,8 +569,8 @@ fn truncate_path(path: &str, max_width: usize) -> String {
         }
 
         // Truncate directory from the left, keeping the rightmost part
-        let truncated_dir = if dir_path.len() > dir_space {
-            format!("…{}", &dir_path[dir_path.len() - dir_space + 1..])
+        let truncated_dir = if dir_path.chars().count() > dir_space {
+            format!("…{}", suffix_chars(dir_path, dir_space - 1))
         } else {
             dir_path.to_string()
         };
@@ -554,12 +578,58 @@ fn truncate_path(path: &str, max_width: usize) -> String {
         format!("{}/{}", truncated_dir, filename)
     } else {
         // No separator, just truncate from the left
-        format!("…{}", &path[path.len().saturating_sub(max_width - 1)..])
+        format!("…{}", suffix_chars(path, max_width.saturating_sub(1)))
     }
 }
 
-/// Render fix-all results (completed)
-fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
+/// What the output panel shows. Shared by rendering and scroll clamping so
+/// the max scroll offset always matches the drawn text.
+enum OutputView<'a> {
+    FixAllResults,
+    FixAllRunning,
+    FixResult(&'a CheckResult),
+    FixRunning,
+    PreCommand(&'a PreCommandState),
+    Check(Option<&'a crate::checks::CheckToRun>),
+}
+
+fn output_view(app: &App) -> OutputView<'_> {
+    if !app.fix.all_results.is_empty() && !app.fix.all_running {
+        OutputView::FixAllResults
+    } else if app.fix.all_running {
+        OutputView::FixAllRunning
+    } else if let Some(result) = app.fix.result.as_ref() {
+        OutputView::FixResult(result)
+    } else if app.fix.running {
+        OutputView::FixRunning
+    } else {
+        match app.selected_item() {
+            Some(SelectableItem::PreCommand(pc)) => OutputView::PreCommand(pc),
+            Some(SelectableItem::Check(check)) => OutputView::Check(Some(check)),
+            None => OutputView::Check(None),
+        }
+    }
+}
+
+/// Count the lines of the text the output panel currently draws.
+///
+/// Used by [`App`] scroll clamping. Running panels do not scroll (0).
+pub fn output_line_count(app: &App, width: u16) -> usize {
+    let text = match output_view(app) {
+        OutputView::FixAllResults => fix_all_results_text(app),
+        OutputView::FixResult(result) => fix_result_text(result),
+        OutputView::PreCommand(pc) => pre_command_output_text(pc),
+        OutputView::Check(Some(check)) => match app.results.get(check.id()) {
+            Some(result) => build_check_output_text(app, check, result, width),
+            None => return 0,
+        },
+        OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => return 0,
+    };
+    text.lines().count()
+}
+
+/// Build the fix-all results text
+fn fix_all_results_text(app: &App) -> String {
     let mut raw_output = String::with_capacity(512);
 
     let passed = app
@@ -609,6 +679,13 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
+    raw_output
+}
+
+/// Render fix-all results (completed)
+fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
+    let raw_output = fix_all_results_text(app);
+
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
     let visible_lines = app.view.output_visible_lines;
@@ -651,12 +728,8 @@ fn render_fix_all_running(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render single fix result
-fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(fix_result) = app.fix.result.as_ref() else {
-        // Should not reach here (called only when fix_result is Some), but handle gracefully
-        return;
-    };
+/// Build the single fix result text
+fn fix_result_text(fix_result: &CheckResult) -> String {
     let mut raw_output = String::with_capacity(512);
 
     let status_line = if fix_result.status == CheckStatus::Passed {
@@ -671,6 +744,13 @@ fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
         raw_output.push_str("\n\x1b[31m─── STDERR ───\x1b[0m\n");
         raw_output.push_str(fix_result.error_output.trim_end());
     }
+
+    raw_output
+}
+
+/// Render single fix result
+fn render_fix_result(app: &App, fix_result: &CheckResult, frame: &mut Frame, area: Rect) {
+    let raw_output = fix_result_text(fix_result);
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
@@ -719,10 +799,10 @@ fn build_check_output_text(
     let max_cmd_len = (width as usize).saturating_sub(10);
 
     raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
-    if app.view.show_full_command || command.len() <= max_cmd_len {
+    if app.view.show_full_command || command.chars().count() <= max_cmd_len {
         raw_output.push_str(command);
     } else {
-        raw_output.push_str(&command[..max_cmd_len.saturating_sub(3)]);
+        raw_output.push_str(prefix_chars(command, max_cmd_len.saturating_sub(3)));
         raw_output.push_str("...\x1b[0m \x1b[90m[e=expand]");
     }
     raw_output.push_str("\x1b[0m\n\n");
@@ -767,22 +847,6 @@ fn build_check_output_text(
     raw_output
 }
 
-/// Count the lines of the fully rendered output text for a check.
-///
-/// Used by [`App`] scroll clamping so the max scroll offset matches what
-/// [`render_check_output`] actually draws (command line, status header,
-/// files section, output, stderr).
-pub fn check_output_line_count(
-    app: &App,
-    check: &crate::checks::CheckToRun,
-    result: &crate::runner::CheckResult,
-    width: u16,
-) -> usize {
-    build_check_output_text(app, check, result, width)
-        .lines()
-        .count()
-}
-
 /// Append the files section to the output string
 fn append_files_section(raw_output: &mut String, app: &App, check: &crate::checks::CheckToRun) {
     let Some(CheckFiles::Files(files)) = app
@@ -820,8 +884,13 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
 }
 
 /// Render check output details
-fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(check) = app.selected_check() else {
+fn render_check_output(
+    app: &App,
+    check: Option<&crate::checks::CheckToRun>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let Some(check) = check else {
         let block = Block::default().borders(Borders::ALL).title(" Output ");
         let paragraph = Paragraph::new("Select a check to view details")
             .block(block)
@@ -860,14 +929,8 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render pre-command output details
-fn render_pre_command_output(
-    app: &App,
-    pre_cmd: &super::app::PreCommandState,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let base_title = &pre_cmd.name;
+/// Build the pre-command output text
+fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
     let mut raw_output = String::with_capacity(512);
 
     // Command info
@@ -901,6 +964,14 @@ fn render_pre_command_output(
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
     }
 
+    raw_output
+}
+
+/// Render pre-command output details
+fn render_pre_command_output(app: &App, pre_cmd: &PreCommandState, frame: &mut Frame, area: Rect) {
+    let base_title = &pre_cmd.name;
+    let raw_output = pre_command_output_text(pre_cmd);
+
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
     let visible_lines = app.view.output_visible_lines;
@@ -924,18 +995,13 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     app.output_area_width = area.width;
 
     // Dispatch to appropriate sub-renderer based on state
-    if !app.fix.all_results.is_empty() && !app.fix.all_running {
-        render_fix_all_results(app, frame, area);
-    } else if app.fix.all_running {
-        render_fix_all_running(app, frame, area);
-    } else if app.fix.result.is_some() {
-        render_fix_result(app, frame, area);
-    } else if app.fix.running {
-        render_fix_running(frame, area);
-    } else if let Some(pre_cmd) = app.selected_pre_command() {
-        render_pre_command_output(app, pre_cmd, frame, area);
-    } else {
-        render_check_output(app, frame, area);
+    match output_view(app) {
+        OutputView::FixAllResults => render_fix_all_results(app, frame, area),
+        OutputView::FixAllRunning => render_fix_all_running(app, frame, area),
+        OutputView::FixResult(result) => render_fix_result(app, result, frame, area),
+        OutputView::FixRunning => render_fix_running(frame, area),
+        OutputView::PreCommand(pc) => render_pre_command_output(app, pc, frame, area),
+        OutputView::Check(check) => render_check_output(app, check, frame, area),
     }
 }
 
@@ -1000,13 +1066,15 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::raw(" all files  "));
     }
 
-    spans.push(Span::styled(
-        "R",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::raw(" RETRY ALL  "));
+    if app.can_retry_all() {
+        spans.push(Span::styled(
+            "R",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" RETRY ALL  "));
+    }
 
     if caps.can_fix {
         spans.push(Span::styled(
@@ -1065,5 +1133,41 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         let help = Line::from(spans);
         let paragraph = Paragraph::new(help);
         frame.render_widget(paragraph, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prefix_chars_respects_char_boundaries() {
+        assert_eq!(prefix_chars("Zażółć", 3), "Zaż");
+        assert_eq!(prefix_chars("abc", 10), "abc");
+        assert_eq!(prefix_chars("abc", 0), "");
+    }
+
+    #[test]
+    fn test_suffix_chars_respects_char_boundaries() {
+        assert_eq!(suffix_chars("Zażółć", 3), "ółć");
+        assert_eq!(suffix_chars("abc", 10), "abc");
+        assert_eq!(suffix_chars("abc", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_path_multibyte() {
+        let path = "src/Ćwiczenia/Zażółć/Gęślą_jaźń_bardzo_długa_nazwa.php";
+        let out = truncate_path(path, 20);
+        assert!(out.chars().count() <= 20, "{}", out);
+        assert!(out.starts_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_path_keeps_ascii_behavior() {
+        assert_eq!(truncate_path("src/main.rs", 20), "src/main.rs");
+        assert_eq!(
+            truncate_path("a/very/long/dir/path/file.rs", 16),
+            "…r/path/file.rs"
+        );
     }
 }

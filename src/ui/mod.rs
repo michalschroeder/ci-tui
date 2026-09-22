@@ -23,10 +23,7 @@ pub mod dashboard;
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
-use crate::runner::{
-    run_check_with_command, run_fix_command, run_single_check, CheckResult, CheckRunner,
-    RunnerEvent,
-};
+use crate::runner::{run_check_with_command, CheckResult, CheckRunner, RunnerEvent};
 use anyhow::Result;
 use app::App;
 use crossterm::{
@@ -176,13 +173,11 @@ enum Action {
     },
 }
 
-/// Channels for spawning async operations from key handlers
-struct EventChannels {
-    fix_tx: mpsc::Sender<CheckResult>,
-    fix_all_tx: mpsc::Sender<FixAllEvent>,
-    retry_tx: mpsc::Sender<CheckResult>,
+/// Shared handles for spawned async tasks (Arcs for cheap cloning)
+#[derive(Clone)]
+struct TaskCtx {
     project_root: Arc<PathBuf>,
-    /// Container name for docker exec/run commands (Arc for cheap cloning into async tasks)
+    /// Default container name for docker exec/run commands
     container_name: Arc<str>,
     /// Docker configuration (for image, volumes, workdir)
     docker_config: Arc<crate::config::DockerConfig>,
@@ -190,25 +185,55 @@ struct EventChannels {
     global_env: Arc<std::collections::HashMap<String, String>>,
 }
 
-/// Cloned shared handles for spawned async tasks
-#[derive(Clone)]
-struct TaskCtx {
-    project_root: Arc<PathBuf>,
-    container_name: Arc<str>,
-    docker_config: Arc<crate::config::DockerConfig>,
-    global_env: Arc<std::collections::HashMap<String, String>>,
+impl TaskCtx {
+    /// Run `command` as `check` (check's container override and env apply)
+    async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
+        run_check_with_command(
+            check,
+            command,
+            &self.project_root,
+            &self.container_name,
+            &self.docker_config,
+            &self.global_env,
+        )
+        .await
+    }
 }
 
-impl EventChannels {
-    /// Clone the shared handles needed by a spawned task
-    fn task_ctx(&self) -> TaskCtx {
-        TaskCtx {
-            project_root: Arc::clone(&self.project_root),
-            container_name: Arc::clone(&self.container_name),
-            docker_config: Arc::clone(&self.docker_config),
-            global_env: Arc::clone(&self.global_env),
-        }
-    }
+/// Senders for spawning async operations from key handlers
+struct EventChannels {
+    fix_tx: mpsc::Sender<CheckResult>,
+    fix_all_tx: mpsc::Sender<FixAllEvent>,
+    retry_tx: mpsc::Sender<CheckResult>,
+    ctx: TaskCtx,
+}
+
+/// Receivers matching [`EventChannels`]
+struct TaskReceivers {
+    fix_rx: mpsc::Receiver<CheckResult>,
+    fix_all_rx: mpsc::Receiver<FixAllEvent>,
+    retry_rx: mpsc::Receiver<CheckResult>,
+}
+
+/// Create fresh task channels. Replacing them on retry-all drops results
+/// from tasks started before the reset (their receivers are gone).
+fn task_channels(ctx: TaskCtx) -> (EventChannels, TaskReceivers) {
+    let (fix_tx, fix_rx) = mpsc::channel(1);
+    let (fix_all_tx, fix_all_rx) = mpsc::channel(10);
+    let (retry_tx, retry_rx) = mpsc::channel(1);
+    (
+        EventChannels {
+            fix_tx,
+            fix_all_tx,
+            retry_tx,
+            ctx,
+        },
+        TaskReceivers {
+            fix_rx,
+            fix_all_rx,
+            retry_rx,
+        },
+    )
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -253,39 +278,25 @@ fn start_runner(
     (handle, event_rx)
 }
 
-/// Spawn a retry/run task for a check
-fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
-    let retry_tx = channels.retry_tx.clone();
-    let ctx = channels.task_ctx();
+/// Spawn a task running `command` as `check`, sending the result to `tx`
+fn spawn_check_task(
+    channels: &EventChannels,
+    tx: &mpsc::Sender<CheckResult>,
+    check: CheckToRun,
+    command: String,
+) {
+    let tx = tx.clone();
+    let ctx = channels.ctx.clone();
     tokio::spawn(async move {
-        let result = run_single_check(
-            &check,
-            &ctx.project_root,
-            &ctx.container_name,
-            &ctx.docker_config,
-            &ctx.global_env,
-        )
-        .await;
-        let _ = retry_tx.send(result).await;
+        let result = ctx.run(&check, &command).await;
+        let _ = tx.send(result).await;
     });
 }
 
-/// Spawn a fix task for a check
-fn spawn_fix_task(channels: &EventChannels, fix_cmd: String, container: Option<String>) {
-    let fix_tx = channels.fix_tx.clone();
-    let ctx = channels.task_ctx();
-    tokio::spawn(async move {
-        let container_name = container.as_deref().unwrap_or(&ctx.container_name);
-        let result = run_fix_command(
-            &fix_cmd,
-            &ctx.project_root,
-            container_name,
-            &ctx.docker_config,
-            &ctx.global_env,
-        )
-        .await;
-        let _ = fix_tx.send(result).await;
-    });
+/// Spawn a retry/run task for a check using its resolved command
+fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
+    let command = check.resolved_command.clone();
+    spawn_check_task(channels, &channels.retry_tx, check, command);
 }
 
 #[cfg(debug_assertions)]
@@ -307,7 +318,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
     let check_id = check.id().to_string();
     let base_ref = app.changed_files.base_ref.clone();
 
-    let Ok(mut new_changed_files) = get_changed_files(&channels.project_root, &base_ref) else {
+    let Ok(mut new_changed_files) = get_changed_files(&channels.ctx.project_root, &base_ref) else {
         // Git refresh failed - fall back to running with existing check,
         // but tell the user the file list may be stale
         let check = check.clone();
@@ -320,7 +331,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
     };
 
     new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
-    let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+    let new_checks = determine_checks(config, &new_changed_files, &channels.ctx.project_root);
 
     let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) else {
         app.set_status_message(Some(
@@ -366,33 +377,23 @@ fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
     let all_files_cmd = check.get_command_for_all_files();
     app.reset_check_for_retry(check.id());
     app.set_status_message(Some("Running for all files...".to_string()));
-    let retry_tx = channels.retry_tx.clone();
-    let ctx = channels.task_ctx();
-    tokio::spawn(async move {
-        let result = run_check_with_command(
-            &check,
-            &all_files_cmd,
-            &ctx.project_root,
-            &ctx.container_name,
-            &ctx.docker_config,
-            &ctx.global_env,
-        )
-        .await;
-        let _ = retry_tx.send(result).await;
-    });
+    spawn_check_task(channels, &channels.retry_tx, check, all_files_cmd);
     Action::Continue
 }
 
 /// Handle 'R' key: retry all checks with git refresh
 fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> Action {
+    if !app.can_retry_all() {
+        return Action::Continue;
+    }
     let base_ref = app.changed_files.base_ref.clone();
     let mut new_changed_files =
-        get_changed_files(&channels.project_root, &base_ref).unwrap_or(ChangedFiles {
+        get_changed_files(&channels.ctx.project_root, &base_ref).unwrap_or(ChangedFiles {
             files: vec![],
             base_ref,
         });
     new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
-    let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
+    let new_checks = determine_checks(config, &new_changed_files, &channels.ctx.project_root);
 
     Action::RestartRunner {
         new_changed_files,
@@ -409,7 +410,7 @@ fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> Action {
         return Action::Continue;
     };
     app.start_fix();
-    spawn_fix_task(channels, job.command, job.container);
+    spawn_check_task(channels, &channels.fix_tx, job.check, job.command);
     Action::Continue
 }
 
@@ -425,18 +426,10 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
     let total = fix_commands.len();
     app.start_fix_all(total);
     let fix_all_tx = channels.fix_all_tx.clone();
-    let ctx = channels.task_ctx();
+    let ctx = channels.ctx.clone();
     tokio::spawn(async move {
         for job in fix_commands {
-            let container_name = job.container.as_deref().unwrap_or(&ctx.container_name);
-            let result = run_fix_command(
-                &job.command,
-                &ctx.project_root,
-                container_name,
-                &ctx.docker_config,
-                &ctx.global_env,
-            )
-            .await;
+            let result = ctx.run(&job.check, &job.command).await;
             let _ = fix_all_tx.send(FixAllEvent::Result(result)).await;
         }
         // Always signal completion, decoupled from per-result send success.
@@ -593,24 +586,13 @@ pub async fn run(
     let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);
 
     // Create event channels for async operations
-    let (fix_tx, mut fix_rx) = mpsc::channel(1);
-    let (fix_all_tx, mut fix_all_rx) = mpsc::channel::<FixAllEvent>(10);
-    let (retry_tx, mut retry_rx) = mpsc::channel::<CheckResult>(1);
     let project_root = Arc::new(project_root);
-    let container_name: Arc<str> = config.docker.container_name().into();
-    let global_env: Arc<std::collections::HashMap<String, String>> =
-        Arc::new(config.docker.env.clone());
-
-    let docker_config = Arc::new(config.docker.clone());
-    let channels = EventChannels {
-        fix_tx,
-        fix_all_tx,
-        retry_tx,
+    let (mut channels, mut receivers) = task_channels(TaskCtx {
         project_root: Arc::clone(&project_root),
-        container_name,
-        docker_config,
-        global_env,
-    };
+        container_name: config.docker.container_name().into(),
+        docker_config: Arc::new(config.docker.clone()),
+        global_env: Arc::new(config.docker.env.clone()),
+    });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
     let (stats_tx, mut stats_rx) = mpsc::channel::<SystemStats>(STATS_CHANNEL_CAPACITY);
@@ -645,13 +627,13 @@ pub async fn run(
             Some(stats) = stats_rx.recv() => Message::SystemStats(stats),
 
             // Fix command results
-            Some(result) = fix_rx.recv() => Message::FixResult(result),
+            Some(result) = receivers.fix_rx.recv() => Message::FixResult(result),
 
             // Fix-all command results
-            Some(event) = fix_all_rx.recv() => Message::FixAll(event),
+            Some(event) = receivers.fix_all_rx.recv() => Message::FixAll(event),
 
             // Retry command results
-            Some(result) = retry_rx.recv() => Message::RetryResult(result),
+            Some(result) = receivers.retry_rx.recv() => Message::RetryResult(result),
 
             // All channels closed - exit
             else => break,
@@ -664,8 +646,10 @@ pub async fn run(
                 new_changed_files,
                 new_checks,
             } => {
-                // Abort old runner and start new one
+                // Abort old runner and start new one. Fresh task channels
+                // drop late results from retries started before the reset.
                 runner_handle.abort();
+                (channels, receivers) = task_channels(channels.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
                 let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
                 runner_handle = new_handle;
@@ -775,18 +759,13 @@ checks:
     /// the tests below never depend on sends succeeding. project_root points
     /// at a nonexistent path so git operations fail deterministically.
     fn make_test_channels(config: &CiConfig) -> EventChannels {
-        let (fix_tx, _fix_rx) = mpsc::channel(1);
-        let (fix_all_tx, _fix_all_rx) = mpsc::channel(10);
-        let (retry_tx, _retry_rx) = mpsc::channel(1);
-        EventChannels {
-            fix_tx,
-            fix_all_tx,
-            retry_tx,
+        task_channels(TaskCtx {
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             container_name: "app".into(),
             docker_config: Arc::new(config.docker.clone()),
             global_env: Arc::new(config.docker.env.clone()),
-        }
+        })
+        .0
     }
 
     fn make_test_app(config: &CiConfig) -> App {

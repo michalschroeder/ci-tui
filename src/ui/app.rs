@@ -54,10 +54,10 @@ pub struct PreCommandState {
 /// A fix command ready to execute
 #[derive(Debug, Clone)]
 pub struct FixJob {
+    /// Check being fixed (provides id, container override and env)
+    pub check: CheckToRun,
     /// Resolved fix command with files substituted
     pub command: String,
-    /// Optional container override (None = use default container)
-    pub container: Option<String>,
 }
 
 /// State for fix and fix-all operations
@@ -114,6 +114,9 @@ pub struct ViewState {
     pub show_full_command: bool,
     /// Status message shown to user (clears on next keypress)
     pub status_message: Option<String>,
+    /// First visible row of the checks list (kept so the list scrolls only
+    /// when the selection leaves the window)
+    pub checks_list_offset: usize,
 }
 
 impl Default for ViewState {
@@ -125,6 +128,7 @@ impl Default for ViewState {
             status_filter: StatusFilter::All,
             show_full_command: false,
             status_message: None,
+            checks_list_offset: 0,
         }
     }
 }
@@ -301,7 +305,11 @@ impl App {
         self.pre_commands = build_pre_commands(&self.config, &active_groups);
 
         // Reset state
-        self.view = ViewState::default();
+        self.view = ViewState {
+            status_filter: self.view.status_filter,
+            output_visible_lines: self.view.output_visible_lines,
+            ..ViewState::default()
+        };
         self.run = RunState::started_now();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
@@ -328,8 +336,7 @@ impl App {
             .map(|r| r.status.clone());
         let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
         SelectedCaps {
-            // Note: can_fix intentionally only gated on fix.running (existing behavior)
-            can_fix: !self.fix.running && status == Some(CheckStatus::Failed) && has_fix,
+            can_fix: !busy && status == Some(CheckStatus::Failed) && has_fix,
             can_retry: !busy && matches!(status, Some(CheckStatus::Passed | CheckStatus::Failed)),
             can_trigger: !busy && status == Some(CheckStatus::OnDemand),
             can_run_all_files: !busy
@@ -347,19 +354,13 @@ impl App {
 
     /// Get the fix job for the selected check
     pub fn get_selected_fix_command(&self) -> Option<FixJob> {
-        let check = self.selected_check()?;
-        let cmd = check.resolved_fix_command.as_ref()?;
-        Some(FixJob {
-            command: cmd.clone(),
-            container: check.definition.container.clone(),
-        })
+        Self::fix_job(self.selected_check()?)
     }
 
     /// Mark fix as started
     pub fn start_fix(&mut self) {
         self.fix.running = true;
         self.fix.result = None;
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -367,7 +368,6 @@ impl App {
     pub fn finish_fix(&mut self, result: CheckResult) {
         self.fix.running = false;
         self.fix.result = Some(result);
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -396,15 +396,16 @@ impl App {
     /// Get fix jobs for all fixable checks
     pub fn get_all_fix_commands(&self) -> Vec<FixJob> {
         self.get_fixable_checks()
-            .iter()
-            .filter_map(|check| {
-                let cmd = check.resolved_fix_command.as_ref()?;
-                Some(FixJob {
-                    command: cmd.clone(),
-                    container: check.definition.container.clone(),
-                })
-            })
+            .into_iter()
+            .filter_map(Self::fix_job)
             .collect()
+    }
+
+    fn fix_job(check: &CheckToRun) -> Option<FixJob> {
+        Some(FixJob {
+            command: check.resolved_fix_command.clone()?,
+            check: check.clone(),
+        })
     }
 
     /// Start fix-all operation
@@ -413,22 +414,24 @@ impl App {
         self.fix.all_results = Vec::new();
         self.fix.all_total = total;
         self.fix.result = None;
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Add a result from fix-all
     pub fn add_fix_all_result(&mut self, result: CheckResult) {
         self.fix.all_results.push(result);
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Finish fix-all operation
     pub fn finish_fix_all(&mut self) {
         self.fix.all_running = false;
-        self.clamp_selection();
         self.needs_redraw = true;
+    }
+
+    /// Check if retry-all can start (blocked while fixes edit files)
+    pub fn can_retry_all(&self) -> bool {
+        !self.fix.running && !self.fix.all_running
     }
 
     /// Check if selected check can be retried
@@ -456,12 +459,12 @@ impl App {
             result.started_at = Some(chrono::Local::now());
             result.finished_at = None;
         }
+        self.clamp_selection();
     }
 
     /// Mark an on-demand check as running (preparing to execute)
     pub fn trigger_on_demand_check(&mut self, check_id: &str) {
         self.reset_result_to_running(check_id);
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -471,7 +474,6 @@ impl App {
         // Clear any fix results
         self.fix.result = None;
         self.fix.all_results.clear();
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -485,14 +487,12 @@ impl App {
     /// Set (or clear) the status message shown in the footer
     pub fn set_status_message(&mut self, msg: Option<String>) {
         self.view.status_message = msg;
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Clear the status message (any keypress dismisses it)
     pub fn clear_status_message(&mut self) {
         self.view.status_message = None;
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -523,7 +523,6 @@ impl App {
             self.sys.mem_history.pop_front();
         }
 
-        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -544,11 +543,11 @@ impl App {
     }
 
     /// Keep selection valid: the filtered item list can shrink when a Failed
-    /// check flips to Passed while the Failed filter is active. An
+    /// check changes status while the Failed filter is active. An
     /// out-of-range index made selected_item() return None and blanked the
-    /// output panel.
+    /// output panel. Called by every mutator that changes statuses or items.
     fn clamp_selection(&mut self) {
-        let max = self.get_selectable_items().len().saturating_sub(1);
+        let max = self.selectable_items().count().saturating_sub(1);
         if self.view.selected_check > max {
             self.view.selected_check = max;
         }
@@ -558,7 +557,9 @@ impl App {
         self.needs_redraw = true;
         match event {
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
-            RunnerEvent::CheckFinished { result } => self.set_retry_result(result),
+            RunnerEvent::CheckFinished { result } => {
+                self.results.insert(result.check_id.clone(), result);
+            }
             RunnerEvent::GroupStarted { group } => {
                 self.run.current_group = Some(group);
             }
@@ -630,10 +631,7 @@ impl App {
 
     pub fn selected_check(&self) -> Option<&CheckToRun> {
         match self.selected_item() {
-            Some(SelectableItem::Check(check)) => {
-                // Return reference from self, not from temporary
-                self.checks.iter().find(|c| c.id() == check.id())
-            }
+            Some(SelectableItem::Check(check)) => Some(check),
             _ => None,
         }
     }
@@ -647,7 +645,7 @@ impl App {
         self.view.output_scroll = 0;
         self.view.show_full_command = false;
 
-        let max = self.get_selectable_items().len().saturating_sub(1);
+        let max = self.selectable_items().count().saturating_sub(1);
         if self.view.selected_check < max {
             self.view.selected_check += 1;
         }
@@ -678,27 +676,10 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Compute maximum scroll offset for the currently selected item's output
+    /// Compute maximum scroll offset for whatever the output panel shows
     fn compute_max_scroll(&self) -> usize {
-        let visible = self.view.output_visible_lines;
-        match self.selected_item() {
-            Some(SelectableItem::Check(check)) => self
-                .check_rendered_line_count(check)
-                .saturating_sub(visible),
-            Some(SelectableItem::PreCommand(pc)) => {
-                pc.output.lines().count().saturating_sub(visible)
-            }
-            None => 0,
-        }
-    }
-
-    /// Count the rendered lines for a check's output panel (see
-    /// [`super::dashboard::check_output_line_count`]).
-    fn check_rendered_line_count(&self, check: &CheckToRun) -> usize {
-        let Some(result) = self.results.get(check.id()) else {
-            return 0;
-        };
-        super::dashboard::check_output_line_count(self, check, result, self.output_area_width)
+        super::dashboard::output_line_count(self, self.output_area_width)
+            .saturating_sub(self.view.output_visible_lines)
     }
 
     /// Set the number of visible lines in output area (called during render)
@@ -766,24 +747,24 @@ impl App {
 
     /// Get all selectable items in display order (pre-commands + checks, grouped)
     pub fn get_selectable_items(&self) -> Vec<SelectableItem<'_>> {
-        let mut items = Vec::new();
+        self.selectable_items().collect()
+    }
 
-        for group in self.groups() {
-            items.extend(
-                self.pre_commands
-                    .iter()
-                    .filter(|p| p.group == group && self.should_show_pre_command(p))
-                    .map(SelectableItem::PreCommand),
-            );
-            items.extend(
-                self.checks_in_group(group)
-                    .into_iter()
-                    .filter(|c| self.should_show_check(c))
-                    .map(SelectableItem::Check),
-            );
-        }
-
-        items
+    /// Lazy iterator over selectable items in display order
+    fn selectable_items(&self) -> impl Iterator<Item = SelectableItem<'_>> {
+        self.groups().into_iter().flat_map(move |group| {
+            let pre_commands = self
+                .pre_commands
+                .iter()
+                .filter(move |p| p.group == group && self.should_show_pre_command(p))
+                .map(SelectableItem::PreCommand);
+            let checks = self
+                .checks
+                .iter()
+                .filter(move |c| c.group() == group && self.should_show_check(c))
+                .map(SelectableItem::Check);
+            pre_commands.chain(checks)
+        })
     }
 
     pub(crate) fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
@@ -806,20 +787,13 @@ impl App {
 
     /// Get the currently selected item (pre-command or check)
     pub fn selected_item(&self) -> Option<SelectableItem<'_>> {
-        self.get_selectable_items()
-            .into_iter()
-            .nth(self.view.selected_check)
+        self.selectable_items().nth(self.view.selected_check)
     }
 
     /// Get the selected pre-command, if one is selected
     pub fn selected_pre_command(&self) -> Option<&PreCommandState> {
         match self.selected_item() {
-            Some(SelectableItem::PreCommand(pc)) => {
-                // Need to return reference from self, not from the temporary
-                self.pre_commands
-                    .iter()
-                    .find(|p| p.group == pc.group && p.name == pc.name)
-            }
+            Some(SelectableItem::PreCommand(pc)) => Some(pc),
             _ => None,
         }
     }
@@ -1499,6 +1473,69 @@ checks:
         let result = app.results.get("php-lint").unwrap();
         assert_eq!(result.status, CheckStatus::Skipped);
         assert_eq!(result.output, "No changes detected");
+    }
+
+    #[test]
+    fn test_reset_for_retry_keeps_status_filter() {
+        let mut app = make_app();
+        app.view.status_filter = StatusFilter::Failed;
+        let checks = app.checks.clone();
+        let changed_files = app.changed_files.clone();
+
+        app.reset_for_retry(changed_files, checks);
+
+        assert_eq!(app.view.status_filter, StatusFilter::Failed);
+        assert_eq!(app.view.selected_check, 0);
+    }
+
+    #[test]
+    fn test_can_fix_selected_disabled_during_fix_all() {
+        let mut app = make_app();
+        app.view.selected_check = 1; // phpunit
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        app.start_fix_all(1);
+
+        assert!(!app.can_fix_selected());
+    }
+
+    #[test]
+    fn test_can_retry_all_disabled_during_fixes() {
+        let mut app = make_app();
+        assert!(app.can_retry_all());
+        app.start_fix();
+        assert!(!app.can_retry_all());
+        app.fix.running = false;
+        app.start_fix_all(1);
+        assert!(!app.can_retry_all());
+    }
+
+    #[test]
+    fn test_fix_jobs_carry_check() {
+        let mut app = make_app();
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        let jobs = app.get_all_fix_commands();
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].check.id(), "phpunit");
+        assert_eq!(jobs[0].command, "phpunit --fix test.php");
+    }
+
+    #[test]
+    fn test_scroll_down_covers_fix_all_results() {
+        let mut app = make_app();
+        app.set_output_visible_lines(5);
+        for i in 0..20 {
+            app.fix
+                .all_results
+                .push(CheckResult::pending(&format!("c{}", i)));
+        }
+
+        app.scroll_down(1000);
+
+        // Header line + blank + 20 result lines = 22; 22 - 5 visible = 17
+        assert_eq!(app.view.output_scroll, 17);
     }
 
     mod needs_redraw_tests {
