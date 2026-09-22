@@ -22,8 +22,8 @@ use determine::*;
 
 /// File context for a check — concrete paths or an explicit no-files state.
 ///
-/// Replaces the old sentinel-string protocol where magic strings like
-/// "(skipped - no matching files)" were stored inside the files vec.
+/// Replaces the old sentinel-string protocol (magic strings stored inside
+/// the files vec).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckFiles {
     /// Concrete file paths that triggered the check (empty for always-run checks)
@@ -1356,6 +1356,14 @@ checks:
         fn empty_files_strips_placeholder_and_trims() {
             let check = mk_check("cmd {files}", None);
             assert_eq!(resolve_command(&check, &[], false), "cmd");
+        }
+
+        // Regression: paren-prefixed paths used to be dropped by a starts_with('(') guard
+        #[test]
+        fn paren_prefixed_path_is_kept() {
+            let check = mk_check("run {files}", None);
+            let out = resolve_command(&check, &["(weird).rs"], false);
+            assert_eq!(out, "run (weird).rs");
         }
     }
 

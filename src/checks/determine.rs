@@ -511,6 +511,22 @@ mod tests {
                 assert_eq!(out.resolved_command, "cmd");
             }
         }
+
+        // Regression: paren-prefixed paths used to be dropped by a starts_with('(') guard
+        #[test]
+        fn paren_prefixed_path_is_kept() {
+            let def = mk_check("run {files}", None, None, false);
+            let out = new_check_to_run(
+                "id",
+                &def,
+                "g",
+                "svc".to_string(),
+                CheckFiles::Files(vec!["(x).rs".into()]),
+                false,
+                false,
+            );
+            assert!(out.resolved_command.contains("(x).rs"));
+        }
     }
 
     mod process_check_tests {
