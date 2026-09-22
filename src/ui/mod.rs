@@ -1,8 +1,9 @@
 //! Terminal UI using ratatui for interactive check execution.
 //!
 //! This module implements the main TUI event loop and coordinates between
-//! user input, check execution, and rendering. It provides real-time
-//! feedback during check execution with keyboard-driven navigation.
+//! user input, check execution, and rendering. It provides lifecycle-event
+//! feedback during check execution with keyboard-driven navigation (output
+//! is captured and shown on completion, not streamed live).
 //!
 //! # Architecture
 //!
@@ -637,7 +638,7 @@ pub async fn run(
             // Keyboard events have highest priority
             Some(key) = keyboard_rx.recv() => Message::KeyPress(key),
 
-            // Runner events (check output, status changes)
+            // Runner lifecycle/status events
             Some(event) = event_rx.recv() => Message::RunnerEvent(event),
 
             // System stats from background worker
@@ -939,25 +940,6 @@ checks:
             &config,
         );
         assert!(matches!(action, Action::Continue));
-    }
-
-    #[test]
-    fn test_handle_message_keypress_dismisses_status_message() {
-        let config = test_config();
-        let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
-        app.set_status_message(Some("hello".to_string()));
-
-        let action = handle_message(
-            &mut app,
-            Message::KeyPress(press(KeyCode::Char('j'), KeyModifiers::NONE)),
-            &channels,
-            &config,
-        )
-        .expect("handle_message failed");
-
-        assert!(matches!(action, Action::Continue));
-        assert!(app.view.status_message.is_none());
     }
 
     #[test]

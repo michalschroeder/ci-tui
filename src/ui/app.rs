@@ -1452,6 +1452,36 @@ checks:
     }
 
     #[test]
+    fn test_selection_clamped_when_set_retry_result_shrinks_filtered_list() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+        app.view.status_filter = StatusFilter::Failed;
+        app.view.selected_check = 1; // phpunit, second item in the filtered list
+
+        // phpunit passes via set_retry_result - the filtered list shrinks to 1 item
+        let result = CheckResult {
+            check_id: "phpunit".to_string(),
+            status: CheckStatus::Passed,
+            output: String::new(),
+            error_output: String::new(),
+            duration_ms: 10,
+            started_at: None,
+            finished_at: None,
+        };
+        app.set_retry_result(result);
+
+        assert_eq!(
+            app.view.selected_check, 0,
+            "selection must be clamped to list length"
+        );
+        assert!(
+            app.selected_item().is_some(),
+            "output panel must not go blank after list shrinks"
+        );
+    }
+
+    #[test]
     fn test_skipped_no_files_initializes_as_skipped() {
         let config = parse_config();
         let changed_files = ChangedFiles {
@@ -1500,6 +1530,35 @@ checks:
                 ("show_all", |a| a.show_all()),
                 ("toggle_full_command", |a| a.toggle_full_command()),
                 ("clear_status_message", |a| a.clear_status_message()),
+                ("start_fix", |a| a.start_fix()),
+                ("finish_fix", |a| {
+                    a.finish_fix(CheckResult {
+                        check_id: "phpunit".to_string(),
+                        status: CheckStatus::Passed,
+                        output: String::new(),
+                        error_output: String::new(),
+                        duration_ms: 10,
+                        started_at: None,
+                        finished_at: None,
+                    })
+                }),
+                ("trigger_on_demand_check", |a| {
+                    a.trigger_on_demand_check("behat")
+                }),
+                ("reset_check_for_retry", |a| {
+                    a.reset_check_for_retry("phpunit")
+                }),
+                ("set_retry_result", |a| {
+                    a.set_retry_result(CheckResult {
+                        check_id: "phpunit".to_string(),
+                        status: CheckStatus::Passed,
+                        output: String::new(),
+                        error_output: String::new(),
+                        duration_ms: 10,
+                        started_at: None,
+                        finished_at: None,
+                    })
+                }),
             ];
             for (name, mutate) in cases {
                 let mut app = make_app();
