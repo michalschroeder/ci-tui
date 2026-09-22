@@ -187,6 +187,27 @@ struct EventChannels {
     global_env: Arc<std::collections::HashMap<String, String>>,
 }
 
+/// Cloned shared handles for spawned async tasks
+#[derive(Clone)]
+struct TaskCtx {
+    project_root: Arc<PathBuf>,
+    container_name: Arc<str>,
+    docker_config: Arc<crate::config::DockerConfig>,
+    global_env: Arc<std::collections::HashMap<String, String>>,
+}
+
+impl EventChannels {
+    /// Clone the shared handles needed by a spawned task
+    fn task_ctx(&self) -> TaskCtx {
+        TaskCtx {
+            project_root: Arc::clone(&self.project_root),
+            container_name: Arc::clone(&self.container_name),
+            docker_config: Arc::clone(&self.docker_config),
+            global_env: Arc::clone(&self.global_env),
+        }
+    }
+}
+
 /// Restore terminal to normal state (called on exit and panic)
 ///
 /// Errors are intentionally ignored because this is called during cleanup
@@ -232,17 +253,14 @@ fn start_runner(
 /// Spawn a retry/run task for a check
 fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
     let retry_tx = channels.retry_tx.clone();
-    let project_root = Arc::clone(&channels.project_root);
-    let container = Arc::clone(&channels.container_name);
-    let docker_config = Arc::clone(&channels.docker_config);
-    let global_env = Arc::clone(&channels.global_env);
+    let ctx = channels.task_ctx();
     tokio::spawn(async move {
         let result = run_single_check(
             &check,
-            &project_root,
-            &container,
-            &docker_config,
-            &global_env,
+            &ctx.project_root,
+            &ctx.container_name,
+            &ctx.docker_config,
+            &ctx.global_env,
         )
         .await;
         let _ = retry_tx.send(result).await;
@@ -252,18 +270,15 @@ fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
 /// Spawn a fix task for a check
 fn spawn_fix_task(channels: &EventChannels, fix_cmd: String, container: Option<String>) {
     let fix_tx = channels.fix_tx.clone();
-    let project_root = Arc::clone(&channels.project_root);
-    let default_container = Arc::clone(&channels.container_name);
-    let docker_config = Arc::clone(&channels.docker_config);
-    let global_env = Arc::clone(&channels.global_env);
+    let ctx = channels.task_ctx();
     tokio::spawn(async move {
-        let container_name = container.as_deref().unwrap_or(&default_container);
+        let container_name = container.as_deref().unwrap_or(&ctx.container_name);
         let result = run_fix_command(
             &fix_cmd,
-            &project_root,
+            &ctx.project_root,
             container_name,
-            &docker_config,
-            &global_env,
+            &ctx.docker_config,
+            &ctx.global_env,
         )
         .await;
         let _ = fix_tx.send(result).await;
@@ -349,18 +364,15 @@ fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
     app.reset_check_for_retry(check.id());
     app.set_status_message(Some("Running for all files...".to_string()));
     let retry_tx = channels.retry_tx.clone();
-    let project_root = Arc::clone(&channels.project_root);
-    let container = Arc::clone(&channels.container_name);
-    let docker_config = Arc::clone(&channels.docker_config);
-    let global_env = Arc::clone(&channels.global_env);
+    let ctx = channels.task_ctx();
     tokio::spawn(async move {
         let result = run_check_with_command(
             &check,
             &all_files_cmd,
-            &project_root,
-            &container,
-            &docker_config,
-            &global_env,
+            &ctx.project_root,
+            &ctx.container_name,
+            &ctx.docker_config,
+            &ctx.global_env,
         )
         .await;
         let _ = retry_tx.send(result).await;
@@ -410,19 +422,16 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
     let total = fix_commands.len();
     app.start_fix_all(total);
     let fix_all_tx = channels.fix_all_tx.clone();
-    let project_root = Arc::clone(&channels.project_root);
-    let default_container = Arc::clone(&channels.container_name);
-    let docker_config = Arc::clone(&channels.docker_config);
-    let global_env = Arc::clone(&channels.global_env);
+    let ctx = channels.task_ctx();
     tokio::spawn(async move {
         for job in fix_commands {
-            let container_name = job.container.as_deref().unwrap_or(&default_container);
+            let container_name = job.container.as_deref().unwrap_or(&ctx.container_name);
             let result = run_fix_command(
                 &job.command,
-                &project_root,
+                &ctx.project_root,
                 container_name,
-                &docker_config,
-                &global_env,
+                &ctx.docker_config,
+                &ctx.global_env,
             )
             .await;
             let _ = fix_all_tx.send(FixAllEvent::Result(result)).await;
