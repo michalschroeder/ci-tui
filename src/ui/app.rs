@@ -887,7 +887,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checks::CheckToRun;
+    use crate::checks::{CheckFiles, CheckToRun};
     use crate::config::{CheckDefinition, CiConfig};
     use crate::git::ChangedFiles;
     use crate::runner::{CheckResult, CheckStatus};
@@ -954,7 +954,7 @@ checks:
                 env: std::collections::HashMap::new(),
             },
             service: "php".to_string(),
-            files: vec!["test.php".to_string()],
+            files: CheckFiles::Files(vec!["test.php".to_string()]),
             resolved_command: format!("{} test.php", id),
             resolved_fix_command: if has_fix {
                 Some(format!("{} --fix test.php", id))

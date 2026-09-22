@@ -13,6 +13,7 @@
 //! 4. **Footer**: Keyboard shortcuts and version info
 
 use super::app::App;
+use crate::checks::CheckFiles;
 use crate::runner::CheckStatus;
 use crate::utils::time;
 use ansi_to_tui::IntoText;
@@ -769,7 +770,7 @@ pub fn check_output_line_count(
 
 /// Append the files section to the output string
 fn append_files_section(raw_output: &mut String, app: &App, check: &crate::checks::CheckToRun) {
-    let Some(files) = app
+    let Some(CheckFiles::Files(files)) = app
         .checks
         .iter()
         .find(|c| c.id() == check.id())
@@ -778,7 +779,7 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
         return;
     };
 
-    if files.is_empty() || files[0].starts_with('(') {
+    if files.is_empty() {
         return;
     }
 

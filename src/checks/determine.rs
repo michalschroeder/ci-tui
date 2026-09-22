@@ -11,7 +11,7 @@ use crate::test_discovery;
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::{resolve_command, CheckToRun};
+use super::{resolve_command, CheckFiles, CheckToRun};
 
 /// Single constructor for CheckToRun: resolves command + fix command from files.
 pub(super) fn new_check_to_run(
@@ -19,11 +19,11 @@ pub(super) fn new_check_to_run(
     check: &CheckDefinition,
     group_name: &str,
     service: String,
-    files: Vec<String>,
+    files: CheckFiles,
     on_demand: bool,
     skipped_no_files: bool,
 ) -> CheckToRun {
-    let file_list: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let file_list: Vec<&str> = files.paths().iter().map(|s| s.as_str()).collect();
     let resolved_command = resolve_command(check, &file_list, false);
     let resolved_fix_command = check
         .fix_command
@@ -61,7 +61,7 @@ pub(super) fn process_check(
             check,
             group_name,
             service,
-            vec![],
+            CheckFiles::Files(vec![]),
             false,
             false,
         ));
@@ -155,6 +155,7 @@ pub(super) fn process_triggered_check(
     let triggers = check.triggers.as_ref()?;
     let mut matched_files = Vec::new();
     let mut has_source_trigger = false;
+    let mut run_all = false;
 
     // Check file pattern trigger
     if let Some(pattern_key) = &triggers.file_pattern {
@@ -174,13 +175,13 @@ pub(super) fn process_triggered_check(
                     check,
                     group_name,
                     service.to_string(),
-                    vec!["(on-demand - press 't' to run)".to_string()],
+                    CheckFiles::OnDemand,
                     true,
                     false,
                 ));
             }
             DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
-                matched_files.push("(source files changed - running all)".to_string());
+                run_all = true;
             }
             DiscoveryOutcome::NoTestsOnDemand | DiscoveryOutcome::NoTestsRunAll => {}
         }
@@ -190,6 +191,18 @@ pub(super) fn process_triggered_check(
     let mut seen = HashSet::new();
     matched_files.retain(|f| seen.insert(f.clone()));
 
+    if run_all {
+        return Some(new_check_to_run(
+            check_id,
+            check,
+            group_name,
+            service.to_string(),
+            CheckFiles::RunAll,
+            false,
+            false,
+        ));
+    }
+
     // Build appropriate CheckToRun based on whether files matched
     if !matched_files.is_empty() {
         Some(new_check_to_run(
@@ -197,7 +210,7 @@ pub(super) fn process_triggered_check(
             check,
             group_name,
             service.to_string(),
-            matched_files,
+            CheckFiles::Files(matched_files),
             false,
             false,
         ))
@@ -210,7 +223,7 @@ pub(super) fn process_triggered_check(
                 check,
                 group_name,
                 service.to_string(),
-                vec!["(skipped - no matching files)".to_string()],
+                CheckFiles::SkippedNoMatch,
                 true,
                 has_files_placeholder,
             ))
@@ -433,14 +446,17 @@ mod tests {
                 &def,
                 "g",
                 "svc".to_string(),
-                vec!["a.rs".into(), "b.rs".into()],
+                CheckFiles::Files(vec!["a.rs".into(), "b.rs".into()]),
                 false,
                 false,
             );
             assert_eq!(out.id, "id");
             assert_eq!(out.group, "g");
             assert_eq!(out.service, "svc");
-            assert_eq!(out.files, vec!["a.rs".to_string(), "b.rs".to_string()]);
+            assert_eq!(
+                out.files,
+                CheckFiles::Files(vec!["a.rs".to_string(), "b.rs".to_string()])
+            );
             assert_eq!(out.resolved_command, "cargo test a.rs b.rs");
             assert_eq!(
                 out.resolved_fix_command.as_deref(),
@@ -453,8 +469,16 @@ mod tests {
         #[test]
         fn empty_files_strips_placeholder() {
             let def = mk_check("cargo check {files}", None, None, false);
-            let out = new_check_to_run("id", &def, "g", "svc".to_string(), vec![], false, false);
-            assert!(out.files.is_empty());
+            let out = new_check_to_run(
+                "id",
+                &def,
+                "g",
+                "svc".to_string(),
+                CheckFiles::Files(vec![]),
+                false,
+                false,
+            );
+            assert!(out.files.paths().is_empty());
             assert_eq!(out.resolved_command, "cargo check");
             assert!(out.resolved_fix_command.is_none());
         }
@@ -462,9 +486,30 @@ mod tests {
         #[test]
         fn flags_pass_through() {
             let def = mk_check("cmd {files}", None, None, false);
-            let out = new_check_to_run("id", &def, "g", "svc".to_string(), vec![], true, true);
+            let out = new_check_to_run(
+                "id",
+                &def,
+                "g",
+                "svc".to_string(),
+                CheckFiles::SkippedNoMatch,
+                true,
+                true,
+            );
             assert!(out.on_demand);
             assert!(out.skipped_no_files);
+        }
+
+        #[test]
+        fn non_file_variants_resolve_with_empty_files() {
+            let def = mk_check("cmd {files}", None, None, false);
+            for files in [
+                CheckFiles::SkippedNoMatch,
+                CheckFiles::OnDemand,
+                CheckFiles::RunAll,
+            ] {
+                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, true, false);
+                assert_eq!(out.resolved_command, "cmd");
+            }
         }
     }
 
@@ -486,7 +531,7 @@ mod tests {
                 "default-svc",
             );
             let run = out.expect("always-run should produce CheckToRun");
-            assert!(run.files.is_empty());
+            assert!(run.files.paths().is_empty());
             assert_eq!(run.resolved_command, "cargo bench");
             assert_eq!(run.service, "default-svc");
         }
@@ -543,7 +588,10 @@ mod tests {
             let out =
                 process_triggered_check(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def, "svc");
             let run = out.expect("file_pattern match should produce CheckToRun");
-            assert_eq!(run.files, vec!["src/main.rs".to_string()]);
+            assert_eq!(
+                run.files,
+                CheckFiles::Files(vec!["src/main.rs".to_string()])
+            );
             assert_eq!(run.resolved_command, "cargo check src/main.rs");
             assert!(!run.on_demand);
         }
@@ -563,7 +611,7 @@ mod tests {
             let run = out.expect("should produce skipped CheckToRun");
             assert!(run.on_demand);
             assert!(run.skipped_no_files);
-            assert_eq!(run.files, vec!["(skipped - no matching files)".to_string()]);
+            assert_eq!(run.files, CheckFiles::SkippedNoMatch);
         }
 
         #[test]
@@ -581,7 +629,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 out.files,
-                vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+                CheckFiles::Files(vec!["src/a.rs".to_string(), "src/b.rs".to_string()])
             );
         }
 
@@ -611,10 +659,7 @@ mod tests {
             let out =
                 process_triggered_check(&cfg, &cf, tmp.path(), "g", "id", &def, "svc").unwrap();
             assert!(out.on_demand);
-            assert_eq!(
-                out.files,
-                vec!["(on-demand - press 't' to run)".to_string()]
-            );
+            assert_eq!(out.files, CheckFiles::OnDemand);
         }
     }
 }

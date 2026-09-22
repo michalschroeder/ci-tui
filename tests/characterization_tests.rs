@@ -3,7 +3,7 @@
 //! Unit-level coverage of the individual build/process helpers lives in
 //! src/checks/determine.rs #[cfg(test)].
 
-use ci_tui::checks::{determine_checks, CheckToRun};
+use ci_tui::checks::{determine_checks, CheckFiles, CheckToRun};
 use ci_tui::config::CiConfig;
 use ci_tui::git::ChangedFiles;
 use std::path::PathBuf;
@@ -225,6 +225,7 @@ checks:
     assert!(
         check
             .files
+            .paths()
             .contains(&"tests/Unit/Service/FooTest.php".to_string()),
         "Check should include the discovered test file at its mapped path"
     );
@@ -318,11 +319,9 @@ checks:
         !check.on_demand,
         "Check without {{files}} should run all when no tests found"
     );
-    assert!(
-        check
-            .files
-            .iter()
-            .any(|f: &String| f.contains("running all")),
+    assert_eq!(
+        check.files,
+        CheckFiles::RunAll,
         "Should indicate running all tests"
     );
 }

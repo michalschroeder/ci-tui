@@ -20,6 +20,32 @@ use std::path::Path;
 mod determine;
 use determine::*;
 
+/// File context for a check — concrete paths or an explicit no-files state.
+///
+/// Replaces the old sentinel-string protocol where magic strings like
+/// "(skipped - no matching files)" were stored inside the files vec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckFiles {
+    /// Concrete file paths that triggered the check (empty for always-run checks)
+    Files(Vec<String>),
+    /// Triggered check skipped: no changed files matched its triggers
+    SkippedNoMatch,
+    /// Test-discovery found no tests; check requires manual trigger ('t' key)
+    OnDemand,
+    /// Source files changed but no specific tests found; command runs the full suite
+    RunAll,
+}
+
+impl CheckFiles {
+    /// Concrete paths, or an empty slice for the no-files states.
+    pub fn paths(&self) -> &[String] {
+        match self {
+            CheckFiles::Files(files) => files,
+            _ => &[],
+        }
+    }
+}
+
 /// A CI check that has been determined to run, with resolved commands
 #[derive(Debug, Clone)]
 pub struct CheckToRun {
@@ -31,8 +57,8 @@ pub struct CheckToRun {
     pub definition: CheckDefinition,
     /// Docker service to use (resolved from check/group/global default)
     pub service: String,
-    /// Files that triggered this check (may be empty for always-run checks)
-    pub files: Vec<String>,
+    /// Files that triggered this check, or the explicit reason there are none
+    pub files: CheckFiles,
     /// The fully resolved command to execute
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
@@ -124,7 +150,7 @@ fn resolve_command(check: &CheckDefinition, files: &[&str], use_fix: bool) -> St
     };
 
     // Replace {files} placeholder
-    let files_str = if files.is_empty() || files.iter().any(|f| f.starts_with('(')) {
+    let files_str = if files.is_empty() {
         String::new()
     } else {
         files.join(" ")
@@ -370,7 +396,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
             },
             service: "php".to_string(),
-            files: vec![],
+            files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
             on_demand,
@@ -391,7 +417,7 @@ mod tests {
         assert!(cache_warmup.is_some());
         let cache_warmup = cache_warmup.unwrap();
         assert!(!cache_warmup.on_demand);
-        assert!(cache_warmup.files.is_empty());
+        assert!(cache_warmup.files.paths().is_empty());
     }
 
     #[test]
@@ -407,7 +433,10 @@ mod tests {
         assert!(php_lint.is_some());
         let php_lint = php_lint.unwrap();
         assert!(!php_lint.on_demand);
-        assert!(php_lint.files.contains(&"src/Service/Foo.php".to_string()));
+        assert!(php_lint
+            .files
+            .paths()
+            .contains(&"src/Service/Foo.php".to_string()));
     }
 
     #[test]
@@ -431,6 +460,7 @@ mod tests {
         assert!(!yaml_lint.on_demand);
         assert!(yaml_lint
             .files
+            .paths()
             .contains(&"config/services.yaml".to_string()));
     }
 
@@ -646,8 +676,9 @@ checks:
             phpunit.skipped_no_files,
             "Check should have skipped_no_files=true (uses {{files}} but no tests found)"
         );
-        assert!(
-            phpunit.files[0].contains("skipped"),
+        assert_eq!(
+            phpunit.files,
+            CheckFiles::SkippedNoMatch,
             "Files should indicate skipped status"
         );
     }
@@ -709,8 +740,9 @@ checks:
             !phpunit.skipped_no_files,
             "Check should NOT have skipped_no_files=true"
         );
-        assert!(
-            phpunit.files[0].contains("running all"),
+        assert_eq!(
+            phpunit.files,
+            CheckFiles::RunAll,
             "Files should indicate running all"
         );
     }
@@ -781,14 +813,16 @@ checks:
                 .find(|c| c.id() == "phpunit")
                 .unwrap()
                 .files
-                .clone()
+                .paths()
+                .to_vec()
         };
 
         for _ in 0..10 {
             let checks = determine_checks(&config, &changed_files, temp_dir.path());
             let phpunit = checks.iter().find(|c| c.id() == "phpunit").unwrap();
             assert_eq!(
-                phpunit.files, expected,
+                phpunit.files.paths().to_vec(),
+                expected,
                 "matched files must be deterministic across runs"
             );
         }
@@ -872,7 +906,7 @@ checks:
         assert!(!phpunit.skipped_no_files, "Check should not be skipped");
 
         // The key assertion: files should contain NO duplicates
-        let files = &phpunit.files;
+        let files = phpunit.files.paths();
         let unique_files: std::collections::HashSet<_> = files.iter().collect();
 
         assert_eq!(
@@ -1105,6 +1139,7 @@ checks:
             assert!(
                 phpunit
                     .files
+                    .paths()
                     .contains(&"tests/Unit/FooTest.php".to_string()),
                 "Should include the test file"
             );
@@ -1164,11 +1199,11 @@ checks:
             assert!(!check2.on_demand, "check2 should be triggered");
 
             assert!(
-                check1.files.contains(&"src/Foo.php".to_string()),
+                check1.files.paths().contains(&"src/Foo.php".to_string()),
                 "check1 should have matching file"
             );
             assert!(
-                check2.files.contains(&"src/Foo.php".to_string()),
+                check2.files.paths().contains(&"src/Foo.php".to_string()),
                 "check2 should have matching file"
             );
         }
@@ -1315,14 +1350,6 @@ checks:
             let check = mk_check("check {files}", None);
             let out = resolve_command(&check, &["a.rs"], true);
             assert_eq!(out, "check a.rs");
-        }
-
-        // Paren-sentinel files (e.g. "(skipped - no matching files)") collapse files_str to empty
-        #[test]
-        fn files_with_paren_sentinel_are_stripped() {
-            let check = mk_check("run {files}", None);
-            let out = resolve_command(&check, &["(skipped - no matching files)"], false);
-            assert_eq!(out, "run");
         }
 
         #[test]

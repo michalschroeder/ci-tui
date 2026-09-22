@@ -842,7 +842,7 @@ checks:
                 env: std::collections::HashMap::new(),
             },
             service: "php".to_string(),
-            files: vec!["src/Foo.php".to_string()],
+            files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
             on_demand: false,
