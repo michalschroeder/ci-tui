@@ -19,8 +19,6 @@
 pub mod app;
 pub mod dashboard;
 
-pub use app::AppMessage;
-
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
@@ -295,10 +293,10 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
         // Git refresh failed - fall back to running with existing check,
         // but tell the user the file list may be stale
         let check = check.clone();
-        app.update(AppMessage::ResetForRetry(check.id().to_string()));
-        app.update(AppMessage::SetStatusMessage(Some(
+        app.reset_check_for_retry(check.id());
+        app.set_status_message(Some(
             "Git refresh failed - retrying with previous file list".to_string(),
-        )));
+        ));
         spawn_retry_task(channels, check);
         return Action::Continue;
     };
@@ -307,9 +305,9 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
     let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
 
     let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) else {
-        app.update(AppMessage::SetStatusMessage(Some(
+        app.set_status_message(Some(
             "Check no longer applicable after git refresh".to_string(),
-        )));
+        ));
         return Action::Continue;
     };
     let new_check = new_check.clone();
@@ -319,7 +317,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
         app.checks[idx] = new_check.clone();
     }
 
-    app.update(AppMessage::ResetForRetry(check_id));
+    app.reset_check_for_retry(&check_id);
     spawn_retry_task(channels, new_check);
     Action::Continue
 }
@@ -333,7 +331,7 @@ fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> Action {
         return Action::Continue;
     };
     let check = check.clone();
-    app.update(AppMessage::TriggerOnDemand(check.id().to_string()));
+    app.trigger_on_demand_check(check.id());
     spawn_retry_task(channels, check);
     Action::Continue
 }
@@ -348,10 +346,8 @@ fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
     };
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
-    app.update(AppMessage::ResetForRetry(check.id().to_string()));
-    app.update(AppMessage::SetStatusMessage(Some(
-        "Running for all files...".to_string(),
-    )));
+    app.reset_check_for_retry(check.id());
+    app.set_status_message(Some("Running for all files...".to_string()));
     let retry_tx = channels.retry_tx.clone();
     let project_root = Arc::clone(&channels.project_root);
     let container = Arc::clone(&channels.container_name);
@@ -397,7 +393,7 @@ fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> Action {
     let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() else {
         return Action::Continue;
     };
-    app.update(AppMessage::StartFix);
+    app.start_fix();
     spawn_fix_task(channels, fix_cmd, container);
     Action::Continue
 }
@@ -412,7 +408,7 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
         return Action::Continue;
     }
     let total = fix_commands.len();
-    app.update(AppMessage::StartFixAll(total));
+    app.start_fix_all(total);
     let fix_all_tx = channels.fix_all_tx.clone();
     let project_root = Arc::clone(&channels.project_root);
     let default_container = Arc::clone(&channels.container_name);
@@ -478,9 +474,7 @@ fn handle_key_event(
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
                 copy_to_clipboard(&check.resolved_command);
-                app.update(AppMessage::SetStatusMessage(Some(
-                    "Command copied to clipboard".to_string(),
-                )));
+                app.set_status_message(Some("Command copied to clipboard".to_string()));
             }
             Action::Continue
         }
@@ -518,7 +512,7 @@ fn handle_message(
 
             // Clear status message on any other key press
             if app.status_message.is_some() && !is_quit {
-                app.update(AppMessage::ClearStatusMessage);
+                app.clear_status_message();
 
                 #[cfg(debug_assertions)]
                 warn_slow_keyboard(start);
@@ -535,31 +529,27 @@ fn handle_message(
             result
         }
         Message::RunnerEvent(event) => {
-            app.update(AppMessage::RunnerEvent(event));
+            app.handle_runner_event(event);
             Ok(Action::Continue)
         }
         Message::SystemStats(stats) => {
-            app.update(AppMessage::SystemStats {
-                cpu_usage: stats.cpu_usage,
-                mem_used: stats.mem_used,
-                mem_total: stats.mem_total,
-            });
+            app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
             Ok(Action::Continue)
         }
         Message::FixResult(result) => {
-            app.update(AppMessage::FinishFix(result));
+            app.finish_fix(result);
             Ok(Action::Continue)
         }
         Message::FixAll(FixAllEvent::Result(result)) => {
-            app.update(AppMessage::AddFixAllResult(result));
+            app.add_fix_all_result(result);
             Ok(Action::Continue)
         }
         Message::FixAll(FixAllEvent::Done) => {
-            app.update(AppMessage::FinishFixAll);
+            app.finish_fix_all();
             Ok(Action::Continue)
         }
         Message::RetryResult(result) => {
-            app.update(AppMessage::RetryResult(result));
+            app.set_retry_result(result);
             Ok(Action::Continue)
         }
     }
@@ -1002,7 +992,7 @@ checks:
         let mut app = make_test_app(&config);
         let channels = make_test_channels(&config);
 
-        app.update(AppMessage::StartFixAll(2));
+        app.start_fix_all(2);
         assert!(app.fix_all_running);
 
         // Done arrives even if individual result sends were lost
@@ -1024,7 +1014,7 @@ checks:
         let mut app = make_test_app(&config);
         let channels = make_test_channels(&config);
 
-        app.update(AppMessage::StartFixAll(2));
+        app.start_fix_all(2);
 
         let result = CheckResult::pending("some-check");
         handle_message(

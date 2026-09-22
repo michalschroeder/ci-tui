@@ -29,44 +29,6 @@ pub enum StatusFilter {
     Failed,
 }
 
-/// Messages for state updates - all mutations flow through update()
-#[derive(Debug)]
-pub enum AppMessage {
-    /// Navigation: next/previous check, scroll up/down
-    NextCheck,
-    PreviousCheck,
-    ScrollUp(usize),
-    ScrollDown(usize),
-    /// Filtering
-    ToggleFailedFilter,
-    ShowAll,
-    /// UI toggles
-    ToggleFullCommand,
-    /// Runner events from check execution
-    RunnerEvent(crate::runner::RunnerEvent),
-    /// System stats from background worker
-    SystemStats {
-        cpu_usage: f32,
-        mem_used: u64,
-        mem_total: u64,
-    },
-    /// Fix operations
-    StartFix,
-    FinishFix(crate::runner::CheckResult),
-    StartFixAll(usize),
-    AddFixAllResult(crate::runner::CheckResult),
-    FinishFixAll,
-    /// Retry/trigger operations
-    TriggerOnDemand(String),
-    ResetForRetry(String),
-    /// Retry result from async task
-    RetryResult(crate::runner::CheckResult),
-    /// Status message
-    SetStatusMessage(Option<String>),
-    /// Clear status on any key
-    ClearStatusMessage,
-}
-
 /// Status of a pre-command
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreCommandStatus {
@@ -475,6 +437,24 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Store the result of a retry/run task
+    pub fn set_retry_result(&mut self, result: CheckResult) {
+        self.results.insert(result.check_id.clone(), result);
+        self.needs_redraw = true;
+    }
+
+    /// Set (or clear) the status message shown in the footer
+    pub fn set_status_message(&mut self, msg: Option<String>) {
+        self.status_message = msg;
+        self.needs_redraw = true;
+    }
+
+    /// Clear the status message (any keypress dismisses it)
+    pub fn clear_status_message(&mut self) {
+        self.status_message = None;
+        self.needs_redraw = true;
+    }
+
     /// Update system stats from background task data
     ///
     /// This is called when the stats background worker sends new data.
@@ -521,6 +501,17 @@ impl App {
         self.mem_total_bytes as f64 / 1_073_741_824.0
     }
 
+    /// Keep selection valid: the filtered item list can shrink when a Failed
+    /// check flips to Passed while the Failed filter is active. An
+    /// out-of-range index made selected_item() return None and blanked the
+    /// output panel.
+    fn clamp_selection(&mut self) {
+        let max = self.get_selectable_items().len().saturating_sub(1);
+        if self.selected_check > max {
+            self.selected_check = max;
+        }
+    }
+
     pub fn handle_runner_event(&mut self, event: RunnerEvent) {
         self.needs_redraw = true;
         match event {
@@ -528,6 +519,7 @@ impl App {
             RunnerEvent::CheckOutput { check_id, line } => self.on_check_output(&check_id, &line),
             RunnerEvent::CheckFinished { result } => {
                 self.results.insert(result.check_id.clone(), result);
+                self.clamp_selection();
             }
             RunnerEvent::GroupStarted { group } => {
                 self.current_group = Some(group);
@@ -614,65 +606,9 @@ impl App {
         }
     }
 
-    /// Central state update function - all mutations flow through here
-    ///
-    /// This implements a TEA-lite pattern where state changes are dispatched
-    /// through explicit message variants, enabling predictable state transitions
-    /// and easier testing.
-    pub fn update(&mut self, msg: AppMessage) {
-        match msg {
-            AppMessage::NextCheck => self.next_check_internal(),
-            AppMessage::PreviousCheck => self.previous_check_internal(),
-            AppMessage::ScrollUp(n) => self.scroll_up_internal(n),
-            AppMessage::ScrollDown(n) => self.scroll_down_internal(n),
-            AppMessage::ToggleFailedFilter => self.toggle_failed_filter_internal(),
-            AppMessage::ShowAll => self.show_all_internal(),
-            AppMessage::ToggleFullCommand => self.toggle_full_command_internal(),
-            AppMessage::RunnerEvent(event) => self.handle_runner_event(event),
-            AppMessage::SystemStats {
-                cpu_usage,
-                mem_used,
-                mem_total,
-            } => {
-                self.update_stats(cpu_usage, mem_used, mem_total);
-            }
-            AppMessage::StartFix => self.start_fix(),
-            AppMessage::FinishFix(result) => self.finish_fix(result),
-            AppMessage::StartFixAll(total) => self.start_fix_all(total),
-            AppMessage::AddFixAllResult(result) => self.add_fix_all_result(result),
-            AppMessage::FinishFixAll => self.finish_fix_all(),
-            AppMessage::TriggerOnDemand(check_id) => self.trigger_on_demand_check(&check_id),
-            AppMessage::ResetForRetry(check_id) => self.reset_check_for_retry(&check_id),
-            AppMessage::RetryResult(result) => {
-                self.results.insert(result.check_id.clone(), result);
-                self.needs_redraw = true;
-            }
-            AppMessage::SetStatusMessage(msg) => {
-                self.status_message = msg;
-                self.needs_redraw = true;
-            }
-            AppMessage::ClearStatusMessage => {
-                self.status_message = None;
-            }
-        }
-        // Keep selection valid: the filtered item list can shrink after any
-        // state change (e.g. a Failed check flips to Passed while the Failed
-        // filter is active). An out-of-range index made selected_item() return
-        // None and blanked the output panel.
-        let max = self.get_selectable_items().len().saturating_sub(1);
-        if self.selected_check > max {
-            self.selected_check = max;
-        }
-
-        // Automatic dirty flag - every state change triggers redraw
-        // (some handlers already set this, but redundant sets are harmless)
-        self.needs_redraw = true;
-    }
-
     // Navigation - all methods set needs_redraw for immediate visual feedback
 
-    /// Internal navigation method - does not set needs_redraw (handled by update())
-    fn next_check_internal(&mut self) {
+    pub fn next_check(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix_result = None;
         self.fix_all_results.clear();
@@ -683,14 +619,10 @@ impl App {
         if self.selected_check < max {
             self.selected_check += 1;
         }
+        self.needs_redraw = true;
     }
 
-    pub fn next_check(&mut self) {
-        self.update(AppMessage::NextCheck);
-    }
-
-    /// Internal navigation method - does not set needs_redraw (handled by update())
-    fn previous_check_internal(&mut self) {
+    pub fn previous_check(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix_result = None;
         self.fix_all_results.clear();
@@ -700,25 +632,18 @@ impl App {
         if self.selected_check > 0 {
             self.selected_check -= 1;
         }
-    }
-
-    pub fn previous_check(&mut self) {
-        self.update(AppMessage::PreviousCheck);
-    }
-
-    /// Internal scroll method - does not set needs_redraw (handled by update())
-    fn scroll_up_internal(&mut self, n: usize) {
-        self.output_scroll = self.output_scroll.saturating_sub(n);
+        self.needs_redraw = true;
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.update(AppMessage::ScrollUp(n));
+        self.output_scroll = self.output_scroll.saturating_sub(n);
+        self.needs_redraw = true;
     }
 
-    /// Internal scroll method - does not set needs_redraw (handled by update())
-    fn scroll_down_internal(&mut self, n: usize) {
+    pub fn scroll_down(&mut self, n: usize) {
         let max_scroll = self.compute_max_scroll();
         self.output_scroll = (self.output_scroll + n).min(max_scroll);
+        self.needs_redraw = true;
     }
 
     /// Compute maximum scroll offset for the currently selected item's output
@@ -744,45 +669,29 @@ impl App {
         super::dashboard::check_output_line_count(self, check, result, self.output_area_width)
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
-        self.update(AppMessage::ScrollDown(n));
-    }
-
     /// Set the number of visible lines in output area (called during render)
     pub fn set_output_visible_lines(&mut self, lines: usize) {
         self.output_visible_lines = lines;
     }
 
-    /// Internal filter method - does not set needs_redraw (handled by update())
-    fn toggle_failed_filter_internal(&mut self) {
+    pub fn toggle_failed_filter(&mut self) {
         self.status_filter = match self.status_filter {
             StatusFilter::All => StatusFilter::Failed,
             StatusFilter::Failed => StatusFilter::All,
         };
         self.selected_check = 0;
-    }
-
-    pub fn toggle_failed_filter(&mut self) {
-        self.update(AppMessage::ToggleFailedFilter);
-    }
-
-    /// Internal filter method - does not set needs_redraw (handled by update())
-    fn show_all_internal(&mut self) {
-        self.status_filter = StatusFilter::All;
-        self.selected_check = 0;
+        self.needs_redraw = true;
     }
 
     pub fn show_all(&mut self) {
-        self.update(AppMessage::ShowAll);
-    }
-
-    /// Internal toggle method - does not set needs_redraw (handled by update())
-    fn toggle_full_command_internal(&mut self) {
-        self.show_full_command = !self.show_full_command;
+        self.status_filter = StatusFilter::All;
+        self.selected_check = 0;
+        self.needs_redraw = true;
     }
 
     pub fn toggle_full_command(&mut self) {
-        self.update(AppMessage::ToggleFullCommand);
+        self.show_full_command = !self.show_full_command;
+        self.needs_redraw = true;
     }
 
     // Stats
@@ -1513,9 +1422,7 @@ checks:
             started_at: None,
             finished_at: None,
         };
-        app.update(AppMessage::RunnerEvent(RunnerEvent::CheckFinished {
-            result,
-        }));
+        app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
         assert_eq!(
             app.selected_check, 0,
@@ -1549,125 +1456,6 @@ checks:
         assert_eq!(result.output, "No changes detected");
     }
 
-    mod update_tests {
-        use super::*;
-        use pretty_assertions::assert_eq;
-
-        #[test]
-        fn test_update_next_check() {
-            let mut app = make_app();
-            assert_eq!(app.selected_check, 0);
-
-            app.update(AppMessage::NextCheck);
-
-            assert_eq!(app.selected_check, 1);
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_previous_check() {
-            let mut app = make_app();
-            app.selected_check = 2;
-
-            app.update(AppMessage::PreviousCheck);
-
-            assert_eq!(app.selected_check, 1);
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_toggle_filter() {
-            let mut app = make_app();
-            assert_eq!(app.status_filter, StatusFilter::All);
-
-            app.update(AppMessage::ToggleFailedFilter);
-
-            assert_eq!(app.status_filter, StatusFilter::Failed);
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_system_stats() {
-            let mut app = make_app();
-
-            app.update(AppMessage::SystemStats {
-                cpu_usage: 75.0,
-                mem_used: 8_000_000_000,
-                mem_total: 16_000_000_000,
-            });
-
-            assert_eq!(app.cpu_usage(), 75.0);
-            assert_eq!(app.mem_usage(), 50.0);
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_fix_lifecycle() {
-            let mut app = make_app();
-
-            // Start fix
-            app.update(AppMessage::StartFix);
-            assert!(app.fix_running);
-            assert!(app.fix_result.is_none());
-
-            // Finish fix
-            let result = CheckResult {
-                check_id: "test".to_string(),
-                status: CheckStatus::Passed,
-                output: "Fixed!".to_string(),
-                error_output: String::new(),
-                duration_ms: 100,
-                started_at: None,
-                finished_at: None,
-            };
-            app.update(AppMessage::FinishFix(result));
-
-            assert!(!app.fix_running);
-            assert!(app.fix_result.is_some());
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_status_message() {
-            let mut app = make_app();
-
-            app.update(AppMessage::SetStatusMessage(Some(
-                "Test message".to_string(),
-            )));
-            assert_eq!(app.status_message, Some("Test message".to_string()));
-
-            app.update(AppMessage::ClearStatusMessage);
-            assert!(app.status_message.is_none());
-            assert!(app.needs_redraw);
-        }
-
-        #[test]
-        fn test_update_clears_fix_result_on_navigation() {
-            let mut app = make_app();
-            app.fix_result = Some(CheckResult::pending("test"));
-
-            app.update(AppMessage::NextCheck);
-
-            assert!(app.fix_result.is_none());
-        }
-
-        #[test]
-        fn test_update_scroll() {
-            let mut app = make_app();
-            app.results.get_mut("php-lint").unwrap().output = (0..50)
-                .map(|i| format!("line {}", i))
-                .collect::<Vec<_>>()
-                .join("\n");
-            app.set_output_visible_lines(10);
-
-            app.update(AppMessage::ScrollDown(5));
-            assert_eq!(app.output_scroll, 5);
-
-            app.update(AppMessage::ScrollUp(3));
-            assert_eq!(app.output_scroll, 2);
-        }
-    }
-
     mod needs_redraw_tests {
         use super::*;
 
@@ -1685,32 +1473,32 @@ checks:
         }
 
         #[test]
-        fn test_needs_redraw_set_after_update() {
-            let mut app = make_app();
-            app.needs_redraw = false; // Clear first
-            app.update(AppMessage::NextCheck);
-            assert!(app.needs_redraw, "update() should set needs_redraw");
+        fn test_needs_redraw_set_after_mutations() {
+            let cases: Vec<(&str, fn(&mut App))> = vec![
+                ("next_check", |a| a.next_check()),
+                ("previous_check", |a| a.previous_check()),
+                ("scroll_up", |a| a.scroll_up(1)),
+                ("scroll_down", |a| a.scroll_down(1)),
+                ("toggle_failed_filter", |a| a.toggle_failed_filter()),
+                ("show_all", |a| a.show_all()),
+                ("toggle_full_command", |a| a.toggle_full_command()),
+                ("clear_status_message", |a| a.clear_status_message()),
+            ];
+            for (name, mutate) in cases {
+                let mut app = make_app();
+                app.needs_redraw = false;
+                mutate(&mut app);
+                assert!(app.needs_redraw, "{} should set needs_redraw", name);
+            }
         }
 
         #[test]
-        fn test_needs_redraw_set_after_various_updates() {
-            let messages = [
-                AppMessage::PreviousCheck,
-                AppMessage::ScrollUp(1),
-                AppMessage::ScrollDown(1),
-                AppMessage::ToggleFailedFilter,
-                AppMessage::ShowAll,
-                AppMessage::ToggleFullCommand,
-            ];
-            for msg in messages {
-                let mut app = make_app();
-                app.needs_redraw = false;
-                app.update(msg);
-                assert!(
-                    app.needs_redraw,
-                    "update() should set needs_redraw for all message types"
-                );
-            }
+        fn test_set_and_clear_status_message() {
+            let mut app = make_app();
+            app.set_status_message(Some("Test message".to_string()));
+            assert_eq!(app.status_message, Some("Test message".to_string()));
+            app.clear_status_message();
+            assert!(app.status_message.is_none());
         }
     }
 }
