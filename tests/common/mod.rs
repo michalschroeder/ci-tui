@@ -2,7 +2,7 @@
 
 pub mod configs;
 
-use ci_tui::checks::CheckToRun;
+use ci_tui::checks::{CheckFiles, CheckToRun};
 use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig};
 use ci_tui::git::ChangedFiles;
 use ci_tui::runner::CheckStatus;
@@ -115,15 +115,17 @@ pub fn make_check_with_options(
             env: std::collections::HashMap::new(),
         },
         service: "app".to_string(),
-        files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
+        files: if on_demand {
+            CheckFiles::OnDemand
+        } else {
+            CheckFiles::Files(vec!["src/main.rs".to_string(), "src/lib.rs".to_string()])
+        },
         resolved_command: format!("{} --check src/main.rs src/lib.rs", id),
         resolved_fix_command: if has_fix {
             Some(format!("{} --fix src/main.rs src/lib.rs", id))
         } else {
             None
         },
-        on_demand,
-        skipped_no_files: false,
     }
 }
 
@@ -161,11 +163,9 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
             env: std::collections::HashMap::new(),
         },
         service: "app".to_string(),
-        files: vec![],
+        files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,
-        on_demand: false,
-        skipped_no_files: false,
     }
 }
 

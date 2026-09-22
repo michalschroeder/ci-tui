@@ -27,11 +27,10 @@ fn parameterized_placeholder_substitution(
 }
 
 #[test]
-fn files_with_spaces_preserved() {
-    // Files with spaces in names are passed through as-is
-    // (shell quoting is responsibility of the caller/executor)
+fn files_with_spaces_are_shell_quoted() {
+    // Paths are shell-quoted so spaces don't split them into separate args
     let result = resolve_fix_command("cmd {files}", &["path with spaces/file.rs"]);
-    assert_eq!(result, "cmd path with spaces/file.rs");
+    assert_eq!(result, "cmd 'path with spaces/file.rs'");
 }
 
 #[test]

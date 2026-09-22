@@ -327,7 +327,7 @@ impl CheckRunner {
     ) -> Result<bool> {
         let group_config = self.config.get_group(group_name);
 
-        let has_runnable = group_checks.iter().any(|c| !c.on_demand);
+        let has_runnable = group_checks.iter().any(|c| !c.is_on_demand());
         let pre_commands = if has_runnable {
             group_config
                 .map(|g| g.pre_commands.as_slice())
@@ -355,7 +355,7 @@ impl CheckRunner {
         checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
-        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.on_demand).collect();
+        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         for check in runnable {
             let result = self.run_single_check(check, event_tx).await;
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
@@ -368,7 +368,7 @@ impl CheckRunner {
         checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
-        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.on_demand).collect();
+        let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         let mut handles = Vec::new();
         for check in runnable {
             handles.push(self.spawn_check(check, event_tx));
