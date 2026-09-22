@@ -129,6 +129,34 @@ impl Default for ViewState {
     }
 }
 
+/// Progress state for the current check run
+#[derive(Debug)]
+pub struct RunState {
+    /// Currently executing group name
+    pub current_group: Option<String>,
+    /// True when all checks have completed
+    pub all_finished: bool,
+    /// When the run started
+    pub started_at: Option<Instant>,
+    /// When the run finished
+    pub finished_at: Option<Instant>,
+    /// Currently running pre-command index
+    pub current_pre_command: Option<usize>,
+}
+
+impl RunState {
+    /// Fresh run state with the clock started now
+    fn started_now() -> Self {
+        Self {
+            current_group: None,
+            all_finished: false,
+            started_at: Some(Instant::now()),
+            finished_at: None,
+            current_pre_command: None,
+        }
+    }
+}
+
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
@@ -193,21 +221,12 @@ pub struct App {
     /// UI view state: selection, scrolling, filtering, toggles, status line
     pub view: ViewState,
 
-    // Runner state
-    /// Currently executing group name
-    pub current_group: Option<String>,
-    /// True when all checks have completed
-    pub all_finished: bool,
-    /// When the run started
-    pub run_started_at: Option<Instant>,
-    /// When the run finished
-    pub run_finished_at: Option<Instant>,
+    /// Progress state for the current check run
+    pub run: RunState,
 
     // Pre-command state
     /// Pre-commands and their status (group, name, status, output)
     pub pre_commands: Vec<PreCommandState>,
-    /// Currently running pre-command index
-    pub current_pre_command: Option<usize>,
 
     /// State for fix and fix-all operations
     pub fix: FixState,
@@ -247,12 +266,8 @@ impl App {
             current_branch,
             output_area_width: 80,
             view: ViewState::default(),
-            current_group: None,
-            all_finished: false,
-            run_started_at: Some(Instant::now()),
-            run_finished_at: None,
+            run: RunState::started_now(),
             pre_commands,
-            current_pre_command: None,
             fix: FixState::default(),
             sys: SysStats::default(),
             needs_redraw: true, // Initial render needed
@@ -278,11 +293,7 @@ impl App {
 
         // Reset state
         self.view = ViewState::default();
-        self.current_group = None;
-        self.all_finished = false;
-        self.run_started_at = Some(Instant::now());
-        self.run_finished_at = None;
-        self.current_pre_command = None;
+        self.run = RunState::started_now();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
         self.needs_redraw = true;
@@ -290,10 +301,11 @@ impl App {
 
     /// Get total elapsed time
     pub fn elapsed_time(&self) -> std::time::Duration {
-        let Some(started) = self.run_started_at else {
+        let Some(started) = self.run.started_at else {
             return std::time::Duration::ZERO;
         };
-        self.run_finished_at
+        self.run
+            .finished_at
             .map(|finished| finished.duration_since(started))
             .unwrap_or_else(|| started.elapsed())
     }
@@ -559,7 +571,7 @@ impl App {
                 self.results.insert(result.check_id.clone(), result);
             }
             RunnerEvent::GroupStarted { group } => {
-                self.current_group = Some(group);
+                self.run.current_group = Some(group);
             }
             RunnerEvent::GroupFinished { .. } => {}
             RunnerEvent::PreCommandStarted { group, name } => {
@@ -575,10 +587,10 @@ impl App {
                 self.on_pre_command_finished(&group, &name, success, output, duration_ms);
             }
             RunnerEvent::AllFinished => {
-                self.all_finished = true;
-                self.current_group = None;
+                self.run.all_finished = true;
+                self.run.current_group = None;
                 self.view.status_message = None;
-                self.run_finished_at = Some(Instant::now());
+                self.run.finished_at = Some(Instant::now());
             }
         }
         self.clamp_selection();
@@ -605,7 +617,7 @@ impl App {
             .position(|p| p.group == group && p.name == name)
         {
             self.pre_commands[idx].status = PreCommandStatus::Running;
-            self.current_pre_command = Some(idx);
+            self.run.current_pre_command = Some(idx);
         }
     }
 
@@ -617,7 +629,7 @@ impl App {
         output: String,
         duration_ms: u64,
     ) {
-        self.current_pre_command = None;
+        self.run.current_pre_command = None;
         let Some(idx) = self
             .pre_commands
             .iter()
@@ -960,7 +972,7 @@ checks:
         assert_eq!(app.view.selected_check, 0);
         assert_eq!(app.view.output_scroll, 0);
         assert_eq!(app.view.status_filter, StatusFilter::All);
-        assert!(!app.all_finished);
+        assert!(!app.run.all_finished);
         assert!(!app.fix.running);
         assert!(app.needs_redraw);
     }
@@ -1259,12 +1271,12 @@ checks:
     #[test]
     fn test_handle_runner_event_all_finished() {
         let mut app = make_app();
-        assert!(!app.all_finished);
+        assert!(!app.run.all_finished);
 
         app.handle_runner_event(RunnerEvent::AllFinished);
 
-        assert!(app.all_finished);
-        assert!(app.run_finished_at.is_some());
+        assert!(app.run.all_finished);
+        assert!(app.run.finished_at.is_some());
     }
 
     #[test]

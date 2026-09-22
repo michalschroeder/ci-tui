@@ -113,7 +113,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         String::new()
     };
-    let status_text = if app.all_finished {
+    let status_text = if app.run.all_finished {
         if failed == 0 {
             format!(
                 "✓ All {} checks passed in {}{}",
@@ -137,7 +137,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         )
     };
 
-    let color = if app.all_finished {
+    let color = if app.run.all_finished {
         if failed == 0 {
             Color::Green
         } else {
@@ -357,7 +357,7 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
             continue;
         }
 
-        let group_style = if Some(group.to_string()) == app.current_group {
+        let group_style = if Some(group.to_string()) == app.run.current_group {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
