@@ -294,6 +294,7 @@ impl App {
     pub fn start_fix(&mut self) {
         self.fix_running = true;
         self.fix_result = None;
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -301,6 +302,7 @@ impl App {
     pub fn finish_fix(&mut self, result: CheckResult) {
         self.fix_running = false;
         self.fix_result = Some(result);
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -349,18 +351,21 @@ impl App {
         self.fix_all_results = Vec::new();
         self.fix_all_total = total;
         self.fix_result = None;
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Add a result from fix-all
     pub fn add_fix_all_result(&mut self, result: CheckResult) {
         self.fix_all_results.push(result);
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Finish fix-all operation
     pub fn finish_fix_all(&mut self) {
         self.fix_all_running = false;
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -418,6 +423,7 @@ impl App {
             result.started_at = Some(chrono::Local::now());
             result.finished_at = None;
         }
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -434,24 +440,28 @@ impl App {
         // Clear any fix results
         self.fix_result = None;
         self.fix_all_results.clear();
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Store the result of a retry/run task
     pub fn set_retry_result(&mut self, result: CheckResult) {
         self.results.insert(result.check_id.clone(), result);
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Set (or clear) the status message shown in the footer
     pub fn set_status_message(&mut self, msg: Option<String>) {
         self.status_message = msg;
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Clear the status message (any keypress dismisses it)
     pub fn clear_status_message(&mut self) {
         self.status_message = None;
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -482,6 +492,7 @@ impl App {
             self.mem_history.pop_front();
         }
 
+        self.clamp_selection();
         self.needs_redraw = true;
     }
 
@@ -519,7 +530,6 @@ impl App {
             RunnerEvent::CheckOutput { check_id, line } => self.on_check_output(&check_id, &line),
             RunnerEvent::CheckFinished { result } => {
                 self.results.insert(result.check_id.clone(), result);
-                self.clamp_selection();
             }
             RunnerEvent::GroupStarted { group } => {
                 self.current_group = Some(group);
@@ -544,6 +554,7 @@ impl App {
                 self.run_finished_at = Some(Instant::now());
             }
         }
+        self.clamp_selection();
     }
 
     fn on_check_started(&mut self, check_id: &str) {
