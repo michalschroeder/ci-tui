@@ -1,10 +1,9 @@
 //! Extracted helper functions for determine_checks().
 //!
 //! These functions handle specific responsibilities:
-//! - Processing always-run checks
 //! - Matching files to check triggers
 //! - Handling test discovery
-//! - Building CheckToRun instances
+//! - Building CheckToRun instances via new_check_to_run
 
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
@@ -14,29 +13,33 @@ use std::path::Path;
 
 use super::{resolve_command, CheckToRun};
 
-/// Process a check that always runs (has no triggers)
-pub(super) fn process_always_run_check(
+/// Single constructor for CheckToRun: resolves command + fix command from files.
+pub(super) fn new_check_to_run(
     check_id: &str,
     check: &CheckDefinition,
     group_name: &str,
     service: String,
+    files: Vec<String>,
+    on_demand: bool,
+    skipped_no_files: bool,
 ) -> CheckToRun {
-    let resolved = resolve_command(check, &[], false);
-    let resolved_fix = check
+    let file_list: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let resolved_command = resolve_command(check, &file_list, false);
+    let resolved_fix_command = check
         .fix_command
         .as_ref()
-        .map(|_| resolve_command(check, &[], true));
+        .map(|_| resolve_command(check, &file_list, true));
 
     CheckToRun {
         id: check_id.to_string(),
         group: group_name.to_string(),
         definition: check.clone(),
         service,
-        files: vec![],
-        resolved_command: resolved,
-        resolved_fix_command: resolved_fix,
-        on_demand: false,
-        skipped_no_files: false,
+        files,
+        resolved_command,
+        resolved_fix_command,
+        on_demand,
+        skipped_no_files,
     }
 }
 
@@ -53,8 +56,14 @@ pub(super) fn process_check(
     let service = check.service_or_default(default_service).to_string();
 
     if check.always_run() {
-        return Some(process_always_run_check(
-            check_id, check, group_name, service,
+        return Some(new_check_to_run(
+            check_id,
+            check,
+            group_name,
+            service,
+            vec![],
+            false,
+            false,
         ));
     }
 
@@ -133,87 +142,6 @@ pub(super) fn run_test_discovery(
     }
 }
 
-/// Build CheckToRun for a check with matched files
-pub(super) fn build_check_to_run(
-    check_id: &str,
-    check: &CheckDefinition,
-    group_name: &str,
-    service: String,
-    matched_files: Vec<String>,
-) -> CheckToRun {
-    let file_list: Vec<&str> = matched_files.iter().map(|s| s.as_str()).collect();
-    let resolved = resolve_command(check, &file_list, false);
-    let resolved_fix = check
-        .fix_command
-        .as_ref()
-        .map(|_| resolve_command(check, &file_list, true));
-
-    CheckToRun {
-        id: check_id.to_string(),
-        group: group_name.to_string(),
-        definition: check.clone(),
-        service,
-        files: matched_files,
-        resolved_command: resolved,
-        resolved_fix_command: resolved_fix,
-        on_demand: false,
-        skipped_no_files: false,
-    }
-}
-
-/// Build CheckToRun for a skipped check (on-demand)
-pub(super) fn build_skipped_check(
-    check_id: &str,
-    check: &CheckDefinition,
-    group_name: &str,
-    service: String,
-    has_files_placeholder: bool,
-) -> CheckToRun {
-    let resolved = resolve_command(check, &[], false);
-    let resolved_fix = check
-        .fix_command
-        .as_ref()
-        .map(|_| resolve_command(check, &[], true));
-
-    CheckToRun {
-        id: check_id.to_string(),
-        group: group_name.to_string(),
-        definition: check.clone(),
-        service,
-        files: vec!["(skipped - no matching files)".to_string()],
-        resolved_command: resolved,
-        resolved_fix_command: resolved_fix,
-        on_demand: true,
-        skipped_no_files: has_files_placeholder,
-    }
-}
-
-/// Build CheckToRun for an on-demand check (test discovery found no tests)
-pub(super) fn build_on_demand_check(
-    check_id: &str,
-    check: &CheckDefinition,
-    group_name: &str,
-    service: String,
-) -> CheckToRun {
-    let resolved = resolve_command(check, &[], false);
-    let resolved_fix = check
-        .fix_command
-        .as_ref()
-        .map(|_| resolve_command(check, &[], true));
-
-    CheckToRun {
-        id: check_id.to_string(),
-        group: group_name.to_string(),
-        definition: check.clone(),
-        service,
-        files: vec!["(on-demand - press 't' to run)".to_string()],
-        resolved_command: resolved,
-        resolved_fix_command: resolved_fix,
-        on_demand: true,
-        skipped_no_files: false,
-    }
-}
-
 /// Process a triggered check (has triggers defined)
 pub(super) fn process_triggered_check(
     config: &CiConfig,
@@ -241,11 +169,14 @@ pub(super) fn process_triggered_check(
             DiscoveryOutcome::TestsFound(tests) => matched_files.extend(tests),
             DiscoveryOutcome::NoSources | DiscoveryOutcome::NoTestsSkip => {}
             DiscoveryOutcome::NoTestsOnDemand if matched_files.is_empty() => {
-                return Some(build_on_demand_check(
+                return Some(new_check_to_run(
                     check_id,
                     check,
                     group_name,
                     service.to_string(),
+                    vec!["(on-demand - press 't' to run)".to_string()],
+                    true,
+                    false,
                 ));
             }
             DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
@@ -261,22 +192,26 @@ pub(super) fn process_triggered_check(
 
     // Build appropriate CheckToRun based on whether files matched
     if !matched_files.is_empty() {
-        Some(build_check_to_run(
+        Some(new_check_to_run(
             check_id,
             check,
             group_name,
             service.to_string(),
             matched_files,
+            false,
+            false,
         ))
     } else {
         let has_file_trigger = triggers.file_pattern.is_some();
         if has_file_trigger || has_source_trigger {
             let has_files_placeholder = check.command.contains("{files}");
-            Some(build_skipped_check(
+            Some(new_check_to_run(
                 check_id,
                 check,
                 group_name,
                 service.to_string(),
+                vec!["(skipped - no matching files)".to_string()],
+                true,
                 has_files_placeholder,
             ))
         } else {
@@ -359,38 +294,6 @@ mod tests {
         ChangedFiles {
             files: files.iter().map(|s| s.to_string()).collect(),
             base_ref: "main".to_string(),
-        }
-    }
-
-    mod process_always_run_check_tests {
-        use super::*;
-
-        #[test]
-        fn builds_check_with_empty_files() {
-            let def = mk_check("cargo check", None, None, false);
-            let out = process_always_run_check("check-id", &def, "g", "svc".to_string());
-            assert_eq!(out.id, "check-id");
-            assert_eq!(out.group, "g");
-            assert_eq!(out.service, "svc");
-            assert!(out.files.is_empty());
-            assert_eq!(out.resolved_command, "cargo check");
-            assert!(out.resolved_fix_command.is_none());
-            assert!(!out.on_demand);
-            assert!(!out.skipped_no_files);
-        }
-
-        #[test]
-        fn populates_resolved_fix_when_present() {
-            let def = mk_check("cargo check", Some("cargo fix"), None, false);
-            let out = process_always_run_check("id", &def, "g", "svc".to_string());
-            assert_eq!(out.resolved_fix_command.as_deref(), Some("cargo fix"));
-        }
-
-        #[test]
-        fn strips_files_placeholder_when_empty() {
-            let def = mk_check("cargo check {files}", None, None, false);
-            let out = process_always_run_check("id", &def, "g", "svc".to_string());
-            assert_eq!(out.resolved_command, "cargo check");
         }
     }
 
@@ -519,18 +422,20 @@ mod tests {
         }
     }
 
-    mod build_check_to_run_tests {
+    mod new_check_to_run_tests {
         use super::*;
 
         #[test]
-        fn sets_fields_and_resolves_command_with_files() {
+        fn resolves_command_and_fix_from_files() {
             let def = mk_check("cargo test {files}", Some("cargo fmt {files}"), None, false);
-            let out = build_check_to_run(
+            let out = new_check_to_run(
                 "id",
                 &def,
                 "g",
                 "svc".to_string(),
                 vec!["a.rs".into(), "b.rs".into()],
+                false,
+                false,
             );
             assert_eq!(out.id, "id");
             assert_eq!(out.group, "g");
@@ -544,44 +449,22 @@ mod tests {
             assert!(!out.on_demand);
             assert!(!out.skipped_no_files);
         }
-    }
-
-    mod build_skipped_check_tests {
-        use super::*;
 
         #[test]
-        fn marks_on_demand_and_copies_placeholder_flag() {
+        fn empty_files_strips_placeholder() {
+            let def = mk_check("cargo check {files}", None, None, false);
+            let out = new_check_to_run("id", &def, "g", "svc".to_string(), vec![], false, false);
+            assert!(out.files.is_empty());
+            assert_eq!(out.resolved_command, "cargo check");
+            assert!(out.resolved_fix_command.is_none());
+        }
+
+        #[test]
+        fn flags_pass_through() {
             let def = mk_check("cmd {files}", None, None, false);
-            let out = build_skipped_check("id", &def, "g", "svc".to_string(), true);
+            let out = new_check_to_run("id", &def, "g", "svc".to_string(), vec![], true, true);
             assert!(out.on_demand);
             assert!(out.skipped_no_files);
-            assert_eq!(out.files, vec!["(skipped - no matching files)".to_string()]);
-            assert_eq!(out.resolved_command, "cmd");
-        }
-
-        #[test]
-        fn without_placeholder_flag_skipped_no_files_false() {
-            let def = mk_check("always", None, None, false);
-            let out = build_skipped_check("id", &def, "g", "svc".to_string(), false);
-            assert!(out.on_demand);
-            assert!(!out.skipped_no_files);
-        }
-    }
-
-    mod build_on_demand_check_tests {
-        use super::*;
-
-        #[test]
-        fn marks_on_demand_with_prompt_sentinel() {
-            let def = mk_check("slow-test {files}", None, None, false);
-            let out = build_on_demand_check("id", &def, "g", "svc".to_string());
-            assert!(out.on_demand);
-            assert!(!out.skipped_no_files);
-            assert_eq!(
-                out.files,
-                vec!["(on-demand - press 't' to run)".to_string()]
-            );
-            assert_eq!(out.resolved_command, "slow-test");
         }
     }
 
