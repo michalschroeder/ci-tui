@@ -220,7 +220,7 @@ pub fn make_test_app() -> App {
 #[allow(dead_code)]
 pub fn make_test_app_all_passed() -> App {
     let mut app = make_test_app();
-    app.all_finished = true;
+    app.run.all_finished = true;
     for result in app.results.values_mut() {
         result.status = CheckStatus::Passed;
         result.duration_ms = 1000;
@@ -232,7 +232,7 @@ pub fn make_test_app_all_passed() -> App {
 #[allow(dead_code)]
 pub fn make_test_app_running() -> App {
     let mut app = make_test_app();
-    app.current_group = Some("lint".to_string());
+    app.run.current_group = Some("lint".to_string());
     app.results.get_mut("clippy").unwrap().status = CheckStatus::Running;
     app
 }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers with real-time output streaming.
+CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers, reporting progress via lifecycle events.
 
 ## Code Validation (REQUIRED)
 
@@ -125,7 +125,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 **On-Demand Checks**: Checks marked `on_demand: true` don't run automatically - user triggers with 't' key. Used for expensive tests when no specific test files are found.
 
-**Event-Driven UI**: Runner sends `RunnerEvent`s through channel. UI processes events non-blocking with `try_recv()`, limiting events per frame to prevent starvation.
+**Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/input/stats/task channels, redrawing when `needs_redraw` is set.
 
 ### Module Responsibilities
 
