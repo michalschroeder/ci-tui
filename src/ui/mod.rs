@@ -390,11 +390,11 @@ fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> Action {
     if !app.can_fix_selected() {
         return Action::Continue;
     }
-    let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() else {
+    let Some(job) = app.get_selected_fix_command() else {
         return Action::Continue;
     };
     app.start_fix();
-    spawn_fix_task(channels, fix_cmd, container);
+    spawn_fix_task(channels, job.command, job.container);
     Action::Continue
 }
 
@@ -415,10 +415,10 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
     let docker_config = Arc::clone(&channels.docker_config);
     let global_env = Arc::clone(&channels.global_env);
     tokio::spawn(async move {
-        for (_check_id, fix_cmd, _service, container) in fix_commands {
-            let container_name = container.as_deref().unwrap_or(&default_container);
+        for job in fix_commands {
+            let container_name = job.container.as_deref().unwrap_or(&default_container);
             let result = run_fix_command(
-                &fix_cmd,
+                &job.command,
                 &project_root,
                 container_name,
                 &docker_config,

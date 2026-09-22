@@ -48,6 +48,15 @@ pub struct PreCommandState {
     pub duration_ms: u64,
 }
 
+/// A fix command ready to execute
+#[derive(Debug, Clone)]
+pub struct FixJob {
+    /// Resolved fix command with files substituted
+    pub command: String,
+    /// Optional container override (None = use default container)
+    pub container: Option<String>,
+}
+
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
@@ -278,16 +287,14 @@ impl App {
         result.status == CheckStatus::Failed && check.has_fix()
     }
 
-    /// Get fix command and service for selected check
-    /// Returns (fix_command, service, container) for the selected check
-    pub fn get_selected_fix_command(&self) -> Option<(String, String, Option<String>)> {
+    /// Get the fix job for the selected check
+    pub fn get_selected_fix_command(&self) -> Option<FixJob> {
         let check = self.selected_check()?;
         let cmd = check.resolved_fix_command.as_ref()?;
-        Some((
-            cmd.clone(),
-            check.service.clone(),
-            check.definition.container.clone(),
-        ))
+        Some(FixJob {
+            command: cmd.clone(),
+            container: check.definition.container.clone(),
+        })
     }
 
     /// Mark fix as started
@@ -328,19 +335,16 @@ impl App {
         !self.get_fixable_checks().is_empty()
     }
 
-    /// Get fix commands for all fixable checks (check_id, fix_command, service)
-    /// Returns Vec of (check_id, fix_command, service, container) for all fixable checks
-    pub fn get_all_fix_commands(&self) -> Vec<(String, String, String, Option<String>)> {
+    /// Get fix jobs for all fixable checks
+    pub fn get_all_fix_commands(&self) -> Vec<FixJob> {
         self.get_fixable_checks()
             .iter()
             .filter_map(|check| {
                 let cmd = check.resolved_fix_command.as_ref()?;
-                Some((
-                    check.id().to_string(),
-                    cmd.clone(),
-                    check.service.clone(),
-                    check.definition.container.clone(),
-                ))
+                Some(FixJob {
+                    command: cmd.clone(),
+                    container: check.definition.container.clone(),
+                })
             })
             .collect()
     }
