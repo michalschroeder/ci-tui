@@ -382,7 +382,7 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
-    let filter_info = match app.status_filter {
+    let filter_info = match app.view.status_filter {
         super::app::StatusFilter::All => "",
         super::app::StatusFilter::Failed => " [failed]",
     };
@@ -598,9 +598,9 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
-    let visible_lines = app.output_visible_lines;
+    let visible_lines = app.view.output_visible_lines;
     let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.output_scroll + 1;
+        let current_line = app.view.output_scroll + 1;
         format!(" Fix All Results [{}/{}] ", current_line, total_lines)
     } else {
         " Fix All Results ".to_string()
@@ -609,7 +609,7 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
-        .scroll((app.output_scroll as u16, 0));
+        .scroll((app.view.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -661,9 +661,9 @@ fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
-    let visible_lines = app.output_visible_lines;
+    let visible_lines = app.view.output_visible_lines;
     let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.output_scroll + 1;
+        let current_line = app.view.output_scroll + 1;
         format!(" Fix Result [{}/{}] ", current_line, total_lines)
     } else {
         " Fix Result ".to_string()
@@ -672,7 +672,7 @@ fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
-        .scroll((app.output_scroll as u16, 0));
+        .scroll((app.view.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -706,7 +706,7 @@ fn build_check_output_text(
     let max_cmd_len = (width as usize).saturating_sub(10);
 
     raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
-    if app.show_full_command || command.len() <= max_cmd_len {
+    if app.view.show_full_command || command.len() <= max_cmd_len {
         raw_output.push_str(command);
     } else {
         raw_output.push_str(&command[..max_cmd_len.saturating_sub(3)]);
@@ -785,7 +785,7 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
         return;
     }
 
-    if app.show_full_command {
+    if app.view.show_full_command {
         raw_output.push_str("\x1b[90mFiles:\x1b[0m\n");
         for file in files {
             raw_output.push_str(&format!("\x1b[90m  - {}\x1b[0m\n", file));
@@ -826,9 +826,9 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
-    let visible_lines = app.output_visible_lines;
+    let visible_lines = app.view.output_visible_lines;
     let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.output_scroll + 1;
+        let current_line = app.view.output_scroll + 1;
         format!(" {} [{}/{}] ", check.name(), current_line, total_lines)
     } else {
         format!(" {} ", check.name())
@@ -838,7 +838,7 @@ fn render_check_output(app: &App, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((app.output_scroll as u16, 0));
+        .scroll((app.view.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -885,9 +885,9 @@ fn render_pre_command_output(
 
     // Calculate scroll indicator
     let total_lines = raw_output.lines().count();
-    let visible_lines = app.output_visible_lines;
+    let visible_lines = app.view.output_visible_lines;
     let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.output_scroll + 1;
+        let current_line = app.view.output_scroll + 1;
         format!(" {} [{}/{}] ", base_title, current_line, total_lines)
     } else {
         format!(" {} ", base_title)
@@ -896,7 +896,7 @@ fn render_pre_command_output(
     let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
-        .scroll((app.output_scroll as u16, 0));
+        .scroll((app.view.output_scroll as u16, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -923,13 +923,13 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
 
 /// Build keyboard shortcut spans for the footer
 fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
-    let expand_label = if app.show_full_command {
+    let expand_label = if app.view.show_full_command {
         "collapse"
     } else {
         "expand"
     };
 
-    let filter_spans = if app.status_filter == crate::ui::app::StatusFilter::Failed {
+    let filter_spans = if app.view.status_filter == crate::ui::app::StatusFilter::Failed {
         vec![
             Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(" all  "),
@@ -1024,7 +1024,7 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    if let Some(ref msg) = app.status_message {
+    if let Some(ref msg) = app.view.status_message {
         let status_line = Line::from(vec![
             Span::styled(
                 " ℹ ",

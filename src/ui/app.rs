@@ -20,6 +20,9 @@ use std::time::Instant;
 /// Maximum number of samples to keep in history for sparklines
 const MAX_HISTORY_SAMPLES: usize = 60;
 
+/// Default assumed output-panel height before first render measures it
+const DEFAULT_OUTPUT_VISIBLE_LINES: usize = 20;
+
 /// Filter for which checks to display in the UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusFilter {
@@ -96,6 +99,36 @@ impl Default for SysStats {
     }
 }
 
+/// UI view state: selection, scrolling, filtering, toggles, status line
+#[derive(Debug)]
+pub struct ViewState {
+    /// Index of currently selected item in the filtered list
+    pub selected_check: usize,
+    /// Scroll position in output panel
+    pub output_scroll: usize,
+    /// Number of visible lines in output area (updated during render)
+    pub output_visible_lines: usize,
+    /// Current filter for check list
+    pub status_filter: StatusFilter,
+    /// Whether to show full command in output panel
+    pub show_full_command: bool,
+    /// Status message shown to user (clears on next keypress)
+    pub status_message: Option<String>,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            selected_check: 0,
+            output_scroll: 0,
+            output_visible_lines: DEFAULT_OUTPUT_VISIBLE_LINES,
+            status_filter: StatusFilter::All,
+            show_full_command: false,
+            status_message: None,
+        }
+    }
+}
+
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
@@ -153,18 +186,12 @@ pub struct App {
     /// Current git branch name
     pub current_branch: String,
 
-    // UI state
-    /// Index of currently selected check in filtered list
-    pub selected_check: usize,
-    /// Scroll position in output panel
-    pub output_scroll: usize,
-    /// Number of visible lines in output area (updated during render)
-    pub output_visible_lines: usize,
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
     pub output_area_width: u16,
-    /// Current filter for check list
-    pub status_filter: StatusFilter,
+
+    /// UI view state: selection, scrolling, filtering, toggles, status line
+    pub view: ViewState,
 
     // Runner state
     /// Currently executing group name
@@ -187,12 +214,6 @@ pub struct App {
 
     /// System monitoring history (updated by background stats worker)
     pub sys: SysStats,
-
-    /// Status message shown to user (clears on next keypress)
-    pub status_message: Option<String>,
-
-    /// Whether to show full command in output panel
-    pub show_full_command: bool,
 
     /// Dirty flag - set when state changes, cleared after render
     /// Used to avoid unnecessary re-renders for better responsiveness
@@ -224,11 +245,8 @@ impl App {
             checks,
             results,
             current_branch,
-            selected_check: 0,
-            output_scroll: 0,
-            output_visible_lines: 20,
             output_area_width: 80,
-            status_filter: StatusFilter::All,
+            view: ViewState::default(),
             current_group: None,
             all_finished: false,
             run_started_at: Some(Instant::now()),
@@ -237,8 +255,6 @@ impl App {
             current_pre_command: None,
             fix: FixState::default(),
             sys: SysStats::default(),
-            status_message: None,
-            show_full_command: false,
             needs_redraw: true, // Initial render needed
         }
     }
@@ -261,9 +277,7 @@ impl App {
         self.pre_commands = build_pre_commands(&self.config, &active_groups);
 
         // Reset state
-        self.selected_check = 0;
-        self.output_scroll = 0;
-        self.output_visible_lines = 20;
+        self.view = ViewState::default();
         self.current_group = None;
         self.all_finished = false;
         self.run_started_at = Some(Instant::now());
@@ -271,8 +285,6 @@ impl App {
         self.current_pre_command = None;
         self.fix = FixState::default();
         // sys stats deliberately survive retries
-        self.status_message = None;
-        self.show_full_command = false;
         self.needs_redraw = true;
     }
 
@@ -468,14 +480,14 @@ impl App {
 
     /// Set (or clear) the status message shown in the footer
     pub fn set_status_message(&mut self, msg: Option<String>) {
-        self.status_message = msg;
+        self.view.status_message = msg;
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Clear the status message (any keypress dismisses it)
     pub fn clear_status_message(&mut self) {
-        self.status_message = None;
+        self.view.status_message = None;
         self.clamp_selection();
         self.needs_redraw = true;
     }
@@ -533,8 +545,8 @@ impl App {
     /// output panel.
     fn clamp_selection(&mut self) {
         let max = self.get_selectable_items().len().saturating_sub(1);
-        if self.selected_check > max {
-            self.selected_check = max;
+        if self.view.selected_check > max {
+            self.view.selected_check = max;
         }
     }
 
@@ -565,7 +577,7 @@ impl App {
             RunnerEvent::AllFinished => {
                 self.all_finished = true;
                 self.current_group = None;
-                self.status_message = None;
+                self.view.status_message = None;
                 self.run_finished_at = Some(Instant::now());
             }
         }
@@ -638,12 +650,12 @@ impl App {
         // Clear fix results and reset command view when navigating
         self.fix.result = None;
         self.fix.all_results.clear();
-        self.output_scroll = 0;
-        self.show_full_command = false;
+        self.view.output_scroll = 0;
+        self.view.show_full_command = false;
 
         let max = self.get_selectable_items().len().saturating_sub(1);
-        if self.selected_check < max {
-            self.selected_check += 1;
+        if self.view.selected_check < max {
+            self.view.selected_check += 1;
         }
         self.needs_redraw = true;
     }
@@ -652,29 +664,29 @@ impl App {
         // Clear fix results and reset command view when navigating
         self.fix.result = None;
         self.fix.all_results.clear();
-        self.output_scroll = 0;
-        self.show_full_command = false;
+        self.view.output_scroll = 0;
+        self.view.show_full_command = false;
 
-        if self.selected_check > 0 {
-            self.selected_check -= 1;
+        if self.view.selected_check > 0 {
+            self.view.selected_check -= 1;
         }
         self.needs_redraw = true;
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.output_scroll = self.output_scroll.saturating_sub(n);
+        self.view.output_scroll = self.view.output_scroll.saturating_sub(n);
         self.needs_redraw = true;
     }
 
     pub fn scroll_down(&mut self, n: usize) {
         let max_scroll = self.compute_max_scroll();
-        self.output_scroll = (self.output_scroll + n).min(max_scroll);
+        self.view.output_scroll = (self.view.output_scroll + n).min(max_scroll);
         self.needs_redraw = true;
     }
 
     /// Compute maximum scroll offset for the currently selected item's output
     fn compute_max_scroll(&self) -> usize {
-        let visible = self.output_visible_lines;
+        let visible = self.view.output_visible_lines;
         match self.selected_item() {
             Some(SelectableItem::Check(check)) => self
                 .check_rendered_line_count(check)
@@ -697,26 +709,26 @@ impl App {
 
     /// Set the number of visible lines in output area (called during render)
     pub fn set_output_visible_lines(&mut self, lines: usize) {
-        self.output_visible_lines = lines;
+        self.view.output_visible_lines = lines;
     }
 
     pub fn toggle_failed_filter(&mut self) {
-        self.status_filter = match self.status_filter {
+        self.view.status_filter = match self.view.status_filter {
             StatusFilter::All => StatusFilter::Failed,
             StatusFilter::Failed => StatusFilter::All,
         };
-        self.selected_check = 0;
+        self.view.selected_check = 0;
         self.needs_redraw = true;
     }
 
     pub fn show_all(&mut self) {
-        self.status_filter = StatusFilter::All;
-        self.selected_check = 0;
+        self.view.status_filter = StatusFilter::All;
+        self.view.selected_check = 0;
         self.needs_redraw = true;
     }
 
     pub fn toggle_full_command(&mut self) {
-        self.show_full_command = !self.show_full_command;
+        self.view.show_full_command = !self.view.show_full_command;
         self.needs_redraw = true;
     }
 
@@ -781,14 +793,14 @@ impl App {
     }
 
     pub(crate) fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
-        match self.status_filter {
+        match self.view.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
         }
     }
 
     pub(crate) fn should_show_check(&self, check: &CheckToRun) -> bool {
-        match self.status_filter {
+        match self.view.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => self
                 .results
@@ -802,7 +814,7 @@ impl App {
     pub fn selected_item(&self) -> Option<SelectableItem<'_>> {
         self.get_selectable_items()
             .into_iter()
-            .nth(self.selected_check)
+            .nth(self.view.selected_check)
     }
 
     /// Get the selected pre-command, if one is selected
@@ -945,9 +957,9 @@ checks:
     fn test_new_initial_state() {
         let app = make_app();
 
-        assert_eq!(app.selected_check, 0);
-        assert_eq!(app.output_scroll, 0);
-        assert_eq!(app.status_filter, StatusFilter::All);
+        assert_eq!(app.view.selected_check, 0);
+        assert_eq!(app.view.output_scroll, 0);
+        assert_eq!(app.view.status_filter, StatusFilter::All);
         assert!(!app.all_finished);
         assert!(!app.fix.running);
         assert!(app.needs_redraw);
@@ -957,30 +969,30 @@ checks:
     fn test_navigation_next() {
         let mut app = make_app();
 
-        assert_eq!(app.selected_check, 0);
+        assert_eq!(app.view.selected_check, 0);
         app.next_check();
-        assert_eq!(app.selected_check, 1);
+        assert_eq!(app.view.selected_check, 1);
         app.next_check();
-        assert_eq!(app.selected_check, 2);
+        assert_eq!(app.view.selected_check, 2);
 
         // Should not go past last item
         app.next_check();
-        assert_eq!(app.selected_check, 2);
+        assert_eq!(app.view.selected_check, 2);
     }
 
     #[test]
     fn test_navigation_previous() {
         let mut app = make_app();
-        app.selected_check = 2;
+        app.view.selected_check = 2;
 
         app.previous_check();
-        assert_eq!(app.selected_check, 1);
+        assert_eq!(app.view.selected_check, 1);
         app.previous_check();
-        assert_eq!(app.selected_check, 0);
+        assert_eq!(app.view.selected_check, 0);
 
         // Should not go below 0
         app.previous_check();
-        assert_eq!(app.selected_check, 0);
+        assert_eq!(app.view.selected_check, 0);
     }
 
     #[test]
@@ -997,23 +1009,23 @@ checks:
     fn test_toggle_failed_filter() {
         let mut app = make_app();
 
-        assert_eq!(app.status_filter, StatusFilter::All);
+        assert_eq!(app.view.status_filter, StatusFilter::All);
         app.toggle_failed_filter();
-        assert_eq!(app.status_filter, StatusFilter::Failed);
+        assert_eq!(app.view.status_filter, StatusFilter::Failed);
         app.toggle_failed_filter();
-        assert_eq!(app.status_filter, StatusFilter::All);
+        assert_eq!(app.view.status_filter, StatusFilter::All);
     }
 
     #[test]
     fn test_show_all_resets_filter() {
         let mut app = make_app();
-        app.status_filter = StatusFilter::Failed;
-        app.selected_check = 5;
+        app.view.status_filter = StatusFilter::Failed;
+        app.view.selected_check = 5;
 
         app.show_all();
 
-        assert_eq!(app.status_filter, StatusFilter::All);
-        assert_eq!(app.selected_check, 0);
+        assert_eq!(app.view.status_filter, StatusFilter::All);
+        assert_eq!(app.view.selected_check, 0);
     }
 
     #[test]
@@ -1051,7 +1063,7 @@ checks:
         let mut app = make_app();
 
         // Check phpunit which has fix command
-        app.selected_check = 1; // phpunit
+        app.view.selected_check = 1; // phpunit
 
         // Not failed yet - can't fix
         assert!(!app.can_fix_selected());
@@ -1068,7 +1080,7 @@ checks:
         let mut app = make_app();
 
         // Select php-lint which has no fix command
-        app.selected_check = 0; // php-lint
+        app.view.selected_check = 0; // php-lint
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
 
         // Can't fix because no fix command
@@ -1078,7 +1090,7 @@ checks:
     #[test]
     fn test_can_fix_selected_disabled_during_fix() {
         let mut app = make_app();
-        app.selected_check = 1; // phpunit
+        app.view.selected_check = 1; // phpunit
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
         app.fix.running = true;
@@ -1091,19 +1103,19 @@ checks:
         let mut app = make_app();
 
         // Select behat which is on-demand
-        app.selected_check = 2;
+        app.view.selected_check = 2;
 
         assert!(app.can_trigger_selected());
 
         // Select php-lint which is pending
-        app.selected_check = 0;
+        app.view.selected_check = 0;
         assert!(!app.can_trigger_selected());
     }
 
     #[test]
     fn test_can_retry_selected() {
         let mut app = make_app();
-        app.selected_check = 0; // php-lint
+        app.view.selected_check = 0; // php-lint
 
         // Can't retry pending
         assert!(!app.can_retry_selected());
@@ -1318,11 +1330,11 @@ checks:
     fn test_toggle_full_command() {
         let mut app = make_app();
 
-        assert!(!app.show_full_command);
+        assert!(!app.view.show_full_command);
         app.toggle_full_command();
-        assert!(app.show_full_command);
+        assert!(app.view.show_full_command);
         app.toggle_full_command();
-        assert!(!app.show_full_command);
+        assert!(!app.view.show_full_command);
     }
 
     #[test]
@@ -1336,17 +1348,17 @@ checks:
         // Set visible lines smaller than output to allow scrolling (10 lines, 5 visible)
         app.set_output_visible_lines(5);
 
-        assert_eq!(app.output_scroll, 0);
+        assert_eq!(app.view.output_scroll, 0);
 
         app.scroll_down(3);
-        assert_eq!(app.output_scroll, 3);
+        assert_eq!(app.view.output_scroll, 3);
 
         app.scroll_up(2);
-        assert_eq!(app.output_scroll, 1);
+        assert_eq!(app.view.output_scroll, 1);
 
         // Can't scroll below 0
         app.scroll_up(10);
-        assert_eq!(app.output_scroll, 0);
+        assert_eq!(app.view.output_scroll, 0);
     }
 
     #[test]
@@ -1369,7 +1381,7 @@ checks:
         // "$ php-lint test.php", blank, "PASSED", blank, "Files: test.php", blank.
         // max scroll = 26 total - 5 visible = 21. The old clamp
         // (stdout-only count) allowed only 20 - 5 = 15.
-        assert_eq!(app.output_scroll, 21);
+        assert_eq!(app.view.output_scroll, 21);
     }
 
     #[test]
@@ -1398,7 +1410,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
 
         // With All filter, both pre-commands should be visible
-        app.status_filter = StatusFilter::All;
+        app.view.status_filter = StatusFilter::All;
         let items = app.get_selectable_items();
         let pre_cmd_count = items
             .iter()
@@ -1407,7 +1419,7 @@ checks:
         assert_eq!(pre_cmd_count, 2, "All filter should show all pre-commands");
 
         // With Failed filter, only the failed pre-command should be visible
-        app.status_filter = StatusFilter::Failed;
+        app.view.status_filter = StatusFilter::Failed;
         let items = app.get_selectable_items();
         let pre_cmds: Vec<_> = items
             .iter()
@@ -1435,8 +1447,8 @@ checks:
         let mut app = make_app();
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
-        app.status_filter = StatusFilter::Failed;
-        app.selected_check = 1; // phpunit, second item in the filtered list
+        app.view.status_filter = StatusFilter::Failed;
+        app.view.selected_check = 1; // phpunit, second item in the filtered list
 
         // phpunit passes on retry - the filtered list shrinks to 1 item
         let result = CheckResult {
@@ -1451,7 +1463,7 @@ checks:
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
         assert_eq!(
-            app.selected_check, 0,
+            app.view.selected_check, 0,
             "selection must be clamped to list length"
         );
         assert!(
@@ -1522,9 +1534,9 @@ checks:
         fn test_set_and_clear_status_message() {
             let mut app = make_app();
             app.set_status_message(Some("Test message".to_string()));
-            assert_eq!(app.status_message, Some("Test message".to_string()));
+            assert_eq!(app.view.status_message, Some("Test message".to_string()));
             app.clear_status_message();
-            assert!(app.status_message.is_none());
+            assert!(app.view.status_message.is_none());
         }
     }
 }

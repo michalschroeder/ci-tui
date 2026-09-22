@@ -520,7 +520,7 @@ fn handle_message(
             );
 
             // Clear status message on any other key press
-            if app.status_message.is_some() && !is_quit {
+            if app.view.status_message.is_some() && !is_quit {
                 app.clear_status_message();
 
                 #[cfg(debug_assertions)]
@@ -840,7 +840,7 @@ checks:
 
         assert!(matches!(action, Action::Continue));
         assert!(
-            app.status_message.is_some(),
+            app.view.status_message.is_some(),
             "git refresh failure must surface a status message"
         );
         // Fallback still retried the check with the previous file list
@@ -854,7 +854,7 @@ checks:
     async fn test_quit_key_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.status_message = Some("Command copied to clipboard".to_string());
+        app.view.status_message = Some("Command copied to clipboard".to_string());
         let channels = make_test_channels(&config);
 
         let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -870,7 +870,7 @@ checks:
     async fn test_ctrl_c_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.status_message = Some("some message".to_string());
+        app.view.status_message = Some("some message".to_string());
         let channels = make_test_channels(&config);
 
         let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -883,7 +883,7 @@ checks:
     async fn test_other_key_dismisses_status_message() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.status_message = Some("some message".to_string());
+        app.view.status_message = Some("some message".to_string());
         let channels = make_test_channels(&config);
 
         let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
@@ -891,7 +891,7 @@ checks:
 
         assert!(matches!(action, Action::Continue));
         assert!(
-            app.status_message.is_none(),
+            app.view.status_message.is_none(),
             "non-quit key clears the message"
         );
     }
