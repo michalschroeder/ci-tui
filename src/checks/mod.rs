@@ -71,15 +71,10 @@ impl CheckToRun {
 
     /// Get command with {files} placeholder removed (for running against all files)
     ///
-    /// This returns the command with {files} replaced by empty string, trimmed.
-    /// Useful for running a check against all files instead of just changed ones.
+    /// This returns the command with {files} replaced by an empty string, trimmed
+    /// (same resolution as normal execution).
     pub fn get_command_for_all_files(&self) -> String {
-        self.definition
-            .command
-            .replace("{files}", "")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        resolve_command(&self.definition, &[], false)
     }
 }
 
@@ -511,6 +506,17 @@ mod tests {
         // Should have {files} replaced with empty and cleaned up
         assert_eq!(all_files_cmd, "parallel-lint");
         assert!(!all_files_cmd.contains("{files}"));
+    }
+
+    #[test]
+    fn test_get_command_for_all_files_matches_resolve_command_policy() {
+        let check = make_check("id", "g", "N", "cmd {files} --flag", false, false);
+        // Must equal resolve_command with empty files: trim-only, placeholder stripped
+        assert_eq!(
+            check.get_command_for_all_files(),
+            resolve_command(&check.definition, &[], false)
+        );
+        assert_eq!(check.get_command_for_all_files(), "cmd  --flag");
     }
 
     #[test]
