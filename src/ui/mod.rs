@@ -165,19 +165,6 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
     })
 }
 
-/// Actions that can result from key handling
-enum KeyAction {
-    /// Continue the main loop
-    None,
-    /// Exit the application
-    Quit,
-    /// Retry all checks with refreshed git state
-    RetryAll {
-        new_changed_files: ChangedFiles,
-        new_checks: Vec<CheckToRun>,
-    },
-}
-
 /// Action result from handle_message
 enum Action {
     Continue,
@@ -294,12 +281,12 @@ fn warn_slow_keyboard(start: std::time::Instant) {
 }
 
 /// Handle 'r' key: retry selected check with git refresh
-fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiConfig) -> KeyAction {
+fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiConfig) -> Action {
     if !app.can_retry_selected() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
-        return KeyAction::None;
+        return Action::Continue;
     };
     let check_id = check.id().to_string();
     let base_ref = app.changed_files.base_ref.clone();
@@ -313,7 +300,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
             "Git refresh failed - retrying with previous file list".to_string(),
         )));
         spawn_retry_task(channels, check);
-        return KeyAction::None;
+        return Action::Continue;
     };
 
     new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
@@ -323,7 +310,7 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
         app.update(AppMessage::SetStatusMessage(Some(
             "Check no longer applicable after git refresh".to_string(),
         )));
-        return KeyAction::None;
+        return Action::Continue;
     };
     let new_check = new_check.clone();
 
@@ -334,30 +321,30 @@ fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiCon
 
     app.update(AppMessage::ResetForRetry(check_id));
     spawn_retry_task(channels, new_check);
-    KeyAction::None
+    Action::Continue
 }
 
 /// Handle 't' key: trigger on-demand test
-fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> KeyAction {
+fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> Action {
     if !app.can_trigger_selected() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
-        return KeyAction::None;
+        return Action::Continue;
     };
     let check = check.clone();
     app.update(AppMessage::TriggerOnDemand(check.id().to_string()));
     spawn_retry_task(channels, check);
-    KeyAction::None
+    Action::Continue
 }
 
 /// Handle 'A' key: run selected check for all files
-fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> KeyAction {
+fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
     if !app.can_run_all_files() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
-        return KeyAction::None;
+        return Action::Continue;
     };
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
@@ -382,11 +369,11 @@ fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> KeyAction {
         .await;
         let _ = retry_tx.send(result).await;
     });
-    KeyAction::None
+    Action::Continue
 }
 
 /// Handle 'R' key: retry all checks with git refresh
-fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> KeyAction {
+fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> Action {
     let base_ref = app.changed_files.base_ref.clone();
     let mut new_changed_files =
         get_changed_files(&channels.project_root, &base_ref).unwrap_or(ChangedFiles {
@@ -396,33 +383,33 @@ fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> K
     new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
     let new_checks = determine_checks(config, &new_changed_files, &channels.project_root);
 
-    KeyAction::RetryAll {
+    Action::RestartRunner {
         new_changed_files,
         new_checks,
     }
 }
 
 /// Handle 'x' key: run fix for selected check
-fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> KeyAction {
+fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> Action {
     if !app.can_fix_selected() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let Some((fix_cmd, _service, container)) = app.get_selected_fix_command() else {
-        return KeyAction::None;
+        return Action::Continue;
     };
     app.update(AppMessage::StartFix);
     spawn_fix_task(channels, fix_cmd, container);
-    KeyAction::None
+    Action::Continue
 }
 
 /// Handle 'X' key: run fix for all failed checks
-fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
+fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
     if !app.can_fix_all() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let fix_commands = app.get_all_fix_commands();
     if fix_commands.is_empty() {
-        return KeyAction::None;
+        return Action::Continue;
     }
     let total = fix_commands.len();
     app.update(AppMessage::StartFixAll(total));
@@ -449,7 +436,7 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> KeyAction {
         // a failed send left fix_all_running=true and disabled r/t/x/X forever.
         let _ = fix_all_tx.send(FixAllEvent::Done).await;
     });
-    KeyAction::None
+    Action::Continue
 }
 
 /// Handle a key event and return the action for the main loop
@@ -458,32 +445,32 @@ fn handle_key_event(
     key: KeyEvent,
     channels: &EventChannels,
     config: &CiConfig,
-) -> KeyAction {
+) -> Action {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyAction::Quit,
+        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
         (KeyCode::Up | KeyCode::Char('k'), _) => {
             app.previous_check();
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Down | KeyCode::Char('j'), _) => {
             app.next_check();
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::PageUp, _) => {
             app.scroll_up(10);
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::PageDown, _) => {
             app.scroll_down(10);
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Char('f'), _) => {
             app.toggle_failed_filter();
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Char('a'), _) => {
             app.show_all();
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, channels, config),
         (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, channels),
@@ -495,16 +482,16 @@ fn handle_key_event(
                     "Command copied to clipboard".to_string(),
                 )));
             }
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Char('e'), KeyModifiers::NONE) => {
             app.toggle_full_command();
-            KeyAction::None
+            Action::Continue
         }
         (KeyCode::Char('R'), KeyModifiers::SHIFT) => handle_retry_all(app, channels, config),
         (KeyCode::Char('x'), KeyModifiers::NONE) => handle_fix_selected(app, channels),
         (KeyCode::Char('X'), KeyModifiers::SHIFT) => handle_fix_all(app, channels),
-        _ => KeyAction::None,
+        _ => Action::Continue,
     }
 }
 
@@ -540,17 +527,7 @@ fn handle_message(
             }
 
             // Dispatch to key handler
-            let result = match handle_key_event(app, key, channels, config) {
-                KeyAction::Quit => Ok(Action::Quit),
-                KeyAction::RetryAll {
-                    new_changed_files,
-                    new_checks,
-                } => Ok(Action::RestartRunner {
-                    new_changed_files,
-                    new_checks,
-                }),
-                KeyAction::None => Ok(Action::Continue),
-            };
+            let result = Ok(handle_key_event(app, key, channels, config));
 
             #[cfg(debug_assertions)]
             warn_slow_keyboard(start);
@@ -862,7 +839,7 @@ checks:
 
         let action = handle_retry_selected(&mut app, &channels, &config);
 
-        assert!(matches!(action, KeyAction::None));
+        assert!(matches!(action, Action::Continue));
         assert!(
             app.status_message.is_some(),
             "git refresh failure must surface a status message"
