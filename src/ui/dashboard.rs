@@ -29,6 +29,20 @@ use std::collections::VecDeque;
 
 const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
 const BUILD_DATE: &str = env!("CI_TUI_BUILD_DATE");
+/// Minimum height (rows, incl. borders) of the checks panel
+const CHECKS_PANEL_MIN_HEIGHT: u16 = 8;
+/// Checks panel takes at most this fraction of the main-area height
+const CHECKS_PANEL_MAX_HEIGHT_RATIO: f32 = 0.7;
+/// Rows consumed by a bordered block (top + bottom border)
+const PANEL_BORDER_ROWS: usize = 2;
+/// Columns reserved beside a check name (icon, padding, duration)
+const CHECK_NAME_RESERVED_COLS: u16 = 15;
+/// Minimum columns granted to a check name before truncation
+const CHECK_NAME_MIN_COLS: usize = 20;
+/// Max files listed inline in the output header before truncating
+const FILES_PREVIEW_COUNT: usize = 3;
+/// Max stderr lines shown per failed fix in fix-all results
+const FIX_ERROR_PREVIEW_LINES: usize = 5;
 
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
@@ -211,10 +225,10 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
     // Count total items: groups + pre-commands + checks
     let groups = app.groups();
     let total_check_items = groups.len() + app.pre_commands.len() + app.checks.len();
-    // Add 2 for borders, minimum 8 lines, cap at 70% of available height
-    let checks_height = ((total_check_items + 2) as u16)
-        .max(8)
-        .min((area.height as f32 * 0.7) as u16);
+    // Add PANEL_BORDER_ROWS for borders, minimum CHECKS_PANEL_MIN_HEIGHT lines, cap at CHECKS_PANEL_MAX_HEIGHT_RATIO of available height
+    let checks_height = ((total_check_items + PANEL_BORDER_ROWS) as u16)
+        .max(CHECKS_PANEL_MIN_HEIGHT)
+        .min((area.height as f32 * CHECKS_PANEL_MAX_HEIGHT_RATIO) as u16);
 
     // Left side: checks + files with dynamic height
     let left_chunks = Layout::default()
@@ -307,8 +321,8 @@ fn render_check_item(
     };
 
     // Truncate name if needed - calculate based on available width
-    let available_width = area.width.saturating_sub(15) as usize;
-    let max_name_len = available_width.max(20);
+    let available_width = area.width.saturating_sub(CHECK_NAME_RESERVED_COLS) as usize;
+    let max_name_len = available_width.max(CHECK_NAME_MIN_COLS);
     let name = if check.name().len() > max_name_len {
         format!("{}…", &check.name()[..max_name_len - 1])
     } else {
@@ -591,7 +605,7 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
             let error_lines: String = result
                 .error_output
                 .lines()
-                .take(5)
+                .take(FIX_ERROR_PREVIEW_LINES)
                 .map(|line| format!("  \x1b[31m{}\x1b[0m\n", line))
                 .collect();
             raw_output.push_str(&error_lines);
@@ -794,10 +808,15 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
         }
         raw_output.push('\n');
     } else {
-        let display_files = if files.len() <= 3 {
+        let display_files = if files.len() <= FILES_PREVIEW_COUNT {
             files.join(", ")
         } else {
-            files.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            files
+                .iter()
+                .take(FILES_PREVIEW_COUNT)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
     }

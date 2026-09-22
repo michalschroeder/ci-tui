@@ -57,6 +57,8 @@ const KEYBOARD_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const STATS_CHANNEL_CAPACITY: usize = 4;
 /// Channel capacity for runner events
 const RUNNER_CHANNEL_CAPACITY: usize = 100;
+/// Lines to scroll per PageUp/PageDown press
+const PAGE_SCROLL_LINES: usize = 10;
 
 /// System stats data sent from background task
 #[derive(Debug, Clone)]
@@ -462,11 +464,11 @@ fn handle_key_event(
             Action::Continue
         }
         (KeyCode::PageUp, _) => {
-            app.scroll_up(10);
+            app.scroll_up(PAGE_SCROLL_LINES);
             Action::Continue
         }
         (KeyCode::PageDown, _) => {
-            app.scroll_down(10);
+            app.scroll_down(PAGE_SCROLL_LINES);
             Action::Continue
         }
         (KeyCode::Char('f'), _) => {
