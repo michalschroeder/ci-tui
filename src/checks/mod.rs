@@ -85,9 +85,10 @@ impl CheckToRun {
 
 /// Determine which checks should run based on changed files.
 ///
-/// Returns ALL checks from config - those that match are set to run,
-/// those that don't match are marked as skipped (can be run on-demand).
-/// Checks are returned in config order for predictable execution.
+/// Returns checks in config order. Always-run checks (no `triggers` key) and
+/// checks whose triggers matched are set to run; triggered checks that did not
+/// match are returned as skipped/on-demand. Checks with an empty `triggers`
+/// block (no `file_pattern` and no `test_discovery`) are omitted entirely.
 pub fn determine_checks(
     config: &CiConfig,
     changed_files: &ChangedFiles,
@@ -117,12 +118,7 @@ pub fn determine_checks(
 ///
 /// Supported placeholders:
 /// - `{files}` - replaced with space-separated list of matched files
-fn resolve_command(
-    _config: &CiConfig,
-    check: &CheckDefinition,
-    files: &[&str],
-    use_fix: bool,
-) -> String {
+fn resolve_command(check: &CheckDefinition, files: &[&str], use_fix: bool) -> String {
     let mut command = if use_fix {
         check
             .fix_command
@@ -1185,7 +1181,7 @@ checks:
                 .expect("php-lint should exist");
 
             let files = vec!["src/Foo.php", "src/Bar.php"];
-            let resolved = resolve_command(&config, check, &files, false);
+            let resolved = resolve_command(check, &files, false);
 
             assert!(
                 resolved.contains("src/Foo.php"),
@@ -1209,7 +1205,7 @@ checks:
                 .find_map(|(_, g)| g.checks.get("php-lint"))
                 .expect("php-lint should exist");
 
-            let resolved = resolve_command(&config, check, &[], false);
+            let resolved = resolve_command(check, &[], false);
 
             assert_eq!(
                 resolved, "parallel-lint",
@@ -1252,7 +1248,7 @@ checks:
                 .find_map(|(_, g)| g.checks.get("test-check"))
                 .expect("test-check should exist");
 
-            let resolved = resolve_command(&config, check, &[], false);
+            let resolved = resolve_command(check, &[], false);
 
             // Should be trimmed
             assert_eq!(resolved, "phpunit", "Command should be trimmed");
@@ -1275,7 +1271,7 @@ checks:
                 .expect("phpstan should exist");
 
             let files = vec!["src/Foo.php"];
-            let resolved_fix = resolve_command(&config, check, &files, true);
+            let resolved_fix = resolve_command(check, &files, true);
 
             assert!(
                 resolved_fix.contains("phpstan fix"),
@@ -1302,35 +1298,31 @@ checks:
 
         #[test]
         fn use_fix_true_with_fix_command_uses_fix() {
-            let cfg = checks_test_config();
             let check = mk_check("check {files}", Some("fix {files}"));
-            let out = resolve_command(&cfg, &check, &["a.rs", "b.rs"], true);
+            let out = resolve_command(&check, &["a.rs", "b.rs"], true);
             assert_eq!(out, "fix a.rs b.rs");
         }
 
         // Silent-fallback branch: use_fix=true but fix_command is None
         #[test]
         fn use_fix_true_without_fix_command_falls_back_to_command() {
-            let cfg = checks_test_config();
             let check = mk_check("check {files}", None);
-            let out = resolve_command(&cfg, &check, &["a.rs"], true);
+            let out = resolve_command(&check, &["a.rs"], true);
             assert_eq!(out, "check a.rs");
         }
 
         // Paren-sentinel files (e.g. "(skipped - no matching files)") collapse files_str to empty
         #[test]
         fn files_with_paren_sentinel_are_stripped() {
-            let cfg = checks_test_config();
             let check = mk_check("run {files}", None);
-            let out = resolve_command(&cfg, &check, &["(skipped - no matching files)"], false);
+            let out = resolve_command(&check, &["(skipped - no matching files)"], false);
             assert_eq!(out, "run");
         }
 
         #[test]
         fn empty_files_strips_placeholder_and_trims() {
-            let cfg = checks_test_config();
             let check = mk_check("cmd {files}", None);
-            assert_eq!(resolve_command(&cfg, &check, &[], false), "cmd");
+            assert_eq!(resolve_command(&check, &[], false), "cmd");
         }
     }
 
