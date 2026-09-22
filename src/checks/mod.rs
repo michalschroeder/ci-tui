@@ -44,6 +44,11 @@ impl CheckFiles {
             _ => &[],
         }
     }
+
+    /// True for states that wait for a manual trigger ('t' key) instead of auto-running.
+    pub fn is_on_demand(&self) -> bool {
+        matches!(self, CheckFiles::SkippedNoMatch | CheckFiles::OnDemand)
+    }
 }
 
 /// A CI check that has been determined to run, with resolved commands

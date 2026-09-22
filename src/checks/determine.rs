@@ -20,9 +20,9 @@ pub(super) fn new_check_to_run(
     group_name: &str,
     service: String,
     files: CheckFiles,
-    on_demand: bool,
     skipped_no_files: bool,
 ) -> CheckToRun {
+    let on_demand = files.is_on_demand();
     let file_list: Vec<&str> = files.paths().iter().map(|s| s.as_str()).collect();
     let resolved_command = resolve_command(check, &file_list, false);
     let resolved_fix_command = check
@@ -62,7 +62,6 @@ pub(super) fn process_check(
             group_name,
             service,
             CheckFiles::Files(vec![]),
-            false,
             false,
         ));
     }
@@ -155,7 +154,6 @@ pub(super) fn process_triggered_check(
     let triggers = check.triggers.as_ref()?;
     let mut matched_files = Vec::new();
     let mut has_source_trigger = false;
-    let mut run_all = false;
 
     // Check file pattern trigger
     if let Some(pattern_key) = &triggers.file_pattern {
@@ -176,12 +174,18 @@ pub(super) fn process_triggered_check(
                     group_name,
                     service.to_string(),
                     CheckFiles::OnDemand,
-                    true,
                     false,
                 ));
             }
             DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
-                run_all = true;
+                return Some(new_check_to_run(
+                    check_id,
+                    check,
+                    group_name,
+                    service.to_string(),
+                    CheckFiles::RunAll,
+                    false,
+                ));
             }
             DiscoveryOutcome::NoTestsOnDemand | DiscoveryOutcome::NoTestsRunAll => {}
         }
@@ -191,18 +195,6 @@ pub(super) fn process_triggered_check(
     let mut seen = HashSet::new();
     matched_files.retain(|f| seen.insert(f.clone()));
 
-    if run_all {
-        return Some(new_check_to_run(
-            check_id,
-            check,
-            group_name,
-            service.to_string(),
-            CheckFiles::RunAll,
-            false,
-            false,
-        ));
-    }
-
     // Build appropriate CheckToRun based on whether files matched
     if !matched_files.is_empty() {
         Some(new_check_to_run(
@@ -211,7 +203,6 @@ pub(super) fn process_triggered_check(
             group_name,
             service.to_string(),
             CheckFiles::Files(matched_files),
-            false,
             false,
         ))
     } else {
@@ -224,7 +215,6 @@ pub(super) fn process_triggered_check(
                 group_name,
                 service.to_string(),
                 CheckFiles::SkippedNoMatch,
-                true,
                 has_files_placeholder,
             ))
         } else {
@@ -448,7 +438,6 @@ mod tests {
                 "svc".to_string(),
                 CheckFiles::Files(vec!["a.rs".into(), "b.rs".into()]),
                 false,
-                false,
             );
             assert_eq!(out.id, "id");
             assert_eq!(out.group, "g");
@@ -476,7 +465,6 @@ mod tests {
                 "svc".to_string(),
                 CheckFiles::Files(vec![]),
                 false,
-                false,
             );
             assert!(out.files.paths().is_empty());
             assert_eq!(out.resolved_command, "cargo check");
@@ -484,19 +472,18 @@ mod tests {
         }
 
         #[test]
-        fn flags_pass_through() {
+        fn on_demand_derived_from_variant() {
             let def = mk_check("cmd {files}", None, None, false);
-            let out = new_check_to_run(
-                "id",
-                &def,
-                "g",
-                "svc".to_string(),
-                CheckFiles::SkippedNoMatch,
-                true,
-                true,
-            );
-            assert!(out.on_demand);
-            assert!(out.skipped_no_files);
+            for (files, expected) in [
+                (CheckFiles::Files(vec![]), false),
+                (CheckFiles::RunAll, false),
+                (CheckFiles::SkippedNoMatch, true),
+                (CheckFiles::OnDemand, true),
+            ] {
+                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, true);
+                assert_eq!(out.on_demand, expected);
+                assert!(out.skipped_no_files);
+            }
         }
 
         #[test]
@@ -507,7 +494,7 @@ mod tests {
                 CheckFiles::OnDemand,
                 CheckFiles::RunAll,
             ] {
-                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, true, false);
+                let out = new_check_to_run("id", &def, "g", "svc".to_string(), files, false);
                 assert_eq!(out.resolved_command, "cmd");
             }
         }
@@ -522,7 +509,6 @@ mod tests {
                 "g",
                 "svc".to_string(),
                 CheckFiles::Files(vec!["(x).rs".into()]),
-                false,
                 false,
             );
             assert!(out.resolved_command.contains("(x).rs"));
