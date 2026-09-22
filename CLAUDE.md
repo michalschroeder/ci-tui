@@ -125,7 +125,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 **On-Demand Checks**: Checks marked `on_demand: true` don't run automatically - user triggers with 't' key. Used for expensive tests when no specific test files are found.
 
-**Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/keyboard/stats/fix/retry channels, redrawing when `needs_redraw` is set.
+**Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/input/stats/task channels, redrawing when `needs_redraw` is set.
 
 ### Module Responsibilities
 

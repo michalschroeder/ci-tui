@@ -20,6 +20,9 @@ use std::time::Instant;
 /// Maximum number of samples to keep in history for sparklines
 const MAX_HISTORY_SAMPLES: usize = 60;
 
+/// Bytes in one GiB
+const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+
 /// Default assumed output-panel height before first render measures it
 const DEFAULT_OUTPUT_VISIBLE_LINES: usize = 20;
 
@@ -208,39 +211,49 @@ fn build_pre_commands(
 /// including check results, system stats, and UI state.
 pub struct App {
     /// CI configuration loaded from YAML
-    pub config: CiConfig,
+    pub(crate) config: CiConfig,
     /// Files changed compared to base branch
-    pub changed_files: ChangedFiles,
+    pub(crate) changed_files: ChangedFiles,
     /// Checks to be executed
     pub checks: Vec<CheckToRun>,
     /// Results indexed by check ID
     pub results: HashMap<String, CheckResult>,
     /// Current git branch name
-    pub current_branch: String,
+    pub(crate) current_branch: String,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
-    pub output_area_width: u16,
+    pub(crate) output_area_width: u16,
 
     /// UI view state: selection, scrolling, filtering, toggles, status line
-    pub view: ViewState,
+    pub(crate) view: ViewState,
 
     /// Progress state for the current check run
     pub run: RunState,
 
     // Pre-command state
     /// Pre-commands and their status (group, name, status, output)
-    pub pre_commands: Vec<PreCommandState>,
+    pub(crate) pre_commands: Vec<PreCommandState>,
 
     /// State for fix and fix-all operations
-    pub fix: FixState,
+    pub(crate) fix: FixState,
 
     /// System monitoring history (updated by background stats worker)
-    pub sys: SysStats,
+    pub(crate) sys: SysStats,
 
     /// Dirty flag - set when state changes, cleared after render
     /// Used to avoid unnecessary re-renders for better responsiveness
-    pub needs_redraw: bool,
+    pub(crate) needs_redraw: bool,
+}
+
+/// Number of checks per status bucket
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    pub passed: usize,
+    pub failed: usize,
+    /// Pending or running
+    pub pending: usize,
+    pub on_demand: usize,
 }
 
 /// What the currently selected check can do — computed once, read many times per frame
@@ -253,6 +266,7 @@ pub struct SelectedCaps {
 }
 
 impl App {
+    /// Create app state; results start pending, skipped or on-demand per check
     pub fn new(
         config: CiConfig,
         changed_files: ChangedFiles,
@@ -290,7 +304,6 @@ impl App {
     /// Reset for retry - update changed files and checks, reset results
     pub fn reset_for_retry(&mut self, changed_files: ChangedFiles, checks: Vec<CheckToRun>) {
         self.changed_files = changed_files;
-        self.checks = checks.clone();
 
         // Reset results - skipped for checks with {files} and no matches,
         // on_demand for manual triggers, pending for auto-run
@@ -303,6 +316,7 @@ impl App {
         let active_groups: std::collections::HashSet<&str> =
             checks.iter().map(|c| c.group()).collect();
         self.pre_commands = build_pre_commands(&self.config, &active_groups);
+        self.checks = checks;
 
         // Reset state
         self.view = ViewState {
@@ -313,6 +327,15 @@ impl App {
         self.run = RunState::started_now();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
+        self.needs_redraw = true;
+    }
+
+    /// Store a git-refreshed file list and check (single-check retry)
+    pub fn replace_check(&mut self, changed_files: ChangedFiles, check: CheckToRun) {
+        self.changed_files = changed_files;
+        if let Some(slot) = self.checks.iter_mut().find(|c| c.id() == check.id()) {
+            *slot = check;
+        }
         self.needs_redraw = true;
     }
 
@@ -347,11 +370,6 @@ impl App {
         }
     }
 
-    /// Check if selected check can be fixed
-    pub fn can_fix_selected(&self) -> bool {
-        self.selected_capabilities().can_fix
-    }
-
     /// Get the fix job for the selected check
     pub fn get_selected_fix_command(&self) -> Option<FixJob> {
         Self::fix_job(self.selected_check()?)
@@ -361,6 +379,9 @@ impl App {
     pub fn start_fix(&mut self) {
         self.fix.running = true;
         self.fix.result = None;
+        // Fix-all results take precedence in the output panel; clear them so
+        // this fix's result is shown
+        self.fix.all_results.clear();
         self.needs_redraw = true;
     }
 
@@ -432,21 +453,6 @@ impl App {
     /// Check if retry-all can start (blocked while fixes edit files)
     pub fn can_retry_all(&self) -> bool {
         !self.fix.running && !self.fix.all_running
-    }
-
-    /// Check if selected check can be retried
-    pub fn can_retry_selected(&self) -> bool {
-        self.selected_capabilities().can_retry
-    }
-
-    /// Check if selected check is on-demand and can be triggered
-    pub fn can_trigger_selected(&self) -> bool {
-        self.selected_capabilities().can_trigger
-    }
-
-    /// Check if selected check can be run with all files (no filtering)
-    pub fn can_run_all_files(&self) -> bool {
-        self.selected_capabilities().can_run_all_files
     }
 
     /// Reset a check's result to Running and clear previous output/timing
@@ -526,20 +532,24 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Latest CPU usage (percent)
     pub fn cpu_usage(&self) -> f32 {
         self.sys.cpu_history.back().copied().unwrap_or(0.0)
     }
 
+    /// Latest memory usage (percent)
     pub fn mem_usage(&self) -> f32 {
         self.sys.mem_history.back().copied().unwrap_or(0.0)
     }
 
-    pub fn mem_used_gb(&self) -> f64 {
-        self.sys.mem_used_bytes as f64 / 1_073_741_824.0
+    /// Used memory in GiB (2^30 bytes)
+    pub fn mem_used_gib(&self) -> f64 {
+        self.sys.mem_used_bytes as f64 / BYTES_PER_GIB
     }
 
-    pub fn mem_total_gb(&self) -> f64 {
-        self.sys.mem_total_bytes as f64 / 1_073_741_824.0
+    /// Total memory in GiB (2^30 bytes)
+    pub fn mem_total_gib(&self) -> f64 {
+        self.sys.mem_total_bytes as f64 / BYTES_PER_GIB
     }
 
     /// Keep selection valid: the filtered item list can shrink when a Failed
@@ -553,6 +563,7 @@ impl App {
         }
     }
 
+    /// Apply a lifecycle event from the check runner
     pub fn handle_runner_event(&mut self, event: RunnerEvent) {
         self.needs_redraw = true;
         match event {
@@ -629,6 +640,7 @@ impl App {
         self.pre_commands[idx].duration_ms = duration_ms;
     }
 
+    /// Get the selected check, if a check (not a pre-command) is selected
     pub fn selected_check(&self) -> Option<&CheckToRun> {
         match self.selected_item() {
             Some(SelectableItem::Check(check)) => Some(check),
@@ -638,6 +650,7 @@ impl App {
 
     // Navigation - all methods set needs_redraw for immediate visual feedback
 
+    /// Select the next item (stops at the last one)
     pub fn next_check(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix.result = None;
@@ -652,6 +665,7 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Select the previous item (stops at the first one)
     pub fn previous_check(&mut self) {
         // Clear fix results and reset command view when navigating
         self.fix.result = None;
@@ -665,21 +679,33 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Scroll the output panel up by `n` rows
     pub fn scroll_up(&mut self, n: usize) {
         self.view.output_scroll = self.view.output_scroll.saturating_sub(n);
         self.needs_redraw = true;
     }
 
+    /// Scroll the output panel down by `n` rows (clamped to the content)
     pub fn scroll_down(&mut self, n: usize) {
         let max_scroll = self.compute_max_scroll();
         self.view.output_scroll = (self.view.output_scroll + n).min(max_scroll);
         self.needs_redraw = true;
     }
 
-    /// Compute maximum scroll offset for whatever the output panel shows
+    /// Compute maximum scroll offset for whatever the output panel shows.
+    /// Capped at `u16::MAX`, the largest offset ratatui can scroll to.
     fn compute_max_scroll(&self) -> usize {
         super::dashboard::output_line_count(self, self.output_area_width)
             .saturating_sub(self.view.output_visible_lines)
+            .min(u16::MAX as usize)
+    }
+
+    /// Pull the scroll offset back when the output shrank (retry cleared
+    /// it, command collapsed, panel resized), so the panel never goes blank
+    pub(crate) fn clamp_output_scroll(&mut self) {
+        if self.view.output_scroll > 0 {
+            self.view.output_scroll = self.view.output_scroll.min(self.compute_max_scroll());
+        }
     }
 
     /// Set the number of visible lines in output area (called during render)
@@ -687,6 +713,7 @@ impl App {
         self.view.output_visible_lines = lines;
     }
 
+    /// Toggle between showing all checks and only failed ones
     pub fn toggle_failed_filter(&mut self) {
         self.view.status_filter = match self.view.status_filter {
             StatusFilter::All => StatusFilter::Failed,
@@ -696,30 +723,35 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Show all checks (clear the failed filter)
     pub fn show_all(&mut self) {
         self.view.status_filter = StatusFilter::All;
         self.view.selected_check = 0;
         self.needs_redraw = true;
     }
 
+    /// Toggle full vs truncated command (and file list) in the output panel
     pub fn toggle_full_command(&mut self) {
         self.view.show_full_command = !self.view.show_full_command;
         self.needs_redraw = true;
     }
 
-    // Stats
-    pub fn count_by_status(&self) -> (usize, usize, usize, usize) {
-        self.results
-            .values()
-            .fold((0, 0, 0, 0), |(p, f, pe, o), r| match r.status {
-                CheckStatus::Passed => (p + 1, f, pe, o),
-                CheckStatus::Failed => (p, f + 1, pe, o),
-                CheckStatus::Pending | CheckStatus::Running => (p, f, pe + 1, o),
-                CheckStatus::OnDemand => (p, f, pe, o + 1),
-                CheckStatus::Skipped => (p, f, pe, o),
-            })
+    /// Count check results per status bucket (skipped checks are not counted)
+    pub fn count_by_status(&self) -> StatusCounts {
+        let mut counts = StatusCounts::default();
+        for result in self.results.values() {
+            match result.status {
+                CheckStatus::Passed => counts.passed += 1,
+                CheckStatus::Failed => counts.failed += 1,
+                CheckStatus::Pending | CheckStatus::Running => counts.pending += 1,
+                CheckStatus::OnDemand => counts.on_demand += 1,
+                CheckStatus::Skipped => (),
+            }
+        }
+        counts
     }
 
+    /// Groups that have checks, in config (YAML) order
     pub fn groups(&self) -> Vec<&str> {
         // Get groups that have checks, in config order (IndexMap preserves YAML order)
         let active_groups: std::collections::HashSet<&str> =
@@ -733,6 +765,7 @@ impl App {
             .collect()
     }
 
+    /// Checks belonging to `group`, in check order
     pub fn checks_in_group(&self, group: &str) -> Vec<&CheckToRun> {
         self.checks.iter().filter(|c| c.group() == group).collect()
     }
@@ -746,12 +779,14 @@ impl App {
     }
 
     /// Get all selectable items in display order (pre-commands + checks, grouped)
-    pub fn get_selectable_items(&self) -> Vec<SelectableItem<'_>> {
+    #[cfg(test)]
+    fn get_selectable_items(&self) -> Vec<SelectableItem<'_>> {
         self.selectable_items().collect()
     }
 
-    /// Lazy iterator over selectable items in display order
-    fn selectable_items(&self) -> impl Iterator<Item = SelectableItem<'_>> {
+    /// Lazy iterator over selectable items in display order. The checks
+    /// list is built from this, so list rows and selection always agree.
+    pub(crate) fn selectable_items(&self) -> impl Iterator<Item = SelectableItem<'_>> {
         self.groups().into_iter().flat_map(move |group| {
             let pre_commands = self
                 .pre_commands
@@ -767,14 +802,14 @@ impl App {
         })
     }
 
-    pub(crate) fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
+    fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
         match self.view.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
         }
     }
 
-    pub(crate) fn should_show_check(&self, check: &CheckToRun) -> bool {
+    fn should_show_check(&self, check: &CheckToRun) -> bool {
         match self.view.status_filter {
             StatusFilter::All => true,
             StatusFilter::Failed => self
@@ -1001,29 +1036,44 @@ checks:
         let mut app = make_app();
 
         // Initial state: 2 pending, 1 on-demand
-        let (passed, failed, pending, on_demand) = app.count_by_status();
-        assert_eq!(passed, 0);
-        assert_eq!(failed, 0);
-        assert_eq!(pending, 2);
-        assert_eq!(on_demand, 1);
+        let counts = app.count_by_status();
+        assert_eq!(
+            counts,
+            StatusCounts {
+                passed: 0,
+                failed: 0,
+                pending: 2,
+                on_demand: 1
+            }
+        );
 
         // Mark one as passed
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
 
-        let (passed, failed, pending, on_demand) = app.count_by_status();
-        assert_eq!(passed, 1);
-        assert_eq!(failed, 0);
-        assert_eq!(pending, 1);
-        assert_eq!(on_demand, 1);
+        let counts = app.count_by_status();
+        assert_eq!(
+            counts,
+            StatusCounts {
+                passed: 1,
+                failed: 0,
+                pending: 1,
+                on_demand: 1
+            }
+        );
 
         // Mark one as failed
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
-        let (passed, failed, pending, on_demand) = app.count_by_status();
-        assert_eq!(passed, 1);
-        assert_eq!(failed, 1);
-        assert_eq!(pending, 0);
-        assert_eq!(on_demand, 1);
+        let counts = app.count_by_status();
+        assert_eq!(
+            counts,
+            StatusCounts {
+                passed: 1,
+                failed: 1,
+                pending: 0,
+                on_demand: 1
+            }
+        );
     }
 
     #[test]
@@ -1034,13 +1084,13 @@ checks:
         app.view.selected_check = 1; // phpunit
 
         // Not failed yet - can't fix
-        assert!(!app.can_fix_selected());
+        assert!(!app.selected_capabilities().can_fix);
 
         // Mark as failed
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
         // Now can fix
-        assert!(app.can_fix_selected());
+        assert!(app.selected_capabilities().can_fix);
     }
 
     #[test]
@@ -1052,7 +1102,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
 
         // Can't fix because no fix command
-        assert!(!app.can_fix_selected());
+        assert!(!app.selected_capabilities().can_fix);
     }
 
     #[test]
@@ -1063,7 +1113,7 @@ checks:
 
         app.fix.running = true;
 
-        assert!(!app.can_fix_selected());
+        assert!(!app.selected_capabilities().can_fix);
     }
 
     #[test]
@@ -1073,11 +1123,11 @@ checks:
         // Select behat which is on-demand
         app.view.selected_check = 2;
 
-        assert!(app.can_trigger_selected());
+        assert!(app.selected_capabilities().can_trigger);
 
         // Select php-lint which is pending
         app.view.selected_check = 0;
-        assert!(!app.can_trigger_selected());
+        assert!(!app.selected_capabilities().can_trigger);
     }
 
     #[test]
@@ -1086,15 +1136,15 @@ checks:
         app.view.selected_check = 0; // php-lint
 
         // Can't retry pending
-        assert!(!app.can_retry_selected());
+        assert!(!app.selected_capabilities().can_retry);
 
         // Can retry passed
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
-        assert!(app.can_retry_selected());
+        assert!(app.selected_capabilities().can_retry);
 
         // Can retry failed
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
-        assert!(app.can_retry_selected());
+        assert!(app.selected_capabilities().can_retry);
     }
 
     #[test]
@@ -1496,7 +1546,7 @@ checks:
 
         app.start_fix_all(1);
 
-        assert!(!app.can_fix_selected());
+        assert!(!app.selected_capabilities().can_fix);
     }
 
     #[test]
@@ -1536,6 +1586,68 @@ checks:
 
         // Header line + blank + 20 result lines = 22; 22 - 5 visible = 17
         assert_eq!(app.view.output_scroll, 17);
+    }
+
+    #[test]
+    fn test_start_fix_clears_fix_all_results() {
+        let mut app = make_app();
+        app.fix.all_results.push(CheckResult::pending("phpunit"));
+
+        app.start_fix();
+
+        assert!(
+            app.fix.all_results.is_empty(),
+            "single fix must not be hidden behind old fix-all results"
+        );
+    }
+
+    #[test]
+    fn test_clamp_output_scroll_after_output_shrinks() {
+        let mut app = make_app();
+        app.set_output_visible_lines(10);
+        app.results.get_mut("php-lint").unwrap().output = "line\n".repeat(50);
+        app.scroll_down(1000);
+        assert!(app.view.output_scroll > 0);
+
+        // Retry clears the output; the header alone fits in 10 rows
+        app.reset_check_for_retry("php-lint");
+        app.clamp_output_scroll();
+
+        assert_eq!(app.view.output_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_max_counts_wrapped_rows() {
+        let mut app = make_app();
+        app.set_output_visible_lines(5);
+        app.output_area_width = 42; // 40 inner columns
+        {
+            let r = app.results.get_mut("php-lint").unwrap();
+            r.status = CheckStatus::Passed;
+            r.output = "x".repeat(200);
+        }
+
+        app.scroll_down(1000);
+
+        // 6 header rows + 200 chars wrapped at 40 cols (5 rows) = 11 rows;
+        // 11 - 5 visible = 6. Counting text lines gave 7 - 5 = 2.
+        assert_eq!(app.view.output_scroll, 6);
+    }
+
+    #[test]
+    fn test_replace_check_updates_check_and_files() {
+        let mut app = make_app();
+        let mut check = app.checks[0].clone();
+        check.resolved_command = "php-lint new.php".to_string();
+        let files = ChangedFiles {
+            files: vec!["new.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+
+        app.replace_check(files, check);
+
+        assert_eq!(app.checks[0].resolved_command, "php-lint new.php");
+        assert_eq!(app.changed_files.files, vec!["new.php".to_string()]);
     }
 
     mod needs_redraw_tests {

@@ -55,6 +55,8 @@ impl CommandExecutor for RealCommandExecutor {
             .arg("-c")
             .arg(command)
             .current_dir(working_dir)
+            // Aborted tasks (e.g. on retry-all) must not leave docker running
+            .kill_on_drop(true)
             .output()
             .await;
 

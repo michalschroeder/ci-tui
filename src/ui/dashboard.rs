@@ -26,6 +26,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::VecDeque;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
 const BUILD_DATE: &str = env!("CI_TUI_BUILD_DATE");
@@ -35,6 +36,10 @@ const CHECKS_PANEL_MIN_HEIGHT: u16 = 8;
 const CHECKS_PANEL_MAX_HEIGHT_RATIO: f32 = 0.7;
 /// Rows consumed by a bordered block (top + bottom border)
 const PANEL_BORDER_ROWS: usize = 2;
+/// Columns consumed by a bordered block (left + right border)
+const PANEL_BORDER_COLS: u16 = 2;
+/// Columns before a check name: border, space, icon, space
+const CHECK_NAME_LEAD_COLS: u16 = 4;
 /// Columns reserved beside a check name (icon, padding, duration)
 const CHECK_NAME_RESERVED_COLS: u16 = 15;
 /// Minimum columns granted to a check name before truncation
@@ -82,15 +87,29 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
     }
 }
 
-/// Longest prefix of `s` with at most `max` chars (never splits a UTF-8 char)
-fn prefix_chars(s: &str, max: usize) -> &str {
-    s.char_indices().nth(max).map_or(s, |(i, _)| &s[..i])
+/// Longest prefix of `s` at most `max` terminal columns wide (wide CJK/emoji
+/// chars count as 2; never splits a UTF-8 char)
+fn prefix_width(s: &str, max: usize) -> &str {
+    let mut width = 0;
+    for (i, c) in s.char_indices() {
+        width += c.width().unwrap_or(0);
+        if width > max {
+            return &s[..i];
+        }
+    }
+    s
 }
 
-/// Longest suffix of `s` with at most `max` chars (never splits a UTF-8 char)
-fn suffix_chars(s: &str, max: usize) -> &str {
-    let skip = s.chars().count().saturating_sub(max);
-    s.char_indices().nth(skip).map_or("", |(i, _)| &s[i..])
+/// Longest suffix of `s` at most `max` terminal columns wide
+fn suffix_width(s: &str, max: usize) -> &str {
+    let mut width = 0;
+    for (i, c) in s.char_indices().rev() {
+        width += c.width().unwrap_or(0);
+        if width > max {
+            return &s[i + c.len_utf8()..];
+        }
+    }
+    s
 }
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -111,7 +130,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
-    let (passed, failed, pending, on_demand) = app.count_by_status();
+    let super::app::StatusCounts {
+        passed,
+        failed,
+        pending,
+        on_demand,
+    } = app.count_by_status();
     let total = app.checks.len();
     let auto_run_total = total - on_demand;
     let completed = passed + failed;
@@ -192,9 +216,9 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .title(format!(" CPU {:.0}% ", app.cpu_usage()));
     let mem_block = Block::default().borders(Borders::ALL).title(format!(
-        " MEM {:.1}/{:.1}GB ({:.0}%) ",
-        app.mem_used_gb(),
-        app.mem_total_gb(),
+        " MEM {:.1}/{:.1}GiB ({:.0}%) ",
+        app.mem_used_gib(),
+        app.mem_total_gib(),
         app.mem_usage()
     ));
 
@@ -328,11 +352,18 @@ fn render_check_item(
         Style::default()
     };
 
-    // Truncate name if needed - calculate based on available width
+    // Truncate name if needed - calculate based on available width. The
+    // minimum never exceeds what fits in the panel.
     let available_width = area.width.saturating_sub(CHECK_NAME_RESERVED_COLS) as usize;
-    let max_name_len = available_width.max(CHECK_NAME_MIN_COLS);
-    let name = if check.name().chars().count() > max_name_len {
-        format!("{}…", prefix_chars(check.name(), max_name_len - 1))
+    let fit_width = area
+        .width
+        .saturating_sub(PANEL_BORDER_COLS + CHECK_NAME_LEAD_COLS) as usize;
+    let max_name_len = available_width.max(CHECK_NAME_MIN_COLS.min(fit_width));
+    let name = if check.name().width() > max_name_len {
+        format!(
+            "{}…",
+            prefix_width(check.name(), max_name_len.saturating_sub(1))
+        )
     } else {
         check.name().to_string()
     };
@@ -360,7 +391,8 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
         super::app::StatusFilter::Failed => " [failed]",
     };
 
-    let list = List::new(items).block(
+    // scroll_padding keeps the neighbor rows (e.g. group headers) in view
+    let list = List::new(items).scroll_padding(1).block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(" Checks{} ", filter_info)),
@@ -377,62 +409,49 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
 
 /// Build the checks list rows and the row index of the selected item.
 ///
-/// Rows follow [`App::get_selectable_items`] order (plus group headers), so
-/// the n-th selectable row is the selected one when n == `selected_check`.
+/// Rows come from [`App::selectable_items`] (plus a header whenever the group
+/// changes), so the list and the selection can never disagree.
 fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Option<usize>) {
-    let groups = app.groups();
     let mut items: Vec<ListItem> = Vec::new();
-    // Row index of each selectable item, in selection order
-    let mut selectable_rows: Vec<usize> = Vec::new();
+    let mut selected_row = None;
+    let mut current_group = None;
 
-    for group in groups {
-        let visible_pre_commands: Vec<_> = app
-            .pre_commands
-            .iter()
-            .filter(|p| p.group == group && app.should_show_pre_command(p))
-            .collect();
-        let visible_checks: Vec<_> = app
-            .checks_in_group(group)
-            .into_iter()
-            .filter(|c| app.should_show_check(c))
-            .collect();
-
-        // Hide groups with nothing to show under the current filter
-        if visible_pre_commands.is_empty() && visible_checks.is_empty() {
-            continue;
-        }
-
-        let group_style = if Some(group.to_string()) == app.run.current_group {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+    for (idx, item) in app.selectable_items().enumerate() {
+        let group = match item {
+            SelectableItem::PreCommand(pc) => pc.group.as_str(),
+            SelectableItem::Check(check) => check.group(),
         };
-
-        let display_name = app.group_display_name(group);
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("─ {} ", display_name.to_uppercase()), group_style),
-            Span::styled("───────────", Style::default().fg(Color::DarkGray)),
-        ])));
-
-        for pre_cmd in visible_pre_commands {
-            let is_selected = selectable_rows.len() == app.view.selected_check;
-            selectable_rows.push(items.len());
-            items.push(render_pre_command_item(pre_cmd, is_selected));
+        if current_group != Some(group) {
+            current_group = Some(group);
+            items.push(group_header_item(app, group));
         }
 
-        for check in visible_checks {
-            let is_selected = selectable_rows.len() == app.view.selected_check;
-            selectable_rows.push(items.len());
-            items.push(render_check_item(app, check, area, is_selected));
+        let is_selected = idx == app.view.selected_check;
+        if is_selected {
+            selected_row = Some(items.len());
         }
+        items.push(match item {
+            SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
+            SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
+        });
     }
 
-    let selected_row = selectable_rows.get(app.view.selected_check).copied();
     (items, selected_row)
+}
+
+/// Group header row; highlighted while the group runs
+fn group_header_item(app: &App, group: &str) -> ListItem<'static> {
+    let color = if app.run.current_group.as_deref() == Some(group) {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    let group_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let display_name = app.group_display_name(group);
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("─ {} ", display_name.to_uppercase()), group_style),
+        Span::styled("───────────", Style::default().fg(Color::DarkGray)),
+    ]))
 }
 
 fn render_files_list(app: &App, frame: &mut Frame, area: Rect) {
@@ -545,7 +564,7 @@ pub fn format_elapsed(duration: std::time::Duration) -> String {
 
 /// Smart path truncation that keeps the filename visible and truncates directory path
 fn truncate_path(path: &str, max_width: usize) -> String {
-    if path.chars().count() <= max_width {
+    if path.width() <= max_width {
         return path.to_string();
     }
 
@@ -553,11 +572,11 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     if let Some(last_sep) = path.rfind('/') {
         let filename = &path[last_sep + 1..];
         let dir_path = &path[..last_sep];
-        let filename_len = filename.chars().count();
+        let filename_len = filename.width();
 
         // If filename alone is too long, truncate it
         if filename_len >= max_width {
-            return format!("…{}", suffix_chars(filename, max_width.saturating_sub(1)));
+            return format!("…{}", suffix_width(filename, max_width.saturating_sub(1)));
         }
 
         // Calculate space for directory (max_width - filename - "/" - "…")
@@ -569,8 +588,8 @@ fn truncate_path(path: &str, max_width: usize) -> String {
         }
 
         // Truncate directory from the left, keeping the rightmost part
-        let truncated_dir = if dir_path.chars().count() > dir_space {
-            format!("…{}", suffix_chars(dir_path, dir_space - 1))
+        let truncated_dir = if dir_path.width() > dir_space {
+            format!("…{}", suffix_width(dir_path, dir_space - 1))
         } else {
             dir_path.to_string()
         };
@@ -578,7 +597,7 @@ fn truncate_path(path: &str, max_width: usize) -> String {
         format!("{}/{}", truncated_dir, filename)
     } else {
         // No separator, just truncate from the left
-        format!("…{}", suffix_chars(path, max_width.saturating_sub(1)))
+        format!("…{}", suffix_width(path, max_width.saturating_sub(1)))
     }
 }
 
@@ -611,7 +630,8 @@ fn output_view(app: &App) -> OutputView<'_> {
     }
 }
 
-/// Count the lines of the text the output panel currently draws.
+/// Count the screen rows the output panel currently draws (after wrapping
+/// at the panel's inner width).
 ///
 /// Used by [`App`] scroll clamping. Running panels do not scroll (0).
 pub fn output_line_count(app: &App, width: u16) -> usize {
@@ -625,7 +645,32 @@ pub fn output_line_count(app: &App, width: u16) -> usize {
         },
         OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => return 0,
     };
-    text.lines().count()
+    output_paragraph(&text).line_count(width.saturating_sub(PANEL_BORDER_COLS))
+}
+
+/// Wrapped paragraph of ANSI output text (no block)
+fn output_paragraph(raw_output: &str) -> Paragraph<'static> {
+    Paragraph::new(raw_output.into_text().unwrap_or_default()).wrap(Wrap { trim: false })
+}
+
+/// Render scrollable ANSI output. The title gets `[row/total]` when the
+/// wrapped text overflows the panel.
+fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, raw_output: &str, title: &str) {
+    let paragraph = output_paragraph(raw_output);
+    let total_lines = paragraph.line_count(area.width.saturating_sub(PANEL_BORDER_COLS));
+    let visible_lines = app.view.output_visible_lines;
+    let title = if total_lines > visible_lines && visible_lines > 0 {
+        let current_line = app.view.output_scroll + 1;
+        format!(" {} [{}/{}] ", title, current_line, total_lines)
+    } else {
+        format!(" {} ", title)
+    };
+    // ratatui scrolls by u16; larger offsets saturate instead of wrapping
+    let scroll = u16::try_from(app.view.output_scroll).unwrap_or(u16::MAX);
+    let paragraph = paragraph
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .scroll((scroll, 0));
+    frame.render_widget(paragraph, area);
 }
 
 /// Build the fix-all results text
@@ -684,23 +729,13 @@ fn fix_all_results_text(app: &App) -> String {
 
 /// Render fix-all results (completed)
 fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
-    let raw_output = fix_all_results_text(app);
-
-    // Calculate scroll indicator
-    let total_lines = raw_output.lines().count();
-    let visible_lines = app.view.output_visible_lines;
-    let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.view.output_scroll + 1;
-        format!(" Fix All Results [{}/{}] ", current_line, total_lines)
-    } else {
-        " Fix All Results ".to_string()
-    };
-
-    let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((app.view.output_scroll as u16, 0));
-    frame.render_widget(paragraph, area);
+    render_scrollable(
+        app,
+        frame,
+        area,
+        &fix_all_results_text(app),
+        "Fix All Results",
+    );
 }
 
 /// Render fix-all running status
@@ -750,23 +785,7 @@ fn fix_result_text(fix_result: &CheckResult) -> String {
 
 /// Render single fix result
 fn render_fix_result(app: &App, fix_result: &CheckResult, frame: &mut Frame, area: Rect) {
-    let raw_output = fix_result_text(fix_result);
-
-    // Calculate scroll indicator
-    let total_lines = raw_output.lines().count();
-    let visible_lines = app.view.output_visible_lines;
-    let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.view.output_scroll + 1;
-        format!(" Fix Result [{}/{}] ", current_line, total_lines)
-    } else {
-        " Fix Result ".to_string()
-    };
-
-    let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((app.view.output_scroll as u16, 0));
-    frame.render_widget(paragraph, area);
+    render_scrollable(app, frame, area, &fix_result_text(fix_result), "Fix Result");
 }
 
 /// Render fix running status
@@ -799,10 +818,10 @@ fn build_check_output_text(
     let max_cmd_len = (width as usize).saturating_sub(10);
 
     raw_output.push_str("\x1b[90m$\x1b[0m \x1b[93m");
-    if app.view.show_full_command || command.chars().count() <= max_cmd_len {
+    if app.view.show_full_command || command.width() <= max_cmd_len {
         raw_output.push_str(command);
     } else {
-        raw_output.push_str(prefix_chars(command, max_cmd_len.saturating_sub(3)));
+        raw_output.push_str(prefix_width(command, max_cmd_len.saturating_sub(3)));
         raw_output.push_str("...\x1b[0m \x1b[90m[e=expand]");
     }
     raw_output.push_str("\x1b[0m\n\n");
@@ -910,23 +929,7 @@ fn render_check_output(
     };
 
     let raw_output = build_check_output_text(app, check, result, area.width);
-
-    // Calculate scroll indicator
-    let total_lines = raw_output.lines().count();
-    let visible_lines = app.view.output_visible_lines;
-    let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.view.output_scroll + 1;
-        format!(" {} [{}/{}] ", check.name(), current_line, total_lines)
-    } else {
-        format!(" {} ", check.name())
-    };
-
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.view.output_scroll as u16, 0));
-    frame.render_widget(paragraph, area);
+    render_scrollable(app, frame, area, &raw_output, check.name());
 }
 
 /// Build the pre-command output text
@@ -969,30 +972,15 @@ fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
 
 /// Render pre-command output details
 fn render_pre_command_output(app: &App, pre_cmd: &PreCommandState, frame: &mut Frame, area: Rect) {
-    let base_title = &pre_cmd.name;
     let raw_output = pre_command_output_text(pre_cmd);
-
-    // Calculate scroll indicator
-    let total_lines = raw_output.lines().count();
-    let visible_lines = app.view.output_visible_lines;
-    let title = if total_lines > visible_lines && visible_lines > 0 {
-        let current_line = app.view.output_scroll + 1;
-        format!(" {} [{}/{}] ", base_title, current_line, total_lines)
-    } else {
-        format!(" {} ", base_title)
-    };
-
-    let paragraph = Paragraph::new(raw_output.into_text().unwrap_or_default())
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((app.view.output_scroll as u16, 0));
-    frame.render_widget(paragraph, area);
+    render_scrollable(app, frame, area, &raw_output, &pre_cmd.name);
 }
 
 fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // Update the visible lines for scroll calculations (subtract 2 for borders)
     app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
     app.output_area_width = area.width;
+    app.clamp_output_scroll();
 
     // Dispatch to appropriate sub-renderer based on state
     match output_view(app) {
@@ -1141,24 +1129,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prefix_chars_respects_char_boundaries() {
-        assert_eq!(prefix_chars("Zażółć", 3), "Zaż");
-        assert_eq!(prefix_chars("abc", 10), "abc");
-        assert_eq!(prefix_chars("abc", 0), "");
+    fn test_prefix_width_respects_char_boundaries() {
+        assert_eq!(prefix_width("Zażółć", 3), "Zaż");
+        assert_eq!(prefix_width("abc", 10), "abc");
+        assert_eq!(prefix_width("abc", 0), "");
     }
 
     #[test]
-    fn test_suffix_chars_respects_char_boundaries() {
-        assert_eq!(suffix_chars("Zażółć", 3), "ółć");
-        assert_eq!(suffix_chars("abc", 10), "abc");
-        assert_eq!(suffix_chars("abc", 0), "");
+    fn test_suffix_width_respects_char_boundaries() {
+        assert_eq!(suffix_width("Zażółć", 3), "ółć");
+        assert_eq!(suffix_width("abc", 10), "abc");
+        assert_eq!(suffix_width("abc", 0), "");
+    }
+
+    #[test]
+    fn test_width_helpers_count_wide_chars_as_two_columns() {
+        assert_eq!(prefix_width("日本語テスト", 5), "日本");
+        assert_eq!(suffix_width("日本語テスト", 5), "スト");
+    }
+
+    #[test]
+    fn test_truncate_path_wide_chars_fit_width() {
+        let out = truncate_path("src/日本語/テストファイル名前.rs", 12);
+        assert!(out.width() <= 12, "{}", out);
     }
 
     #[test]
     fn test_truncate_path_multibyte() {
         let path = "src/Ćwiczenia/Zażółć/Gęślą_jaźń_bardzo_długa_nazwa.php";
         let out = truncate_path(path, 20);
-        assert!(out.chars().count() <= 20, "{}", out);
+        assert!(out.width() <= 20, "{}", out);
         assert!(out.starts_with('…'));
     }
 

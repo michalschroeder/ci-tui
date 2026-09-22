@@ -44,7 +44,7 @@ use std::thread;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 // Constants for timing and performance tuning
 /// Interval between system stats updates (CPU, memory)
@@ -55,6 +55,8 @@ const KEYBOARD_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const STATS_CHANNEL_CAPACITY: usize = 4;
 /// Channel capacity for runner events
 const RUNNER_CHANNEL_CAPACITY: usize = 100;
+/// Channel capacity for background task events
+const TASK_CHANNEL_CAPACITY: usize = 16;
 /// Lines to scroll per PageUp/PageDown press
 const PAGE_SCROLL_LINES: usize = 10;
 
@@ -70,39 +72,56 @@ pub struct SystemStats {
 #[derive(Debug)]
 enum Message {
     KeyPress(KeyEvent),
+    /// Terminal resized - redraw with the new layout
+    Resize,
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
-    FixResult(CheckResult),
-    FixAll(FixAllEvent),
-    RetryResult(CheckResult),
+    Task(TaskEvent),
 }
 
-/// Events from the fix-all background task
+/// Events from spawned background tasks (fix, fix-all, retry, refresh)
 #[derive(Debug)]
-enum FixAllEvent {
-    /// One fix command finished
-    Result(CheckResult),
+enum TaskEvent {
+    /// Single fix command finished
+    FixResult(CheckResult),
+    /// One fix-all command finished
+    FixAllResult(CheckResult),
     /// The whole fix-all loop finished (sent unconditionally after the loop)
-    Done,
+    FixAllDone,
+    /// Git refresh for a single retry found the updated check
+    CheckRefreshed {
+        changed_files: ChangedFiles,
+        check: Box<CheckToRun>,
+    },
+    /// Check dropped out after git refresh; carries its previous result
+    CheckNotApplicable(CheckResult),
+    /// Git refresh failed; the retry runs with the previous file list
+    GitRefreshFailed,
+    /// Retry / on-demand / run-all-files result
+    RetryResult(CheckResult),
+    /// Git refresh for retry-all finished; restart the runner
+    RetryAllReady {
+        changed_files: ChangedFiles,
+        checks: Vec<CheckToRun>,
+    },
 }
 
-/// Read keyboard events and send them through a channel
+/// Read keyboard and resize events and send them through a channel
 ///
 /// This runs on a dedicated OS thread for responsiveness under high CPU load.
-fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<KeyEvent>) {
+fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
     while !shutdown.load(Ordering::Relaxed) {
         if !event::poll(KEYBOARD_POLL_TIMEOUT).unwrap_or(false) {
             continue;
         }
-        let Ok(Event::Key(key)) = event::read() else {
-            continue;
+        let event = match event::read() {
+            // Filter for Press events only (Windows sends Press+Release)
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => Event::Key(key),
+            Ok(event @ Event::Resize(..)) => event,
+            _ => continue,
         };
-        // Filter for Press events only (Windows sends Press+Release)
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
         // If send fails, receiver is dropped - exit thread
-        if tx.send(key).is_err() {
+        if tx.send(event).is_err() {
             break;
         }
     }
@@ -120,7 +139,7 @@ fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<KeyEvent>)
 /// keyboard events due to backpressure.
 fn spawn_keyboard_thread(
     shutdown: Arc<AtomicBool>,
-) -> (mpsc::UnboundedReceiver<KeyEvent>, thread::JoinHandle<()>) {
+) -> (mpsc::UnboundedReceiver<Event>, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let handle = thread::Builder::new()
@@ -177,12 +196,10 @@ enum Action {
 #[derive(Clone)]
 struct TaskCtx {
     project_root: Arc<PathBuf>,
+    /// Config (docker settings, env, ignore patterns, check rules)
+    config: Arc<CiConfig>,
     /// Default container name for docker exec/run commands
     container_name: Arc<str>,
-    /// Docker configuration (for image, volumes, workdir)
-    docker_config: Arc<crate::config::DockerConfig>,
-    /// Global environment variables from config (for docker exec -e flags)
-    global_env: Arc<std::collections::HashMap<String, String>>,
 }
 
 impl TaskCtx {
@@ -193,47 +210,104 @@ impl TaskCtx {
             command,
             &self.project_root,
             &self.container_name,
-            &self.docker_config,
-            &self.global_env,
+            &self.config.docker,
+            &self.config.docker.env,
         )
         .await
     }
+
+    /// Re-detect changed files and matching checks. Blocking (git + file
+    /// system): call from `spawn_blocking`.
+    fn refresh(&self, base_ref: &str) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+        let mut changed_files = get_changed_files(&self.project_root, base_ref)?;
+        changed_files.apply_ignore_patterns(self.config.compiled_ignore_patterns());
+        let checks = determine_checks(&self.config, &changed_files, &self.project_root);
+        Ok((changed_files, checks))
+    }
+
+    /// [`Self::refresh`] on the blocking pool
+    async fn refresh_async(&self, base_ref: String) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+        let ctx = self.clone();
+        tokio::task::spawn_blocking(move || ctx.refresh(&base_ref)).await?
+    }
 }
 
-/// Senders for spawning async operations from key handlers
-struct EventChannels {
-    fix_tx: mpsc::Sender<CheckResult>,
-    fix_all_tx: mpsc::Sender<FixAllEvent>,
-    retry_tx: mpsc::Sender<CheckResult>,
+/// Spawns background tasks and owns them, so retry-all can abort them all
+struct Tasks {
+    tx: mpsc::Sender<TaskEvent>,
+    set: JoinSet<()>,
     ctx: TaskCtx,
 }
 
-/// Receivers matching [`EventChannels`]
-struct TaskReceivers {
-    fix_rx: mpsc::Receiver<CheckResult>,
-    fix_all_rx: mpsc::Receiver<FixAllEvent>,
-    retry_rx: mpsc::Receiver<CheckResult>,
+impl Tasks {
+    /// Create a task spawner and the receiver for its events. Replacing it
+    /// on retry-all drops late results from tasks started before the reset.
+    fn new(ctx: TaskCtx) -> (Self, mpsc::Receiver<TaskEvent>) {
+        let (tx, rx) = mpsc::channel(TASK_CHANNEL_CAPACITY);
+        let tasks = Self {
+            tx,
+            set: JoinSet::new(),
+            ctx,
+        };
+        (tasks, rx)
+    }
+
+    /// Spawn `f(ctx, tx)` as a tracked task
+    fn spawn<F, Fut>(&mut self, f: F)
+    where
+        F: FnOnce(TaskCtx, mpsc::Sender<TaskEvent>) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        // Reap finished tasks so the set does not grow without bound
+        while self.set.try_join_next().is_some() {}
+        self.set.spawn(f(self.ctx.clone(), self.tx.clone()));
+    }
+
+    /// Spawn a task running `command` as `check`; `wrap` builds the event
+    fn spawn_check(
+        &mut self,
+        check: CheckToRun,
+        command: String,
+        wrap: fn(CheckResult) -> TaskEvent,
+    ) {
+        self.spawn(|ctx, tx| async move {
+            let result = ctx.run(&check, &command).await;
+            let _ = tx.send(wrap(result)).await;
+        });
+    }
 }
 
-/// Create fresh task channels. Replacing them on retry-all drops results
-/// from tasks started before the reset (their receivers are gone).
-fn task_channels(ctx: TaskCtx) -> (EventChannels, TaskReceivers) {
-    let (fix_tx, fix_rx) = mpsc::channel(1);
-    let (fix_all_tx, fix_all_rx) = mpsc::channel(10);
-    let (retry_tx, retry_rx) = mpsc::channel(1);
-    (
-        EventChannels {
-            fix_tx,
-            fix_all_tx,
-            retry_tx,
-            ctx,
-        },
-        TaskReceivers {
-            fix_rx,
-            fix_all_rx,
-            retry_rx,
-        },
-    )
+/// Retry `check` after a git refresh. `previous` is restored if the check
+/// no longer applies to the refreshed file list.
+async fn retry_with_refresh(
+    ctx: TaskCtx,
+    tx: mpsc::Sender<TaskEvent>,
+    check: CheckToRun,
+    previous: CheckResult,
+    base_ref: String,
+) {
+    let check = match ctx.refresh_async(base_ref).await {
+        Ok((changed_files, checks)) => {
+            let Some(new_check) = checks.into_iter().find(|c| c.id() == check.id()) else {
+                let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
+                return;
+            };
+            let _ = tx
+                .send(TaskEvent::CheckRefreshed {
+                    changed_files,
+                    check: Box::new(new_check.clone()),
+                })
+                .await;
+            new_check
+        }
+        // Git refresh failed - run with the existing check
+        Err(_) => {
+            let _ = tx.send(TaskEvent::GitRefreshFailed).await;
+            check
+        }
+    };
+    let result = ctx.run(&check, &check.resolved_command).await;
+    let _ = tx.send(TaskEvent::RetryResult(result)).await;
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -278,27 +352,6 @@ fn start_runner(
     (handle, event_rx)
 }
 
-/// Spawn a task running `command` as `check`, sending the result to `tx`
-fn spawn_check_task(
-    channels: &EventChannels,
-    tx: &mpsc::Sender<CheckResult>,
-    check: CheckToRun,
-    command: String,
-) {
-    let tx = tx.clone();
-    let ctx = channels.ctx.clone();
-    tokio::spawn(async move {
-        let result = ctx.run(&check, &command).await;
-        let _ = tx.send(result).await;
-    });
-}
-
-/// Spawn a retry/run task for a check using its resolved command
-fn spawn_retry_task(channels: &EventChannels, check: CheckToRun) {
-    let command = check.resolved_command.clone();
-    spawn_check_task(channels, &channels.retry_tx, check, command);
-}
-
 #[cfg(debug_assertions)]
 fn warn_slow_keyboard(start: std::time::Instant) {
     let elapsed = start.elapsed();
@@ -308,52 +361,31 @@ fn warn_slow_keyboard(start: std::time::Instant) {
 }
 
 /// Handle 'r' key: retry selected check with git refresh
-fn handle_retry_selected(app: &mut App, channels: &EventChannels, config: &CiConfig) -> Action {
-    if !app.can_retry_selected() {
+fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
+    if !app.selected_capabilities().can_retry {
         return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
         return Action::Continue;
     };
-    let check_id = check.id().to_string();
+    let check = check.clone();
+    let previous = app
+        .results
+        .get(check.id())
+        .cloned()
+        .unwrap_or_else(|| CheckResult::pending(check.id()));
     let base_ref = app.changed_files.base_ref.clone();
 
-    let Ok(mut new_changed_files) = get_changed_files(&channels.ctx.project_root, &base_ref) else {
-        // Git refresh failed - fall back to running with existing check,
-        // but tell the user the file list may be stale
-        let check = check.clone();
-        app.reset_check_for_retry(check.id());
-        app.set_status_message(Some(
-            "Git refresh failed - retrying with previous file list".to_string(),
-        ));
-        spawn_retry_task(channels, check);
-        return Action::Continue;
-    };
-
-    new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
-    let new_checks = determine_checks(config, &new_changed_files, &channels.ctx.project_root);
-
-    let Some(new_check) = new_checks.iter().find(|c| c.id() == check_id) else {
-        app.set_status_message(Some(
-            "Check no longer applicable after git refresh".to_string(),
-        ));
-        return Action::Continue;
-    };
-    let new_check = new_check.clone();
-
-    app.changed_files = new_changed_files;
-    if let Some(idx) = app.checks.iter().position(|c| c.id() == check_id) {
-        app.checks[idx] = new_check.clone();
-    }
-
-    app.reset_check_for_retry(&check_id);
-    spawn_retry_task(channels, new_check);
+    // Mark running now (also blocks a second 'r'); git refresh runs off the
+    // event loop so large repos do not freeze the UI
+    app.reset_check_for_retry(check.id());
+    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, base_ref));
     Action::Continue
 }
 
 /// Handle 't' key: trigger on-demand test
-fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> Action {
-    if !app.can_trigger_selected() {
+fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
+    if !app.selected_capabilities().can_trigger {
         return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
@@ -361,13 +393,14 @@ fn handle_trigger_on_demand(app: &mut App, channels: &EventChannels) -> Action {
     };
     let check = check.clone();
     app.trigger_on_demand_check(check.id());
-    spawn_retry_task(channels, check);
+    let command = check.resolved_command.clone();
+    tasks.spawn_check(check, command, TaskEvent::RetryResult);
     Action::Continue
 }
 
 /// Handle 'A' key: run selected check for all files
-fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
-    if !app.can_run_all_files() {
+fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
+    if !app.selected_capabilities().can_run_all_files {
         return Action::Continue;
     }
     let Some(check) = app.selected_check() else {
@@ -377,45 +410,55 @@ fn handle_run_all_files(app: &mut App, channels: &EventChannels) -> Action {
     let all_files_cmd = check.get_command_for_all_files();
     app.reset_check_for_retry(check.id());
     app.set_status_message(Some("Running for all files...".to_string()));
-    spawn_check_task(channels, &channels.retry_tx, check, all_files_cmd);
+    tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
     Action::Continue
 }
 
-/// Handle 'R' key: retry all checks with git refresh
-fn handle_retry_all(app: &App, channels: &EventChannels, config: &CiConfig) -> Action {
+/// Handle 'R' key: retry all checks after a git refresh (runs off the event loop)
+fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.can_retry_all() {
         return Action::Continue;
     }
     let base_ref = app.changed_files.base_ref.clone();
-    let mut new_changed_files =
-        get_changed_files(&channels.ctx.project_root, &base_ref).unwrap_or(ChangedFiles {
-            files: vec![],
-            base_ref,
-        });
-    new_changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
-    let new_checks = determine_checks(config, &new_changed_files, &channels.ctx.project_root);
-
-    Action::RestartRunner {
-        new_changed_files,
-        new_checks,
-    }
+    app.set_status_message(Some("Refreshing changed files...".to_string()));
+    tasks.spawn(|ctx, tx| async move {
+        let (changed_files, checks) = match ctx.refresh_async(base_ref.clone()).await {
+            Ok(refreshed) => refreshed,
+            // Git refresh failed - restart with no changed files
+            Err(_) => {
+                let changed_files = ChangedFiles {
+                    files: vec![],
+                    base_ref,
+                };
+                let checks = determine_checks(&ctx.config, &changed_files, &ctx.project_root);
+                (changed_files, checks)
+            }
+        };
+        let _ = tx
+            .send(TaskEvent::RetryAllReady {
+                changed_files,
+                checks,
+            })
+            .await;
+    });
+    Action::Continue
 }
 
 /// Handle 'x' key: run fix for selected check
-fn handle_fix_selected(app: &mut App, channels: &EventChannels) -> Action {
-    if !app.can_fix_selected() {
+fn handle_fix_selected(app: &mut App, tasks: &mut Tasks) -> Action {
+    if !app.selected_capabilities().can_fix {
         return Action::Continue;
     }
     let Some(job) = app.get_selected_fix_command() else {
         return Action::Continue;
     };
     app.start_fix();
-    spawn_check_task(channels, &channels.fix_tx, job.check, job.command);
+    tasks.spawn_check(job.check, job.command, TaskEvent::FixResult);
     Action::Continue
 }
 
 /// Handle 'X' key: run fix for all failed checks
-fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
+fn handle_fix_all(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.can_fix_all() {
         return Action::Continue;
     }
@@ -423,30 +466,22 @@ fn handle_fix_all(app: &mut App, channels: &EventChannels) -> Action {
     if fix_commands.is_empty() {
         return Action::Continue;
     }
-    let total = fix_commands.len();
-    app.start_fix_all(total);
-    let fix_all_tx = channels.fix_all_tx.clone();
-    let ctx = channels.ctx.clone();
-    tokio::spawn(async move {
+    app.start_fix_all(fix_commands.len());
+    tasks.spawn(|ctx, tx| async move {
         for job in fix_commands {
             let result = ctx.run(&job.check, &job.command).await;
-            let _ = fix_all_tx.send(FixAllEvent::Result(result)).await;
+            let _ = tx.send(TaskEvent::FixAllResult(result)).await;
         }
         // Always signal completion, decoupled from per-result send success.
         // Previously completion rode on an is_last flag on the final result;
         // a failed send left fix_all_running=true and disabled r/t/x/X forever.
-        let _ = fix_all_tx.send(FixAllEvent::Done).await;
+        let _ = tx.send(TaskEvent::FixAllDone).await;
     });
     Action::Continue
 }
 
 /// Handle a key event and return the action for the main loop
-fn handle_key_event(
-    app: &mut App,
-    key: KeyEvent,
-    channels: &EventChannels,
-    config: &CiConfig,
-) -> Action {
+fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
         (KeyCode::Up | KeyCode::Char('k'), _) => {
@@ -473,9 +508,9 @@ fn handle_key_event(
             app.show_all();
             Action::Continue
         }
-        (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, channels, config),
-        (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, channels),
-        (KeyCode::Char('A'), KeyModifiers::SHIFT) => handle_run_all_files(app, channels),
+        (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, tasks),
+        (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, tasks),
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => handle_run_all_files(app, tasks),
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
                 copy_to_clipboard(&check.resolved_command);
@@ -487,21 +522,49 @@ fn handle_key_event(
             app.toggle_full_command();
             Action::Continue
         }
-        (KeyCode::Char('R'), KeyModifiers::SHIFT) => handle_retry_all(app, channels, config),
-        (KeyCode::Char('x'), KeyModifiers::NONE) => handle_fix_selected(app, channels),
-        (KeyCode::Char('X'), KeyModifiers::SHIFT) => handle_fix_all(app, channels),
+        (KeyCode::Char('R'), KeyModifiers::SHIFT) => handle_retry_all(app, tasks),
+        (KeyCode::Char('x'), KeyModifiers::NONE) => handle_fix_selected(app, tasks),
+        (KeyCode::Char('X'), KeyModifiers::SHIFT) => handle_fix_all(app, tasks),
         _ => Action::Continue,
     }
 }
 
+/// Apply an event from a background task
+fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
+    match event {
+        TaskEvent::FixResult(result) => app.finish_fix(result),
+        TaskEvent::FixAllResult(result) => app.add_fix_all_result(result),
+        TaskEvent::FixAllDone => app.finish_fix_all(),
+        TaskEvent::CheckRefreshed {
+            changed_files,
+            check,
+        } => app.replace_check(changed_files, *check),
+        TaskEvent::CheckNotApplicable(previous) => {
+            app.set_retry_result(previous);
+            app.set_status_message(Some(
+                "Check no longer applicable after git refresh".to_string(),
+            ));
+        }
+        TaskEvent::GitRefreshFailed => app.set_status_message(Some(
+            "Git refresh failed - retrying with previous file list".to_string(),
+        )),
+        TaskEvent::RetryResult(result) => app.set_retry_result(result),
+        TaskEvent::RetryAllReady {
+            changed_files,
+            checks,
+        } => {
+            return Action::RestartRunner {
+                new_changed_files: changed_files,
+                new_checks: checks,
+            }
+        }
+    }
+    Action::Continue
+}
+
 /// Handle a message from the event loop and update app state
 /// All state changes go through this function via &mut App
-fn handle_message(
-    app: &mut App,
-    msg: Message,
-    channels: &EventChannels,
-    config: &CiConfig,
-) -> Result<Action> {
+fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
     match msg {
         Message::KeyPress(key) => {
             // Keyboard response timing instrumentation
@@ -522,41 +585,30 @@ fn handle_message(
                 #[cfg(debug_assertions)]
                 warn_slow_keyboard(start);
 
-                return Ok(Action::Continue);
+                return Action::Continue;
             }
 
             // Dispatch to key handler
-            let result = Ok(handle_key_event(app, key, channels, config));
+            let action = handle_key_event(app, key, tasks);
 
             #[cfg(debug_assertions)]
             warn_slow_keyboard(start);
 
-            result
+            action
+        }
+        Message::Resize => {
+            app.needs_redraw = true;
+            Action::Continue
         }
         Message::RunnerEvent(event) => {
             app.handle_runner_event(event);
-            Ok(Action::Continue)
+            Action::Continue
         }
         Message::SystemStats(stats) => {
             app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
-            Ok(Action::Continue)
+            Action::Continue
         }
-        Message::FixResult(result) => {
-            app.finish_fix(result);
-            Ok(Action::Continue)
-        }
-        Message::FixAll(FixAllEvent::Result(result)) => {
-            app.add_fix_all_result(result);
-            Ok(Action::Continue)
-        }
-        Message::FixAll(FixAllEvent::Done) => {
-            app.finish_fix_all();
-            Ok(Action::Continue)
-        }
-        Message::RetryResult(result) => {
-            app.set_retry_result(result);
-            Ok(Action::Continue)
-        }
+        Message::Task(event) => handle_task_event(app, event),
     }
 }
 
@@ -585,13 +637,12 @@ pub async fn run(
     // Start the runner in background
     let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);
 
-    // Create event channels for async operations
+    // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
-    let (mut channels, mut receivers) = task_channels(TaskCtx {
+    let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
+        config: Arc::new(config.clone()),
         container_name: config.docker.container_name().into(),
-        docker_config: Arc::new(config.docker.clone()),
-        global_env: Arc::new(config.docker.env.clone()),
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -602,7 +653,7 @@ pub async fn run(
     // CRITICAL: Using std::thread ensures keyboard events are processed by the OS
     // scheduler even when Tokio is starved of CPU time by Docker containers.
     let keyboard_shutdown = Arc::new(AtomicBool::new(false));
-    let (mut keyboard_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
+    let (mut input_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
 
     // Main event loop - uses tokio::select! for event-driven responsiveness
     //
@@ -617,8 +668,11 @@ pub async fn run(
         let msg = tokio::select! {
             biased;
 
-            // Keyboard events have highest priority
-            Some(key) = keyboard_rx.recv() => Message::KeyPress(key),
+            // Keyboard (and resize) events have highest priority
+            Some(event) = input_rx.recv() => match event {
+                Event::Key(key) => Message::KeyPress(key),
+                _ => Message::Resize,
+            },
 
             // Runner lifecycle/status events
             Some(event) = event_rx.recv() => Message::RunnerEvent(event),
@@ -626,30 +680,26 @@ pub async fn run(
             // System stats from background worker
             Some(stats) = stats_rx.recv() => Message::SystemStats(stats),
 
-            // Fix command results
-            Some(result) = receivers.fix_rx.recv() => Message::FixResult(result),
-
-            // Fix-all command results
-            Some(event) = receivers.fix_all_rx.recv() => Message::FixAll(event),
-
-            // Retry command results
-            Some(result) = receivers.retry_rx.recv() => Message::RetryResult(result),
+            // Fix / retry / refresh task events
+            Some(event) = task_rx.recv() => Message::Task(event),
 
             // All channels closed - exit
             else => break,
         };
 
         // Handle the message and get the action
-        match handle_message(&mut app, msg, &channels, &config)? {
+        match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
             Action::RestartRunner {
                 new_changed_files,
                 new_checks,
             } => {
-                // Abort old runner and start new one. Fresh task channels
-                // drop late results from retries started before the reset.
+                // Abort old runner and background tasks (kill_on_drop stops
+                // their docker processes), then start fresh. The new channel
+                // drops late results from tasks started before the reset.
                 runner_handle.abort();
-                (channels, receivers) = task_channels(channels.ctx.clone());
+                tasks.set.abort_all();
+                (tasks, task_rx) = Tasks::new(tasks.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
                 let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
                 runner_handle = new_handle;
@@ -668,6 +718,7 @@ pub async fn run(
     // Cleanup - signal keyboard thread to shutdown and wait for it
     keyboard_shutdown.store(true, Ordering::Relaxed);
     runner_handle.abort();
+    tasks.set.abort_all();
     stats_handle.abort();
 
     // Wait for keyboard thread to finish (with timeout to avoid hanging)
@@ -692,7 +743,8 @@ pub async fn run(
 }
 
 fn print_summary(app: &App) {
-    let (passed, failed, _pending, _on_demand) = app.count_by_status();
+    let counts = app.count_by_status();
+    let (passed, failed) = (counts.passed, counts.failed);
     let total = passed + failed;
 
     // Format elapsed time
@@ -755,17 +807,14 @@ checks:
         .expect("Failed to parse test config")
     }
 
-    /// Build EventChannels for handle_message tests. Receivers are dropped;
-    /// the tests below never depend on sends succeeding. project_root points
+    /// Build a task spawner for handle_message tests. project_root points
     /// at a nonexistent path so git operations fail deterministically.
-    fn make_test_channels(config: &CiConfig) -> EventChannels {
-        task_channels(TaskCtx {
+    fn make_test_tasks(config: &CiConfig) -> (Tasks, mpsc::Receiver<TaskEvent>) {
+        Tasks::new(TaskCtx {
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
+            config: Arc::new(config.clone()),
             container_name: "app".into(),
-            docker_config: Arc::new(config.docker.clone()),
-            global_env: Arc::new(config.docker.env.clone()),
         })
-        .0
     }
 
     fn make_test_app(config: &CiConfig) -> App {
@@ -816,20 +865,74 @@ checks:
         let checks = vec![make_test_check("php-lint", "fast")];
         let mut app = App::new(config.clone(), changed_files, checks, "main".to_string());
         app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
-        let channels = make_test_channels(&config); // project_root does not exist -> git fails
+        let (mut tasks, mut rx) = make_test_tasks(&config); // project_root does not exist -> git fails
 
-        let action = handle_retry_selected(&mut app, &channels, &config);
+        let action = handle_retry_selected(&mut app, &mut tasks);
 
         assert!(matches!(action, Action::Continue));
-        assert!(
-            app.view.status_message.is_some(),
-            "git refresh failure must surface a status message"
-        );
-        // Fallback still retried the check with the previous file list
+        // Marked running right away; git refresh happens in the background
         assert_eq!(
             app.results.get("php-lint").unwrap().status,
             crate::runner::CheckStatus::Running
         );
+        let event = rx.recv().await.expect("refresh task must report");
+        assert!(matches!(event, TaskEvent::GitRefreshFailed));
+        handle_task_event(&mut app, event);
+        assert!(
+            app.view.status_message.is_some(),
+            "git refresh failure must surface a status message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_all_refreshes_in_background() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, mut rx) = make_test_tasks(&config);
+
+        let action = handle_retry_all(&mut app, &mut tasks);
+        assert!(matches!(action, Action::Continue));
+
+        let event = rx.recv().await.expect("refresh task must report");
+        let action = handle_task_event(&mut app, event);
+        assert!(matches!(action, Action::RestartRunner { .. }));
+    }
+
+    #[test]
+    fn test_check_not_applicable_restores_previous_result() {
+        let config = test_config();
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        let checks = vec![make_test_check("php-lint", "fast")];
+        let mut app = App::new(config, changed_files, checks, "main".to_string());
+        let mut previous = CheckResult::pending("php-lint");
+        previous.status = crate::runner::CheckStatus::Passed;
+
+        handle_task_event(&mut app, TaskEvent::CheckNotApplicable(previous));
+
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Passed
+        );
+        assert!(app.view.status_message.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_abort_all_stops_spawned_tasks() {
+        let config = test_config();
+        let (mut tasks, mut rx) = make_test_tasks(&config);
+        tasks.spawn(|_, tx| async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let _ = tx.send(TaskEvent::FixAllDone).await;
+        });
+
+        tasks.set.abort_all();
+        while tasks.set.join_next().await.is_some() {}
+        drop(tasks);
+
+        assert!(rx.recv().await.is_none(), "aborted task must not send");
     }
 
     #[tokio::test]
@@ -837,10 +940,10 @@ checks:
         let config = test_config();
         let mut app = make_test_app(&config);
         app.view.status_message = Some("Command copied to clipboard".to_string());
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
-        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+        let action = handle_message(&mut app, Message::KeyPress(key), &mut tasks);
 
         assert!(
             matches!(action, Action::Quit),
@@ -853,10 +956,10 @@ checks:
         let config = test_config();
         let mut app = make_test_app(&config);
         app.view.status_message = Some("some message".to_string());
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+        let action = handle_message(&mut app, Message::KeyPress(key), &mut tasks);
 
         assert!(matches!(action, Action::Quit));
     }
@@ -866,10 +969,10 @@ checks:
         let config = test_config();
         let mut app = make_test_app(&config);
         app.view.status_message = Some("some message".to_string());
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
-        let action = handle_message(&mut app, Message::KeyPress(key), &channels, &config).unwrap();
+        let action = handle_message(&mut app, Message::KeyPress(key), &mut tasks);
 
         assert!(matches!(action, Action::Continue));
         assert!(
@@ -882,12 +985,11 @@ checks:
     fn test_handle_key_event_quit() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
         let action = handle_key_event(
             &mut app,
             press(KeyCode::Char('q'), KeyModifiers::NONE),
-            &channels,
-            &config,
+            &mut tasks,
         );
         assert!(matches!(action, Action::Quit));
     }
@@ -896,12 +998,11 @@ checks:
     fn test_handle_key_event_toggle_filter() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
         let action = handle_key_event(
             &mut app,
             press(KeyCode::Char('f'), KeyModifiers::NONE),
-            &channels,
-            &config,
+            &mut tasks,
         );
         assert!(matches!(action, Action::Continue));
         assert_eq!(app.view.status_filter, crate::ui::app::StatusFilter::Failed);
@@ -911,12 +1012,11 @@ checks:
     fn test_handle_key_event_unknown_key_continues() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
         let action = handle_key_event(
             &mut app,
             press(KeyCode::Char('z'), KeyModifiers::NONE),
-            &channels,
-            &config,
+            &mut tasks,
         );
         assert!(matches!(action, Action::Continue));
     }
@@ -925,15 +1025,13 @@ checks:
     fn test_handle_message_runner_event_all_finished() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         let action = handle_message(
             &mut app,
             Message::RunnerEvent(RunnerEvent::AllFinished),
-            &channels,
-            &config,
-        )
-        .expect("handle_message failed");
+            &mut tasks,
+        );
 
         assert!(matches!(action, Action::Continue));
         assert!(app.run.all_finished);
@@ -943,7 +1041,7 @@ checks:
     fn test_handle_message_retry_result_stored() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
         let result = CheckResult {
             check_id: "php-lint".to_string(),
             status: crate::runner::CheckStatus::Passed,
@@ -954,8 +1052,11 @@ checks:
             finished_at: None,
         };
 
-        handle_message(&mut app, Message::RetryResult(result), &channels, &config)
-            .expect("handle_message failed");
+        handle_message(
+            &mut app,
+            Message::Task(TaskEvent::RetryResult(result)),
+            &mut tasks,
+        );
 
         assert_eq!(
             app.results.get("php-lint").map(|r| r.status.clone()),
@@ -967,19 +1068,13 @@ checks:
     async fn test_fix_all_done_clears_running_flag() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         app.start_fix_all(2);
         assert!(app.fix.all_running);
 
         // Done arrives even if individual result sends were lost
-        let action = handle_message(
-            &mut app,
-            Message::FixAll(FixAllEvent::Done),
-            &channels,
-            &config,
-        )
-        .unwrap();
+        let action = handle_message(&mut app, Message::Task(TaskEvent::FixAllDone), &mut tasks);
 
         assert!(matches!(action, Action::Continue));
         assert!(!app.fix.all_running, "Done must clear fix_all_running");
@@ -989,18 +1084,16 @@ checks:
     async fn test_fix_all_result_does_not_finish_run() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        let channels = make_test_channels(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
 
         app.start_fix_all(2);
 
         let result = CheckResult::pending("some-check");
         handle_message(
             &mut app,
-            Message::FixAll(FixAllEvent::Result(result)),
-            &channels,
-            &config,
-        )
-        .unwrap();
+            Message::Task(TaskEvent::FixAllResult(result)),
+            &mut tasks,
+        );
 
         assert!(
             app.fix.all_running,

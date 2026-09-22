@@ -593,8 +593,8 @@ fn test_checks_list_scrolls_to_selected_check() {
         app.results
             .insert(id.clone(), ci_tui::runner::CheckResult::pending(&id));
     }
-    let last = app.get_selectable_items().len() - 1;
-    for _ in 0..last {
+    // next_check stops at the last item
+    for _ in 0..app.checks.len() {
         app.next_check();
     }
     let mut terminal = create_terminal();
@@ -602,5 +602,17 @@ fn test_checks_list_scrolls_to_selected_check() {
     assert!(
         left_column_contains(terminal.backend().buffer(), "Extra 5"),
         "selected last check must be scrolled into view"
+    );
+
+    // Moving up inside the visible window must not scroll the list back.
+    // Without a persisted offset, ratatui recomputes from the top and the
+    // bottom rows (Extra 5) drop out of view.
+    for _ in 0..3 {
+        app.previous_check();
+    }
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(
+        left_column_contains(terminal.backend().buffer(), "Extra 5"),
+        "list offset must persist while the selection stays visible"
     );
 }
