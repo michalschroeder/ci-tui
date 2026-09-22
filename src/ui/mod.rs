@@ -1002,7 +1002,7 @@ checks:
         let channels = make_test_channels(&config);
 
         app.start_fix_all(2);
-        assert!(app.fix_all_running);
+        assert!(app.fix.all_running);
 
         // Done arrives even if individual result sends were lost
         let action = handle_message(
@@ -1014,7 +1014,7 @@ checks:
         .unwrap();
 
         assert!(matches!(action, Action::Continue));
-        assert!(!app.fix_all_running, "Done must clear fix_all_running");
+        assert!(!app.fix.all_running, "Done must clear fix_all_running");
     }
 
     #[tokio::test]
@@ -1035,9 +1035,9 @@ checks:
         .unwrap();
 
         assert!(
-            app.fix_all_running,
+            app.fix.all_running,
             "intermediate results must not finish the run"
         );
-        assert_eq!(app.fix_all_results.len(), 1);
+        assert_eq!(app.fix.all_results.len(), 1);
     }
 }

@@ -57,6 +57,21 @@ pub struct FixJob {
     pub container: Option<String>,
 }
 
+/// State for fix and fix-all operations
+#[derive(Debug, Default)]
+pub struct FixState {
+    /// True while a fix command is running
+    pub running: bool,
+    /// Result of the last fix command
+    pub result: Option<CheckResult>,
+    /// True while fix-all is running
+    pub all_running: bool,
+    /// Results from fix-all operation
+    pub all_results: Vec<CheckResult>,
+    /// Total number of fixes in fix-all
+    pub all_total: usize,
+}
+
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
@@ -143,17 +158,8 @@ pub struct App {
     /// Currently running pre-command index
     pub current_pre_command: Option<usize>,
 
-    // Fix state
-    /// True while a fix command is running
-    pub fix_running: bool,
-    /// Result of the last fix command
-    pub fix_result: Option<CheckResult>,
-    /// True while fix-all is running
-    pub fix_all_running: bool,
-    /// Results from fix-all operation
-    pub fix_all_results: Vec<CheckResult>,
-    /// Total number of fixes in fix-all
-    pub fix_all_total: usize,
+    /// State for fix and fix-all operations
+    pub fix: FixState,
 
     // System monitoring (updated by background task)
     /// CPU usage history for sparkline (percentage values)
@@ -212,11 +218,7 @@ impl App {
             run_finished_at: None,
             pre_commands,
             current_pre_command: None,
-            fix_running: false,
-            fix_result: None,
-            fix_all_running: false,
-            fix_all_results: Vec::new(),
-            fix_all_total: 0,
+            fix: FixState::default(),
             cpu_history: VecDeque::with_capacity(64),
             mem_history: VecDeque::with_capacity(64),
             mem_used_bytes: 0,
@@ -253,11 +255,7 @@ impl App {
         self.run_started_at = Some(Instant::now());
         self.run_finished_at = None;
         self.current_pre_command = None;
-        self.fix_running = false;
-        self.fix_result = None;
-        self.fix_all_running = false;
-        self.fix_all_results = Vec::new();
-        self.fix_all_total = 0;
+        self.fix = FixState::default();
         self.status_message = None;
         self.show_full_command = false;
         self.needs_redraw = true;
@@ -275,7 +273,7 @@ impl App {
 
     /// Check if selected check can be fixed
     pub fn can_fix_selected(&self) -> bool {
-        if self.fix_running {
+        if self.fix.running {
             return false;
         }
         let Some(check) = self.selected_check() else {
@@ -299,16 +297,16 @@ impl App {
 
     /// Mark fix as started
     pub fn start_fix(&mut self) {
-        self.fix_running = true;
-        self.fix_result = None;
+        self.fix.running = true;
+        self.fix.result = None;
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Store fix result
     pub fn finish_fix(&mut self, result: CheckResult) {
-        self.fix_running = false;
-        self.fix_result = Some(result);
+        self.fix.running = false;
+        self.fix.result = Some(result);
         self.clamp_selection();
         self.needs_redraw = true;
     }
@@ -329,7 +327,7 @@ impl App {
 
     /// Check if there are any checks that can be fixed
     pub fn can_fix_all(&self) -> bool {
-        if self.fix_running || self.fix_all_running {
+        if self.fix.running || self.fix.all_running {
             return false;
         }
         !self.get_fixable_checks().is_empty()
@@ -351,31 +349,31 @@ impl App {
 
     /// Start fix-all operation
     pub fn start_fix_all(&mut self, total: usize) {
-        self.fix_all_running = true;
-        self.fix_all_results = Vec::new();
-        self.fix_all_total = total;
-        self.fix_result = None;
+        self.fix.all_running = true;
+        self.fix.all_results = Vec::new();
+        self.fix.all_total = total;
+        self.fix.result = None;
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Add a result from fix-all
     pub fn add_fix_all_result(&mut self, result: CheckResult) {
-        self.fix_all_results.push(result);
+        self.fix.all_results.push(result);
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Finish fix-all operation
     pub fn finish_fix_all(&mut self) {
-        self.fix_all_running = false;
+        self.fix.all_running = false;
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
     /// Check if selected check can be retried
     pub fn can_retry_selected(&self) -> bool {
-        if self.fix_running || self.fix_all_running {
+        if self.fix.running || self.fix.all_running {
             return false;
         }
         let Some(check) = self.selected_check() else {
@@ -389,7 +387,7 @@ impl App {
 
     /// Check if selected check is on-demand and can be triggered
     pub fn can_trigger_selected(&self) -> bool {
-        if self.fix_running || self.fix_all_running {
+        if self.fix.running || self.fix.all_running {
             return false;
         }
         let Some(check) = self.selected_check() else {
@@ -403,7 +401,7 @@ impl App {
 
     /// Check if selected check can be run with all files (no filtering)
     pub fn can_run_all_files(&self) -> bool {
-        if self.fix_running || self.fix_all_running {
+        if self.fix.running || self.fix.all_running {
             return false;
         }
         let Some(check) = self.selected_check() else {
@@ -440,8 +438,8 @@ impl App {
     pub fn reset_check_for_retry(&mut self, check_id: &str) {
         self.reset_result_to_running(check_id);
         // Clear any fix results
-        self.fix_result = None;
-        self.fix_all_results.clear();
+        self.fix.result = None;
+        self.fix.all_results.clear();
         self.clamp_selection();
         self.needs_redraw = true;
     }
@@ -623,8 +621,8 @@ impl App {
 
     pub fn next_check(&mut self) {
         // Clear fix results and reset command view when navigating
-        self.fix_result = None;
-        self.fix_all_results.clear();
+        self.fix.result = None;
+        self.fix.all_results.clear();
         self.output_scroll = 0;
         self.show_full_command = false;
 
@@ -637,8 +635,8 @@ impl App {
 
     pub fn previous_check(&mut self) {
         // Clear fix results and reset command view when navigating
-        self.fix_result = None;
-        self.fix_all_results.clear();
+        self.fix.result = None;
+        self.fix.all_results.clear();
         self.output_scroll = 0;
         self.show_full_command = false;
 
@@ -936,7 +934,7 @@ checks:
         assert_eq!(app.output_scroll, 0);
         assert_eq!(app.status_filter, StatusFilter::All);
         assert!(!app.all_finished);
-        assert!(!app.fix_running);
+        assert!(!app.fix.running);
         assert!(app.needs_redraw);
     }
 
@@ -973,11 +971,11 @@ checks:
     #[test]
     fn test_navigation_clears_fix_result() {
         let mut app = make_app();
-        app.fix_result = Some(CheckResult::pending("test"));
+        app.fix.result = Some(CheckResult::pending("test"));
 
         app.next_check();
 
-        assert!(app.fix_result.is_none());
+        assert!(app.fix.result.is_none());
     }
 
     #[test]
@@ -1068,7 +1066,7 @@ checks:
         app.selected_check = 1; // phpunit
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
-        app.fix_running = true;
+        app.fix.running = true;
 
         assert!(!app.can_fix_selected());
     }
@@ -1109,8 +1107,8 @@ checks:
         let mut app = make_app();
 
         app.start_fix();
-        assert!(app.fix_running);
-        assert!(app.fix_result.is_none());
+        assert!(app.fix.running);
+        assert!(app.fix.result.is_none());
 
         let result = CheckResult {
             check_id: "phpunit".to_string(),
@@ -1123,8 +1121,8 @@ checks:
         };
 
         app.finish_fix(result);
-        assert!(!app.fix_running);
-        assert!(app.fix_result.is_some());
+        assert!(!app.fix.running);
+        assert!(app.fix.result.is_some());
     }
 
     #[test]

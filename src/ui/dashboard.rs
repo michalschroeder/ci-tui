@@ -550,12 +550,14 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
     let mut raw_output = String::with_capacity(512);
 
     let passed = app
-        .fix_all_results
+        .fix
+        .all_results
         .iter()
         .filter(|r| r.status == CheckStatus::Passed)
         .count();
     let failed = app
-        .fix_all_results
+        .fix
+        .all_results
         .iter()
         .filter(|r| r.status == CheckStatus::Failed)
         .count();
@@ -569,12 +571,12 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
         raw_output.push_str(&format!(
             "\x1b[33m● {}/{} fixes completed, {} failed\x1b[0m\n\n",
             passed,
-            app.fix_all_results.len(),
+            app.fix.all_results.len(),
             failed
         ));
     }
 
-    for result in &app.fix_all_results {
+    for result in &app.fix.all_results {
         let status_icon = if result.status == CheckStatus::Passed {
             "\x1b[32m✓\x1b[0m"
         } else {
@@ -613,10 +615,10 @@ fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render fix-all running status
 fn render_fix_all_running(app: &App, frame: &mut Frame, area: Rect) {
-    let progress = format!("{}/{}", app.fix_all_results.len(), app.fix_all_total);
+    let progress = format!("{}/{}", app.fix.all_results.len(), app.fix.all_total);
     let mut raw_output = format!("\x1b[33m● Running fix all... {}\x1b[0m\n\n", progress);
 
-    for result in &app.fix_all_results {
+    for result in &app.fix.all_results {
         let status_icon = if result.status == CheckStatus::Passed {
             "\x1b[32m✓\x1b[0m"
         } else {
@@ -638,7 +640,7 @@ fn render_fix_all_running(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render single fix result
 fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(fix_result) = app.fix_result.as_ref() else {
+    let Some(fix_result) = app.fix.result.as_ref() else {
         // Should not reach here (called only when fix_result is Some), but handle gracefully
         return;
     };
@@ -904,13 +906,13 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     app.output_area_width = area.width;
 
     // Dispatch to appropriate sub-renderer based on state
-    if !app.fix_all_results.is_empty() && !app.fix_all_running {
+    if !app.fix.all_results.is_empty() && !app.fix.all_running {
         render_fix_all_results(app, frame, area);
-    } else if app.fix_all_running {
+    } else if app.fix.all_running {
         render_fix_all_running(app, frame, area);
-    } else if app.fix_result.is_some() {
+    } else if app.fix.result.is_some() {
         render_fix_result(app, frame, area);
-    } else if app.fix_running {
+    } else if app.fix.running {
         render_fix_running(frame, area);
     } else if let Some(pre_cmd) = app.selected_pre_command() {
         render_pre_command_output(app, pre_cmd, frame, area);
@@ -999,7 +1001,7 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     }
 
     let fixable_count = app.get_fixable_checks().len();
-    if fixable_count > 0 && !app.fix_running && !app.fix_all_running {
+    if fixable_count > 0 && !app.fix.running && !app.fix.all_running {
         spans.push(Span::styled(
             "X",
             Style::default()
