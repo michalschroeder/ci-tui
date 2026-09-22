@@ -240,7 +240,7 @@ pub struct App {
 }
 
 /// What the currently selected check can do — computed once, read many times per frame
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SelectedCaps {
     pub can_fix: bool,
     pub can_retry: bool,
@@ -475,7 +475,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Store the result of a retry/run task
+    /// Store a finished check result (runner, retry or run-all-files)
     pub fn set_retry_result(&mut self, result: CheckResult) {
         self.results.insert(result.check_id.clone(), result);
         self.clamp_selection();
@@ -558,9 +558,7 @@ impl App {
         self.needs_redraw = true;
         match event {
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
-            RunnerEvent::CheckFinished { result } => {
-                self.results.insert(result.check_id.clone(), result);
-            }
+            RunnerEvent::CheckFinished { result } => self.set_retry_result(result),
             RunnerEvent::GroupStarted { group } => {
                 self.run.current_group = Some(group);
             }

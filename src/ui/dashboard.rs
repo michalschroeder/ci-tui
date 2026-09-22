@@ -347,10 +347,8 @@ fn render_check_item(
 fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
     let groups = app.groups();
     let mut items: Vec<ListItem> = Vec::new();
-    let selected_check_id: Option<String> = app.selected_check().map(|c| c.id().to_string());
-    let selected_pre_cmd: Option<(String, String)> = app
-        .selected_pre_command()
-        .map(|p| (p.group.clone(), p.name.clone()));
+    let selected_check_id = app.selected_check().map(|c| c.id());
+    let selected_pre_cmd = app.selected_pre_command();
 
     for group in groups {
         let visible_pre_commands: Vec<_> = app
@@ -387,13 +385,12 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
 
         for pre_cmd in visible_pre_commands {
             let is_selected = selected_pre_cmd
-                .as_ref()
-                .is_some_and(|(g, n)| *g == pre_cmd.group && *n == pre_cmd.name);
+                .is_some_and(|p| p.group == pre_cmd.group && p.name == pre_cmd.name);
             items.push(render_pre_command_item(pre_cmd, is_selected));
         }
 
         for check in visible_checks {
-            let is_selected = selected_check_id.as_deref() == Some(check.id());
+            let is_selected = selected_check_id == Some(check.id());
             items.push(render_check_item(app, check, area, is_selected));
         }
     }
