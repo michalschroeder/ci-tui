@@ -28,22 +28,3 @@ pub use checks::{determine_checks, CheckToRun};
 pub use config::{load_config, CiConfig};
 pub use git::{detect_changes, ChangedFiles};
 pub use runner::{CheckResult, CheckRunner, CheckStatus};
-
-#[cfg(test)]
-mod tests {
-    use pretty_assertions::assert_eq;
-    use rstest::*;
-
-    #[test]
-    fn test_infrastructure_works() {
-        // Basic test to verify test infrastructure is set up
-        assert_eq!(1 + 1, 2);
-    }
-
-    #[rstest]
-    #[case(2, 2, 4)]
-    #[case(3, 3, 6)]
-    fn test_parameterized(#[case] a: i32, #[case] b: i32, #[case] expected: i32) {
-        assert_eq!(a + b, expected);
-    }
-}
