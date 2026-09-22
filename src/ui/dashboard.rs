@@ -225,7 +225,7 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
     // Count total items: groups + pre-commands + checks
     let groups = app.groups();
     let total_check_items = groups.len() + app.pre_commands.len() + app.checks.len();
-    // Add PANEL_BORDER_ROWS for borders, minimum CHECKS_PANEL_MIN_HEIGHT lines, cap at CHECKS_PANEL_MAX_HEIGHT_RATIO of available height
+    // borders + min height, capped at a fraction of available height
     let checks_height = ((total_check_items + PANEL_BORDER_ROWS) as u16)
         .max(CHECKS_PANEL_MIN_HEIGHT)
         .min((area.height as f32 * CHECKS_PANEL_MAX_HEIGHT_RATIO) as u16);
