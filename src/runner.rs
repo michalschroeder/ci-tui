@@ -2,7 +2,8 @@
 //!
 //! This module handles the actual execution of CI checks via Docker. It supports
 //! both `docker exec` (for running containers) and `docker run` (for standalone
-//! execution), with real-time output streaming through async channels.
+//! execution). Output is captured when a command completes and delivered as
+//! lifecycle events ([`RunnerEvent`]) through async channels.
 //!
 //! # Key Types
 //!
@@ -247,8 +248,6 @@ impl CheckResult {
 pub enum RunnerEvent {
     /// A check has started executing
     CheckStarted { check_id: String },
-    /// Output line received from a running check (for streaming)
-    CheckOutput { check_id: String, line: String },
     /// A check has finished executing
     CheckFinished { result: CheckResult },
     /// A group of checks has started

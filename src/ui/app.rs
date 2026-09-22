@@ -558,7 +558,6 @@ impl App {
         self.needs_redraw = true;
         match event {
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
-            RunnerEvent::CheckOutput { check_id, line } => self.on_check_output(&check_id, &line),
             RunnerEvent::CheckFinished { result } => {
                 self.results.insert(result.check_id.clone(), result);
             }
@@ -592,13 +591,6 @@ impl App {
         if let Some(result) = self.results.get_mut(check_id) {
             result.status = CheckStatus::Running;
             result.started_at = Some(chrono::Local::now());
-        }
-    }
-
-    fn on_check_output(&mut self, check_id: &str, line: &str) {
-        if let Some(result) = self.results.get_mut(check_id) {
-            result.output.push_str(line);
-            result.output.push('\n');
         }
     }
 
@@ -1218,23 +1210,6 @@ checks:
             app.results.get("php-lint").unwrap().status,
             CheckStatus::Running
         );
-    }
-
-    #[test]
-    fn test_handle_runner_event_check_output() {
-        let mut app = make_app();
-
-        app.handle_runner_event(RunnerEvent::CheckOutput {
-            check_id: "php-lint".to_string(),
-            line: "Checking file...".to_string(),
-        });
-
-        assert!(app
-            .results
-            .get("php-lint")
-            .unwrap()
-            .output
-            .contains("Checking file..."));
     }
 
     #[test]
