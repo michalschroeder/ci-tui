@@ -417,8 +417,8 @@ impl App {
             || result.status == CheckStatus::OnDemand
     }
 
-    /// Mark an on-demand check as running (preparing to execute)
-    pub fn trigger_on_demand_check(&mut self, check_id: &str) {
+    /// Reset a check's result to Running and clear previous output/timing
+    fn reset_result_to_running(&mut self, check_id: &str) {
         if let Some(result) = self.results.get_mut(check_id) {
             result.status = CheckStatus::Running;
             result.output.clear();
@@ -427,20 +427,18 @@ impl App {
             result.started_at = Some(chrono::Local::now());
             result.finished_at = None;
         }
+    }
+
+    /// Mark an on-demand check as running (preparing to execute)
+    pub fn trigger_on_demand_check(&mut self, check_id: &str) {
+        self.reset_result_to_running(check_id);
         self.clamp_selection();
         self.needs_redraw = true;
     }
 
-    /// Reset a single check to pending for retry
+    /// Reset a single check to running for retry
     pub fn reset_check_for_retry(&mut self, check_id: &str) {
-        if let Some(result) = self.results.get_mut(check_id) {
-            result.status = CheckStatus::Running;
-            result.output.clear();
-            result.error_output.clear();
-            result.duration_ms = 0;
-            result.started_at = Some(chrono::Local::now());
-            result.finished_at = None;
-        }
+        self.reset_result_to_running(check_id);
         // Clear any fix results
         self.fix_result = None;
         self.fix_all_results.clear();
