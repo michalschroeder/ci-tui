@@ -86,48 +86,51 @@ pub(super) fn match_file_pattern(
     }
 }
 
-/// Process test_discovery trigger logic
-pub(super) fn process_test_discovery(
+/// Outcome of evaluating a test_discovery trigger.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DiscoveryOutcome {
+    /// source_pattern unknown, or no changed files matched it
+    NoSources,
+    /// Related test files were discovered
+    TestsFound(Vec<String>),
+    /// No tests found and the check is marked on_demand — offer manual trigger
+    NoTestsOnDemand,
+    /// No tests found; command has no {files} placeholder — run the full suite
+    NoTestsRunAll,
+    /// No tests found; command uses {files} — nothing to run
+    NoTestsSkip,
+}
+
+/// Evaluate a test_discovery trigger against the changed files.
+pub(super) fn run_test_discovery(
     config: &CiConfig,
     changed_files: &ChangedFiles,
     project_root: &Path,
     discovery: &crate::config::TestDiscoveryConfig,
     check: &CheckDefinition,
-    matched_files: &mut Vec<String>,
-) -> Option<TestDiscoveryResult> {
-    let re = config.get_compiled_file_pattern(&discovery.source_pattern)?;
+) -> DiscoveryOutcome {
+    let Some(re) = config.get_compiled_file_pattern(&discovery.source_pattern) else {
+        return DiscoveryOutcome::NoSources;
+    };
     let source_files = changed_files.filter_by_pattern(re);
     if source_files.is_empty() {
-        return None;
+        return DiscoveryOutcome::NoSources;
     }
 
     let related_tests =
         test_discovery::find_related_tests(&discovery.strategies, &source_files, project_root);
-
     if !related_tests.is_empty() {
-        matched_files.extend(related_tests);
-        return None;
+        return DiscoveryOutcome::TestsFound(related_tests);
     }
 
-    if !matched_files.is_empty() {
-        return None;
-    }
-
-    // No tests found and no file_pattern matches
     if check.on_demand {
-        return Some(TestDiscoveryResult::OnDemand);
+        return DiscoveryOutcome::NoTestsOnDemand;
     }
-
-    if !check.command.contains("{files}") {
-        matched_files.push("(source files changed - running all)".to_string());
+    if check.command.contains("{files}") {
+        DiscoveryOutcome::NoTestsSkip
+    } else {
+        DiscoveryOutcome::NoTestsRunAll
     }
-
-    None
-}
-
-/// Result from test discovery processing
-pub(super) enum TestDiscoveryResult {
-    OnDemand,
 }
 
 /// Build CheckToRun for a check with matched files
@@ -234,22 +237,21 @@ pub(super) fn process_triggered_check(
     // Check test_discovery trigger
     if let Some(discovery) = &triggers.test_discovery {
         has_source_trigger = true;
-        if process_test_discovery(
-            config,
-            changed_files,
-            project_root,
-            discovery,
-            check,
-            &mut matched_files,
-        )
-        .is_some()
-        {
-            return Some(build_on_demand_check(
-                check_id,
-                check,
-                group_name,
-                service.to_string(),
-            ));
+        match run_test_discovery(config, changed_files, project_root, discovery, check) {
+            DiscoveryOutcome::TestsFound(tests) => matched_files.extend(tests),
+            DiscoveryOutcome::NoSources | DiscoveryOutcome::NoTestsSkip => {}
+            DiscoveryOutcome::NoTestsOnDemand if matched_files.is_empty() => {
+                return Some(build_on_demand_check(
+                    check_id,
+                    check,
+                    group_name,
+                    service.to_string(),
+                ));
+            }
+            DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
+                matched_files.push("(source files changed - running all)".to_string());
+            }
+            DiscoveryOutcome::NoTestsOnDemand | DiscoveryOutcome::NoTestsRunAll => {}
         }
     }
 
@@ -431,7 +433,7 @@ mod tests {
         }
     }
 
-    mod process_test_discovery_tests {
+    mod run_test_discovery_tests {
         use super::*;
 
         fn discovery_cfg() -> TestDiscoveryConfig {
@@ -447,65 +449,60 @@ mod tests {
         }
 
         #[test]
-        fn returns_none_when_no_source_files_match() {
+        fn no_source_files_match_returns_no_sources() {
             let cfg = base_config();
             let cf = changed(&["README.md"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let disc = discovery_cfg();
-            let mut matched = Vec::new();
-            let out = process_test_discovery(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                &disc,
-                &check,
-                &mut matched,
-            );
-            assert!(out.is_none());
-            assert!(matched.is_empty());
+            let out =
+                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &discovery_cfg(), &check);
+            assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
         #[test]
-        fn returns_on_demand_when_no_tests_found_and_on_demand() {
+        fn unknown_source_pattern_returns_no_sources() {
+            let cfg = base_config();
+            let cf = changed(&["src/foo.rs"]);
+            let check = mk_check("cmd {files}", None, None, false);
+            let disc = TestDiscoveryConfig {
+                source_pattern: "nonexistent".to_string(),
+                strategies: vec![],
+            };
+            let out = run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check);
+            assert_eq!(out, DiscoveryOutcome::NoSources);
+        }
+
+        #[test]
+        fn no_tests_found_and_on_demand_returns_on_demand() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
-            let disc = discovery_cfg();
-            let mut matched = Vec::new();
-            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
-            assert!(matches!(out, Some(TestDiscoveryResult::OnDemand)));
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            assert_eq!(out, DiscoveryOutcome::NoTestsOnDemand);
         }
 
         #[test]
-        fn pushes_sentinel_when_no_tests_and_command_has_no_files_placeholder() {
+        fn no_tests_and_no_files_placeholder_returns_run_all() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("run-all-tests", None, None, false);
-            let disc = discovery_cfg();
-            let mut matched = Vec::new();
-            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
-            assert!(out.is_none());
-            assert_eq!(matched.len(), 1);
-            assert!(matched[0].contains("source files changed"));
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            assert_eq!(out, DiscoveryOutcome::NoTestsRunAll);
         }
 
         #[test]
-        fn no_sentinel_when_command_has_files_placeholder() {
+        fn no_tests_with_files_placeholder_returns_skip() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("test {files}", None, None, false);
-            let disc = discovery_cfg();
-            let mut matched = Vec::new();
-            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
-            assert!(out.is_none());
-            assert!(matched.is_empty());
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            assert_eq!(out, DiscoveryOutcome::NoTestsSkip);
         }
 
         #[test]
-        fn extends_matched_files_when_tests_found() {
+        fn tests_found_returns_paths() {
             let tmp = tempfile::TempDir::new().unwrap();
             let test_path = tmp.path().join("tests/foo_test.rs");
             std::fs::create_dir_all(test_path.parent().unwrap()).unwrap();
@@ -514,11 +511,11 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let disc = discovery_cfg();
-            let mut matched = Vec::new();
-            let out = process_test_discovery(&cfg, &cf, tmp.path(), &disc, &check, &mut matched);
-            assert!(out.is_none());
-            assert_eq!(matched, vec!["tests/foo_test.rs".to_string()]);
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            assert_eq!(
+                out,
+                DiscoveryOutcome::TestsFound(vec!["tests/foo_test.rs".to_string()])
+            );
         }
     }
 
