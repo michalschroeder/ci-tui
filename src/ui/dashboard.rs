@@ -231,7 +231,10 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a pre-command as a list item
-fn render_pre_command_item(app: &App, pre_cmd: &super::app::PreCommandState) -> ListItem<'static> {
+fn render_pre_command_item(
+    pre_cmd: &super::app::PreCommandState,
+    is_selected: bool,
+) -> ListItem<'static> {
     use super::app::PreCommandStatus;
 
     let (icon, icon_style) = match pre_cmd.status {
@@ -246,11 +249,6 @@ fn render_pre_command_item(app: &App, pre_cmd: &super::app::PreCommandState) -> 
     } else {
         String::new()
     };
-
-    let is_selected = app
-        .selected_pre_command()
-        .map(|p| p.group == pre_cmd.group && p.name == pre_cmd.name)
-        .unwrap_or(false);
 
     let name_style = if is_selected {
         Style::default()
@@ -276,6 +274,7 @@ fn render_check_item(
     app: &App,
     check: &crate::checks::CheckToRun,
     area: Rect,
+    is_selected: bool,
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
@@ -289,11 +288,6 @@ fn render_check_item(
             }
         })
         .unwrap_or_default();
-
-    let is_selected = app
-        .selected_check()
-        .map(|c| c.id() == check.id())
-        .unwrap_or(false);
 
     let is_on_demand = result
         .map(|r| r.status == CheckStatus::OnDemand)
@@ -339,6 +333,10 @@ fn render_check_item(
 fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
     let groups = app.groups();
     let mut items: Vec<ListItem> = Vec::new();
+    let selected_check_id: Option<String> = app.selected_check().map(|c| c.id().to_string());
+    let selected_pre_cmd: Option<(String, String)> = app
+        .selected_pre_command()
+        .map(|p| (p.group.clone(), p.name.clone()));
 
     for group in groups {
         let visible_pre_commands: Vec<_> = app
@@ -374,11 +372,15 @@ fn render_checks_list(app: &App, frame: &mut Frame, area: Rect) {
         ])));
 
         for pre_cmd in visible_pre_commands {
-            items.push(render_pre_command_item(app, pre_cmd));
+            let is_selected = selected_pre_cmd
+                .as_ref()
+                .is_some_and(|(g, n)| *g == pre_cmd.group && *n == pre_cmd.name);
+            items.push(render_pre_command_item(pre_cmd, is_selected));
         }
 
         for check in visible_checks {
-            items.push(render_check_item(app, check, area));
+            let is_selected = selected_check_id.as_deref() == Some(check.id());
+            items.push(render_check_item(app, check, area, is_selected));
         }
     }
 
@@ -923,6 +925,7 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
 
 /// Build keyboard shortcut spans for the footer
 fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
+    let caps = app.selected_capabilities();
     let expand_label = if app.view.show_full_command {
         "collapse"
     } else {
@@ -955,7 +958,7 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
         Span::raw(format!(" {}  ", expand_label)),
     ]);
 
-    if app.can_trigger_selected() {
+    if caps.can_trigger {
         spans.push(Span::styled(
             "t",
             Style::default()
@@ -966,12 +969,12 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::raw("  "));
     }
 
-    if app.can_retry_selected() {
+    if caps.can_retry {
         spans.push(Span::styled("r", Style::default().fg(Color::Cyan)));
         spans.push(Span::raw(" retry  "));
     }
 
-    if app.can_run_all_files() {
+    if caps.can_run_all_files {
         spans.push(Span::styled(
             "A",
             Style::default()
@@ -989,7 +992,7 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     ));
     spans.push(Span::raw(" RETRY ALL  "));
 
-    if app.can_fix_selected() {
+    if caps.can_fix {
         spans.push(Span::styled(
             "x",
             Style::default()

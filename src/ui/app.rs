@@ -239,6 +239,15 @@ pub struct App {
     pub needs_redraw: bool,
 }
 
+/// What the currently selected check can do — computed once, read many times per frame
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SelectedCaps {
+    pub can_fix: bool,
+    pub can_retry: bool,
+    pub can_trigger: bool,
+    pub can_run_all_files: bool,
+}
+
 impl App {
     pub fn new(
         config: CiConfig,
@@ -310,18 +319,30 @@ impl App {
             .unwrap_or_else(|| started.elapsed())
     }
 
+    /// Compute all selected-check capabilities with a single selection lookup
+    pub fn selected_capabilities(&self) -> SelectedCaps {
+        let busy = self.fix.running || self.fix.all_running;
+        let selected = self.selected_check();
+        let status = selected
+            .and_then(|c| self.results.get(c.id()))
+            .map(|r| r.status.clone());
+        let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
+        SelectedCaps {
+            // Note: can_fix intentionally only gated on fix.running (existing behavior)
+            can_fix: !self.fix.running && status == Some(CheckStatus::Failed) && has_fix,
+            can_retry: !busy && matches!(status, Some(CheckStatus::Passed | CheckStatus::Failed)),
+            can_trigger: !busy && status == Some(CheckStatus::OnDemand),
+            can_run_all_files: !busy
+                && matches!(
+                    status,
+                    Some(CheckStatus::Passed | CheckStatus::Failed | CheckStatus::OnDemand)
+                ),
+        }
+    }
+
     /// Check if selected check can be fixed
     pub fn can_fix_selected(&self) -> bool {
-        if self.fix.running {
-            return false;
-        }
-        let Some(check) = self.selected_check() else {
-            return false;
-        };
-        let Some(result) = self.results.get(check.id()) else {
-            return false;
-        };
-        result.status == CheckStatus::Failed && check.has_fix()
+        self.selected_capabilities().can_fix
     }
 
     /// Get the fix job for the selected check
@@ -412,46 +433,17 @@ impl App {
 
     /// Check if selected check can be retried
     pub fn can_retry_selected(&self) -> bool {
-        if self.fix.running || self.fix.all_running {
-            return false;
-        }
-        let Some(check) = self.selected_check() else {
-            return false;
-        };
-        let Some(result) = self.results.get(check.id()) else {
-            return false;
-        };
-        result.status == CheckStatus::Passed || result.status == CheckStatus::Failed
+        self.selected_capabilities().can_retry
     }
 
     /// Check if selected check is on-demand and can be triggered
     pub fn can_trigger_selected(&self) -> bool {
-        if self.fix.running || self.fix.all_running {
-            return false;
-        }
-        let Some(check) = self.selected_check() else {
-            return false;
-        };
-        let Some(result) = self.results.get(check.id()) else {
-            return false;
-        };
-        result.status == CheckStatus::OnDemand
+        self.selected_capabilities().can_trigger
     }
 
     /// Check if selected check can be run with all files (no filtering)
     pub fn can_run_all_files(&self) -> bool {
-        if self.fix.running || self.fix.all_running {
-            return false;
-        }
-        let Some(check) = self.selected_check() else {
-            return false;
-        };
-        let Some(result) = self.results.get(check.id()) else {
-            return false;
-        };
-        result.status == CheckStatus::Passed
-            || result.status == CheckStatus::Failed
-            || result.status == CheckStatus::OnDemand
+        self.selected_capabilities().can_run_all_files
     }
 
     /// Reset a check's result to Running and clear previous output/timing
