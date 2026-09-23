@@ -464,6 +464,46 @@ When test discovery finds no related tests:
 - If check has `on_demand: true`: Check is skipped and marked on-demand
 - User can manually trigger with 't' key to run full test suite
 
+## Test Discovery Limitations
+
+Test discovery is a **heuristic**, not a dependency analysis. Know what it can and cannot catch:
+
+**No transitive coverage.** `path_mapping` finds the test for the file you touched — not the tests of that file's *callers*. Editing a shared helper runs `HelperTest`, but not the tests of the twenty classes that use the helper. If those break, local runs stay green and full CI catches it.
+
+**`grep_search` is a content regex.** It finds tests that literally mention the changed file's name (via `{basename}` etc.). It misses tests that exercise your code through an interface, a factory, or a DI container without naming the concrete class — and it can over-match on common names (a file called `Client.php` will pull in every test mentioning "Client").
+
+**Renames and deletions.** A deleted source file maps to a test path that may still exist; a renamed file's old tests are not discovered.
+
+**What this means in practice:**
+
+- Treat a green ci-tui run as a *fast pre-push signal*, not a replacement for full CI on the branch.
+- Add a full-suite check with `on_demand: true` as a safety net — it stays out of your fast loop but is one `t` keypress away:
+
+```yaml
+checks:
+  tests:
+    checks:
+      unit-related:
+        name: Related Unit Tests
+        command: vendor/bin/phpunit {files}
+        triggers:
+          test_discovery:
+            source_pattern: php
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: "src/{path}.php"
+                    tests: ["tests/{path}Test.php"]
+      unit-full:
+        name: Full Unit Suite (on demand)
+        command: vendor/bin/phpunit
+        on_demand: true
+        triggers:
+          file_pattern: php
+```
+
+- Prefer `path_mapping` over `grep_search` where your project's layout allows it — it is precise and cheap. Use `grep_search` as the fallback strategy, ordered second.
+
 ## Pre-Commands
 
 Pre-commands run before checks in a group. Useful for setup tasks like database initialization.
