@@ -12,7 +12,7 @@
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
 
-use super::app::{App, PreCommandState, SelectableItem};
+use super::app::{App, PreCommandState, SelectableItem, StatusKind};
 use crate::checks::CheckFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
@@ -1100,12 +1100,15 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(ref msg) = app.view.status_message {
+        let (icon, color) = match msg.kind {
+            StatusKind::Info { .. } => (" ℹ ", Color::Cyan),
+            StatusKind::Error => (" ✗ ", Color::Red),
+            StatusKind::Progress => (" ⟳ ", Color::Yellow),
+        };
         let status_line = Line::from(vec![
             Span::styled(
-                " ℹ ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                icon,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(msg.text.clone(), Style::default().fg(Color::White)),
             Span::raw("  "),

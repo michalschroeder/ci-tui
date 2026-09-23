@@ -106,14 +106,25 @@ impl Default for SysStats {
 }
 
 /// How a status message leaves the footer (any keypress also dismisses it)
+///
+/// The deadline lives inside `Info` so only info messages can expire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
-    /// Auto-dismisses after `STATUS_MESSAGE_TTL`
-    Info,
+    /// Auto-dismisses at `expires_at`
+    Info { expires_at: Instant },
     /// Stays until a keypress so failures are not missed
     Error,
     /// Stays until the work it describes finishes
     Progress,
+}
+
+impl StatusKind {
+    /// Info message that auto-dismisses `STATUS_MESSAGE_TTL` from now
+    pub fn info() -> Self {
+        Self::Info {
+            expires_at: Instant::now() + STATUS_MESSAGE_TTL,
+        }
+    }
 }
 
 /// Footer status message
@@ -121,8 +132,6 @@ pub enum StatusKind {
 pub struct StatusMessage {
     pub text: String,
     pub kind: StatusKind,
-    /// Auto-dismiss deadline (`Info` only)
-    pub expires_at: Option<Instant>,
 }
 
 /// UI view state: selection, scrolling, filtering, toggles, status line
@@ -476,6 +485,12 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Mark a retry-all git refresh as in flight and show its progress
+    pub fn start_refresh(&mut self) {
+        self.run.refresh_pending = true;
+        self.set_status_message(StatusKind::Progress, "Refreshing changed files...");
+    }
+
     /// Check if retry-all can start (blocked while fixes edit files)
     pub fn can_retry_all(&self) -> bool {
         !self.fix.running && !self.fix.all_running && !self.run.refresh_pending
@@ -518,11 +533,9 @@ impl App {
 
     /// Show a status message in the footer
     pub fn set_status_message(&mut self, kind: StatusKind, text: impl Into<String>) {
-        let expires_at = (kind == StatusKind::Info).then(|| Instant::now() + STATUS_MESSAGE_TTL);
         self.view.status_message = Some(StatusMessage {
             text: text.into(),
             kind,
-            expires_at,
         });
         self.needs_redraw = true;
     }
@@ -535,7 +548,10 @@ impl App {
 
     /// When the current status message auto-dismisses, if ever
     pub fn status_message_deadline(&self) -> Option<Instant> {
-        self.view.status_message.as_ref()?.expires_at
+        match self.view.status_message.as_ref()?.kind {
+            StatusKind::Info { expires_at } => Some(expires_at),
+            StatusKind::Error | StatusKind::Progress => None,
+        }
     }
 
     /// Clear the status message once its deadline has passed
@@ -1640,7 +1656,7 @@ checks:
     #[test]
     fn test_can_retry_all_disabled_during_refresh() {
         let mut app = make_app();
-        app.run.refresh_pending = true;
+        app.start_refresh();
         assert!(!app.can_retry_all());
         app.reset_for_retry(app.changed_files.clone(), app.checks.clone());
         assert!(app.can_retry_all(), "reset clears pending refresh");
@@ -1804,7 +1820,7 @@ checks:
         #[test]
         fn test_set_and_clear_status_message() {
             let mut app = make_app();
-            app.set_status_message(StatusKind::Info, "Test message");
+            app.set_status_message(StatusKind::info(), "Test message");
             assert_eq!(
                 app.view.status_message.as_ref().map(|m| m.text.as_str()),
                 Some("Test message")
@@ -1816,7 +1832,7 @@ checks:
         #[test]
         fn test_status_message_expires_after_ttl() {
             let mut app = make_app();
-            app.set_status_message(StatusKind::Info, "Test message");
+            app.set_status_message(StatusKind::info(), "Test message");
             let deadline = app.status_message_deadline().expect("info expires");
 
             app.expire_status_message(deadline - Duration::from_millis(1));

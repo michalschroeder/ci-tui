@@ -425,8 +425,7 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     }
     let previous = app.changed_files.clone();
     let base_ref = previous.base_ref.clone();
-    app.run.refresh_pending = true;
-    app.set_status_message(StatusKind::Progress, "Refreshing changed files...");
+    app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
         let (changed_files, checks) = match ctx.refresh_async(previous).await {
             Ok(refreshed) => refreshed,
@@ -520,7 +519,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
                 copy_to_clipboard(&check.resolved_command);
-                app.set_status_message(StatusKind::Info, "Command copied to clipboard");
+                app.set_status_message(StatusKind::info(), "Command copied to clipboard");
             }
             Action::Continue
         }
@@ -1005,12 +1004,14 @@ checks:
         let mut app = make_test_app(&config);
         let (mut tasks, _rx) = make_test_tasks(&config);
 
-        app.set_status_message(StatusKind::Info, "Command copied to clipboard");
-        app.view.status_message.as_mut().unwrap().expires_at = Some(std::time::Instant::now());
+        app.set_status_message(StatusKind::info(), "Command copied to clipboard");
+        app.view.status_message.as_mut().unwrap().kind = StatusKind::Info {
+            expires_at: std::time::Instant::now(),
+        };
         handle_message(&mut app, Message::StatusExpired, &mut tasks);
         assert!(app.view.status_message.is_none(), "due message cleared");
 
-        app.set_status_message(StatusKind::Info, "fresh");
+        app.set_status_message(StatusKind::info(), "fresh");
         handle_message(&mut app, Message::StatusExpired, &mut tasks);
         assert!(
             app.view.status_message.is_some(),
@@ -1052,7 +1053,7 @@ checks:
     async fn test_quit_key_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.set_status_message(StatusKind::Info, "Command copied to clipboard");
+        app.set_status_message(StatusKind::info(), "Command copied to clipboard");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1068,7 +1069,7 @@ checks:
     async fn test_ctrl_c_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.set_status_message(StatusKind::Info, "some message");
+        app.set_status_message(StatusKind::info(), "some message");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1087,7 +1088,7 @@ checks:
                 make_test_check("phpstan", "fast"),
             ],
         );
-        app.set_status_message(StatusKind::Info, "some message");
+        app.set_status_message(StatusKind::info(), "some message");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
