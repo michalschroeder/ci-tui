@@ -284,7 +284,8 @@ checks:
 - If omitted, check always runs
 
 **`on_demand`** (default: `false`)
-- If `true`, check only runs when manually triggered with 't' key
+- Only takes effect on a check with a `test_discovery` trigger; ignored otherwise
+- If `true`, and test discovery finds no related tests, check waits for the 't' key instead of skipping or running the full command
 - Useful for expensive checks when test discovery finds no specific tests
 
 **`env`** (optional)
@@ -651,7 +652,8 @@ checks:
 
 ### Use on_demand for Expensive Checks
 
-Mark comprehensive test runs as on-demand:
+`on_demand` only has an effect on a check with a `test_discovery` trigger — it's ignored
+on any other check (including one with no `triggers` at all, which always runs):
 
 ```yaml
 checks:
@@ -660,20 +662,16 @@ checks:
       phpunit:
         name: PHPUnit
         command: vendor/bin/phpunit {files}
-        on_demand: false  # Run when specific tests found
+        on_demand: true  # no related tests found -> wait for 't' instead of skipping
         triggers:
           file_pattern: php_tests
           test_discovery:
             source_pattern: php_src
             strategies: [...]
-
-      full-suite:
-        name: Full Test Suite
-        command: vendor/bin/phpunit
-        on_demand: true  # Only run when manually triggered
 ```
 
-When source changes but no specific tests are found, user can trigger full suite with 't' key.
+When source changes but no specific tests are found, user can trigger the full command
+(with `{files}` stripped) with the 't' key.
 
 ### Leverage fix_command
 

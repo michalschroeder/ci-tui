@@ -19,11 +19,11 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - Live TUI (ratatui) with per-check status, output shown on completion, and timing
 - Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init)
 - Test discovery via `path_mapping` and `grep_search` strategies
-- On-demand checks (`t` key) for expensive suites when no specific tests were found
+- On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests
 - `--fix` mode runs each check's `fix_command` (formatters, etc.)
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
-- Falls back to `docker run` when the compose container isn't up (configure `docker.image` / `volume_mount`)
+- Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 
 ## Install
@@ -39,6 +39,14 @@ Docker image (published to GHCR on each release):
 
 ```bash
 docker pull ghcr.io/michalschroeder/ci-tui:latest
+
+# needs the docker socket (to run checks) and your project mounted at /app;
+# workdir /app derives compose project name "app" unless overridden
+docker run --rm -it \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD":/app \
+  -e COMPOSE_PROJECT_NAME=<your-compose-project> \
+  ghcr.io/michalschroeder/ci-tui:latest
 ```
 
 ## Quickstart
@@ -59,6 +67,7 @@ docker:
   project_dir: .
   service: app
   shell: bash
+  volume_mount: .:/app  # used by the docker-run fallback if the compose container isn't up
 
 git:
   base_branch: main
@@ -103,7 +112,7 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `q` / `Ctrl-C` | Quit |
 | `j`/`k`, `↓`/`↑` | Select check |
 | `PgUp`/`PgDn` | Scroll output |
-| `f` | Filter to failed checks |
+| `f` | Toggle failed-only filter |
 | `a` | Show all checks |
 | `r` | Retry selected check |
 | `R` | Re-detect changes and rerun all |
@@ -113,6 +122,8 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `X` | Fix all checks |
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
+
+While a status message (e.g. "Command copied") is shown, the first keypress only dismisses it — press again to trigger the action.
 
 ## CI / scripting usage
 
@@ -128,8 +139,9 @@ Simple mode is auto-enabled when stdout is not a terminal, so `ci-tui` works as 
 ## How check selection works
 
 1. `git diff` against the base ref lists changed files, plus uncommitted and untracked files (minus `ignore_patterns`).
-2. Each check's `triggers.file_pattern` is matched against the list; a check with no match and no `{files}` in its command becomes `t`-triggerable too.
-3. Checks with `test_discovery` map changed sources to test files; if none are found and the check is `on_demand`, it waits for you to press `t` (never runs in `--simple`) — otherwise it runs the full command if the command has no `{files}`, else it's skipped.
+2. A check with no `triggers` key always runs. A check with a `triggers` block but neither `file_pattern` nor `test_discovery` set never runs.
+3. `triggers.file_pattern` is matched against the list; if it's set and nothing matches, the check becomes `t`-triggerable instead.
+4. `triggers.test_discovery` maps changed sources to test files; if none are found: `on_demand: true` makes it wait for you to press `t` (never runs in `--simple`), otherwise it runs the full command if the command has no `{files}`, else it's skipped. `on_demand` only has an effect here — it's ignored on checks without `test_discovery`.
 
 Test discovery is heuristic (path conventions + grep) — it does not do dependency analysis, so a passing run is a fast pre-push signal, not a replacement for full CI.
 
