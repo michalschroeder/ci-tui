@@ -135,10 +135,11 @@ impl DockerConfig {
     /// the real project name would require running `docker compose ps`.
     /// Future work: resolve containers via `docker compose ps -q <service>`.
     pub(crate) fn compose_project_name(&self) -> String {
-        std::env::var("COMPOSE_PROJECT_NAME")
+        let name = std::env::var("COMPOSE_PROJECT_NAME")
             .ok()
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.derive_project_name())
+            .unwrap_or_else(|| self.derive_project_name());
+        normalize_project_name(&name)
     }
 
     /// Extract project name from project_dir (last path component)
@@ -194,6 +195,17 @@ fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
         _ => return None,
     };
     resolved.file_name()?.to_str().map(String::from)
+}
+
+/// Normalize a compose project name like docker compose (compose-go
+/// `NormalizeProjectName`): lowercase, keep only `[a-z0-9_-]`, trim leading `_`/`-`
+fn normalize_project_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
+        .collect::<String>()
+        .trim_start_matches(['_', '-'])
+        .to_string()
 }
 
 fn default_service() -> String {
@@ -1126,6 +1138,32 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             // Image derived from container name by stripping -1 suffix
             assert_eq!(config.docker.image_name(), "myproject-web");
+        }
+
+        // Edge case: project_dir basename is normalized like docker compose
+        // (lowercase, drop chars outside [a-z0-9_-], trim leading _/-)
+        #[rstest]
+        #[case("./MyApp", "myapp-web-1", "myapp-web")]
+        #[case("./my.app", "myapp-web-1", "myapp-web")]
+        #[case("./_My App!", "myapp-web-1", "myapp-web")]
+        #[case("./my_proj-2", "my_proj-2-web-1", "my_proj-2-web")]
+        fn test_derived_names_normalized_like_compose(
+            #[case] project_dir: &str,
+            #[case] container: &str,
+            #[case] image: &str,
+        ) {
+            let config = DockerConfig {
+                project_dir: project_dir.to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            };
+            assert_eq!(config.container_name(), container);
+            assert_eq!(config.image_name(), image);
         }
 
         // Edge case: COMPOSE_PROJECT_NAME overrides project_dir-derived compose project name.

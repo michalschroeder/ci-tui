@@ -83,6 +83,7 @@ docker:
 - Explicit container name for `docker exec` commands
 - If not set, derived using Docker Compose naming: `{project_dir_basename}-{service}-1`
 - Example: project_dir="./backend", service="php" → container="backend-php-1"
+- Project name normalized like Compose (lowercase, only `a-z0-9_-`): `./My.App` → `myapp-php-1`
 
 **`image`** (optional)
 - Docker image for standalone `docker run` when container isn't running
