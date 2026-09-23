@@ -210,8 +210,8 @@ impl TaskCtx {
             command,
             &self.project_root,
             &self.container_name,
-            &self.config.docker,
-            &self.config.docker.env,
+            self.config.docker(),
+            &self.config.docker().env,
         )
         .await
     }
@@ -650,7 +650,7 @@ pub async fn run(
     let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
         config: Arc::new(config.clone()),
-        container_name: config.docker.container_name().into(),
+        container_name: config.docker().container_name().into(),
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI

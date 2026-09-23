@@ -339,7 +339,8 @@ mod tests {
 
         CiConfig {
             version: 2,
-            docker: DockerConfig {
+            runner: crate::config::RunnerMode::Docker,
+            docker: Some(DockerConfig {
                 project_dir: "./infrastructure".to_string(),
                 service: "php".to_string(),
                 container: None,
@@ -348,7 +349,8 @@ mod tests {
                 work_dir: None,
                 shell: "bash".to_string(),
                 env: HashMap::new(),
-            },
+            }),
+            local: crate::config::LocalConfig::default(),
             git: GitConfig {
                 base_branch: "development".to_string(),
                 fallback_branch: "HEAD~1".to_string(),

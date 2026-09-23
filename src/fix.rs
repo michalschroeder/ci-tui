@@ -39,7 +39,7 @@ pub async fn run_with_executor(
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
-    let docker_config = &config.docker;
+    let docker_config = config.docker();
 
     let mut fix_count = 0;
     let mut pass_count = 0;

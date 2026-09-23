@@ -36,7 +36,7 @@ pub async fn run_with_executor(
     project_root: PathBuf,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Result<Vec<CheckResult>> {
-    let docker_config = &config.docker;
+    let docker_config = config.docker();
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
@@ -75,7 +75,7 @@ pub async fn run(
     project_root: PathBuf,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let docker_config = &config.docker;
+    let docker_config = config.docker();
 
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",

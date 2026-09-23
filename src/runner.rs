@@ -295,7 +295,7 @@ impl CheckRunner {
         project_root: &Path,
         executor: Arc<dyn CommandExecutor>,
     ) -> Self {
-        let container_name: Arc<str> = config.docker.container_name().into();
+        let container_name: Arc<str> = config.docker().container_name().into();
         Self {
             config: Arc::new(config),
             project_root: Arc::from(project_root),
@@ -394,8 +394,8 @@ impl CheckRunner {
             .clone()
             .unwrap_or_else(|| self.container_name.to_string())
             .into();
-        let docker_config = self.config.docker.clone();
-        let global_env = self.config.docker.env.clone();
+        let docker_config = self.config.docker().clone();
+        let global_env = self.config.docker().env.clone();
         let executor = self.executor.clone();
 
         tokio::spawn(async move {
@@ -428,8 +428,8 @@ impl CheckRunner {
             check,
             &self.project_root,
             container_name,
-            &self.config.docker,
-            &self.config.docker.env,
+            self.config.docker(),
+            &self.config.docker().env,
             event_tx,
             self.executor.as_ref(),
         )
@@ -476,7 +476,7 @@ impl CheckRunner {
         } else if service != self.config.default_service() {
             format!(
                 "{}-{}-1",
-                self.config.docker.compose_project_name(),
+                self.config.docker().compose_project_name(),
                 service
             )
         } else {
@@ -490,7 +490,7 @@ impl CheckRunner {
             .as_deref()
             .unwrap_or_else(|| self.config.default_service());
 
-        let mut env = self.config.docker.env.clone();
+        let mut env = self.config.docker().env.clone();
         env.extend(pre_cmd.env.clone());
 
         let container_name = self.resolve_container_name(pre_cmd.container.as_deref(), service);
@@ -500,10 +500,10 @@ impl CheckRunner {
                 &container_name,
                 &env,
                 &pre_cmd.command,
-                &self.config.docker.shell,
+                &self.config.docker().shell,
             )
         } else {
-            build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
+            build_docker_run_command(self.config.docker(), &env, &pre_cmd.command)
         }
     }
 }
