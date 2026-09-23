@@ -29,8 +29,19 @@ pub struct Cli {
     pub fix: bool,
 
     /// Run checks on specific files instead of git-detected changes
-    #[arg(short, long, num_args = 1..)]
+    #[arg(short, long, num_args = 1.., value_parser = parse_file_arg)]
     pub files: Vec<PathBuf>,
+}
+
+/// `--files` value parser. `--files` takes 1.. values, so a trailing subcommand
+/// (`-f a.rs validate`) would otherwise be swallowed as a file path.
+fn parse_file_arg(value: &str) -> Result<PathBuf, String> {
+    if <Command as Subcommand>::has_subcommand(value) {
+        return Err(format!(
+            "`{value}` is a subcommand, not a file (subcommands cannot be combined with --files)"
+        ));
+    }
+    Ok(PathBuf::from(value))
 }
 
 impl Cli {
@@ -113,11 +124,20 @@ mod tests {
     #[rstest::rstest]
     #[case::fix_before_validate(&["ci-tui", "--fix", "validate"])]
     #[case::simple_before_init(&["ci-tui", "-s", "init"])]
+    #[case::files_before_init(&["ci-tui", "--files", "a.rs", "-s", "init"])]
     fn test_run_flags_conflict_with_subcommands(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
             .expect("expected conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[rstest::rstest]
+    #[case::validate(&["ci-tui", "-c", "x.yaml", "-f", "a.rs", "validate"])]
+    #[case::init(&["ci-tui", "-f", "a.rs", "init"])]
+    fn test_files_rejects_subcommand_name(#[case] args: &[&str]) {
+        let err = Cli::try_parse_checked(args).err().expect("expected error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[rstest::rstest]
