@@ -14,7 +14,8 @@ version: 2
 docker:
   # Directory containing docker-compose.yml (for `docker compose --project-directory`)
   project_dir: .
-  # Compose service to exec checks in; container name derives as {dir}-{service}-1
+  # Compose service to exec checks in; container name derives as
+  # {project}-{service}-1 (project = $COMPOSE_PROJECT_NAME, else project_dir name)
   service: app
   # container: myproject-app-1           # override if the derived name is wrong (e.g. compose `name:`)
   # Shell inside the container ("/bin/sh" for Alpine images)
