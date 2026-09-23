@@ -1107,7 +1107,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(msg.clone(), Style::default().fg(Color::White)),
+            Span::styled(msg.text.clone(), Style::default().fg(Color::White)),
             Span::raw("  "),
             Span::styled(
                 "[press any key to dismiss]",

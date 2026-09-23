@@ -25,7 +25,7 @@ use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
 use crate::runner::{run_check_with_command, CheckResult, CheckRunner, RunnerEvent};
 use anyhow::Result;
-use app::App;
+use app::{App, StatusKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -77,6 +77,8 @@ enum Message {
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
     Task(TaskEvent),
+    /// Status message auto-dismiss deadline reached
+    StatusExpired,
 }
 
 /// Events from spawned background tasks (fix, fix-all, retry, refresh)
@@ -411,7 +413,7 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
     app.reset_check_for_retry(check.id());
-    app.set_status_message(Some("Running for all files...".to_string()));
+    app.set_status_message(StatusKind::Progress, "Running for all files...");
     tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
     Action::Continue
 }
@@ -423,7 +425,8 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     }
     let previous = app.changed_files.clone();
     let base_ref = previous.base_ref.clone();
-    app.set_status_message(Some("Refreshing changed files...".to_string()));
+    app.run.refresh_pending = true;
+    app.set_status_message(StatusKind::Progress, "Refreshing changed files...");
     tasks.spawn(|ctx, tx| async move {
         let (changed_files, checks) = match ctx.refresh_async(previous).await {
             Ok(refreshed) => refreshed,
@@ -517,7 +520,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
                 copy_to_clipboard(&check.resolved_command);
-                app.set_status_message(Some("Command copied to clipboard".to_string()));
+                app.set_status_message(StatusKind::Info, "Command copied to clipboard");
             }
             Action::Continue
         }
@@ -544,12 +547,19 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         } => app.replace_check(changed_files, *check),
         TaskEvent::CheckNotApplicable(previous) => {
             app.set_retry_result(previous);
-            app.set_status_message(Some("Check no longer applicable after refresh".to_string()));
+            app.set_status_message(
+                StatusKind::Error,
+                "Check no longer applicable after refresh",
+            );
         }
-        TaskEvent::GitRefreshFailed => app.set_status_message(Some(
-            "Git refresh failed - retrying with previous file list".to_string(),
-        )),
-        TaskEvent::RetryResult(result) => app.set_retry_result(result),
+        TaskEvent::GitRefreshFailed => app.set_status_message(
+            StatusKind::Error,
+            "Git refresh failed - retrying with previous file list",
+        ),
+        TaskEvent::RetryResult(result) => {
+            app.set_retry_result(result);
+            app.finish_progress();
+        }
         TaskEvent::RetryAllReady {
             changed_files,
             checks,
@@ -572,21 +582,10 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             #[cfg(debug_assertions)]
             let start = std::time::Instant::now();
 
-            // Quit keys must always work, even while a status message is
-            // displayed - previously they were swallowed by the dismiss logic
-            let is_quit = matches!(
-                (key.code, key.modifiers),
-                (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            );
-
-            // Clear status message on any other key press
-            if app.view.status_message.is_some() && !is_quit {
+            // Any key dismisses the status message, then still acts
+            // (cleared first so the handler may set a fresh message)
+            if app.view.status_message.is_some() {
                 app.clear_status_message();
-
-                #[cfg(debug_assertions)]
-                warn_slow_keyboard(start);
-
-                return Action::Continue;
             }
 
             // Dispatch to key handler
@@ -610,6 +609,10 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             Action::Continue
         }
         Message::Task(event) => handle_task_event(app, event),
+        Message::StatusExpired => {
+            app.expire_status_message(std::time::Instant::now());
+            Action::Continue
+        }
     }
 }
 
@@ -665,6 +668,9 @@ pub async fn run(
     // 3. All state transitions go through handle_message with explicit Message enum
     // 4. Render only if state changed (dirty flag)
     loop {
+        // Status message auto-dismiss deadline (disabled branch when None)
+        let status_deadline = app.status_message_deadline();
+
         // Wait for the next event from any channel
         // biased; ensures keyboard is checked first for immediate responsiveness
         let msg = tokio::select! {
@@ -675,6 +681,11 @@ pub async fn run(
                 Event::Key(key) => Message::KeyPress(key),
                 _ => Message::Resize,
             },
+
+            // Status message TTL (ahead of busy channels so it cannot starve)
+            _ = tokio::time::sleep_until(
+                status_deadline.unwrap_or_else(std::time::Instant::now).into()
+            ), if status_deadline.is_some() => Message::StatusExpired,
 
             // Runner lifecycle/status events
             Some(event) = event_rx.recv() => Message::RunnerEvent(event),
@@ -826,11 +837,15 @@ checks:
     }
 
     fn make_test_app(config: &CiConfig) -> App {
+        make_test_app_with_checks(config, vec![])
+    }
+
+    fn make_test_app_with_checks(config: &CiConfig, checks: Vec<CheckToRun>) -> App {
         let changed_files = ChangedFiles {
             files: vec!["src/Foo.php".to_string()],
             base_ref: "development".to_string(),
         };
-        App::new(config.clone(), changed_files, vec![], "main".to_string())
+        App::new(config.clone(), changed_files, checks, "main".to_string())
     }
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -866,12 +881,7 @@ checks:
     #[tokio::test]
     async fn test_retry_selected_git_failure_sets_status_message() {
         let config = test_config();
-        let changed_files = ChangedFiles {
-            files: vec!["src/Foo.php".to_string()],
-            base_ref: "development".to_string(),
-        };
-        let checks = vec![make_test_check("php-lint", "fast")];
-        let mut app = App::new(config.clone(), changed_files, checks, "main".to_string());
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
         app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
         let (mut tasks, mut rx) = make_test_tasks(&config); // project_root does not exist -> git fails
 
@@ -990,10 +1000,59 @@ checks:
     }
 
     #[tokio::test]
+    async fn test_status_expired_clears_due_message() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        app.set_status_message(StatusKind::Info, "Command copied to clipboard");
+        app.view.status_message.as_mut().unwrap().expires_at = Some(std::time::Instant::now());
+        handle_message(&mut app, Message::StatusExpired, &mut tasks);
+        assert!(app.view.status_message.is_none(), "due message cleared");
+
+        app.set_status_message(StatusKind::Info, "fresh");
+        handle_message(&mut app, Message::StatusExpired, &mut tasks);
+        assert!(
+            app.view.status_message.is_some(),
+            "stale wakeup keeps fresh message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_all_ignores_second_press_while_refreshing() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_retry_all(&mut app, &mut tasks);
+        handle_retry_all(&mut app, &mut tasks);
+
+        assert_eq!(
+            tasks.set.len(),
+            1,
+            "second R must not spawn another refresh"
+        );
+    }
+
+    #[test]
+    fn test_run_all_files_progress_cleared_by_result() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.set_status_message(StatusKind::Progress, "Running for all files...");
+
+        handle_task_event(
+            &mut app,
+            TaskEvent::RetryResult(CheckResult::pending("php-lint")),
+        );
+
+        assert!(app.view.status_message.is_none());
+    }
+
+    #[tokio::test]
     async fn test_quit_key_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.view.status_message = Some("Command copied to clipboard".to_string());
+        app.set_status_message(StatusKind::Info, "Command copied to clipboard");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1009,7 +1068,7 @@ checks:
     async fn test_ctrl_c_works_while_status_message_shown() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.view.status_message = Some("some message".to_string());
+        app.set_status_message(StatusKind::Info, "some message");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1021,8 +1080,14 @@ checks:
     #[tokio::test]
     async fn test_other_key_dismisses_status_message() {
         let config = test_config();
-        let mut app = make_test_app(&config);
-        app.view.status_message = Some("some message".to_string());
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        );
+        app.set_status_message(StatusKind::Info, "some message");
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let key = press(KeyCode::Char('j'), KeyModifiers::NONE);
@@ -1032,6 +1097,10 @@ checks:
         assert!(
             app.view.status_message.is_none(),
             "non-quit key clears the message"
+        );
+        assert_eq!(
+            app.view.selected_check, 1,
+            "key still acts while dismissing the message"
         );
     }
 

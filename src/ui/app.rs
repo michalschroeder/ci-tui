@@ -15,7 +15,7 @@ use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus, RunnerEvent};
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum number of samples to keep in history for sparklines
 const MAX_HISTORY_SAMPLES: usize = 60;
@@ -25,6 +25,9 @@ const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 
 /// Default assumed output-panel height before first render measures it
 const DEFAULT_OUTPUT_VISIBLE_LINES: usize = 20;
+
+/// How long a status message stays visible before auto-dismissing
+pub const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(3);
 
 /// Filter for which checks to display in the UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +105,26 @@ impl Default for SysStats {
     }
 }
 
+/// How a status message leaves the footer (any keypress also dismisses it)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// Auto-dismisses after `STATUS_MESSAGE_TTL`
+    Info,
+    /// Stays until a keypress so failures are not missed
+    Error,
+    /// Stays until the work it describes finishes
+    Progress,
+}
+
+/// Footer status message
+#[derive(Debug, Clone)]
+pub struct StatusMessage {
+    pub text: String,
+    pub kind: StatusKind,
+    /// Auto-dismiss deadline (`Info` only)
+    pub expires_at: Option<Instant>,
+}
+
 /// UI view state: selection, scrolling, filtering, toggles, status line
 #[derive(Debug)]
 pub struct ViewState {
@@ -115,8 +138,8 @@ pub struct ViewState {
     pub status_filter: StatusFilter,
     /// Whether to show full command in output panel
     pub show_full_command: bool,
-    /// Status message shown to user (clears on next keypress)
-    pub status_message: Option<String>,
+    /// Status message shown in the footer
+    pub status_message: Option<StatusMessage>,
     /// First visible row of the checks list (kept so the list scrolls only
     /// when the selection leaves the window)
     pub checks_list_offset: usize,
@@ -149,6 +172,8 @@ pub struct RunState {
     pub finished_at: Option<Instant>,
     /// Currently running pre-command index
     pub current_pre_command: Option<usize>,
+    /// Retry-all git refresh in flight (blocks a second 'R')
+    pub refresh_pending: bool,
 }
 
 impl RunState {
@@ -160,6 +185,7 @@ impl RunState {
             started_at: Some(Instant::now()),
             finished_at: None,
             current_pre_command: None,
+            refresh_pending: false,
         }
     }
 }
@@ -452,7 +478,7 @@ impl App {
 
     /// Check if retry-all can start (blocked while fixes edit files)
     pub fn can_retry_all(&self) -> bool {
-        !self.fix.running && !self.fix.all_running
+        !self.fix.running && !self.fix.all_running && !self.run.refresh_pending
     }
 
     /// Reset a check's result to Running and clear previous output/timing
@@ -490,9 +516,14 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Set (or clear) the status message shown in the footer
-    pub fn set_status_message(&mut self, msg: Option<String>) {
-        self.view.status_message = msg;
+    /// Show a status message in the footer
+    pub fn set_status_message(&mut self, kind: StatusKind, text: impl Into<String>) {
+        let expires_at = (kind == StatusKind::Info).then(|| Instant::now() + STATUS_MESSAGE_TTL);
+        self.view.status_message = Some(StatusMessage {
+            text: text.into(),
+            kind,
+            expires_at,
+        });
         self.needs_redraw = true;
     }
 
@@ -500,6 +531,30 @@ impl App {
     pub fn clear_status_message(&mut self) {
         self.view.status_message = None;
         self.needs_redraw = true;
+    }
+
+    /// When the current status message auto-dismisses, if ever
+    pub fn status_message_deadline(&self) -> Option<Instant> {
+        self.view.status_message.as_ref()?.expires_at
+    }
+
+    /// Clear the status message once its deadline has passed
+    pub fn expire_status_message(&mut self, now: Instant) {
+        if self.status_message_deadline().is_some_and(|d| now >= d) {
+            self.clear_status_message();
+        }
+    }
+
+    /// Clear a progress message once its work is done
+    pub fn finish_progress(&mut self) {
+        if self
+            .view
+            .status_message
+            .as_ref()
+            .is_some_and(|m| m.kind == StatusKind::Progress)
+        {
+            self.clear_status_message();
+        }
     }
 
     /// Update system stats from background task data
@@ -590,7 +645,6 @@ impl App {
             RunnerEvent::AllFinished => {
                 self.run.all_finished = true;
                 self.run.current_group = None;
-                self.view.status_message = None;
                 self.run.finished_at = Some(Instant::now());
             }
         }
@@ -1584,6 +1638,15 @@ checks:
     }
 
     #[test]
+    fn test_can_retry_all_disabled_during_refresh() {
+        let mut app = make_app();
+        app.run.refresh_pending = true;
+        assert!(!app.can_retry_all());
+        app.reset_for_retry(app.changed_files.clone(), app.checks.clone());
+        assert!(app.can_retry_all(), "reset clears pending refresh");
+    }
+
+    #[test]
     fn test_fix_jobs_carry_check() {
         let mut app = make_app();
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
@@ -1741,10 +1804,49 @@ checks:
         #[test]
         fn test_set_and_clear_status_message() {
             let mut app = make_app();
-            app.set_status_message(Some("Test message".to_string()));
-            assert_eq!(app.view.status_message, Some("Test message".to_string()));
+            app.set_status_message(StatusKind::Info, "Test message");
+            assert_eq!(
+                app.view.status_message.as_ref().map(|m| m.text.as_str()),
+                Some("Test message")
+            );
             app.clear_status_message();
             assert!(app.view.status_message.is_none());
+        }
+
+        #[test]
+        fn test_status_message_expires_after_ttl() {
+            let mut app = make_app();
+            app.set_status_message(StatusKind::Info, "Test message");
+            let deadline = app.status_message_deadline().expect("info expires");
+
+            app.expire_status_message(deadline - Duration::from_millis(1));
+            assert!(app.view.status_message.is_some(), "not yet expired");
+
+            app.expire_status_message(deadline);
+            assert!(app.view.status_message.is_none(), "expired at deadline");
+        }
+
+        #[test]
+        fn test_error_and_progress_messages_do_not_expire() {
+            let mut app = make_app();
+            for kind in [StatusKind::Error, StatusKind::Progress] {
+                app.set_status_message(kind, "sticky");
+                assert!(app.status_message_deadline().is_none());
+                app.expire_status_message(Instant::now() + STATUS_MESSAGE_TTL * 10);
+                assert!(app.view.status_message.is_some(), "{:?} must stay", kind);
+            }
+        }
+
+        #[test]
+        fn test_finish_progress_clears_only_progress() {
+            let mut app = make_app();
+            app.set_status_message(StatusKind::Error, "failed");
+            app.finish_progress();
+            assert!(app.view.status_message.is_some(), "error survives");
+
+            app.set_status_message(StatusKind::Progress, "working...");
+            app.finish_progress();
+            assert!(app.view.status_message.is_none(), "progress cleared");
         }
     }
 }
