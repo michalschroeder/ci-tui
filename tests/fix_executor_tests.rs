@@ -16,7 +16,7 @@ async fn returns_ok_on_success() {
         stdout: String::new(),
         stderr: String::new(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let result =
         run_fix_command_with_executor("cargo fmt", "fmt", Path::new("/app"), &cfg, None, &mock)
             .await;
@@ -32,7 +32,7 @@ async fn reports_stderr_when_present() {
         stdout: "stdout-noise".into(),
         stderr: "stderr-wins".into(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let err =
         run_fix_command_with_executor("cargo fmt", "fmt", Path::new("/app"), &cfg, None, &mock)
             .await
@@ -49,7 +49,7 @@ async fn falls_back_to_stdout_when_stderr_empty() {
         stdout: "stdout-only".into(),
         stderr: String::new(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let err =
         run_fix_command_with_executor("cargo fmt", "fmt", Path::new("/app"), &cfg, None, &mock)
             .await
@@ -66,7 +66,7 @@ async fn falls_back_to_formatted_message_when_both_empty() {
         stdout: String::new(),
         stderr: String::new(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let err =
         run_fix_command_with_executor("cargo fmt", "fmt", Path::new("/app"), &cfg, None, &mock)
             .await
@@ -87,7 +87,7 @@ async fn uses_docker_run_when_container_not_running() {
             stdout: String::new(),
             stderr: String::new(),
         });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     run_fix_command_with_executor("cargo fmt", "fmt", Path::new("/app"), &cfg, None, &mock)
         .await
         .unwrap();

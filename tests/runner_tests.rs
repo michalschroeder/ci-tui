@@ -7,7 +7,7 @@
 //! - CheckRunner orchestration
 
 use ci_tui::runner::{
-    build_docker_exec_command, build_docker_run_command, execute_docker_command_with_executor,
+    build_docker_exec_command, build_docker_run_command, execute_command_with_executor,
     filter_docker_warnings, CheckResult, CheckStatus,
 };
 use rstest::rstest;
@@ -314,9 +314,9 @@ mod execute_docker_command_tests {
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let result = execute_docker_command_with_executor(
+        let result = execute_command_with_executor(
             "test-check".to_string(),
             "cargo test",
             Path::new("/app"),
@@ -346,9 +346,9 @@ mod execute_docker_command_tests {
                 stderr: "error: test failed\n".to_string(),
             });
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let result = execute_docker_command_with_executor(
+        let result = execute_command_with_executor(
             "test-check".to_string(),
             "cargo test",
             Path::new("/app"),
@@ -380,9 +380,9 @@ mod execute_docker_command_tests {
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let _result = execute_docker_command_with_executor(
+        let _result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
@@ -411,9 +411,9 @@ mod execute_docker_command_tests {
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let _result = execute_docker_command_with_executor(
+        let _result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
@@ -429,9 +429,9 @@ mod execute_docker_command_tests {
     async fn captures_duration() {
         let mock = mock_executor_success("output");
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let result = execute_docker_command_with_executor(
+        let result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
@@ -458,9 +458,9 @@ mod execute_docker_command_tests {
                 .to_string(),
         });
 
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_docker_target("test-image:latest");
         let env = HashMap::new();
-        let result = execute_docker_command_with_executor(
+        let result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
@@ -954,7 +954,7 @@ mod run_single_check_with_executor_tests {
             });
 
         let check = super::common::make_exec_check("c1", "echo hi", None);
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let result = run_single_check_with_executor(
             &check,
@@ -986,7 +986,7 @@ mod run_single_check_with_executor_tests {
             });
 
         let check = super::common::make_exec_check("c1", "ls", Some("override-container"));
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let _ = run_single_check_with_executor(
             &check,
@@ -1017,7 +1017,7 @@ mod run_single_check_with_executor_tests {
         let mut check = super::common::make_exec_check("c1", "env", None);
         check.definition.env.insert("FOO".into(), "check".into());
 
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let mut env = HashMap::new();
         env.insert("FOO".into(), "global".into());
         env.insert("BAR".into(), "global".into());
@@ -1037,7 +1037,7 @@ mod run_single_check_with_executor_tests {
         });
 
         let check = super::common::make_exec_check("c1", "false", None);
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let result =
             run_single_check_with_executor(&check, Path::new("/app"), "c", &cfg, &env, &mock).await;
@@ -1065,7 +1065,7 @@ mod run_check_with_command_with_executor_tests {
             });
 
         let c = super::common::make_exec_check("phpunit", "phpunit a.rs", None);
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let _ = run_check_with_command_with_executor(
             &c,
@@ -1095,7 +1095,7 @@ mod run_fix_command_with_executor_tests {
             stderr: String::new(),
         });
 
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let result = run_fix_command_with_executor(
             "cargo fmt",
@@ -1122,7 +1122,7 @@ mod run_fix_command_with_executor_tests {
                 stderr: String::new(),
             });
 
-        let cfg = super::common::test_docker_config("img:latest");
+        let cfg = super::common::test_docker_target("img:latest");
         let env = HashMap::new();
         let _ = run_fix_command_with_executor(
             "cargo fmt",

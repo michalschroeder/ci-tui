@@ -23,7 +23,7 @@ pub mod dashboard;
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
-use crate::runner::{run_check_with_command, CheckResult, CheckRunner, RunnerEvent};
+use crate::runner::{run_check_with_command, CheckResult, CheckRunner, ExecTarget, RunnerEvent};
 use anyhow::Result;
 use app::App;
 use crossterm::{
@@ -198,7 +198,9 @@ struct TaskCtx {
     project_root: Arc<PathBuf>,
     /// Config (docker settings, env, ignore patterns, check rules)
     config: Arc<CiConfig>,
-    /// Default container name for docker exec/run commands
+    /// Where commands execute (docker or local host)
+    target: ExecTarget,
+    /// Default container name for docker exec/run commands (empty in local mode)
     container_name: Arc<str>,
 }
 
@@ -210,8 +212,8 @@ impl TaskCtx {
             command,
             &self.project_root,
             &self.container_name,
-            self.config.docker(),
-            &self.config.docker().env,
+            &self.target,
+            self.target.env(),
         )
         .await
     }
@@ -647,10 +649,12 @@ pub async fn run(
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
+    let target = ExecTarget::from_config(&config);
     let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
         config: Arc::new(config.clone()),
-        container_name: config.docker().container_name().into(),
+        container_name: target.default_container().into(),
+        target,
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -821,6 +825,7 @@ checks:
         Tasks::new(TaskCtx {
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
+            target: ExecTarget::from_config(config),
             container_name: "app".into(),
         })
     }

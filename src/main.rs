@@ -80,9 +80,17 @@ async fn main() -> Result<()> {
     };
     changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
 
+    // Local mode runs commands from the repo root so repo-relative {files}
+    // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
+    let exec_root = if config.runner == config::RunnerMode::Local {
+        git::repo_root(&project_root).unwrap_or_else(|| project_root.clone())
+    } else {
+        project_root.clone()
+    };
+
     // Run fix mode if requested
     if cli.fix {
-        return fix::run(config, changed_files, project_root).await;
+        return fix::run(config, changed_files, exec_root).await;
     }
 
     // Determine which checks to run
@@ -90,9 +98,9 @@ async fn main() -> Result<()> {
 
     if simple_mode {
         // Run in simple console mode
-        simple::run(config, changed_files, checks_to_run, project_root).await
+        simple::run(config, changed_files, checks_to_run, exec_root).await
     } else {
         // Run the TUI
-        ui::run(config, changed_files, checks_to_run, project_root).await
+        ui::run(config, changed_files, checks_to_run, exec_root).await
     }
 }

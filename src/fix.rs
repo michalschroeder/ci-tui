@@ -14,8 +14,9 @@
 //! - `0`: All fix commands passed
 //! - `1`: One or more fix commands failed
 
-use crate::config::{CiConfig, DockerConfig};
+use crate::config::CiConfig;
 use crate::git::ChangedFiles;
+use crate::runner::ExecTarget;
 use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -39,7 +40,7 @@ pub async fn run_with_executor(
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
-    let docker_config = config.docker();
+    let target = ExecTarget::from_config(&config);
 
     let mut fix_count = 0;
     let mut pass_count = 0;
@@ -54,7 +55,7 @@ pub async fn run_with_executor(
             display_name,
             &changed_files,
             &project_root,
-            docker_config,
+            &target,
             executor,
         )
         .await;
@@ -138,7 +139,7 @@ async fn run_group_fixes_with_executor(
     display_name: &str,
     changed_files: &ChangedFiles,
     project_root: &Path,
-    docker_config: &DockerConfig,
+    target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> (usize, usize, usize, bool) {
     let mut fix_count = 0;
@@ -166,7 +167,7 @@ async fn run_group_fixes_with_executor(
             &resolved_command,
             check_id,
             project_root,
-            docker_config,
+            target,
             check.container.as_deref(),
             executor,
         )
@@ -271,28 +272,17 @@ pub async fn run_fix_command_with_executor(
     command: &str,
     check_id: &str,
     project_root: &Path,
-    docker_config: &DockerConfig,
+    target: &ExecTarget,
     check_container: Option<&str>,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<u64> {
     let start = Instant::now();
 
-    let default_container = docker_config.container_name();
+    let default_container = target.default_container();
     let container_name = check_container.unwrap_or(&default_container);
 
-    let env = std::collections::HashMap::new();
-    let docker_cmd = if executor.is_container_running(container_name) {
-        crate::runner::build_docker_exec_command(
-            container_name,
-            &env,
-            command,
-            &docker_config.shell,
-        )
-    } else {
-        crate::runner::build_docker_run_command(docker_config, &env, command)
-    };
-
-    let output = executor.execute(&docker_cmd, project_root).await;
+    let full_cmd = target.build_command(container_name, target.env(), command, executor);
+    let output = executor.execute(&full_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if !output.success {
@@ -484,6 +474,32 @@ mod tests {
             let cf = changed(&["README.md"]);
             let out = resolve_check_fix(&cfg, &check, &cf).unwrap();
             assert_eq!(out, "fmt-all");
+        }
+    }
+
+    mod env_tests {
+        use super::*;
+        use crate::runner::{CommandOutput, MockCommandExecutor};
+
+        #[tokio::test]
+        async fn fix_command_includes_global_env() {
+            let mut docker = cfg_with_pattern("rust", r"\.rs$").docker().clone();
+            docker.env.insert("APP_ENV".into(), "ci".into());
+            let target = ExecTarget::Docker(docker);
+            let mut mock = MockCommandExecutor::new();
+            mock.expect_is_container_running().returning(|_| true);
+            mock.expect_execute()
+                .withf(|cmd, _| cmd.contains("-e APP_ENV='ci'"))
+                .times(1)
+                .returning(|_, _| CommandOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            let res =
+                run_fix_command_with_executor("fmt", "fmt", Path::new("."), &target, None, &mock)
+                    .await;
+            assert!(res.is_ok());
         }
     }
 

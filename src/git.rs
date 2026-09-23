@@ -18,7 +18,7 @@ use crate::config::GitConfig;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Trait for executing git commands.
@@ -291,9 +291,41 @@ pub fn short_commit_with_executor(
     Ok(output.trim().to_string())
 }
 
+/// Top-level directory of the git repo containing `cwd`; `None` outside a repo.
+pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
+    repo_root_with_executor(cwd, &RealGitExecutor)
+}
+
+/// Repo root using a custom executor (testable version). See [`repo_root`].
+pub fn repo_root_with_executor(cwd: &Path, executor: &impl GitExecutor) -> Option<PathBuf> {
+    let args = vec!["rev-parse".to_string(), "--show-toplevel".to_string()];
+    let output = executor.run_command(cwd, &args).ok()?;
+    let root = output.trim();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_root_trims_show_toplevel_output() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args == ["rev-parse", "--show-toplevel"])
+            .times(1)
+            .returning(|_, _| Ok("/home/u/repo\n".to_string()));
+        let root = repo_root_with_executor(Path::new("/home/u/repo/src"), &mock);
+        assert_eq!(root, Some(PathBuf::from("/home/u/repo")));
+    }
+
+    #[test]
+    fn repo_root_none_on_git_error() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .returning(|_, _| Err(anyhow::anyhow!("not a git repository")));
+        assert_eq!(repo_root_with_executor(Path::new("/tmp"), &mock), None);
+    }
 
     fn make_changed_files(files: Vec<&str>) -> ChangedFiles {
         ChangedFiles {

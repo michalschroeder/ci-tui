@@ -145,6 +145,12 @@ pub fn test_docker_config(image: &str) -> DockerConfig {
     }
 }
 
+/// `ExecTarget::Docker` around [`test_docker_config`], for fns taking a target.
+#[allow(dead_code)]
+pub fn test_docker_target(image: &str) -> ci_tui::runner::ExecTarget {
+    ci_tui::runner::ExecTarget::Docker(test_docker_config(image))
+}
+
 /// CheckToRun whose resolved_command equals `command`, for executor tests.
 /// `container` sets the per-check container override.
 #[allow(dead_code)]
