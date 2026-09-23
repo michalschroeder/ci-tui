@@ -741,6 +741,12 @@ pub async fn run(
     // Print summary
     print_summary(&app);
 
+    // Non-zero exit on failure so `ci-tui && git push` is safe (terminal already restored)
+    let code = app.exit_code();
+    if code != 0 {
+        std::process::exit(code);
+    }
+
     Ok(())
 }
 

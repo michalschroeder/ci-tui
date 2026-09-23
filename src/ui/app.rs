@@ -751,6 +751,11 @@ impl App {
         counts
     }
 
+    /// Process exit code at quit: 1 if any check failed, else 0 (matches simple mode)
+    pub fn exit_code(&self) -> i32 {
+        i32::from(self.count_by_status().failed > 0)
+    }
+
     /// Groups that have checks, in config (YAML) order
     pub fn groups(&self) -> Vec<&str> {
         // Get groups that have checks, in config order (IndexMap preserves YAML order)
@@ -1074,6 +1079,24 @@ checks:
                 on_demand: 1
             }
         );
+    }
+
+    #[test]
+    fn test_exit_code_zero_when_all_passed() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Passed;
+
+        assert_eq!(app.exit_code(), 0);
+    }
+
+    #[test]
+    fn test_exit_code_one_when_any_failed() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        assert_eq!(app.exit_code(), 1);
     }
 
     #[test]

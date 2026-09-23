@@ -137,6 +137,8 @@ ci-tui --files src/a.rs    # bypass git detection
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 
+Both TUI and `--simple` exit `1` if any check failed, so `ci-tui && git push` is safe. In the TUI, checks still pending when you quit don't count as failures.
+
 Simple mode is auto-enabled when stdout is not a terminal, so `ci-tui` works as a CI runner. This repo dogfoods it: its own [`ci-tui.yaml`](ci-tui.yaml) runs fmt, clippy and tests in the dev image (`make build-dev`, then `HOST_PWD=$PWD ci-tui`).
 
 ## How check selection works
