@@ -20,7 +20,7 @@
 //! }
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::Deserialize;
@@ -343,6 +343,9 @@ pub struct PreCommand {
     pub env: std::collections::HashMap<String, String>,
 }
 
+/// Config schema version this build understands.
+pub const SUPPORTED_VERSION: u32 = 2;
+
 /// Compile every entry in `file_patterns` into a Regex, erroring on the first invalid pattern.
 fn compile_file_patterns(
     patterns: &HashMap<String, FilePattern>,
@@ -408,7 +411,8 @@ impl CiConfig {
         }
     }
 
-    /// Compile and cache every regex in `file_patterns` and `ignore_patterns`.
+    /// Check the schema version, then compile and cache every regex in
+    /// `file_patterns` and `ignore_patterns`.
     ///
     /// Called from [`load_config`] so that invalid regexes surface at startup instead
     /// of being silently dropped on first use.
@@ -417,6 +421,12 @@ impl CiConfig {
     /// second call never replaces already-cached patterns (even if `file_patterns`
     /// was mutated in between). Call at most once per config instance.
     pub fn validate_and_compile(&self) -> Result<()> {
+        if self.version != SUPPORTED_VERSION {
+            bail!(
+                "unsupported config version {} (expected {SUPPORTED_VERSION})",
+                self.version
+            );
+        }
         let _ = self
             .compiled_file_patterns
             .set(compile_file_patterns(&self.file_patterns)?);
@@ -1407,6 +1417,19 @@ checks: {}
                 msg.contains("file_patterns.foo") && msg.contains("[invalid"),
                 "error chain should mention offending key + pattern: {msg}"
             );
+        }
+
+        // Unsupported schema version is rejected at load
+        #[rstest]
+        #[case(1)]
+        #[case(99)]
+        fn test_validate_rejects_unsupported_version(#[case] version: u32) {
+            let yaml = format!(
+                "version: {version}\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
+            );
+            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let msg = config.validate_and_compile().unwrap_err().to_string();
+            assert!(msg.contains("unsupported config version"), "got: {msg}");
         }
 
         // load_config end-to-end: invalid ignore_patterns regex fails
