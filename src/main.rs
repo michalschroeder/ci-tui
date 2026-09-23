@@ -16,11 +16,16 @@ fn git_detect_changes_or_exit(
     match result {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error: {e}");
-            eprintln!(
-                "\nNo base ref could be resolved against the current repository. \
-                If this is intentional, bypass git with --files <paths...>."
-            );
+            eprintln!("Error: {e:#}");
+            match base_override {
+                Some(base_ref) => eprintln!(
+                    "\nCheck that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."
+                ),
+                None => eprintln!(
+                    "\nNo base ref could be resolved against the current repository. \
+                    If this is intentional, bypass git with --files <paths...>."
+                ),
+            }
             std::process::exit(1);
         }
     }

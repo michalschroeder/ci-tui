@@ -57,9 +57,32 @@ mod get_changed_files {
         let result = get_changed_files_with_executor(Path::new("/tmp"), "invalid-ref", &mock);
 
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
+        let err_msg = format!("{:#}", result.unwrap_err());
         assert!(err_msg.contains("bad revision"));
         assert!(err_msg.contains("invalid-ref"), "error should name the ref");
+    }
+
+    #[test]
+    fn committed_diff_guards_ref_against_options_and_paths() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && args.ends_with(&[
+                        "--end-of-options".to_string(),
+                        "--cached".to_string(),
+                        "HEAD".to_string(),
+                        "--".to_string(),
+                    ])
+            })
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        get_changed_files_with_executor(Path::new("/tmp"), "--cached", &mock).unwrap();
     }
 
     #[rstest]

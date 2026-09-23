@@ -37,13 +37,10 @@ pub struct Cli {
     pub base: Option<String>,
 }
 
-/// `--base` value parser. The ref is passed to `git diff` positionally, so a
-/// leading `-` (`--base=--cached`) would be read as a git option.
+/// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
 fn parse_base_arg(value: &str) -> Result<String, String> {
-    if value.starts_with('-') {
-        return Err(format!(
-            "`{value}` is not a git ref (must not start with `-`)"
-        ));
+    if value.trim().is_empty() {
+        return Err("git ref must not be empty".to_string());
     }
     Ok(value.to_string())
 }
@@ -171,9 +168,11 @@ mod tests {
         assert!(Cli::try_parse_checked(["ci-tui"]).unwrap().base.is_none());
     }
 
-    #[test]
-    fn test_base_rejects_option_like_ref() {
-        let err = Cli::try_parse_checked(["ci-tui", "--base=--cached"])
+    #[rstest::rstest]
+    #[case::empty("--base=")]
+    #[case::whitespace("--base=  ")]
+    fn test_base_rejects_empty_ref(#[case] arg: &str) {
+        let err = Cli::try_parse_checked(["ci-tui", arg])
             .err()
             .expect("expected error");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);

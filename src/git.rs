@@ -58,7 +58,7 @@ impl GitExecutor for RealGitExecutor {
         if !output.status.success() {
             anyhow::bail!(
                 "git command failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&output.stderr).trim_end()
             );
         }
 
@@ -183,9 +183,8 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    // Flattened (not `.context`) so the git error survives `to_string()`.
     let committed = run_committed_diff(project_root, base_ref, executor)
-        .map_err(|e| anyhow::anyhow!("could not resolve git base ref `{base_ref}`: {e:#}"))?;
+        .with_context(|| format!("could not resolve git base ref `{base_ref}`"))?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {
@@ -204,8 +203,12 @@ fn run_committed_diff(
         "--name-only".to_string(),
         "--diff-filter=ACMR".to_string(),
         "--merge-base".to_string(),
+        // Refs come from config / `--base`: a leading `-` must not parse as an
+        // option, and `--` keeps a ref that is also a path unambiguous.
+        "--end-of-options".to_string(),
         base_ref.to_string(),
         "HEAD".to_string(),
+        "--".to_string(),
     ];
     executor.run_command(project_root, &args)
 }
