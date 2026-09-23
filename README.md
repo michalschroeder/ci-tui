@@ -24,6 +24,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
+- `runner: local` runs checks directly on the host when you don't use Docker
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 
 ## Install

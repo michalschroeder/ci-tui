@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers, reporting progress via lifecycle events.
+CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers (or on the host with `runner: local`), reporting progress via lifecycle events.
 
 ## Code Validation (REQUIRED)
 
@@ -131,7 +131,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 - **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching
 - **checks/**: `CheckToRun` struct (`mod.rs`), `determine_checks()` logic (`determine.rs`), `group_checks()` for execution grouping
-- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, Docker command execution, `RunnerEvent` variants
+- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
@@ -144,8 +144,10 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 ## Config File Structure
 
 The tool expects a YAML config with:
-- `docker.project_dir`: Path for `docker compose --project-directory`
+- `runner`: `docker` (default) or `local` — where checks execute
+- `docker.project_dir`: Path for `docker compose --project-directory` (required in docker mode)
 - `docker.service`: Default container service name
+- `local.shell` / `local.env`: Shell and env vars for `runner: local` (docker section optional/ignored in this mode)
 - `git.base_branch` / `git.fallback_branch`: For change detection
 - `file_patterns`: Named regex patterns with optional colors
 - `checks`: Groups containing check definitions with triggers

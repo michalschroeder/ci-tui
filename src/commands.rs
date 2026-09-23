@@ -11,6 +11,14 @@ pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
 # Full reference: https://github.com/michalschroeder/ci-tui/blob/master/docs/configuration.md
 version: 2
 
+# Where checks run: docker (default) or local (directly on the host).
+# With `runner: local` the docker section is not needed:
+# runner: local
+# local:
+#   shell: bash
+#   env:
+#     APP_ENV: testing
+
 docker:
   # Directory containing docker-compose.yml (for `docker compose --project-directory`)
   project_dir: .
@@ -97,6 +105,17 @@ mod tests {
         let path = dir.path().join("ci-tui.yaml");
         std::fs::write(&path, TEMPLATE).unwrap();
         validate(&path).expect("init template must always parse");
+    }
+
+    #[test]
+    fn test_template_local_variant_is_valid() {
+        let start = TEMPLATE.find("docker:\n").unwrap();
+        let end = TEMPLATE.find("\ngit:").unwrap();
+        let local = format!("{}runner: local{}", &TEMPLATE[..start], &TEMPLATE[end..]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        std::fs::write(&path, local).unwrap();
+        validate(&path).expect("local-mode template must parse");
     }
 
     #[test]

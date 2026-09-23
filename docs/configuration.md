@@ -35,13 +35,30 @@ file_patterns: {}
 checks: {}
 ```
 
+## Runner Mode
+
+```yaml
+# Optional: how checks execute (default: docker)
+runner: local
+
+# Settings for runner: local
+local:
+  # Shell for check commands (default: bash)
+  shell: bash
+  # Env vars for all local checks
+  env:
+    APP_ENV: testing
+```
+
+With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory); the `docker` section becomes optional and is ignored. Per-check / pre-command `service` and `container` are rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
+
 ## Docker Configuration
 
-The `docker` section configures how CI-TUI interacts with Docker containers.
+The `docker` section configures how CI-TUI interacts with Docker containers. Required in docker mode (the default); optional and ignored when `runner: local` (see [Runner Mode](#runner-mode)).
 
 ```yaml
 docker:
-  # Required: Working directory for docker commands
+  # Required in docker mode: Working directory for docker commands
   project_dir: ./infrastructure
 
   # Optional: Default Docker service name (default: "app")
@@ -70,7 +87,7 @@ docker:
 
 ### Field Details
 
-**`project_dir`** (required)
+**`project_dir`** (required in docker mode, the default)
 - Path used for `docker compose --project-directory`
 - Can be absolute or relative to current directory
 - Used to derive container name if not explicit
