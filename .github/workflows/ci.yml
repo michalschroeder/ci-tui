@@ -44,7 +44,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run unit tests
-        run: cargo nextest run --lib --bins --profile ci
+        run: cargo nextest run --lib --profile ci
 
       - name: Run doctests
         run: cargo test --doc

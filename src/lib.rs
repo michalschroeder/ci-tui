@@ -6,6 +6,7 @@
 //! # Modules
 //!
 //! - `checks`: Logic for determining which checks to run
+//! - `cli`: Command-line argument parsing
 //! - `commands`: `init` / `validate` subcommands (scaffold and check config)
 //! - `config`: Configuration loading and parsing from YAML
 //! - `git`: Git operations for detecting changed files
@@ -15,6 +16,7 @@
 //! - `ui`: Terminal UI using ratatui
 
 pub mod checks;
+pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod fix;

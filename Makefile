@@ -13,7 +13,7 @@ help: ## Show this help
 # === Development (runs in Docker using dev image) ===
 
 test: ## Run tests with nextest
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo nextest run --lib --bins --status-level all
+	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo nextest run --lib --status-level all
 	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo nextest run --features test --test '*' --status-level all
 
 fmt: ## Format code
