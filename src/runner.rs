@@ -110,20 +110,29 @@ pub fn build_docker_exec_command(
     command: &str,
     shell: &str,
 ) -> String {
-    let env_flags: String = env
-        .iter()
-        .filter(|(k, _)| is_valid_env_key(k))
-        .map(|(k, v)| format!("-e {}='{}' ", k, v.replace('\'', "'\\''")))
-        .collect();
+    let env_flags: String = env_assignments(env).map(|a| format!("-e {a} ")).collect();
 
     // Single format path: env_flags is either empty or ends with a trailing space.
     format!(
-        "docker exec {}{} {} -c '{}'",
+        "docker exec {}{} {} -c {}",
         env_flags,
         container_name,
         shell,
-        command.replace('\'', "'\\''")
+        single_quote(command)
     )
+}
+
+/// `KEY='VALUE'` for each valid env key; invalid keys are skipped (unquotable
+/// → shell injection). Values are single-quoted with `'` escaped.
+fn env_assignments(env: &HashMap<String, String>) -> impl Iterator<Item = String> + '_ {
+    env.iter()
+        .filter(|(k, _)| is_valid_env_key(k))
+        .map(|(k, v)| format!("{k}={}", single_quote(v)))
+}
+
+/// Always single-quote `s` for POSIX shells (`'` escaped as `'\''`).
+fn single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Build a docker run command with environment variables
@@ -132,12 +141,9 @@ pub fn build_docker_run_command(
     env: &HashMap<String, String>,
     command: &str,
 ) -> String {
-    // Build env flags for docker run (-e KEY='VALUE' for each); invalid keys
-    // are skipped (unquotable, see build_docker_exec_command).
-    let env_flags: String = env
-        .iter()
-        .filter(|(k, _)| is_valid_env_key(k))
-        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
+    // Build env flags for docker run (-e KEY='VALUE' for each)
+    let env_flags: String = env_assignments(env)
+        .map(|a| format!("-e {a}"))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -166,7 +172,7 @@ pub fn build_docker_run_command(
 
     parts.push(format!("-w {}", work_dir));
     parts.push(image_name);
-    parts.push(format!("{} -c '{}'", shell, command.replace('\'', "'\\''")));
+    parts.push(format!("{} -c {}", shell, single_quote(command)));
 
     parts.join(" ")
 }
@@ -846,22 +852,13 @@ pub fn build_local_command(
     env: &HashMap<String, String>,
     command: &str,
 ) -> String {
-    let env_flags: String = env
-        .iter()
-        .filter(|(k, _)| is_valid_env_key(k))
-        .map(|(k, v)| format!("{}='{}' ", k, v.replace('\'', "'\\''")))
-        .collect();
+    let env_flags: String = env_assignments(env).map(|a| format!("{a} ")).collect();
     let prefix = if env_flags.is_empty() {
         String::new()
     } else {
         format!("env {env_flags}")
     };
-    format!(
-        "{}{} -c '{}'",
-        prefix,
-        local.shell,
-        command.replace('\'', "'\\''")
-    )
+    format!("{}{} -c {}", prefix, local.shell, single_quote(command))
 }
 
 #[cfg(test)]
