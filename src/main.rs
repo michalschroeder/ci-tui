@@ -7,8 +7,13 @@ use std::io::IsTerminal;
 fn git_detect_changes_or_exit(
     project_root: &std::path::Path,
     git_config: &ci_tui::config::GitConfig,
+    base_override: Option<&str>,
 ) -> git::ChangedFiles {
-    match git::detect_changes(project_root, git_config) {
+    let result = match base_override {
+        Some(base_ref) => git::get_changed_files(project_root, base_ref),
+        None => git::detect_changes(project_root, git_config),
+    };
+    match result {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -100,7 +105,7 @@ async fn main() -> Result<()> {
     // Get changed files: from --files arg or git detection. In local mode
     // `--files` (cwd-relative) are rewritten repo-relative to match git paths.
     let mut changed_files = if cli.files.is_empty() {
-        git_detect_changes_or_exit(&project_root, &config.git)
+        git_detect_changes_or_exit(&project_root, &config.git, cli.base.as_deref())
     } else {
         git::ChangedFiles {
             files: cli

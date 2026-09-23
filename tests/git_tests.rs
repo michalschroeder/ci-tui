@@ -59,6 +59,7 @@ mod get_changed_files {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("bad revision"));
+        assert!(err_msg.contains("invalid-ref"), "error should name the ref");
     }
 
     #[rstest]
