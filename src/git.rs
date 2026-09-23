@@ -166,36 +166,6 @@ pub fn detect_changes_with_executor(
     })
 }
 
-/// Detect changed files against `base_override` (the `--base` flag) when given,
-/// else via the config fallback chain ([`detect_changes`]).
-///
-/// # Errors
-///
-/// Returns an error naming the ref if `base_override` does not resolve (no
-/// fallback), or any [`detect_changes`] error.
-pub fn resolve_changes(
-    project_root: &Path,
-    git_config: &GitConfig,
-    base_override: Option<&str>,
-) -> Result<ChangedFiles> {
-    resolve_changes_with_executor(project_root, git_config, base_override, &RealGitExecutor)
-}
-
-/// Resolve changed files using a custom executor (testable version).
-///
-/// See [`resolve_changes`] for details.
-pub fn resolve_changes_with_executor(
-    project_root: &Path,
-    git_config: &GitConfig,
-    base_override: Option<&str>,
-    executor: &impl GitExecutor,
-) -> Result<ChangedFiles> {
-    match base_override {
-        Some(base_ref) => get_changed_files_with_executor(project_root, base_ref, executor),
-        None => detect_changes_with_executor(project_root, git_config, executor),
-    }
-}
-
 /// Get list of files changed compared to a specific git reference.
 ///
 /// # Errors

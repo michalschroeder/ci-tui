@@ -144,7 +144,9 @@ mod tests {
     #[case::simple_before_init(&["ci-tui", "-s", "init"])]
     #[case::files_before_init(&["ci-tui", "--files", "a.rs", "-s", "init"])]
     #[case::base_before_validate(&["ci-tui", "--base", "v1.0", "validate"])]
-    fn test_run_flags_conflict_with_subcommands(#[case] args: &[&str]) {
+    #[case::base_then_files(&["ci-tui", "--base", "main", "--files", "a.rs"])]
+    #[case::files_then_base(&["ci-tui", "-f", "a.rs", "--base", "main"])]
+    fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
             .expect("expected conflict");
@@ -156,16 +158,6 @@ mod tests {
         let cli = Cli::try_parse_checked(["ci-tui", "--base", "v1.0"]).unwrap();
         assert_eq!(cli.base.as_deref(), Some("v1.0"));
         assert!(Cli::try_parse_checked(["ci-tui"]).unwrap().base.is_none());
-    }
-
-    #[rstest::rstest]
-    #[case::base_then_files(&["ci-tui", "--base", "main", "--files", "a.rs"])]
-    #[case::files_then_base(&["ci-tui", "-f", "a.rs", "--base", "main"])]
-    fn test_base_conflicts_with_files(#[case] args: &[&str]) {
-        let err = Cli::try_parse_checked(args)
-            .err()
-            .expect("expected conflict");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[rstest::rstest]

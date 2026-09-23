@@ -9,16 +9,18 @@ fn git_detect_changes_or_exit(
     git_config: &ci_tui::config::GitConfig,
     base_override: Option<&str>,
 ) -> git::ChangedFiles {
-    match git::resolve_changes(project_root, git_config, base_override) {
+    let result = match base_override {
+        Some(base_ref) => git::get_changed_files(project_root, base_ref),
+        None => git::detect_changes(project_root, git_config),
+    };
+    match result {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e}");
-            if base_override.is_none() {
-                eprintln!(
-                    "\nNo base ref could be resolved against the current repository. \
-                    If this is intentional, bypass git with --files <paths...>."
-                );
-            }
+            eprintln!(
+                "\nNo base ref could be resolved against the current repository. \
+                If this is intentional, bypass git with --files <paths...>."
+            );
             std::process::exit(1);
         }
     }
