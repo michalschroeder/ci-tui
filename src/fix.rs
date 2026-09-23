@@ -340,6 +340,7 @@ mod tests {
             triggers,
             on_demand: false,
             env: HashMap::new(),
+            timeout: None,
         }
     }
 

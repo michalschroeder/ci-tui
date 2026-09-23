@@ -239,6 +239,7 @@ mod tests {
                 triggers: None,
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
         );
         checks.insert("warmup".to_string(), warmup_group);
@@ -265,6 +266,7 @@ mod tests {
                 }),
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
         );
         fast_group.checks.insert(
@@ -281,6 +283,7 @@ mod tests {
                 }),
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
         );
         checks.insert("fast".to_string(), fast_group);
@@ -307,6 +310,7 @@ mod tests {
                 }),
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
         );
         checks.insert("analysis".to_string(), analysis_group);
@@ -333,6 +337,7 @@ mod tests {
                 }),
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
         );
         checks.insert("tests".to_string(), tests_group);
@@ -382,6 +387,7 @@ mod tests {
                 triggers: None,
                 on_demand: false,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             },
             service: Some("php".to_string()),
             files: CheckFiles::Files(vec![]),
@@ -1323,6 +1329,7 @@ checks:
                 triggers: Some(crate::config::CheckTriggers::default()),
                 on_demand: false,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             }
         }
 

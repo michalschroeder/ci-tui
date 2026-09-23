@@ -79,6 +79,7 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
     match status {
         Some(CheckStatus::Passed) => ("✓", Style::default().fg(Color::Green)),
         Some(CheckStatus::Failed) => ("✗", Style::default().fg(Color::Red)),
+        Some(CheckStatus::TimedOut) => ("⧗", Style::default().fg(Color::Magenta)),
         Some(CheckStatus::Running) => ("●", Style::default().fg(Color::Yellow)),
         Some(CheckStatus::Pending) => ("○", Style::default().fg(Color::DarkGray)),
         Some(CheckStatus::Skipped) => ("⊘", Style::default().fg(Color::DarkGray)),
@@ -830,6 +831,7 @@ fn build_check_output_text(
     let status_line = match result.status {
         CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
         CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
+        CheckStatus::TimedOut => "\x1b[35m⧗ TIMED OUT\x1b[0m",
         CheckStatus::Running => "\x1b[33m◉ RUNNING...\x1b[0m",
         CheckStatus::Pending => "\x1b[90m○ PENDING\x1b[0m",
         CheckStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
@@ -840,7 +842,7 @@ fn build_check_output_text(
     // Show hints
     if result.status == CheckStatus::OnDemand {
         raw_output.push_str("  \x1b[33m← press 't' to run\x1b[0m");
-    } else if result.status == CheckStatus::Failed && check.has_fix() {
+    } else if result.status.is_failure() && check.has_fix() {
         raw_output.push_str("  \x1b[33m← press 'x' to fix\x1b[0m");
     }
     raw_output.push_str("\n\n");
@@ -854,7 +856,7 @@ fn build_check_output_text(
     }
 
     // Stderr for failed checks
-    if result.status == CheckStatus::Failed && !result.error_output.is_empty() {
+    if result.status.is_failure() && !result.error_output.is_empty() {
         raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
         raw_output.push_str(result.error_output.trim_end());
     }

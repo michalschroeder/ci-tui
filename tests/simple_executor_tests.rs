@@ -204,3 +204,19 @@ async fn failure_recorded_in_results() {
     assert_eq!(results[0].status, CheckStatus::Failed);
     assert_eq!(results[0].error_output, "failed");
 }
+
+#[tokio::test]
+async fn hung_check_times_out_with_real_executor() {
+    let mut config = common::configs::ConfigBuilder::new().build();
+    config.runner = ci_tui::config::ExecTarget::Local(ci_tui::config::LocalConfig {
+        shell: "sh".into(),
+        ..Default::default()
+    });
+    let mut check = common::make_exec_check("hang", "sleep 999", None);
+    check.definition.timeout = Some(std::time::Duration::from_secs(1));
+    let executor = Arc::new(ci_tui::runner::RealCommandExecutor);
+    let results = run_with_executor(config, vec![check], "/tmp".into(), executor)
+        .await
+        .unwrap();
+    assert_eq!(results[0].status, CheckStatus::TimedOut);
+}
