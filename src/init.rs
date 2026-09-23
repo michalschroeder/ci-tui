@@ -1,0 +1,124 @@
+//! `ci-tui init` — scaffold a starter configuration file.
+
+use anyhow::{bail, Context, Result};
+use std::path::Path;
+
+pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
+# Full reference: docs/configuration.md
+version: 2
+
+docker:
+  # Directory containing docker-compose.yml (for `docker compose --project-directory`)
+  project_dir: .
+  # Compose service to exec checks in; container name derives as {dir}-{service}-1
+  service: app
+  # Shell inside the container ("/bin/sh" for Alpine images)
+  shell: bash
+  # image: my-dev-image:latest            # for standalone `docker run` fallback
+  # volume_mount: "${HOST_PWD}:/app"      # mount for `docker run`
+  # work_dir: /app                        # workdir inside container
+  # env:
+  #   APP_ENV: testing
+
+git:
+  # Changed files are detected against origin/{base_branch}, then {base_branch},
+  # then {fallback_branch}
+  base_branch: main
+  fallback_branch: HEAD~1
+
+# Named regex patterns; checks reference these by key in triggers
+file_patterns:
+  source:
+    pattern: '\.(rs|php|py|ts|go)$'
+    color: yellow
+
+# Files excluded from change detection
+ignore_patterns:
+  - '\.md$'
+  - '^target/'
+
+# Groups run sequentially (YAML order); checks inside a group with
+# `parallel: true` run concurrently
+checks:
+  quality:
+    name: Code Quality
+    parallel: true
+    checks:
+      lint:
+        name: Lint
+        # {files} expands to the changed files matching the trigger
+        command: echo "replace me — e.g. cargo clippy -- -D warnings" {files}
+        # fix_command: echo "optional autofix — runs with --fix / 'x' key"
+        triggers:
+          file_pattern: source
+"#;
+
+/// Write the starter config to `path`. Refuses to overwrite an existing file.
+pub fn run(path: &Path) -> Result<()> {
+    if path.exists() {
+        bail!("{} already exists — not overwriting", path.display());
+    }
+    std::fs::write(path, TEMPLATE)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    println!("Wrote {}", path.display());
+    println!(
+        "Edit the checks section, then run: ci-tui --config {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Validate a config file: parses + compiles patterns via `load_config`.
+pub fn validate(path: &Path) -> Result<()> {
+    crate::config::load_config(path)
+        .with_context(|| format!("invalid config: {}", path.display()))?;
+    println!("OK: {} is valid", path.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_is_valid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        std::fs::write(&path, TEMPLATE).unwrap();
+        crate::config::load_config(&path).expect("init template must always parse");
+    }
+
+    #[test]
+    fn test_run_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        run(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
+    }
+
+    #[test]
+    fn test_run_refuses_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        std::fs::write(&path, "existing").unwrap();
+        let err = run(&path).unwrap_err().to_string();
+        assert!(err.contains("exists"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+    }
+
+    #[test]
+    fn test_validate_accepts_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        std::fs::write(&path, TEMPLATE).unwrap();
+        validate(&path).unwrap();
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.yaml");
+        std::fs::write(&path, "version: 2\nnot_a_field: true\n").unwrap();
+        assert!(validate(&path).is_err());
+    }
+}
