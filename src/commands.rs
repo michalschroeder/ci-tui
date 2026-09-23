@@ -128,6 +128,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.yaml");
         std::fs::write(&path, "version: 2\nnot_a_field: true\n").unwrap();
-        assert!(validate(&path).is_err());
+        let err = format!("{:#}", validate(&path).unwrap_err());
+        assert!(err.contains("not_a_field"), "got: {err}");
     }
 }
