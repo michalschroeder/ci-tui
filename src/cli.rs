@@ -91,11 +91,15 @@ pub fn missing_config_error() -> clap::Error {
     )
 }
 
-/// Resolve the config path for `init` / `validate`: positional arg, then
-/// `--config`, then `ci-tui.yaml`.
-pub fn resolve_config_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
-    path.or(config)
-        .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
+impl Command {
+    /// Config path for `init` / `validate`: positional arg, then `--config`,
+    /// then `ci-tui.yaml`.
+    pub fn config_path(&self, config: Option<PathBuf>) -> PathBuf {
+        let (Self::Init { path } | Self::Validate { path }) = self;
+        path.clone()
+            .or(config)
+            .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
+    }
 }
 
 /// Config path for running checks: `--config`, else `ci-tui.yaml` in `cwd` if
@@ -124,11 +128,9 @@ mod tests {
     /// Parse `args` and return the resolved `init` / `validate` config path.
     fn resolved(args: &[&str]) -> PathBuf {
         let cli = Cli::try_parse_checked(args).unwrap();
-        let path = match cli.command {
-            Some(Command::Init { path } | Command::Validate { path }) => path,
-            None => panic!("expected a subcommand"),
-        };
-        resolve_config_path(path, cli.config)
+        cli.command
+            .expect("expected a subcommand")
+            .config_path(cli.config)
     }
 
     #[rstest::rstest]
@@ -158,7 +160,7 @@ mod tests {
     #[case::validate_default(&["ci-tui", "validate"], "ci-tui.yaml")]
     #[case::init_default(&["ci-tui", "init"], "ci-tui.yaml")]
     #[case::init_honors_config(&["ci-tui", "-c", "a.yaml", "init"], "a.yaml")]
-    fn test_resolve_config_path(#[case] args: &[&str], #[case] expected: &str) {
+    fn test_subcommand_config_path(#[case] args: &[&str], #[case] expected: &str) {
         assert_eq!(resolved(args), PathBuf::from(expected));
     }
 

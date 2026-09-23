@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ci_tui::cli::{missing_config_error, resolve_config_path, run_config_path, Cli, Command};
+use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
 use ci_tui::{checks, commands, config, fix, git, simple, ui};
 use std::io::IsTerminal;
 
@@ -20,6 +20,26 @@ fn git_detect_changes_or_exit(
     }
 }
 
+/// Run `init` / `validate` and print the outcome.
+fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
+    let path = command.config_path(config);
+    match command {
+        Command::Init { .. } => {
+            commands::init(&path)?;
+            println!("Wrote {}", path.display());
+            println!(
+                "Edit the checks section, then run: ci-tui --config {}",
+                path.display()
+            );
+        }
+        Command::Validate { .. } => {
+            commands::validate(&path)?;
+            println!("OK: {} is valid", path.display());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install color-eyre for better panic handling (errors are ignored if it fails)
@@ -27,24 +47,8 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse_checked();
 
-    match cli.command {
-        Some(Command::Init { path }) => {
-            let path = resolve_config_path(path, cli.config);
-            commands::init(&path)?;
-            println!("Wrote {}", path.display());
-            println!(
-                "Edit the checks section, then run: ci-tui --config {}",
-                path.display()
-            );
-            return Ok(());
-        }
-        Some(Command::Validate { path }) => {
-            let path = resolve_config_path(path, cli.config);
-            commands::validate(&path)?;
-            println!("OK: {} is valid", path.display());
-            return Ok(());
-        }
-        None => {}
+    if let Some(command) = cli.command {
+        return run_subcommand(command, cli.config);
     }
 
     // Use current working directory as project root
