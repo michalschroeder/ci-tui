@@ -3,6 +3,7 @@ name = "ci-tui"
 version = "0.1.18"
 edition = "2021"
 description = "TUI for running and monitoring CI checks"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "ci_tui"
