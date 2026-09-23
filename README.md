@@ -117,7 +117,8 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `PgUp`/`PgDn` | Scroll output |
 | `f` | Toggle failed-only filter |
 | `a` | Show all checks |
-| `r` | Retry selected check |
+| `r` | Retry selected check (also cancelled ones) |
+| `s` | Cancel selected running check (others keep running; not a failure) |
 | `R` | Re-detect changes and rerun all |
 | `t` | Trigger on-demand check |
 | `A` | Run selected check on all files |
@@ -125,6 +126,8 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `X` | Fix all checks |
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
+
+Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker run` fallback. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.
 
 Info messages (e.g. "Command copied") auto-dismiss after 3s; errors stay until a keypress; progress messages ("Refreshing changed files...") stay until the work finishes. Any keypress dismisses the message and still performs its action.
 

@@ -167,6 +167,7 @@ pub fn print_result(result: &CheckResult) {
 /// - Passed: green checkmark with duration
 /// - Failed: red X with duration
 /// - TimedOut: magenta hourglass, "timed out" and duration
+/// - Cancelled: gray crossed circle, "cancelled" and duration
 /// - Running: yellow dot with "(running)"
 /// - Pending: gray circle with "(pending)"
 /// - Skipped: gray slashed circle with "(skipped)"
@@ -180,6 +181,9 @@ pub fn format_result(result: &CheckResult) -> String {
         CheckStatus::Failed => format!("  \x1b[31m✗\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
         CheckStatus::TimedOut => {
             format!("  \x1b[35m⧗\x1b[0m {id} \x1b[35mtimed out\x1b[0m \x1b[90m{duration}\x1b[0m")
+        }
+        CheckStatus::Cancelled => {
+            format!("  \x1b[90m⊗\x1b[0m {id} \x1b[90mcancelled {duration}\x1b[0m")
         }
         CheckStatus::Running => format!("  \x1b[33m●\x1b[0m {id} \x1b[90m(running)\x1b[0m"),
         CheckStatus::Pending => format!("  \x1b[90m○\x1b[0m {id} \x1b[90m(pending)\x1b[0m"),

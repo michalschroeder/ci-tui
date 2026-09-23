@@ -151,7 +151,7 @@ mod build_docker_run_command_tests {
     fn basic_command() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "cargo test");
+        let cmd = build_docker_run_command(&config, &env, "cargo test", "ci-tui-test-1");
 
         assert!(cmd.starts_with("docker run --rm"));
         assert!(cmd.contains("test-image:latest"));
@@ -163,7 +163,7 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.shell = "/bin/sh".to_string();
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "ls");
+        let cmd = build_docker_run_command(&config, &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("/bin/sh -c 'ls'"));
         assert!(!cmd.contains("bash"));
@@ -174,7 +174,7 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.work_dir = Some("/custom".to_string());
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "ls");
+        let cmd = build_docker_run_command(&config, &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("-w /custom"));
     }
@@ -184,7 +184,7 @@ mod build_docker_run_command_tests {
         let config = super::common::test_docker_config("test-image:latest");
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let cmd = build_docker_run_command(&config, &env, "test");
+        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
 
         assert!(cmd.contains("-e FOO='bar'"));
     }
@@ -194,17 +194,26 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.volume_mount = Some("/host/path:/container/path".to_string());
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test");
+        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
 
         // Volume mount should be included
         assert!(cmd.contains("-v /host/path:/container/path"));
     }
 
     #[test]
+    fn includes_container_name() {
+        let config = super::common::test_docker_config("test-image:latest");
+        let cmd = build_docker_run_command(&config, &HashMap::new(), "ls", "ci-tui-lint-42-7");
+
+        // Named so cancel/timeout can `docker kill` it
+        assert!(cmd.contains("--name ci-tui-lint-42-7 "), "got: {cmd}");
+    }
+
+    #[test]
     fn rm_flag_always_present() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test");
+        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
 
         // --rm flag should be present for auto-cleanup
         assert!(cmd.contains("--rm"));
@@ -214,7 +223,7 @@ mod build_docker_run_command_tests {
     fn command_structure_order() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test");
+        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
 
         // Check general structure: docker run --rm [volumes] [env] -w dir image bash -c 'cmd'
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -1245,5 +1254,340 @@ mod timeout_tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, RunnerEvent::CheckStarted { .. })));
+    }
+}
+
+mod cancel_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use ci_tui::config::{ExecTarget, LocalConfig};
+    use ci_tui::runner::{
+        run_single_check_with_executor, CancelRegistry, CheckRunner, CommandExecutor,
+        RealCommandExecutor, RunnerEvent,
+    };
+    use ci_tui::CheckToRun;
+    use common::configs::{CheckBuilder, ConfigBuilder};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    fn local_sh() -> ExecTarget {
+        ExecTarget::Local(LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// Executor whose commands never finish; records commands and container kills
+    #[derive(Default)]
+    struct HangingExecutor {
+        executed: Mutex<Vec<String>>,
+        killed: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CommandExecutor for HangingExecutor {
+        async fn execute(&self, command: &str, _working_dir: &Path) -> CommandOutput {
+            self.executed.lock().unwrap().push(command.to_string());
+            std::future::pending().await
+        }
+
+        fn is_container_running(&self, _container_name: &str) -> bool {
+            false
+        }
+
+        fn kill_container(&self, name: &str) {
+            self.killed.lock().unwrap().push(name.to_string());
+        }
+    }
+
+    /// `--name` value of a `docker run` command
+    fn container_name(cmd: &str) -> String {
+        cmd.split_whitespace()
+            .skip_while(|w| *w != "--name")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no --name in: {cmd}"))
+            .to_string()
+    }
+
+    fn check_in(group: &str, id: &str, command: &str) -> CheckToRun {
+        let mut check = common::make_exec_check(id, command, None);
+        check.group = group.to_string();
+        check
+    }
+
+    /// Command that backgrounds a `sleep` (a grandchild of the spawned `sh`)
+    /// and writes its pid to `pidfile`
+    fn orphan_command(pidfile: &Path) -> String {
+        format!("sleep 1000 & echo $! > {}; wait", pidfile.display())
+    }
+
+    async fn wait_for_pid(pidfile: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(pidfile)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "pidfile never written");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Gone or zombie (killed, not yet reaped by its new parent)
+    fn is_dead(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+        }
+    }
+
+    async fn assert_dies(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !is_dead(pid) {
+            assert!(Instant::now() < deadline, "child pid {pid} survived");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Run `checks`, cancelling `cancel_id` once it has started (and, with
+    /// `pidfile`, once its child is up). Returns finished results by id.
+    async fn run_and_cancel(
+        runner: CheckRunner,
+        cancels: CancelRegistry,
+        checks: Vec<CheckToRun>,
+        cancel_id: &'static str,
+        pidfile: Option<PathBuf>,
+    ) -> HashMap<String, CheckResult> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let run = tokio::spawn(async move { runner.run_checks(checks, tx).await });
+        let mut results = HashMap::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                RunnerEvent::CheckStarted { check_id } if check_id == cancel_id => {
+                    let cancels = cancels.clone();
+                    let pidfile = pidfile.clone();
+                    tokio::spawn(async move {
+                        if let Some(pidfile) = pidfile {
+                            wait_for_pid(&pidfile).await;
+                        }
+                        cancels.cancel(cancel_id);
+                    });
+                }
+                RunnerEvent::CheckFinished { result } => {
+                    results.insert(result.check_id.clone(), result);
+                }
+                _ => {}
+            }
+        }
+        run.await.unwrap().unwrap();
+        results
+    }
+
+    fn local_runner(config: ci_tui::CiConfig, cancels: &CancelRegistry) -> CheckRunner {
+        let mut config = config;
+        config.runner = local_sh();
+        CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(RealCommandExecutor))
+            .with_cancels(cancels.clone())
+    }
+
+    #[tokio::test]
+    async fn cancel_affects_only_selected_check_in_parallel_group() {
+        let config = ConfigBuilder::new()
+            .with_parallel_group("g")
+            .with_check("g", "slow", CheckBuilder::new("Slow", "sleep 30").build())
+            .with_check(
+                "g",
+                "other",
+                CheckBuilder::new("Other", "sleep 0.5").build(),
+            )
+            .build();
+        let cancels = CancelRegistry::default();
+        let checks = vec![
+            check_in("g", "slow", "sleep 30"),
+            check_in("g", "other", "sleep 0.5"),
+        ];
+
+        let start = Instant::now();
+        let results = run_and_cancel(
+            local_runner(config, &cancels),
+            cancels,
+            checks,
+            "slow",
+            None,
+        )
+        .await;
+
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(results["slow"].status, CheckStatus::Cancelled);
+        assert_eq!(results["other"].status, CheckStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn cancel_lets_pending_checks_in_sequential_group_run() {
+        let config = ConfigBuilder::new()
+            .with_check("g", "slow", CheckBuilder::new("Slow", "sleep 30").build())
+            .with_check("g", "next", CheckBuilder::new("Next", "true").build())
+            .build();
+        let cancels = CancelRegistry::default();
+        let checks = vec![
+            check_in("g", "slow", "sleep 30"),
+            check_in("g", "next", "true"),
+        ];
+
+        let results = run_and_cancel(
+            local_runner(config, &cancels),
+            cancels,
+            checks,
+            "slow",
+            None,
+        )
+        .await;
+
+        assert_eq!(results["slow"].status, CheckStatus::Cancelled);
+        assert!(!results["slow"].status.is_failure());
+        assert_eq!(results["next"].status, CheckStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_check_is_noop() {
+        assert!(!CancelRegistry::default().cancel("nope"));
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let command = orphan_command(&pidfile);
+        let cancels = CancelRegistry::default();
+        let checks = vec![check_in("g", "tree", &command)];
+
+        let runner = local_runner(ConfigBuilder::new().build(), &cancels);
+        let results = run_and_cancel(runner, cancels, checks, "tree", Some(pidfile.clone())).await;
+
+        assert_eq!(results["tree"].status, CheckStatus::Cancelled);
+        assert_dies(wait_for_pid(&pidfile).await).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let mut check = common::make_exec_check("tree", &orphan_command(&pidfile), None);
+        check.definition.timeout = Some(Duration::from_millis(500));
+
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/tmp"),
+            &local_sh(),
+            &RealCommandExecutor,
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::TimedOut);
+        assert_dies(wait_for_pid(&pidfile).await).await;
+    }
+
+    /// Quit / retry-all abort the task running the command
+    #[tokio::test]
+    async fn aborted_task_kills_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let command = orphan_command(&pidfile);
+        let handle = tokio::spawn(async move {
+            RealCommandExecutor
+                .execute(&command, Path::new("/tmp"))
+                .await
+        });
+        let pid = wait_for_pid(&pidfile).await;
+        assert!(!is_dead(pid), "child must be running before abort");
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_dies(pid).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_docker_run_check_kills_named_container() {
+        let executor = Arc::new(HangingExecutor::default());
+        let mut config = ConfigBuilder::new().build();
+        config.runner = common::test_docker_target("img:latest");
+        let cancels = CancelRegistry::default();
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), executor.clone())
+            .with_cancels(cancels.clone());
+        let checks = vec![check_in("g", "lint", "cargo clippy")];
+
+        let results = run_and_cancel(runner, cancels, checks, "lint", None).await;
+
+        assert_eq!(results["lint"].status, CheckStatus::Cancelled);
+        let executed = executor.executed.lock().unwrap().clone();
+        assert_eq!(executed.len(), 1);
+        assert!(
+            executed[0].starts_with("docker run"),
+            "got: {}",
+            executed[0]
+        );
+        assert_eq!(
+            *executor.killed.lock().unwrap(),
+            vec![container_name(&executed[0])]
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_docker_run_check_kills_named_container() {
+        let executor = HangingExecutor::default();
+        let result = execute_command_with_executor(
+            "lint".to_string(),
+            "cargo clippy",
+            Path::new("/tmp"),
+            None,
+            &common::test_docker_target("img:latest"),
+            &HashMap::new(),
+            &executor,
+            Some(Duration::from_millis(20)),
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::TimedOut);
+        let executed = executor.executed.lock().unwrap().clone();
+        assert_eq!(
+            *executor.killed.lock().unwrap(),
+            vec![container_name(&executed[0])]
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_docker_run_check_does_not_kill_container() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| false);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        mock.expect_kill_container().times(0);
+
+        let result = execute_command_with_executor(
+            "lint".to_string(),
+            "cargo clippy",
+            Path::new("/tmp"),
+            None,
+            &common::test_docker_target("img:latest"),
+            &HashMap::new(),
+            &mock,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+
+        assert_eq!(result.status, CheckStatus::Passed);
     }
 }

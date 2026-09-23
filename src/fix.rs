@@ -278,7 +278,15 @@ pub async fn run_fix_command_with_executor(
     let start = Instant::now();
 
     let full_cmd = target.build_command(check_container, target.env(), command, executor);
-    let output = executor.execute(&full_cmd, project_root).await;
+    // Via execute_with_timeout for its `docker run` cleanup on Ctrl-C;
+    // without a timeout it never returns Err
+    let output = crate::runner::execute_with_timeout(executor, &full_cmd, project_root, None)
+        .await
+        .unwrap_or_else(|message| crate::runner::CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: message,
+        });
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if !output.success {

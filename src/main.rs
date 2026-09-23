@@ -64,15 +64,42 @@ fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Resul
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Exit code for a Ctrl-C interrupted run (128 + SIGINT)
+const INTERRUPTED_EXIT_CODE: i32 = 130;
+
+fn main() -> Result<()> {
+    // The runtime is dropped at the end of this statement, before exiting:
+    // that drops every still-running command future, whose guards kill its
+    // process group / `docker run` container (quit, Ctrl-C).
+    let code = tokio::runtime::Runtime::new()?.block_on(run())?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Run `fut`, or stop at Ctrl-C. Commands run in their own process group,
+/// so the terminal's SIGINT no longer reaches them: dropping `fut` (and then
+/// the runtime) kills them instead.
+async fn interruptible(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
+    tokio::select! {
+        result = fut => result.map(|()| 0),
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nInterrupted");
+            Ok(INTERRUPTED_EXIT_CODE)
+        }
+    }
+}
+
+/// Process exit code of the whole run
+async fn run() -> Result<i32> {
     // Install color-eyre for better panic handling (errors are ignored if it fails)
     let _ = color_eyre::install();
 
     let cli = Cli::parse_checked();
 
     if let Some(command) = cli.command {
-        return run_subcommand(command, cli.config);
+        return run_subcommand(command, cli.config).map(|()| 0);
     }
 
     // Use current working directory as project root
@@ -115,7 +142,7 @@ async fn main() -> Result<()> {
 
     // Run fix mode if requested
     if cli.fix {
-        return fix::run(config, changed_files, exec_root).await;
+        return interruptible(fix::run(config, changed_files, exec_root)).await;
     }
 
     // Determine which checks to run
@@ -123,7 +150,7 @@ async fn main() -> Result<()> {
 
     if simple_mode {
         // Run in simple console mode
-        simple::run(config, changed_files, checks_to_run, exec_root).await
+        interruptible(simple::run(config, changed_files, checks_to_run, exec_root)).await
     } else {
         // Run the TUI
         ui::run(

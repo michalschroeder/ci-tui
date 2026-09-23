@@ -20,6 +20,20 @@ pub(crate) fn is_running(container_name: &str) -> bool {
     }
 }
 
+/// `docker kill` a container, waiting for the client (best effort: errors,
+/// e.g. the container already gone, are ignored).
+///
+/// Blocking on purpose: called from drop guards, possibly while the process
+/// is quitting, so the kill must be sent before we exit.
+pub(crate) fn kill(container_name: &str) {
+    let _ = std::process::Command::new("docker")
+        .args(["kill", container_name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

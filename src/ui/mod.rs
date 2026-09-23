@@ -23,7 +23,9 @@ pub mod dashboard;
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
-use crate::runner::{run_check_with_command, CheckResult, CheckRunner, RunnerEvent};
+use crate::runner::{
+    run_cancellable, run_check_with_command, CancelRegistry, CheckResult, CheckRunner, RunnerEvent,
+};
 use anyhow::Result;
 use app::{App, StatusKind};
 use crossterm::{
@@ -203,12 +205,22 @@ struct TaskCtx {
     exec_root: Arc<PathBuf>,
     /// Config; `config.runner` is where commands execute (docker or local host)
     config: Arc<CiConfig>,
+    /// Cancel switches shared with the runner ('s' key)
+    cancels: CancelRegistry,
 }
 
 impl TaskCtx {
     /// Run `command` as `check` (check's container override and env apply)
     async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
         run_check_with_command(check, command, &self.exec_root, &self.config.runner).await
+    }
+
+    /// [`Self::run`], cancellable with 's' (then reports `Cancelled`)
+    async fn run_cancellable(&self, check: &CheckToRun, command: &str) -> CheckResult {
+        let started_at = chrono::Local::now();
+        run_cancellable(&self.cancels, check.id(), self.run(check, command))
+            .await
+            .unwrap_or_else(|| CheckResult::cancelled(check.id(), started_at))
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
@@ -267,6 +279,15 @@ impl Tasks {
         self.set.spawn(f(self.ctx.clone(), self.tx.clone()));
     }
 
+    /// Spawn a cancellable task running `command` as `check`, reporting a
+    /// [`TaskEvent::RetryResult`] (on-demand, run-all-files)
+    fn spawn_retry(&mut self, check: CheckToRun, command: String) {
+        self.spawn(|ctx, tx| async move {
+            let result = ctx.run_cancellable(&check, &command).await;
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+        });
+    }
+
     /// Spawn a task running `command` as `check`; `wrap` builds the event
     fn spawn_check(
         &mut self,
@@ -282,7 +303,8 @@ impl Tasks {
 }
 
 /// Retry `check` after a git refresh. `previous` is restored if the check
-/// no longer applies to the refreshed file list.
+/// no longer applies to the refreshed file list. Cancellable with 's' from
+/// the start (the check shows as running during the refresh too).
 async fn retry_with_refresh(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
@@ -290,11 +312,30 @@ async fn retry_with_refresh(
     previous: CheckResult,
     changed_files: ChangedFiles,
 ) {
+    let check_id = check.id().to_string();
+    let started_at = chrono::Local::now();
+    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files);
+    let result = match run_cancellable(&ctx.cancels, &check_id, run).await {
+        Some(Some(result)) => result,
+        Some(None) => return, // not applicable, already reported
+        None => CheckResult::cancelled(&check_id, started_at),
+    };
+    let _ = tx.send(TaskEvent::RetryResult(result)).await;
+}
+
+/// Body of [`retry_with_refresh`]; `None` when the check no longer applies
+async fn refresh_and_run(
+    ctx: &TaskCtx,
+    tx: &mpsc::Sender<TaskEvent>,
+    check: CheckToRun,
+    previous: CheckResult,
+    changed_files: ChangedFiles,
+) -> Option<CheckResult> {
     let check = match ctx.refresh_async(changed_files).await {
         Ok((changed_files, checks)) => {
             let Some(new_check) = checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
-                return;
+                return None;
             };
             let _ = tx
                 .send(TaskEvent::CheckRefreshed {
@@ -310,8 +351,7 @@ async fn retry_with_refresh(
             check
         }
     };
-    let result = ctx.run(&check, &check.resolved_command).await;
-    let _ = tx.send(TaskEvent::RetryResult(result)).await;
+    Some(ctx.run(&check, &check.resolved_command).await)
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -347,9 +387,10 @@ fn start_runner(
     config: &CiConfig,
     project_root: &Path,
     checks: Vec<CheckToRun>,
+    cancels: &CancelRegistry,
 ) -> (JoinHandle<Result<()>>, mpsc::Receiver<RunnerEvent>) {
     let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>(RUNNER_CHANNEL_CAPACITY);
-    let runner = CheckRunner::new(config.clone(), project_root);
+    let runner = CheckRunner::new(config.clone(), project_root).with_cancels(cancels.clone());
 
     let handle = tokio::spawn(async move { runner.run_checks(checks, event_tx).await });
 
@@ -398,7 +439,7 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
     let check = check.clone();
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_check(check, command, TaskEvent::RetryResult);
+    tasks.spawn_retry(check, command);
     Action::Continue
 }
 
@@ -417,7 +458,19 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
+    tasks.spawn_retry(check, all_files_cmd);
+    Action::Continue
+}
+
+/// Handle 's' key: cancel the selected running check. Its runner or retry
+/// task then reports `Cancelled`; other checks keep running.
+fn handle_cancel_selected(app: &mut App, tasks: &mut Tasks) -> Action {
+    if !app.selected_capabilities().can_cancel {
+        return Action::Continue;
+    }
+    if let Some(check) = app.selected_check() {
+        tasks.ctx.cancels.cancel(check.id());
+    }
     Action::Continue
 }
 
@@ -518,6 +571,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
         }
         (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, tasks),
         (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, tasks),
+        (KeyCode::Char('s'), KeyModifiers::NONE) => handle_cancel_selected(app, tasks),
         (KeyCode::Char('A'), KeyModifiers::SHIFT) => handle_run_all_files(app, tasks),
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(check) = app.selected_check() {
@@ -619,13 +673,17 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
     }
 }
 
+/// Run the TUI; returns the process exit code (1 if any check failed).
+///
+/// The caller must drop the tokio runtime before exiting: that drops the
+/// aborted runner/task futures, whose guards kill still-running commands.
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
     exec_root: PathBuf,
-) -> Result<()> {
+) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
 
@@ -642,8 +700,9 @@ pub async fn run(
     // Create app state
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
 
-    // Start the runner in background
-    let (mut runner_handle, mut event_rx) = start_runner(&config, &exec_root, checks);
+    // Start the runner in background ('s' cancels through `cancels`)
+    let cancels = CancelRegistry::default();
+    let (mut runner_handle, mut event_rx) = start_runner(&config, &exec_root, checks, &cancels);
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
@@ -651,6 +710,7 @@ pub async fn run(
         project_root: Arc::clone(&project_root),
         exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
+        cancels: cancels.clone(),
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -710,14 +770,15 @@ pub async fn run(
                 new_changed_files,
                 new_checks,
             } => {
-                // Abort old runner and background tasks (kill_on_drop stops
-                // their docker processes), then start fresh. The new channel
-                // drops late results from tasks started before the reset.
+                // Abort old runner and background tasks (dropping their
+                // futures kills process groups / `docker run` containers),
+                // then start fresh. The new channel drops late results from
+                // tasks started before the reset.
                 runner_handle.abort();
                 tasks.set.abort_all();
                 (tasks, task_rx) = Tasks::new(tasks.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
-                let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks);
+                let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks, &cancels);
                 runner_handle = new_handle;
                 event_rx = new_rx;
             }
@@ -731,11 +792,15 @@ pub async fn run(
         }
     }
 
-    // Cleanup - signal keyboard thread to shutdown and wait for it
+    // Cleanup - signal keyboard thread to shutdown and wait for it.
+    // Aborted futures kill their commands when dropped: here, or at the
+    // latest when main drops the runtime (before process exit).
     keyboard_shutdown.store(true, Ordering::Relaxed);
     runner_handle.abort();
     tasks.set.abort_all();
     stats_handle.abort();
+    let _ = runner_handle.await;
+    while tasks.set.join_next().await.is_some() {}
 
     // Wait for keyboard thread to finish (with timeout to avoid hanging)
     let _ = keyboard_thread.join();
@@ -756,27 +821,30 @@ pub async fn run(
     print_summary(&app);
 
     // Non-zero exit on failure so `ci-tui && git push` is safe (terminal already restored)
-    let code = app.exit_code();
-    if code != 0 {
-        std::process::exit(code);
-    }
-
-    Ok(())
+    Ok(app.exit_code())
 }
 
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
-    let (passed, failed) = (counts.passed, counts.failed);
-    let total = passed + failed;
+    let (passed, failed, cancelled) = (counts.passed, counts.failed, counts.cancelled);
+    let total = passed + failed + cancelled;
 
     // Format elapsed time
     let elapsed = app.elapsed_time();
     let elapsed_str = dashboard::format_elapsed(elapsed);
 
-    if failed == 0 {
+    if cancelled > 0 {
         println!(
-            "\n\x1b[32m✓ All {} checks passed in {}\x1b[0m",
-            total, elapsed_str
+            "\n\x1b[90m⊗ {} of {} checks cancelled\x1b[0m",
+            cancelled, total
+        );
+    }
+
+    if failed == 0 {
+        let label = if cancelled == 0 { "All " } else { "" };
+        println!(
+            "\n\x1b[32m✓ {}{} checks passed in {}\x1b[0m",
+            label, passed, elapsed_str
         );
         return;
     }
@@ -836,6 +904,7 @@ checks:
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
+            cancels: CancelRegistry::default(),
         })
     }
 
@@ -1146,6 +1215,63 @@ checks:
         assert_eq!(
             app.view.selected_check, 1,
             "key still acts while dismissing the message"
+        );
+    }
+
+    /// Spawn a task holding a cancellable registration for `check_id`; it
+    /// reports a cancelled result once cancelled
+    fn spawn_cancellable(tasks: &mut Tasks, check_id: &'static str) {
+        tasks.spawn(move |ctx, tx| async move {
+            let started_at = chrono::Local::now();
+            let run = std::future::pending::<()>();
+            if crate::runner::run_cancellable(&ctx.cancels, check_id, run)
+                .await
+                .is_none()
+            {
+                let result = CheckResult::cancelled(check_id, started_at);
+                let _ = tx.send(TaskEvent::RetryResult(result)).await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_cancel_key_cancels_running_check() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Running;
+        let (mut tasks, mut rx) = make_test_tasks(&config);
+        spawn_cancellable(&mut tasks, "php-lint");
+        tokio::task::yield_now().await; // let the task register
+
+        let key = press(KeyCode::Char('s'), KeyModifiers::NONE);
+        let action = handle_key_event(&mut app, key, &mut tasks);
+
+        assert!(matches!(action, Action::Continue));
+        let event = rx.recv().await.expect("cancelled task must report");
+        handle_task_event(&mut app, event);
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_key_ignores_non_running_check() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
+        let (mut tasks, mut rx) = make_test_tasks(&config);
+        spawn_cancellable(&mut tasks, "php-lint");
+        tokio::task::yield_now().await;
+
+        let key = press(KeyCode::Char('s'), KeyModifiers::NONE);
+        handle_key_event(&mut app, key, &mut tasks);
+        tokio::task::yield_now().await;
+
+        assert!(rx.try_recv().is_err(), "non-running check must not cancel");
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Passed
         );
     }
 
