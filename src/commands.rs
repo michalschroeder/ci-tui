@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use std::io::ErrorKind;
 use std::path::Path;
 
+/// Default config path for `init` / `validate` when none is given.
+pub const DEFAULT_CONFIG_FILE: &str = "ci-tui.yaml";
+
 pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
 # Full reference: https://github.com/michalschroeder/ci-tui/blob/master/docs/configuration.md
 version: 2

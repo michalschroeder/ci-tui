@@ -33,7 +33,7 @@ enum Command {
     /// Generate a starter ci-tui.yaml
     Init {
         /// Output path
-        #[arg(default_value = "ci-tui.yaml")]
+        #[arg(default_value = commands::DEFAULT_CONFIG_FILE)]
         path: PathBuf,
     },
     /// Validate a config file (exit non-zero if invalid)
@@ -47,7 +47,7 @@ enum Command {
 /// then `ci-tui.yaml`.
 fn validate_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
     path.or(config)
-        .unwrap_or_else(|| PathBuf::from("ci-tui.yaml"))
+        .unwrap_or_else(|| PathBuf::from(commands::DEFAULT_CONFIG_FILE))
 }
 
 fn git_detect_changes_or_exit(
