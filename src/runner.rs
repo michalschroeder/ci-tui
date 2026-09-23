@@ -790,3 +790,65 @@ pub async fn run_check_with_command_with_executor(
     )
     .await
 }
+
+/// Build a host-local command: optional `env K='V'...` prefix + `shell -c` wrapper.
+///
+/// Invalid env keys are skipped (unquotable → shell injection), as in
+/// [`build_docker_exec_command`].
+pub fn build_local_command(
+    local: &crate::config::LocalConfig,
+    env: &std::collections::HashMap<String, String>,
+    command: &str,
+) -> String {
+    let env_flags: String = env
+        .iter()
+        .filter(|(k, _)| is_valid_env_key(k))
+        .map(|(k, v)| format!("{}='{}' ", k, v.replace('\'', "'\\''")))
+        .collect();
+    let prefix = if env_flags.is_empty() {
+        String::new()
+    } else {
+        format!("env {env_flags}")
+    };
+    format!(
+        "{}{} -c '{}'",
+        prefix,
+        local.shell,
+        command.replace('\'', "'\\''")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_local_command_no_env() {
+        let local = crate::config::LocalConfig::default();
+        let cmd = build_local_command(&local, &std::collections::HashMap::new(), "cargo test");
+        assert_eq!(cmd, "bash -c 'cargo test'");
+    }
+
+    #[test]
+    fn test_build_local_command_with_env_and_quotes() {
+        let local = crate::config::LocalConfig::default();
+        let env = std::collections::HashMap::from([("APP_ENV".to_string(), "it's".to_string())]);
+        let cmd = build_local_command(&local, &env, "echo 'hi'");
+        assert_eq!(cmd, "env APP_ENV='it'\\''s' bash -c 'echo '\\''hi'\\'''");
+    }
+
+    #[test]
+    fn test_build_local_command_skips_invalid_env_keys() {
+        let local = crate::config::LocalConfig::default();
+        let env = std::collections::HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
+        let cmd = build_local_command(&local, &env, "ls");
+        assert_eq!(cmd, "bash -c 'ls'");
+    }
+
+    #[test]
+    fn test_build_local_command_custom_shell() {
+        let local: crate::config::LocalConfig = serde_yaml::from_str("shell: /bin/sh").unwrap();
+        let cmd = build_local_command(&local, &std::collections::HashMap::new(), "ls");
+        assert_eq!(cmd, "/bin/sh -c 'ls'");
+    }
+}
