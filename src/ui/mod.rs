@@ -551,9 +551,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         } => app.replace_check(changed_files, *check),
         TaskEvent::CheckNotApplicable(previous) => {
             app.set_retry_result(previous);
-            app.set_status_message(Some(
-                "Check no longer applicable after git refresh".to_string(),
-            ));
+            app.set_status_message(Some("Check no longer applicable after refresh".to_string()));
         }
         TaskEvent::GitRefreshFailed => app.set_status_message(Some(
             "Git refresh failed - retrying with previous file list".to_string(),

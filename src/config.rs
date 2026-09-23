@@ -139,7 +139,12 @@ impl DockerConfig {
             .ok()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| self.derive_project_name());
-        normalize_project_name(&name)
+        let normalized = normalize_project_name(&name);
+        if normalized.is_empty() {
+            // Nothing valid left (e.g. "___", non-ASCII) - same fallback as non-UTF8 paths
+            return "project".to_string();
+        }
+        normalized
     }
 
     /// Extract project name from project_dir (last path component)
@@ -1147,6 +1152,8 @@ checks: {}
         #[case("./my.app", "myapp-web-1", "myapp-web")]
         #[case("./_My App!", "myapp-web-1", "myapp-web")]
         #[case("./my_proj-2", "my_proj-2-web-1", "my_proj-2-web")]
+        #[case("./___", "project-web-1", "project-web")]
+        #[case("./日本", "project-web-1", "project-web")]
         fn test_derived_names_normalized_like_compose(
             #[case] project_dir: &str,
             #[case] container: &str,
