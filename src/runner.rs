@@ -83,7 +83,7 @@ impl CommandExecutor for RealCommandExecutor {
 
 /// Run `command` via `executor`, bounded by `timeout` (`None` = unbounded).
 ///
-/// Returns `Err(limit)` on expiry. The timeout wraps the executor future rather than
+/// Returns `Err(message)` on expiry. The timeout wraps the executor future rather than
 /// living in [`CommandExecutor`] so mocks stay unchanged; expiry drops the
 /// future, and [`RealCommandExecutor`]'s `kill_on_drop` kills the spawned
 /// process. Only that local process is killed: a `docker exec`'d command keeps
@@ -93,20 +93,17 @@ pub async fn execute_with_timeout(
     command: &str,
     working_dir: &Path,
     timeout: Option<Duration>,
-) -> std::result::Result<CommandOutput, Duration> {
+) -> std::result::Result<CommandOutput, String> {
     let run = executor.execute(command, working_dir);
     match timeout {
-        Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| limit),
+        Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| {
+            format!(
+                "timed out after {}",
+                crate::utils::time::format_from_duration(limit)
+            )
+        }),
         None => Ok(run.await),
     }
-}
-
-/// User-facing message for an expired `timeout` (e.g. "timed out after 10m 0s").
-pub fn timeout_message(limit: Duration) -> String {
-    format!(
-        "timed out after {}",
-        crate::utils::time::format_from_duration(limit)
-    )
 }
 
 /// Filter out Docker Compose warning messages from stderr
@@ -545,7 +542,7 @@ impl CheckRunner {
         // Timeout → failure, same as a non-zero exit (group aborted)
         let output = match output {
             Ok(output) => output,
-            Err(limit) => return (false, timeout_message(limit), duration_ms),
+            Err(message) => return (false, message, duration_ms),
         };
 
         let stderr = filter_docker_warnings(&output.stderr);
@@ -678,7 +675,7 @@ async fn run_check_with_target(
         })
         .await;
 
-    execute_bounded(
+    execute_command_with_executor(
         check_id,
         &check.resolved_command,
         project_root,
@@ -695,33 +692,10 @@ async fn run_check_with_target(
 ///
 /// `container` overrides the docker default container (ignored in local mode).
 /// `check_env` is merged over the target's global env (check env wins).
-/// Unbounded; checks go through [`execute_bounded`] with their `timeout`.
-pub async fn execute_command_with_executor(
-    check_id: String,
-    command: &str,
-    project_root: &std::path::Path,
-    container: Option<&str>,
-    target: &ExecTarget,
-    check_env: &HashMap<String, String>,
-    executor: &dyn CommandExecutor,
-) -> CheckResult {
-    execute_bounded(
-        check_id,
-        command,
-        project_root,
-        container,
-        target,
-        check_env,
-        executor,
-        None,
-    )
-    .await
-}
-
-/// [`execute_command_with_executor`] bounded by `timeout` (`None` = unbounded).
-/// Expiry yields [`CheckStatus::TimedOut`] with the reason in `error_output`.
+/// `timeout` bounds the run (`None` = unbounded); expiry yields
+/// [`CheckStatus::TimedOut`] with the reason in `error_output`.
 #[allow(clippy::too_many_arguments)]
-async fn execute_bounded(
+pub async fn execute_command_with_executor(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
@@ -744,7 +718,7 @@ async fn execute_bounded(
     let (status, stdout, stderr) = match output {
         Ok(out) if out.success => (CheckStatus::Passed, out.stdout, out.stderr),
         Ok(out) => (CheckStatus::Failed, out.stdout, out.stderr),
-        Err(limit) => (CheckStatus::TimedOut, String::new(), timeout_message(limit)),
+        Err(message) => (CheckStatus::TimedOut, String::new(), message),
     };
 
     CheckResult {
@@ -820,6 +794,7 @@ pub async fn run_fix_command_with_executor(
         target,
         &HashMap::new(),
         executor,
+        None,
     )
     .await
 }
@@ -846,7 +821,7 @@ pub async fn run_check_with_command_with_executor(
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    execute_bounded(
+    execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,

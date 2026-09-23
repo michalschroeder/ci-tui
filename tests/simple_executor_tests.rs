@@ -213,7 +213,7 @@ async fn hung_check_times_out_with_real_executor() {
         ..Default::default()
     });
     let mut check = common::make_exec_check("hang", "sleep 999", None);
-    check.definition.timeout = Some(std::time::Duration::from_secs(1));
+    check.definition.timeout = Some(std::time::Duration::from_millis(100));
     let executor = Arc::new(ci_tui::runner::RealCommandExecutor);
     let results = run_with_executor(config, vec![check], "/tmp".into(), executor)
         .await

@@ -280,47 +280,7 @@ pub async fn run_check_with_executor(
     target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> CheckResult {
-    let check_id = check.id().to_string();
-    let start = Instant::now();
-
-    // Global env, then check-specific env (check wins) — same as the TUI runner
-    let mut env = target.env().clone();
-    env.extend(check.definition.env.clone());
-    let full_cmd = target.build_command(
-        check.definition.container.as_deref(),
-        &env,
-        &check.resolved_command,
-        executor,
-    );
-
-    let output = crate::runner::execute_with_timeout(
-        executor,
-        &full_cmd,
-        project_root,
-        check.definition.timeout,
-    )
-    .await;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let (status, stdout, stderr) = match output {
-        Ok(out) if out.success => (CheckStatus::Passed, out.stdout, out.stderr),
-        Ok(out) => (CheckStatus::Failed, out.stdout, out.stderr),
-        Err(limit) => (
-            CheckStatus::TimedOut,
-            String::new(),
-            crate::runner::timeout_message(limit),
-        ),
-    };
-
-    CheckResult {
-        check_id,
-        status,
-        output: stdout,
-        error_output: stderr,
-        duration_ms,
-        started_at: None,
-        finished_at: None,
-    }
+    crate::runner::run_single_check_with_executor(check, project_root, target, executor).await
 }
 
 #[cfg(test)]

@@ -402,24 +402,14 @@ impl App {
             .and_then(|c| self.results.get(c.id()))
             .map(|r| r.status.clone());
         let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
+        let finished = status
+            .as_ref()
+            .is_some_and(|s| *s == CheckStatus::Passed || s.is_failure());
         SelectedCaps {
             can_fix: !busy && status.as_ref().is_some_and(CheckStatus::is_failure) && has_fix,
-            can_retry: !busy
-                && matches!(
-                    status,
-                    Some(CheckStatus::Passed | CheckStatus::Failed | CheckStatus::TimedOut)
-                ),
+            can_retry: !busy && finished,
             can_trigger: !busy && status == Some(CheckStatus::OnDemand),
-            can_run_all_files: !busy
-                && matches!(
-                    status,
-                    Some(
-                        CheckStatus::Passed
-                            | CheckStatus::Failed
-                            | CheckStatus::TimedOut
-                            | CheckStatus::OnDemand
-                    )
-                ),
+            can_run_all_files: !busy && (finished || status == Some(CheckStatus::OnDemand)),
         }
     }
 

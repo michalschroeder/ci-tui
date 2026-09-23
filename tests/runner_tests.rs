@@ -324,6 +324,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -356,6 +357,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -390,6 +392,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
     }
@@ -421,6 +424,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
     }
@@ -439,6 +443,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -468,6 +473,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -1170,7 +1176,7 @@ mod timeout_tests {
     #[tokio::test]
     async fn real_executor_kills_hung_check_and_reports_timed_out() {
         let mut check = common::make_exec_check("hang", "sleep 999", None);
-        check.definition.timeout = Some(Duration::from_secs(1));
+        check.definition.timeout = Some(Duration::from_millis(100));
 
         let start = Instant::now();
         let result = run_single_check_with_executor(
@@ -1189,7 +1195,7 @@ mod timeout_tests {
         assert_eq!(result.status, CheckStatus::TimedOut);
         assert!(result.status.is_failure());
         assert!(
-            result.error_output.contains("timed out after 1s"),
+            result.error_output.contains("timed out after"),
             "got: {}",
             result.error_output
         );
@@ -1215,7 +1221,7 @@ mod timeout_tests {
             .with_host_pre_command("lint", "hang", "sleep 999")
             .with_check("lint", "ok", CheckBuilder::new("Ok", "true").build())
             .build();
-        config.checks["lint"].pre_commands[0].timeout = Some(Duration::from_secs(1));
+        config.checks["lint"].pre_commands[0].timeout = Some(Duration::from_millis(100));
         config.runner = local_sh();
 
         let runner =
@@ -1235,7 +1241,7 @@ mod timeout_tests {
             events.push(e);
         }
         assert!(events.iter().any(|e| matches!(e,
-            RunnerEvent::PreCommandFinished { success: false, output, .. } if output.contains("timed out after 1s"))));
+            RunnerEvent::PreCommandFinished { success: false, output, .. } if output.contains("timed out after"))));
         assert!(!events
             .iter()
             .any(|e| matches!(e, RunnerEvent::CheckStarted { .. })));

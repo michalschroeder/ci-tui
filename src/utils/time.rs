@@ -68,7 +68,7 @@ pub(crate) fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
         _ => return Err(invalid()),
     };
     let digits = &s[..s.len() - 1];
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
     }
     let n: u64 = digits.parse().map_err(|_| invalid())?;
