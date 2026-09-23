@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.19](https://github.com/michalschroeder/ci-tui/compare/v0.1.18...v0.1.19) (2026-09-23)
+
+
+### Features
+
+* add runner: local mode (plan 07) ([#119](https://github.com/michalschroeder/ci-tui/issues/119)) ([1fbd7c6](https://github.com/michalschroeder/ci-tui/commit/1fbd7c6ba85afadd2b04ae6995647a807db7e0e6))
+* **cli:** add init and validate subcommands ([#115](https://github.com/michalschroeder/ci-tui/issues/115)) ([adec90d](https://github.com/michalschroeder/ci-tui/commit/adec90d57b190efe13a5ddf554c712f6e6426a0e))
+
+
+### Bug Fixes
+
+* normalize compose project name; keep --files list on refresh ([#117](https://github.com/michalschroeder/ci-tui/issues/117)) ([80b0a14](https://github.com/michalschroeder/ci-tui/commit/80b0a14298b980af222951f0c03c198d51e05e26))
+
+
+### Code Refactoring
+
+* **checks:** model CheckToRun.files as CheckFiles enum ([#112](https://github.com/michalschroeder/ci-tui/issues/112)) ([312d413](https://github.com/michalschroeder/ci-tui/commit/312d4132a28c9a9e1ae67627801e618c3bda566b))
+* **ui:** TUI architecture cleanup ([#114](https://github.com/michalschroeder/ci-tui/issues/114)) ([18c3672](https://github.com/michalschroeder/ci-tui/commit/18c3672f2a1a5ab7fb9080299b774882a0fc4470))
+
+
+### Documentation
+
+* add README and MIT OR Apache-2.0 license (plan 08) ([#116](https://github.com/michalschroeder/ci-tui/issues/116)) ([64de0a3](https://github.com/michalschroeder/ci-tui/commit/64de0a3e8b3448a860968b2eef017e7ecd9ed691))
+* document test discovery limitations (plan 09) ([#118](https://github.com/michalschroeder/ci-tui/issues/118)) ([a2ef3bc](https://github.com/michalschroeder/ci-tui/commit/a2ef3bc3e83e3cb178d090db67e63dec9cb2711b))
+
 ## [0.1.18](https://github.com/michalschroeder/ci-tui/compare/v0.1.17...v0.1.18) (2026-09-08)
 
 
