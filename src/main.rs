@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ci_tui::{checks, config, fix, git, simple, ui};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -8,9 +8,12 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "ci-tui", version, about, long_about = None)]
 struct Cli {
-    /// Path to ci-config.yaml
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Path to ci-config.yaml (required unless a subcommand is given)
     #[arg(short, long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// Run in simple console mode (no TUI)
     #[arg(short, long)]
@@ -23,6 +26,22 @@ struct Cli {
     /// Run checks on specific files instead of git-detected changes
     #[arg(short, long, num_args = 1..)]
     files: Vec<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Generate a starter ci-tui.yaml
+    Init {
+        /// Output path
+        #[arg(default_value = "ci-tui.yaml")]
+        path: PathBuf,
+    },
+    /// Validate a config file (exit non-zero if invalid)
+    Validate {
+        /// Config path
+        #[arg(default_value = "ci-tui.yaml")]
+        path: PathBuf,
+    },
 }
 
 fn git_detect_changes_or_exit(
@@ -49,6 +68,17 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    match cli.command {
+        Some(Command::Init { path }) => return ci_tui::init::run(&path),
+        Some(Command::Validate { path }) => return ci_tui::init::validate(&path),
+        None => {}
+    }
+
+    let Some(config_path) = cli.config else {
+        eprintln!("Error: --config <path> is required (or run `ci-tui init` to create one)");
+        std::process::exit(2);
+    };
+
     // Auto-detect TUI mode: use simple mode if stdout is not a terminal
     let simple_mode = cli.simple || !std::io::stdout().is_terminal();
 
@@ -56,7 +86,7 @@ async fn main() -> Result<()> {
     let project_root = std::env::current_dir()?;
 
     // Load configuration
-    let config = config::load_config(&cli.config)?;
+    let config = config::load_config(&config_path)?;
 
     // Get changed files: from --files arg or git detection
     let mut changed_files = if cli.files.is_empty() {
