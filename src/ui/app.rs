@@ -108,14 +108,16 @@ impl Default for SysStats {
 /// How a status message leaves the footer (any keypress also dismisses it)
 ///
 /// The deadline lives inside `Info` so only info messages can expire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusKind {
     /// Auto-dismisses at `expires_at`
     Info { expires_at: Instant },
     /// Stays until a keypress so failures are not missed
     Error,
-    /// Stays until the work it describes finishes
-    Progress,
+    /// Stays until the work it describes finishes. `check_id` names the
+    /// check whose result ends it; `None` is not check-owned (git refresh)
+    /// and is cleared by its own path, never by a check result.
+    Progress { check_id: Option<String> },
 }
 
 impl StatusKind {
@@ -123,6 +125,13 @@ impl StatusKind {
     pub fn info() -> Self {
         Self::Info {
             expires_at: Instant::now() + STATUS_MESSAGE_TTL,
+        }
+    }
+
+    /// Progress message owned by `check_id` (cleared by its result only)
+    pub fn progress_for(check_id: impl Into<String>) -> Self {
+        Self::Progress {
+            check_id: Some(check_id.into()),
         }
     }
 }
@@ -488,7 +497,10 @@ impl App {
     /// Mark a retry-all git refresh as in flight and show its progress
     pub fn start_refresh(&mut self) {
         self.run.refresh_pending = true;
-        self.set_status_message(StatusKind::Progress, "Refreshing changed files...");
+        self.set_status_message(
+            StatusKind::Progress { check_id: None },
+            "Refreshing changed files...",
+        );
     }
 
     /// Check if retry-all can start (blocked while fixes edit files)
@@ -550,7 +562,7 @@ impl App {
     pub fn status_message_deadline(&self) -> Option<Instant> {
         match self.view.status_message.as_ref()?.kind {
             StatusKind::Info { expires_at } => Some(expires_at),
-            StatusKind::Error | StatusKind::Progress => None,
+            StatusKind::Error | StatusKind::Progress { .. } => None,
         }
     }
 
@@ -561,14 +573,14 @@ impl App {
         }
     }
 
-    /// Clear a progress message once its work is done
-    pub fn finish_progress(&mut self) {
-        if self
-            .view
-            .status_message
-            .as_ref()
-            .is_some_and(|m| m.kind == StatusKind::Progress)
-        {
+    /// Clear the progress message owned by `check_id` once its result arrives
+    ///
+    /// Results of other checks (retry, on-demand) leave it in place.
+    pub fn finish_progress(&mut self, check_id: &str) {
+        let owned = self.view.status_message.as_ref().is_some_and(
+            |m| matches!(&m.kind, StatusKind::Progress { check_id: Some(id) } if id == check_id),
+        );
+        if owned {
             self.clear_status_message();
         }
     }
@@ -1845,8 +1857,8 @@ checks:
         #[test]
         fn test_error_and_progress_messages_do_not_expire() {
             let mut app = make_app();
-            for kind in [StatusKind::Error, StatusKind::Progress] {
-                app.set_status_message(kind, "sticky");
+            for kind in [StatusKind::Error, StatusKind::progress_for("phpunit")] {
+                app.set_status_message(kind.clone(), "sticky");
                 assert!(app.status_message_deadline().is_none());
                 app.expire_status_message(Instant::now() + STATUS_MESSAGE_TTL * 10);
                 assert!(app.view.status_message.is_some(), "{:?} must stay", kind);
@@ -1854,15 +1866,21 @@ checks:
         }
 
         #[test]
-        fn test_finish_progress_clears_only_progress() {
+        fn test_finish_progress_clears_only_matching_check_progress() {
             let mut app = make_app();
             app.set_status_message(StatusKind::Error, "failed");
-            app.finish_progress();
+            app.finish_progress("phpunit");
             assert!(app.view.status_message.is_some(), "error survives");
 
-            app.set_status_message(StatusKind::Progress, "working...");
-            app.finish_progress();
-            assert!(app.view.status_message.is_none(), "progress cleared");
+            app.set_status_message(StatusKind::progress_for("phpunit"), "working...");
+            app.finish_progress("phpstan");
+            assert!(app.view.status_message.is_some(), "other check keeps it");
+            app.finish_progress("phpunit");
+            assert!(app.view.status_message.is_none(), "own check clears it");
+
+            app.start_refresh();
+            app.finish_progress("phpunit");
+            assert!(app.view.status_message.is_some(), "refresh not check-owned");
         }
     }
 }

@@ -438,7 +438,7 @@ fn test_footer_status_icon_colored_by_kind() {
     let cases = [
         (StatusKind::info(), 'ℹ', Color::Cyan),
         (StatusKind::Error, '✗', Color::Red),
-        (StatusKind::Progress, '⟳', Color::Yellow),
+        (StatusKind::progress_for("phpunit"), '⟳', Color::Yellow),
     ];
     for (kind, icon, color) in cases {
         let mut app = make_test_app();
