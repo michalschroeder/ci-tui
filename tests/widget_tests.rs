@@ -642,3 +642,19 @@ fn test_checks_list_scrolls_to_selected_check() {
         "list offset must persist while the selection stays visible"
     );
 }
+
+#[test]
+fn test_timed_out_check_shows_distinct_icon_and_label() {
+    let mut app = make_test_app();
+    // clippy is selected by default
+    let clippy = app.results.get_mut("clippy").unwrap();
+    clippy.status = ci_tui::runner::CheckStatus::TimedOut;
+    clippy.error_output = "timed out after 1s".to_string();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(find_symbol_color(buffer, '⧗'), Some(Color::Magenta));
+    assert!(buffer_contains(buffer, "TIMED OUT"));
+    assert!(buffer_contains(buffer, "timed out after 1s"));
+}

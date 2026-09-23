@@ -280,6 +280,7 @@ mod tests {
             triggers,
             on_demand,
             env: HashMap::new(),
+            timeout: None,
         }
     }
 

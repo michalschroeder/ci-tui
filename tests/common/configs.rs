@@ -167,6 +167,7 @@ impl ConfigBuilder {
                 exec: false,
                 host: false,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             });
         self
     }
@@ -194,6 +195,7 @@ impl ConfigBuilder {
                 exec: false,
                 host: true,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             });
         self
     }
@@ -300,6 +302,7 @@ impl CheckBuilder {
             triggers: self.triggers,
             on_demand: self.on_demand,
             env: self.env,
+            timeout: None,
         }
     }
 }

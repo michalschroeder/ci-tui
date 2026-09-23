@@ -7,7 +7,7 @@
 //! tests/simple_executor_tests.rs via run_with_executor + MockCommandExecutor.
 
 use ci_tui::runner::{CheckResult, CheckStatus};
-use ci_tui::simple::{format_failed_check, print_result};
+use ci_tui::simple::{format_failed_check, format_result, print_result};
 use rstest::rstest;
 
 /// Create a CheckResult with the given status for testing
@@ -47,6 +47,7 @@ fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> Check
 #[case(CheckStatus::Pending, "pending-check", 0)]
 #[case(CheckStatus::Skipped, "skipped-check", 0)]
 #[case(CheckStatus::OnDemand, "on-demand-check", 0)]
+#[case(CheckStatus::TimedOut, "timed-out-check", 1000)]
 fn print_result_handles_all_status_variants(
     #[case] status: CheckStatus,
     #[case] check_id: &str,
@@ -156,4 +157,18 @@ fn format_failed_check_empty_output() {
     // Should still have the box frame
     assert!(formatted.contains("┌─ check ─┐"));
     assert!(formatted.contains("└─────────┘"));
+}
+
+#[test]
+fn format_result_timed_out_shows_label_and_duration() {
+    let line = format_result(&make_result("hang", CheckStatus::TimedOut, 1000));
+    assert!(line.contains("hang"), "got: {line}");
+    assert!(line.contains("timed out"), "got: {line}");
+    assert!(line.contains("1.0s"), "got: {line}");
+}
+
+#[test]
+fn format_result_failed_is_not_timed_out() {
+    let line = format_result(&make_result("x", CheckStatus::Failed, 1000));
+    assert!(!line.contains("timed out"), "got: {line}");
 }

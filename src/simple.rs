@@ -109,7 +109,7 @@ pub async fn run(
 
         for result in results {
             print_result(&result);
-            has_failures |= result.status == CheckStatus::Failed;
+            has_failures |= result.status.is_failure();
             all_results.push(result);
         }
         println!();
@@ -121,10 +121,7 @@ pub async fn run(
         .iter()
         .filter(|r| r.status == CheckStatus::Passed)
         .count();
-    let failed = all_results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Failed)
-        .count();
+    let failed = all_results.iter().filter(|r| r.status.is_failure()).count();
 
     println!("\x1b[1m── Summary ──\x1b[0m");
     if has_failures {
@@ -138,10 +135,7 @@ pub async fn run(
 
         println!();
         println!("\x1b[1;31mFailed checks:\x1b[0m");
-        for result in all_results
-            .iter()
-            .filter(|r| r.status == CheckStatus::Failed)
-        {
+        for result in all_results.iter().filter(|r| r.status.is_failure()) {
             let fix_cmd = checks
                 .iter()
                 .find(|c| c.id() == result.check_id)
@@ -164,53 +158,33 @@ pub async fn run(
 
 /// Print a check result to stdout with colored status indicator.
 ///
-/// Formats the result differently based on `CheckStatus`:
+/// See [`format_result`] for the per-status layout.
+pub fn print_result(result: &CheckResult) {
+    println!("{}", format_result(result));
+}
+
+/// One colored status line for a check result:
 /// - Passed: green checkmark with duration
 /// - Failed: red X with duration
+/// - TimedOut: magenta hourglass, "timed out" and duration
 /// - Running: yellow dot with "(running)"
 /// - Pending: gray circle with "(pending)"
 /// - Skipped: gray slashed circle with "(skipped)"
 /// - OnDemand: cyan diamond with "(on-demand)"
-pub fn print_result(result: &CheckResult) {
+pub fn format_result(result: &CheckResult) -> String {
+    let id = &result.check_id;
     let duration = time::format(result.duration_ms);
 
     match result.status {
-        CheckStatus::Passed => {
-            println!(
-                "  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m",
-                result.check_id, duration
-            );
+        CheckStatus::Passed => format!("  \x1b[32m✓\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
+        CheckStatus::Failed => format!("  \x1b[31m✗\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
+        CheckStatus::TimedOut => {
+            format!("  \x1b[35m⧗\x1b[0m {id} \x1b[35mtimed out\x1b[0m \x1b[90m{duration}\x1b[0m")
         }
-        CheckStatus::Failed => {
-            println!(
-                "  \x1b[31m✗\x1b[0m {} \x1b[90m{}\x1b[0m",
-                result.check_id, duration
-            );
-        }
-        CheckStatus::Running => {
-            println!(
-                "  \x1b[33m●\x1b[0m {} \x1b[90m(running)\x1b[0m",
-                result.check_id
-            );
-        }
-        CheckStatus::Pending => {
-            println!(
-                "  \x1b[90m○\x1b[0m {} \x1b[90m(pending)\x1b[0m",
-                result.check_id
-            );
-        }
-        CheckStatus::Skipped => {
-            println!(
-                "  \x1b[90m⊘\x1b[0m {} \x1b[90m(skipped)\x1b[0m",
-                result.check_id
-            );
-        }
-        CheckStatus::OnDemand => {
-            println!(
-                "  \x1b[36m◇\x1b[0m {} \x1b[90m(on-demand)\x1b[0m",
-                result.check_id
-            );
-        }
+        CheckStatus::Running => format!("  \x1b[33m●\x1b[0m {id} \x1b[90m(running)\x1b[0m"),
+        CheckStatus::Pending => format!("  \x1b[90m○\x1b[0m {id} \x1b[90m(pending)\x1b[0m"),
+        CheckStatus::Skipped => format!("  \x1b[90m⊘\x1b[0m {id} \x1b[90m(skipped)\x1b[0m"),
+        CheckStatus::OnDemand => format!("  \x1b[36m◇\x1b[0m {id} \x1b[90m(on-demand)\x1b[0m"),
     }
 }
 
@@ -306,37 +280,7 @@ pub async fn run_check_with_executor(
     target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> CheckResult {
-    let check_id = check.id().to_string();
-    let start = Instant::now();
-
-    // Global env, then check-specific env (check wins) — same as the TUI runner
-    let mut env = target.env().clone();
-    env.extend(check.definition.env.clone());
-    let full_cmd = target.build_command(
-        check.definition.container.as_deref(),
-        &env,
-        &check.resolved_command,
-        executor,
-    );
-
-    let output = executor.execute(&full_cmd, project_root).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let status = if output.success {
-        CheckStatus::Passed
-    } else {
-        CheckStatus::Failed
-    };
-
-    CheckResult {
-        check_id,
-        status,
-        output: output.stdout,
-        error_output: output.stderr,
-        duration_ms,
-        started_at: None,
-        finished_at: None,
-    }
+    crate::runner::run_single_check_with_executor(check, project_root, target, executor).await
 }
 
 #[cfg(test)]
@@ -360,6 +304,7 @@ mod tests {
                 triggers: None,
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             },
             service: None,
             files: CheckFiles::Files(vec![]),

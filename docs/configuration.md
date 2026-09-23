@@ -33,6 +33,9 @@ git:
 file_patterns: {}
 
 checks: {}
+
+# Optional: default max runtime for every check / pre-command (see `timeout` below)
+# timeout: 15m
 ```
 
 ## Runner Mode
@@ -310,6 +313,12 @@ checks:
 - Additional environment variables for this check
 - Merged with global docker.env
 
+**`timeout`** (optional)
+- Max runtime as `<n>s`, `<n>m` or `<n>h` (e.g. `30s`, `10m`, `1h`); must be > 0
+- On expiry the check process is killed and reported as **timed out** (counts as a failure)
+- Falls back to the top-level `timeout:`; if neither is set the check runs unbounded
+- Only the top-level local process is killed: its child processes (e.g. of `a && b` commands in local mode) may survive, and in docker mode the command keeps running inside the container (`docker exec`) or the `docker run` container keeps running until it exits
+
 ### The `{files}` Placeholder
 
 Commands can use `{files}` placeholder, which expands to space-separated list of changed files:
@@ -577,6 +586,10 @@ checks:
 - Additional environment variables
 - Merged with global docker.env
 
+**`timeout`** (optional)
+- Same format and fallback as the check `timeout`
+- Expiry counts as a pre-command failure (group skipped); output says "timed out after ..."
+
 ### Execution
 
 Pre-commands run sequentially before any checks in the group:
@@ -792,6 +805,7 @@ This catches configuration mistakes early before running checks.
 - Added: `on_demand` check flag
 - Added: `fix_command` and `--fix` mode
 - Added: `--files` flag for manual file selection (bypasses git detection)
+- Added: `timeout` (top-level default, per check, per pre-command)
 
 **Version 1** (legacy, not documented)
 - Basic docker-compose integration

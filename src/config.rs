@@ -27,6 +27,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Root configuration type for CI-TUI.
 ///
@@ -70,6 +71,9 @@ struct RawCiConfig {
     checks: IndexMap<String, GroupConfig>,
     #[serde(default)]
     ignore_patterns: Vec<String>,
+    /// Default timeout for checks and pre-commands that set none
+    #[serde(default, deserialize_with = "deserialize_timeout")]
+    timeout: Option<Duration>,
 }
 
 impl TryFrom<RawCiConfig> for CiConfig {
@@ -88,17 +92,49 @@ impl TryFrom<RawCiConfig> for CiConfig {
             // A `docker` section in local mode is parsed (must be valid) but ignored
             (RunnerMode::Local, _) => ExecTarget::Local(raw.local),
         };
+        let mut checks = raw.checks;
+        if let Some(default) = raw.timeout {
+            apply_default_timeout(&mut checks, default);
+        }
         Ok(Self {
             version: raw.version,
             runner,
             git: raw.git,
             file_patterns: raw.file_patterns,
-            checks: raw.checks,
+            checks,
             ignore_patterns: raw.ignore_patterns,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         })
     }
+}
+
+/// Fill `timeout` on every check and pre-command that has none with the
+/// top-level `timeout:`. Resolved once at parse time so runners only read the
+/// item's own field (retry paths never see `CiConfig`).
+fn apply_default_timeout(checks: &mut IndexMap<String, GroupConfig>, default: Duration) {
+    for group in checks.values_mut() {
+        let pre = group.pre_commands.iter_mut().map(|p| &mut p.timeout);
+        let chk = group.checks.values_mut().map(|c| &mut c.timeout);
+        for timeout in pre.chain(chk) {
+            timeout.get_or_insert(default);
+        }
+    }
+}
+
+/// Deserialize an optional `timeout:` duration string (`30s`, `10m`, `1h`).
+/// serde_yaml prefixes the error with the parent path (e.g. `checks.g.checks.c`), so the
+/// message names the field itself: `checks.g.checks.c: `timeout`: invalid duration ...`.
+fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| {
+            crate::utils::time::parse_duration(&raw)
+                .map_err(|e| serde::de::Error::custom(format!("`timeout`: {e}")))
+        })
+        .transpose()
 }
 
 /// Where check commands execute, resolved from `runner:` at parse time.
@@ -385,6 +421,10 @@ pub struct CheckDefinition {
     /// Additional environment variables for this check (merged with global env)
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Max runtime (`30s`, `10m`, `1h`); on expiry the process is killed and the
+    /// check reports `TimedOut`. `None` = unbounded. Top-level `timeout:` fills it.
+    #[serde(default, deserialize_with = "deserialize_timeout")]
+    pub timeout: Option<Duration>,
 }
 
 /// Triggers that determine when a check should run.
@@ -457,6 +497,9 @@ pub struct PreCommand {
     /// Additional environment variables for this command (merged with global env)
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Max runtime; expiry fails the pre-command (and so the group). `None` = unbounded.
+    #[serde(default, deserialize_with = "deserialize_timeout")]
+    pub timeout: Option<Duration>,
 }
 
 /// Config schema version this build understands.
@@ -901,6 +944,7 @@ mod tests {
                 triggers: self.triggers,
                 on_demand: false,
                 env: HashMap::new(),
+                timeout: None,
             }
         }
     }
@@ -2213,6 +2257,88 @@ checks:
             let result = expand_env_vars("${CI_TUI_TEST_EXPAND_DUP}-${CI_TUI_TEST_EXPAND_DUP}");
             assert_eq!(result, "X-X");
             std::env::remove_var("CI_TUI_TEST_EXPAND_DUP");
+        }
+    }
+
+    mod test_timeout {
+        use super::*;
+        use std::io::Write;
+        use std::time::Duration;
+
+        /// Local-mode config with one check `c` + one pre-command in group `g`.
+        /// `top`, `check`, `pre` are optional `timeout:` values (raw YAML scalars).
+        fn yaml(top: Option<&str>, check: Option<&str>, pre: Option<&str>) -> String {
+            let t = |v: Option<&str>, indent: &str| {
+                v.map(|v| format!("{indent}timeout: {v}\n"))
+                    .unwrap_or_default()
+            };
+            format!(
+                "version: 2\nrunner: local\n{}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks:\n  g:\n    pre_commands:\n      - name: warmup\n        command: 'true'\n{}    checks:\n      c:\n        name: C\n        command: 'true'\n{}",
+                t(top, ""),
+                t(pre, "        "),
+                t(check, "        "),
+            )
+        }
+
+        fn parse(yaml: &str) -> CiConfig {
+            serde_yaml::from_str(yaml).unwrap()
+        }
+
+        fn timeouts(config: &CiConfig) -> (Option<Duration>, Option<Duration>) {
+            let group = config.get_group("g").unwrap();
+            (group.checks["c"].timeout, group.pre_commands[0].timeout)
+        }
+
+        #[rstest]
+        #[case("1s", 1)]
+        #[case("30s", 30)]
+        #[case("10m", 600)]
+        #[case("1h", 3600)]
+        fn test_check_timeout_parses(#[case] raw: &str, #[case] secs: u64) {
+            let config = parse(&yaml(None, Some(raw), None));
+            assert_eq!(timeouts(&config).0, Some(Duration::from_secs(secs)));
+        }
+
+        #[test]
+        fn test_pre_command_timeout_parses() {
+            let config = parse(&yaml(None, None, Some("45s")));
+            assert_eq!(timeouts(&config).1, Some(Duration::from_secs(45)));
+        }
+
+        #[test]
+        fn test_no_timeout_anywhere_is_unbounded() {
+            assert_eq!(timeouts(&parse(&yaml(None, None, None))), (None, None));
+        }
+
+        #[test]
+        fn test_global_timeout_is_default_and_item_overrides() {
+            let s = Duration::from_secs;
+            // Global applies where the item has none
+            let config = parse(&yaml(Some("5m"), None, None));
+            assert_eq!(timeouts(&config), (Some(s(300)), Some(s(300))));
+            // Per-item value wins over global
+            let config = parse(&yaml(Some("5m"), Some("10s"), Some("1h")));
+            assert_eq!(timeouts(&config), (Some(s(10)), Some(s(3600))));
+        }
+
+        #[rstest]
+        #[case::check(None, Some("abc"), None, "checks.g.checks.c: `timeout`")]
+        #[case::unit(None, Some("10x"), None, "checks.g.checks.c: `timeout`")]
+        #[case::zero(None, Some("0s"), None, "checks.g.checks.c: `timeout`")]
+        #[case::empty(None, Some("''"), None, "checks.g.checks.c: `timeout`")]
+        #[case::pre(None, None, Some("abc"), "checks.g.pre_commands[0]: `timeout`")]
+        #[case::global(Some("-1s"), None, None, "`timeout`: invalid duration")]
+        fn test_load_config_rejects_bad_timeout(
+            #[case] top: Option<&str>,
+            #[case] check: Option<&str>,
+            #[case] pre: Option<&str>,
+            #[case] path: &str,
+        ) {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml(top, check, pre).as_bytes()).unwrap();
+            let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
+            assert!(msg.contains(path), "error should name `{path}`: {msg}");
+            assert!(msg.contains("duration"), "error should explain: {msg}");
         }
     }
 }

@@ -788,7 +788,7 @@ fn print_summary(app: &App) {
 
     // Show failed checks
     for (id, result) in &app.results {
-        if result.status == crate::runner::CheckStatus::Failed {
+        if result.status.is_failure() {
             println!("  - {}", id);
         }
     }
@@ -873,6 +873,7 @@ checks:
                 triggers: None,
                 on_demand: false,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             },
             service: Some("php".to_string()),
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),

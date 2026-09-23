@@ -9,7 +9,7 @@
 //!
 //! - [`CheckRunner`]: Orchestrates check execution with parallel/sequential support
 //! - [`CheckResult`]: Result of executing a check including output and timing
-//! - [`CheckStatus`]: Current status of a check (Pending, Running, Passed, etc.)
+//! - [`CheckStatus`]: Current status of a check (Pending, Running, Passed, TimedOut, etc.)
 //! - [`RunnerEvent`]: Events emitted during execution for UI updates
 //!
 //! # Key Functions
@@ -25,6 +25,7 @@ use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Output from executing a command
@@ -77,6 +78,32 @@ impl CommandExecutor for RealCommandExecutor {
 
     fn is_container_running(&self, container_name: &str) -> bool {
         crate::utils::docker::is_running(container_name)
+    }
+}
+
+/// Run `command` via `executor`, bounded by `timeout` (`None` = unbounded).
+///
+/// Returns `Err(message)` on expiry. The timeout wraps the executor future rather than
+/// living in [`CommandExecutor`] so mocks stay unchanged; expiry drops the
+/// future, and [`RealCommandExecutor`]'s `kill_on_drop` kills the spawned
+/// process. Only that process is killed (SIGKILL, no process group): its
+/// descendants may survive, and a `docker exec`/`docker run` command keeps
+/// running inside the container.
+pub async fn execute_with_timeout(
+    executor: &dyn CommandExecutor,
+    command: &str,
+    working_dir: &Path,
+    timeout: Option<Duration>,
+) -> std::result::Result<CommandOutput, String> {
+    let run = executor.execute(command, working_dir);
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| {
+            format!(
+                "timed out after {}",
+                crate::utils::time::format_from_duration(limit)
+            )
+        }),
+        None => Ok(run.await),
     }
 }
 
@@ -244,6 +271,16 @@ pub enum CheckStatus {
     Skipped,
     /// Check is available but requires manual trigger (press 't')
     OnDemand,
+    /// Check exceeded its `timeout` and was killed
+    TimedOut,
+}
+
+impl CheckStatus {
+    /// True for outcomes that count as a failure (exit code, summaries,
+    /// failed filter, retry/fix eligibility).
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed | Self::TimedOut)
+    }
 }
 
 /// Result of executing a CI check, including output and timing information
@@ -494,9 +531,20 @@ impl CheckRunner {
             self.build_pre_command_cmd(pre_cmd)
         };
 
-        let output = self.executor.execute(&cmd, &self.project_root).await;
-
+        let output = execute_with_timeout(
+            self.executor.as_ref(),
+            &cmd,
+            &self.project_root,
+            pre_cmd.timeout,
+        )
+        .await;
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Timeout → failure, same as a non-zero exit (group aborted)
+        let output = match output {
+            Ok(output) => output,
+            Err(message) => return (false, message, duration_ms),
+        };
 
         let stderr = filter_docker_warnings(&output.stderr);
         let combined = if stderr.is_empty() {
@@ -620,30 +668,22 @@ async fn run_check_with_target(
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let check_id = check.id().to_string();
-
     let _ = event_tx
         .send(RunnerEvent::CheckStarted {
-            check_id: check_id.clone(),
+            check_id: check.id().to_string(),
         })
         .await;
 
-    execute_command_with_executor(
-        check_id,
-        &check.resolved_command,
-        project_root,
-        check.definition.container.as_deref(),
-        target,
-        &check.definition.env,
-        executor,
-    )
-    .await
+    run_single_check_with_executor(check, project_root, target, executor).await
 }
 
 /// Execute a command on `target` and return the result (for testing with executor).
 ///
 /// `container` overrides the docker default container (ignored in local mode).
 /// `check_env` is merged over the target's global env (check env wins).
+/// `timeout` bounds the run (`None` = unbounded); expiry yields
+/// [`CheckStatus::TimedOut`] with the reason in `error_output`.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_command_with_executor(
     check_id: String,
     command: &str,
@@ -652,29 +692,29 @@ pub async fn execute_command_with_executor(
     target: &ExecTarget,
     check_env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
+    timeout: Option<Duration>,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
 
     let env = merged_env(target, check_env);
     let full_cmd = target.build_command(container, &env, command, executor);
-    let output = executor.execute(&full_cmd, project_root).await;
+    let output = execute_with_timeout(executor, &full_cmd, project_root, timeout).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let finished_at = chrono::Local::now();
 
-    let stderr = filter_docker_warnings(&output.stderr);
-    let status = if output.success {
-        CheckStatus::Passed
-    } else {
-        CheckStatus::Failed
+    let (status, stdout, stderr) = match output {
+        Ok(out) if out.success => (CheckStatus::Passed, out.stdout, out.stderr),
+        Ok(out) => (CheckStatus::Failed, out.stdout, out.stderr),
+        Err(message) => (CheckStatus::TimedOut, String::new(), message),
     };
 
     CheckResult {
         check_id,
         status,
-        output: output.stdout,
-        error_output: stderr,
+        output: stdout,
+        error_output: filter_docker_warnings(&stderr),
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
@@ -743,6 +783,7 @@ pub async fn run_fix_command_with_executor(
         target,
         &HashMap::new(),
         executor,
+        None,
     )
     .await
 }
@@ -777,6 +818,7 @@ pub async fn run_check_with_command_with_executor(
         target,
         &check.definition.env,
         executor,
+        check.definition.timeout,
     )
     .await
 }

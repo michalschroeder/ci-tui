@@ -53,6 +53,33 @@ pub(crate) fn format_from_duration(duration: std::time::Duration) -> String {
     }
 }
 
+/// Parse a config duration: a positive integer followed by `s`, `m` or `h`
+/// (e.g. `30s`, `10m`, `1h`).
+///
+/// Hand-rolled instead of `humantime`: config only needs these three units and
+/// one fewer dependency beats compound forms (`1h30m`) nobody asked for.
+pub(crate) fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
+    let invalid = || format!("invalid duration '{s}': expected <n>s, <n>m or <n>h (e.g. 30s, 10m)");
+    let unit = s.chars().last().ok_or_else(invalid)?;
+    let multiplier = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        _ => return Err(invalid()),
+    };
+    let digits = &s[..s.len() - 1];
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let n: u64 = digits.parse().map_err(|_| invalid())?;
+    if n == 0 {
+        return Err(format!("invalid duration '{s}': must be greater than zero"));
+    }
+    n.checked_mul(multiplier)
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(invalid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +113,32 @@ mod tests {
             format_from_duration(std::time::Duration::from_secs(secs)),
             expected
         );
+    }
+
+    #[rstest]
+    #[case("1s", 1)]
+    #[case("30s", 30)]
+    #[case("10m", 600)]
+    #[case("1h", 3600)]
+    fn test_parse_duration_valid(#[case] input: &str, #[case] secs: u64) {
+        assert_eq!(
+            parse_duration(input),
+            Ok(std::time::Duration::from_secs(secs))
+        );
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("abc")]
+    #[case("10x")]
+    #[case("0s")]
+    #[case("s")]
+    #[case("-1s")]
+    #[case("1.5m")]
+    #[case(" 1s")]
+    #[case("99999999999999999999h")]
+    fn test_parse_duration_invalid(#[case] input: &str) {
+        let err = parse_duration(input).unwrap_err();
+        assert!(err.contains("duration"), "got: {err}");
     }
 }

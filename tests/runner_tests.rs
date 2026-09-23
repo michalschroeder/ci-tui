@@ -324,6 +324,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -356,6 +357,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -390,6 +392,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
     }
@@ -421,6 +424,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
     }
@@ -439,6 +443,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -468,6 +473,7 @@ mod execute_docker_command_tests {
             &config,
             &env,
             &mock,
+            None,
         )
         .await;
 
@@ -1146,5 +1152,98 @@ mod run_fix_command_with_executor_tests {
             &mock,
         )
         .await;
+    }
+}
+
+mod timeout_tests {
+    use super::*;
+    use ci_tui::config::{ExecTarget, LocalConfig};
+    use ci_tui::runner::{
+        run_single_check_with_executor, CheckRunner, RealCommandExecutor, RunnerEvent,
+    };
+    use common::configs::{CheckBuilder, ConfigBuilder};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn local_sh() -> ExecTarget {
+        ExecTarget::Local(LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn real_executor_kills_hung_check_and_reports_timed_out() {
+        let mut check = common::make_exec_check("hang", "sleep 999", None);
+        check.definition.timeout = Some(Duration::from_millis(100));
+
+        let start = Instant::now();
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/tmp"),
+            &local_sh(),
+            &RealCommandExecutor,
+        )
+        .await;
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.status, CheckStatus::TimedOut);
+        assert!(result.status.is_failure());
+        assert!(
+            result.error_output.contains("timed out after"),
+            "got: {}",
+            result.error_output
+        );
+    }
+
+    #[tokio::test]
+    async fn check_within_timeout_passes() {
+        let mut check = common::make_exec_check("quick", "true", None);
+        check.definition.timeout = Some(Duration::from_secs(30));
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/tmp"),
+            &local_sh(),
+            &RealCommandExecutor,
+        )
+        .await;
+        assert_eq!(result.status, CheckStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn pre_command_timeout_fails_group_with_timeout_message() {
+        let mut config = ConfigBuilder::new()
+            .with_host_pre_command("lint", "hang", "sleep 999")
+            .with_check("lint", "ok", CheckBuilder::new("Ok", "true").build())
+            .build();
+        config.checks["lint"].pre_commands[0].timeout = Some(Duration::from_millis(100));
+        config.runner = local_sh();
+
+        let runner =
+            CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(RealCommandExecutor));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![common::make_widget_check("ok", "lint", "Ok", false)];
+        let start = Instant::now();
+        runner.run_checks(checks, tx).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
+        );
+
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        assert!(events.iter().any(|e| matches!(e,
+            RunnerEvent::PreCommandFinished { success: false, output, .. } if output.contains("timed out after"))));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::CheckStarted { .. })));
     }
 }

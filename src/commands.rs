@@ -51,6 +51,10 @@ ignore_patterns:
   - '\.md$'
   - '^target/'
 
+# Optional default max runtime for checks / pre-commands (<n>s, <n>m or <n>h).
+# Expired checks are killed and reported as "timed out". Unset = no limit.
+# timeout: 15m
+
 # Groups run sequentially (YAML order); checks inside a group with
 # `parallel: true` run concurrently
 checks:
@@ -64,6 +68,7 @@ checks:
         # Placeholder fails on purpose until replaced with a real command.
         command: echo "replace me — e.g. cargo clippy -- -D warnings" {files} && false
         # fix_command: echo "optional autofix — runs with --fix / 'x' key"
+        # timeout: 5m                         # per-check limit, overrides top-level timeout
         triggers:
           file_pattern: source
 "#;
@@ -143,5 +148,26 @@ mod tests {
         std::fs::write(&path, "version: 2\nnot_a_field: true\n").unwrap();
         let err = format!("{:#}", validate(&path).unwrap_err());
         assert!(err.contains("not_a_field"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        let bad = TEMPLATE.replace(
+            "        triggers:",
+            "        timeout: 10x\n        triggers:",
+        );
+        std::fs::write(&path, bad).unwrap();
+        let err = format!("{:#}", validate(&path).unwrap_err());
+        assert!(
+            err.contains("checks.quality.checks.lint: `timeout`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_template_documents_timeout() {
+        assert!(TEMPLATE.contains("timeout:"));
     }
 }

@@ -402,15 +402,14 @@ impl App {
             .and_then(|c| self.results.get(c.id()))
             .map(|r| r.status.clone());
         let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
+        let finished = status
+            .as_ref()
+            .is_some_and(|s| *s == CheckStatus::Passed || s.is_failure());
         SelectedCaps {
-            can_fix: !busy && status == Some(CheckStatus::Failed) && has_fix,
-            can_retry: !busy && matches!(status, Some(CheckStatus::Passed | CheckStatus::Failed)),
+            can_fix: !busy && status.as_ref().is_some_and(CheckStatus::is_failure) && has_fix,
+            can_retry: !busy && finished,
             can_trigger: !busy && status == Some(CheckStatus::OnDemand),
-            can_run_all_files: !busy
-                && matches!(
-                    status,
-                    Some(CheckStatus::Passed | CheckStatus::Failed | CheckStatus::OnDemand)
-                ),
+            can_run_all_files: !busy && (finished || status == Some(CheckStatus::OnDemand)),
         }
     }
 
@@ -439,7 +438,7 @@ impl App {
     fn is_fixable(&self, check: &CheckToRun) -> bool {
         self.results
             .get(check.id())
-            .is_some_and(|r| r.status == CheckStatus::Failed && check.has_fix())
+            .is_some_and(|r| r.status.is_failure() && check.has_fix())
     }
 
     /// Get all failed checks that can be fixed
@@ -824,7 +823,7 @@ impl App {
         for result in self.results.values() {
             match result.status {
                 CheckStatus::Passed => counts.passed += 1,
-                CheckStatus::Failed => counts.failed += 1,
+                CheckStatus::Failed | CheckStatus::TimedOut => counts.failed += 1,
                 CheckStatus::Pending | CheckStatus::Running => counts.pending += 1,
                 CheckStatus::OnDemand => counts.on_demand += 1,
                 CheckStatus::Skipped => (),
@@ -902,8 +901,7 @@ impl App {
             StatusFilter::Failed => self
                 .results
                 .get(check.id())
-                .map(|r| r.status == CheckStatus::Failed)
-                .unwrap_or(false),
+                .is_some_and(|r| r.status.is_failure()),
         }
     }
 
@@ -989,6 +987,7 @@ checks:
                 triggers: None,
                 on_demand: false,
                 env: std::collections::HashMap::new(),
+                timeout: None,
             },
             service: Some("php".to_string()),
             files: if on_demand {
@@ -1093,6 +1092,27 @@ checks:
         app.next_check();
 
         assert!(app.fix.result.is_none());
+    }
+
+    #[test]
+    fn test_timed_out_counts_as_failure() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::TimedOut;
+
+        assert_eq!(app.count_by_status().failed, 1);
+        assert_eq!(app.exit_code(), 1);
+
+        app.view.status_filter = StatusFilter::Failed;
+        let visible: Vec<_> = app.get_selectable_items();
+        assert!(visible
+            .iter()
+            .any(|i| matches!(i, SelectableItem::Check(c) if c.id() == "phpunit")));
+
+        app.view.status_filter = StatusFilter::All;
+        app.view.selected_check = 1; // phpunit
+        let caps = app.selected_capabilities();
+        assert!(caps.can_retry && caps.can_run_all_files);
     }
 
     #[test]
