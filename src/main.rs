@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ci_tui::{checks, commands, config, fix, git, simple, ui};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Path to config file (required unless a subcommand is given)
+    /// Path to config file (required unless a subcommand is given; create one with `ci-tui init`)
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
@@ -40,6 +40,14 @@ enum Command {
         /// Config path [default: --config value, else ci-tui.yaml]
         path: Option<PathBuf>,
     },
+}
+
+/// Clap-styled usage error for a missing `--config` (exit code 2).
+fn missing_config_error() -> clap::Error {
+    Cli::command().error(
+        clap::error::ErrorKind::MissingRequiredArgument,
+        "--config <CONFIG> is required (or run `ci-tui init` to create one)",
+    )
 }
 
 /// Resolve the config path for `init` / `validate`: positional arg, then
@@ -93,9 +101,9 @@ async fn main() -> Result<()> {
         None => {}
     }
 
+    // Enforced here, not via clap `required`: clap forbids required global args.
     let Some(config_path) = cli.config else {
-        eprintln!("Error: --config <path> is required (or run `ci-tui init` to create one)");
-        std::process::exit(2);
+        missing_config_error().exit();
     };
 
     // Auto-detect TUI mode: use simple mode if stdout is not a terminal
@@ -142,6 +150,15 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_missing_config_error() {
+        let cli = Cli::try_parse_from(["ci-tui"]).unwrap();
+        assert!(cli.command.is_none() && cli.config.is_none());
+        let err = missing_config_error();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.exit_code(), 2);
+    }
 
     #[test]
     fn test_config_flag_before_subcommand() {
