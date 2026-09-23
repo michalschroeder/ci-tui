@@ -185,7 +185,7 @@ pub fn get_changed_files_with_executor(
 ) -> Result<ChangedFiles> {
     // Flattened (not `.context`) so the git error survives `to_string()`.
     let committed = run_committed_diff(project_root, base_ref, executor)
-        .map_err(|e| anyhow::anyhow!("could not resolve git base ref `{base_ref}`: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("could not resolve git base ref `{base_ref}`: {e:#}"))?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {

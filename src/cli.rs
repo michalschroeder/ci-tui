@@ -33,8 +33,19 @@ pub struct Cli {
     pub files: Vec<PathBuf>,
 
     /// Compare against this git ref instead of `git.base_branch` (exact ref, no fallback)
-    #[arg(long, value_name = "REF", conflicts_with = "files")]
+    #[arg(long, value_name = "REF", conflicts_with = "files", value_parser = parse_base_arg)]
     pub base: Option<String>,
+}
+
+/// `--base` value parser. The ref is passed to `git diff` positionally, so a
+/// leading `-` (`--base=--cached`) would be read as a git option.
+fn parse_base_arg(value: &str) -> Result<String, String> {
+    if value.starts_with('-') {
+        return Err(format!(
+            "`{value}` is not a git ref (must not start with `-`)"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// `--files` value parser. `--files` takes 1.. values, so a trailing subcommand
@@ -158,6 +169,14 @@ mod tests {
         let cli = Cli::try_parse_checked(["ci-tui", "--base", "v1.0"]).unwrap();
         assert_eq!(cli.base.as_deref(), Some("v1.0"));
         assert!(Cli::try_parse_checked(["ci-tui"]).unwrap().base.is_none());
+    }
+
+    #[test]
+    fn test_base_rejects_option_like_ref() {
+        let err = Cli::try_parse_checked(["ci-tui", "--base=--cached"])
+            .err()
+            .expect("expected error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[rstest::rstest]
