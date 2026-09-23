@@ -1,4 +1,4 @@
-//! `ci-tui init` — scaffold a starter configuration file.
+//! `ci-tui init` / `ci-tui validate` subcommands: scaffold and check config files.
 
 use anyhow::{Context, Result};
 use std::io::ErrorKind;
@@ -56,7 +56,7 @@ checks:
 "#;
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
-pub fn run(path: &Path) -> Result<()> {
+pub fn init(path: &Path) -> Result<()> {
     use std::io::Write;
 
     let mut file = std::fs::OpenOptions::new()
@@ -71,11 +71,6 @@ pub fn run(path: &Path) -> Result<()> {
         })?;
     file.write_all(TEMPLATE.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
-    println!("Wrote {}", path.display());
-    println!(
-        "Edit the checks section, then run: ci-tui --config {}",
-        path.display()
-    );
     Ok(())
 }
 
@@ -83,7 +78,6 @@ pub fn run(path: &Path) -> Result<()> {
 pub fn validate(path: &Path) -> Result<()> {
     crate::config::load_config(path)
         .with_context(|| format!("invalid config: {}", path.display()))?;
-    println!("OK: {} is valid", path.display());
     Ok(())
 }
 
@@ -100,19 +94,19 @@ mod tests {
     }
 
     #[test]
-    fn test_run_writes_file() {
+    fn test_init_writes_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
-        run(&path).unwrap();
+        init(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
     }
 
     #[test]
-    fn test_run_refuses_to_overwrite() {
+    fn test_init_refuses_to_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
         std::fs::write(&path, "existing").unwrap();
-        let err = run(&path).unwrap_err().to_string();
+        let err = init(&path).unwrap_err().to_string();
         assert!(err.contains("exists"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
     }

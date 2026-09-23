@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ci_tui::{checks, config, fix, git, simple, ui};
+use ci_tui::{checks, commands, config, fix, git, simple, ui};
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -75,9 +75,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Init { path }) => return ci_tui::init::run(&path),
+        Some(Command::Init { path }) => {
+            commands::init(&path)?;
+            println!("Wrote {}", path.display());
+            println!(
+                "Edit the checks section, then run: ci-tui --config {}",
+                path.display()
+            );
+            return Ok(());
+        }
         Some(Command::Validate { path }) => {
-            return ci_tui::init::validate(&validate_path(path, cli.config));
+            let path = validate_path(path, cli.config);
+            commands::validate(&path)?;
+            println!("OK: {} is valid", path.display());
+            return Ok(());
         }
         None => {}
     }

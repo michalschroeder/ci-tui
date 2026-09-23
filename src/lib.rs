@@ -6,19 +6,19 @@
 //! # Modules
 //!
 //! - `checks`: Logic for determining which checks to run
+//! - `commands`: `init` / `validate` subcommands (scaffold and check config)
 //! - `config`: Configuration loading and parsing from YAML
 //! - `git`: Git operations for detecting changed files
-//! - `init`: Scaffold starter configuration and validation
 //! - `runner`: Check execution in Docker containers
 //! - `simple`: Simple console output mode (no TUI)
 //! - `test_discovery`: Finding related test files for source changes
 //! - `ui`: Terminal UI using ratatui
 
 pub mod checks;
+pub mod commands;
 pub mod config;
 pub mod fix;
 pub mod git;
-pub mod init;
 pub mod runner;
 pub mod simple;
 pub mod test_discovery;
