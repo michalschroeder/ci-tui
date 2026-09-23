@@ -95,7 +95,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
         std::fs::write(&path, TEMPLATE).unwrap();
-        crate::config::load_config(&path).expect("init template must always parse");
+        validate(&path).expect("init template must always parse");
     }
 
     #[test]
@@ -114,14 +114,6 @@ mod tests {
         let err = init(&path).unwrap_err().to_string();
         assert!(err.contains("exists"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
-    }
-
-    #[test]
-    fn test_validate_accepts_template() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ci-tui.yaml");
-        std::fs::write(&path, TEMPLATE).unwrap();
-        validate(&path).unwrap();
     }
 
     #[test]
