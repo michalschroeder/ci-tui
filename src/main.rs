@@ -32,9 +32,8 @@ struct Cli {
 enum Command {
     /// Generate a starter ci-tui.yaml
     Init {
-        /// Output path
-        #[arg(default_value = commands::DEFAULT_CONFIG_FILE)]
-        path: PathBuf,
+        /// Output path [default: --config value, else ci-tui.yaml]
+        path: Option<PathBuf>,
     },
     /// Validate a config file (exit non-zero if invalid)
     Validate {
@@ -43,9 +42,9 @@ enum Command {
     },
 }
 
-/// Resolve the config path for `validate`: positional arg, then `--config`,
-/// then `ci-tui.yaml`.
-fn validate_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
+/// Resolve the config path for `init` / `validate`: positional arg, then
+/// `--config`, then `ci-tui.yaml`.
+fn resolve_config_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
     path.or(config)
         .unwrap_or_else(|| PathBuf::from(commands::DEFAULT_CONFIG_FILE))
 }
@@ -76,6 +75,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Init { path }) => {
+            let path = resolve_config_path(path, cli.config);
             commands::init(&path)?;
             println!("Wrote {}", path.display());
             println!(
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Command::Validate { path }) => {
-            let path = validate_path(path, cli.config);
+            let path = resolve_config_path(path, cli.config);
             commands::validate(&path)?;
             println!("OK: {} is valid", path.display());
             return Ok(());
@@ -149,7 +149,10 @@ mod tests {
         let Some(Command::Validate { path }) = cli.command else {
             panic!("expected Validate");
         };
-        assert_eq!(validate_path(path, cli.config), PathBuf::from("a.yaml"));
+        assert_eq!(
+            resolve_config_path(path, cli.config),
+            PathBuf::from("a.yaml")
+        );
     }
 
     #[test]
@@ -158,7 +161,10 @@ mod tests {
         let Some(Command::Validate { path }) = cli.command else {
             panic!("expected Validate");
         };
-        assert_eq!(validate_path(path, cli.config), PathBuf::from("a.yaml"));
+        assert_eq!(
+            resolve_config_path(path, cli.config),
+            PathBuf::from("a.yaml")
+        );
     }
 
     #[test]
@@ -167,7 +173,10 @@ mod tests {
         let Some(Command::Validate { path }) = cli.command else {
             panic!("expected Validate");
         };
-        assert_eq!(validate_path(path, cli.config), PathBuf::from("b.yaml"));
+        assert_eq!(
+            resolve_config_path(path, cli.config),
+            PathBuf::from("b.yaml")
+        );
     }
 
     #[test]
@@ -177,7 +186,7 @@ mod tests {
             panic!("expected Validate");
         };
         assert_eq!(
-            validate_path(path, cli.config),
+            resolve_config_path(path, cli.config),
             PathBuf::from("ci-tui.yaml")
         );
     }
@@ -188,6 +197,21 @@ mod tests {
         let Some(Command::Init { path }) = cli.command else {
             panic!("expected Init");
         };
-        assert_eq!(path, PathBuf::from("ci-tui.yaml"));
+        assert_eq!(
+            resolve_config_path(path, cli.config),
+            PathBuf::from("ci-tui.yaml")
+        );
+    }
+
+    #[test]
+    fn test_init_honors_config_flag() {
+        let cli = Cli::try_parse_from(["ci-tui", "-c", "a.yaml", "init"]).unwrap();
+        let Some(Command::Init { path }) = cli.command else {
+            panic!("expected Init");
+        };
+        assert_eq!(
+            resolve_config_path(path, cli.config),
+            PathBuf::from("a.yaml")
+        );
     }
 }
