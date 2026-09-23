@@ -368,6 +368,27 @@ fn compile_ignore_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
         .collect()
 }
 
+/// First pattern key referenced by `triggers` that is missing from `patterns`,
+/// as `(field, key)`.
+fn dangling_pattern_ref<'a>(
+    triggers: &'a CheckTriggers,
+    patterns: &HashMap<String, FilePattern>,
+) -> Option<(&'static str, &'a str)> {
+    let discovery = triggers
+        .test_discovery
+        .as_ref()
+        .map(|d| d.source_pattern.as_str());
+    [
+        ("file_pattern", triggers.file_pattern.as_deref()),
+        ("test_discovery.source_pattern", discovery),
+    ]
+    .into_iter()
+    .find_map(|(field, key)| {
+        key.filter(|k| !patterns.contains_key(*k))
+            .map(|k| (field, k))
+    })
+}
+
 /// Load configuration from a YAML file.
 ///
 /// # Errors
@@ -427,6 +448,7 @@ impl CiConfig {
                 self.version
             );
         }
+        self.check_pattern_references()?;
         let _ = self
             .compiled_file_patterns
             .set(compile_file_patterns(&self.file_patterns)?);
@@ -434,6 +456,26 @@ impl CiConfig {
             .compiled_ignore_patterns
             .set(compile_ignore_patterns(&self.ignore_patterns)?);
         Ok(())
+    }
+
+    /// Every `triggers.file_pattern` / `test_discovery.source_pattern` must name a
+    /// key in `file_patterns`; otherwise the check would be silently skipped.
+    fn check_pattern_references(&self) -> Result<()> {
+        let dangling = self
+            .checks
+            .iter()
+            .flat_map(|(g, group)| group.checks.iter().map(move |(c, check)| (g, c, check)))
+            .find_map(|(g, c, check)| {
+                let (field, key) =
+                    dangling_pattern_ref(check.triggers.as_ref()?, &self.file_patterns)?;
+                Some(format!(
+                    "checks.{g}.checks.{c}.triggers.{field}: unknown file pattern '{key}'"
+                ))
+            });
+        match dangling {
+            Some(msg) => bail!(msg),
+            None => Ok(()),
+        }
     }
 
     /// Get the raw regex string for a file pattern key
@@ -1430,6 +1472,25 @@ checks: {}
             let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
             let msg = config.validate_and_compile().unwrap_err().to_string();
             assert!(msg.contains("unsupported config version"), "got: {msg}");
+        }
+
+        // Trigger referencing an undefined file_patterns key is rejected at load
+        #[rstest]
+        #[case::file_pattern("file_pattern: sorce", "triggers.file_pattern")]
+        #[case::source_pattern(
+            "test_discovery: {source_pattern: sorce, strategies: []}",
+            "triggers.test_discovery.source_pattern"
+        )]
+        fn test_validate_rejects_unknown_pattern_ref(#[case] trigger: &str, #[case] field: &str) {
+            let yaml = format!(
+                "version: 2\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns:\n  source:\n    pattern: 'x'\nchecks:\n  g:\n    checks:\n      lint:\n        name: Lint\n        command: 'true'\n        triggers:\n          {trigger}\n"
+            );
+            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let msg = config.validate_and_compile().unwrap_err().to_string();
+            assert!(
+                msg.contains(&format!("checks.g.checks.lint.{field}")) && msg.contains("'sorce'"),
+                "got: {msg}"
+            );
         }
 
         // load_config end-to-end: invalid ignore_patterns regex fails
