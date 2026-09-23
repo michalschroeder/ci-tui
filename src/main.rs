@@ -11,8 +11,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Path to ci-config.yaml (required unless a subcommand is given)
-    #[arg(short, long)]
+    /// Path to config file (required unless a subcommand is given)
+    #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
     /// Run in simple console mode (no TUI)
@@ -38,10 +38,16 @@ enum Command {
     },
     /// Validate a config file (exit non-zero if invalid)
     Validate {
-        /// Config path
-        #[arg(default_value = "ci-tui.yaml")]
-        path: PathBuf,
+        /// Config path [default: --config value, else ci-tui.yaml]
+        path: Option<PathBuf>,
     },
+}
+
+/// Resolve the config path for `validate`: positional arg, then `--config`,
+/// then `ci-tui.yaml`.
+fn validate_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
+    path.or(config)
+        .unwrap_or_else(|| PathBuf::from("ci-tui.yaml"))
 }
 
 fn git_detect_changes_or_exit(
@@ -70,7 +76,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Init { path }) => return ci_tui::init::run(&path),
-        Some(Command::Validate { path }) => return ci_tui::init::validate(&path),
+        Some(Command::Validate { path }) => {
+            return ci_tui::init::validate(&validate_path(path, cli.config));
+        }
         None => {}
     }
 
@@ -117,5 +125,58 @@ async fn main() -> Result<()> {
     } else {
         // Run the TUI
         ui::run(config, changed_files, checks_to_run, project_root).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_flag_before_subcommand() {
+        let cli = Cli::try_parse_from(["ci-tui", "-c", "a.yaml", "validate"]).unwrap();
+        let Some(Command::Validate { path }) = cli.command else {
+            panic!("expected Validate");
+        };
+        assert_eq!(validate_path(path, cli.config), PathBuf::from("a.yaml"));
+    }
+
+    #[test]
+    fn test_config_flag_after_subcommand() {
+        let cli = Cli::try_parse_from(["ci-tui", "validate", "--config", "a.yaml"]).unwrap();
+        let Some(Command::Validate { path }) = cli.command else {
+            panic!("expected Validate");
+        };
+        assert_eq!(validate_path(path, cli.config), PathBuf::from("a.yaml"));
+    }
+
+    #[test]
+    fn test_validate_positional_path() {
+        let cli = Cli::try_parse_from(["ci-tui", "validate", "b.yaml"]).unwrap();
+        let Some(Command::Validate { path }) = cli.command else {
+            panic!("expected Validate");
+        };
+        assert_eq!(validate_path(path, cli.config), PathBuf::from("b.yaml"));
+    }
+
+    #[test]
+    fn test_validate_defaults_to_ci_tui_yaml() {
+        let cli = Cli::try_parse_from(["ci-tui", "validate"]).unwrap();
+        let Some(Command::Validate { path }) = cli.command else {
+            panic!("expected Validate");
+        };
+        assert_eq!(
+            validate_path(path, cli.config),
+            PathBuf::from("ci-tui.yaml")
+        );
+    }
+
+    #[test]
+    fn test_init_defaults_to_ci_tui_yaml() {
+        let cli = Cli::try_parse_from(["ci-tui", "init"]).unwrap();
+        let Some(Command::Init { path }) = cli.command else {
+            panic!("expected Init");
+        };
+        assert_eq!(path, PathBuf::from("ci-tui.yaml"));
     }
 }

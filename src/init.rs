@@ -1,10 +1,11 @@
 //! `ci-tui init` — scaffold a starter configuration file.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use std::io::ErrorKind;
 use std::path::Path;
 
 pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
-# Full reference: docs/configuration.md
+# Full reference: https://github.com/michalschroeder/ci-tui/blob/master/docs/configuration.md
 version: 2
 
 docker:
@@ -12,6 +13,7 @@ docker:
   project_dir: .
   # Compose service to exec checks in; container name derives as {dir}-{service}-1
   service: app
+  # container: myproject-app-1           # override if the derived name is wrong (e.g. compose `name:`)
   # Shell inside the container ("/bin/sh" for Alpine images)
   shell: bash
   # image: my-dev-image:latest            # for standalone `docker run` fallback
@@ -55,10 +57,19 @@ checks:
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
 pub fn run(path: &Path) -> Result<()> {
-    if path.exists() {
-        bail!("{} already exists — not overwriting", path.display());
-    }
-    std::fs::write(path, TEMPLATE)
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => {
+                anyhow::anyhow!("{} already exists — not overwriting", path.display())
+            }
+            _ => anyhow::Error::new(e).context(format!("failed to write {}", path.display())),
+        })?;
+    file.write_all(TEMPLATE.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     println!("Wrote {}", path.display());
     println!(
