@@ -79,9 +79,9 @@ pub fn init(path: &Path) -> Result<()> {
 }
 
 /// Validate a config file: parses + compiles patterns via `load_config`.
+/// Errors already name the file (read / parse / invalid) via `load_config`.
 pub fn validate(path: &Path) -> Result<()> {
-    crate::config::load_config(path)
-        .with_context(|| format!("invalid config: {}", path.display()))?;
+    crate::config::load_config(path)?;
     Ok(())
 }
 
