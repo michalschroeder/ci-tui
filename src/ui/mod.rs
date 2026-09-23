@@ -23,7 +23,7 @@ pub mod dashboard;
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
-use crate::runner::{run_check_with_command, CheckResult, CheckRunner, ExecTarget, RunnerEvent};
+use crate::runner::{run_check_with_command, CheckResult, CheckRunner, RunnerEvent};
 use anyhow::Result;
 use app::App;
 use crossterm::{
@@ -195,30 +195,18 @@ enum Action {
 /// Shared handles for spawned async tasks (Arcs for cheap cloning)
 #[derive(Clone)]
 struct TaskCtx {
-    /// Git change detection + test discovery root (cwd)
+    /// Git change detection root (cwd)
     project_root: Arc<PathBuf>,
-    /// Command execution dir (repo root in local mode, cwd in docker mode)
+    /// Command execution + test discovery root (repo root in local mode, cwd in docker mode)
     exec_root: Arc<PathBuf>,
-    /// Config (docker settings, env, ignore patterns, check rules)
+    /// Config; `config.runner` is where commands execute (docker or local host)
     config: Arc<CiConfig>,
-    /// Where commands execute (docker or local host)
-    target: ExecTarget,
-    /// Default container name for docker exec/run commands (empty in local mode)
-    container_name: Arc<str>,
 }
 
 impl TaskCtx {
     /// Run `command` as `check` (check's container override and env apply)
     async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        run_check_with_command(
-            check,
-            command,
-            &self.exec_root,
-            &self.container_name,
-            &self.target,
-            self.target.env(),
-        )
-        .await
+        run_check_with_command(check, command, &self.exec_root, &self.config.runner).await
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
@@ -653,13 +641,10 @@ pub async fn run(
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
-    let target = ExecTarget::from_config(&config);
     let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
         exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
-        container_name: target.default_container().into(),
-        target,
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -831,8 +816,6 @@ checks:
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
-            target: ExecTarget::from_config(config),
-            container_name: "app".into(),
         })
     }
 
@@ -867,7 +850,7 @@ checks:
                 on_demand: false,
                 env: std::collections::HashMap::new(),
             },
-            service: "php".to_string(),
+            service: Some("php".to_string()),
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,

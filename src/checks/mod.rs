@@ -62,8 +62,8 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// Docker service to use (resolved from check/group/global default)
-    pub service: String,
+    /// Docker service to use (resolved from check/group/global default); `None` in local mode
+    pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,
     /// The fully resolved command to execute
@@ -339,8 +339,7 @@ mod tests {
 
         CiConfig {
             version: 2,
-            runner: crate::config::RunnerMode::Docker,
-            docker: Some(DockerConfig {
+            runner: crate::config::ExecTarget::Docker(DockerConfig {
                 project_dir: "./infrastructure".to_string(),
                 service: "php".to_string(),
                 container: None,
@@ -350,7 +349,6 @@ mod tests {
                 shell: "bash".to_string(),
                 env: HashMap::new(),
             }),
-            local: crate::config::LocalConfig::default(),
             git: GitConfig {
                 base_branch: "development".to_string(),
                 fallback_branch: "HEAD~1".to_string(),
@@ -385,7 +383,7 @@ mod tests {
                 on_demand: false,
                 env: std::collections::HashMap::new(),
             },
-            service: "php".to_string(),
+            service: Some("php".to_string()),
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,

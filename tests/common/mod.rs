@@ -114,7 +114,7 @@ pub fn make_check_with_options(
             on_demand,
             env: std::collections::HashMap::new(),
         },
-        service: "app".to_string(),
+        service: Some("app".to_string()),
         files: if on_demand {
             CheckFiles::OnDemand
         } else {
@@ -168,7 +168,7 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
             on_demand: false,
             env: std::collections::HashMap::new(),
         },
-        service: "app".to_string(),
+        service: Some("app".to_string()),
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,

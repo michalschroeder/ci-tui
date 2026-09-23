@@ -20,7 +20,7 @@
 //! }
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::Deserialize;
@@ -32,32 +32,89 @@ use std::sync::OnceLock;
 ///
 /// Contains all settings needed to run CI checks including Docker configuration,
 /// git settings, file patterns, and check definitions organized into groups.
+/// Deserialized via [`RawCiConfig`] so the runner mode is resolved at parse time.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawCiConfig")]
 pub struct CiConfig {
     pub version: u32,
-    /// Execution mode: docker (default) or local host
-    #[serde(default)]
-    pub runner: RunnerMode,
-    /// Required when runner is docker (the default)
-    #[serde(default)]
-    pub docker: Option<DockerConfig>,
-    /// Settings for runner: local
-    #[serde(default)]
-    pub local: LocalConfig,
+    /// Where checks execute (`runner:` + its `docker` / `local` section)
+    pub runner: ExecTarget,
     pub git: GitConfig,
     pub file_patterns: HashMap<String, FilePattern>,
     /// Check groups in execution order (YAML key order preserved)
     pub checks: IndexMap<String, GroupConfig>,
-    #[serde(default)]
     pub ignore_patterns: Vec<String>,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
-    #[serde(skip)]
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
     /// Compiled file_patterns regexes keyed by pattern name. Populated eagerly in `load_config`.
-    #[serde(skip)]
     pub(crate) compiled_file_patterns: OnceLock<HashMap<String, Regex>>,
+}
+
+/// On-disk YAML shape of [`CiConfig`]: flat `runner` flag + optional sections.
+/// Converted to [`CiConfig`] (with a typed [`ExecTarget`]) right after parsing.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCiConfig {
+    version: u32,
+    #[serde(default)]
+    runner: RunnerMode,
+    /// Required when runner is docker (the default)
+    #[serde(default)]
+    docker: Option<DockerConfig>,
+    /// Settings for runner: local
+    #[serde(default)]
+    local: LocalConfig,
+    git: GitConfig,
+    file_patterns: HashMap<String, FilePattern>,
+    checks: IndexMap<String, GroupConfig>,
+    #[serde(default)]
+    ignore_patterns: Vec<String>,
+}
+
+impl TryFrom<RawCiConfig> for CiConfig {
+    type Error = String;
+
+    fn try_from(raw: RawCiConfig) -> std::result::Result<Self, Self::Error> {
+        let runner = match (raw.runner, raw.docker) {
+            (RunnerMode::Docker, Some(docker)) => ExecTarget::Docker(docker),
+            (RunnerMode::Docker, None) => {
+                return Err(
+                    "`docker` section is required when runner is `docker` (the default). \
+                     Set `runner: local` to run checks on the host instead."
+                        .to_string(),
+                )
+            }
+            // A `docker` section in local mode is parsed (must be valid) but ignored
+            (RunnerMode::Local, _) => ExecTarget::Local(raw.local),
+        };
+        Ok(Self {
+            version: raw.version,
+            runner,
+            git: raw.git,
+            file_patterns: raw.file_patterns,
+            checks: raw.checks,
+            ignore_patterns: raw.ignore_patterns,
+            compiled_ignore_patterns: OnceLock::new(),
+            compiled_file_patterns: OnceLock::new(),
+        })
+    }
+}
+
+/// Where check commands execute, resolved from `runner:` at parse time.
+///
+/// Design: one enum instead of a `runner` flag + `Option<DockerConfig>` so
+/// "docker mode without a docker section" is unrepresentable after parsing and
+/// every consumer matches exhaustively (no panicking accessor). Enum rather than
+/// a trait: the set of backends is closed (no others planned), and exhaustive
+/// `match` keeps docker/local differences visible at each call site.
+/// Command building lives in `runner.rs` (`impl ExecTarget`).
+#[derive(Debug, Clone)]
+pub enum ExecTarget {
+    /// Run inside Docker: `docker exec` into a running container, else `docker run`
+    Docker(DockerConfig),
+    /// Run directly on the host via `local.shell -c` from the repo root
+    Local(LocalConfig),
 }
 
 /// File pattern definition with optional color for UI display
@@ -75,9 +132,7 @@ impl Clone for CiConfig {
     fn clone(&self) -> Self {
         Self {
             version: self.version,
-            runner: self.runner,
-            docker: self.docker.clone(),
-            local: self.local.clone(),
+            runner: self.runner.clone(),
             git: self.git.clone(),
             file_patterns: self.file_patterns.clone(),
             checks: self.checks.clone(),
@@ -89,10 +144,10 @@ impl Clone for CiConfig {
     }
 }
 
-/// How checks are executed: inside Docker (default) or directly on the host.
+/// Raw `runner:` value; resolved into [`ExecTarget`] during parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum RunnerMode {
+enum RunnerMode {
     #[default]
     Docker,
     Local,
@@ -452,7 +507,7 @@ fn dangling_pattern_ref<'a>(
 
 /// Check one group's pre-commands and checks for `service`/`container` set, which is
 /// disallowed under `runner: local`. Extracted to keep `check_no_docker_targets` nesting low.
-fn group_docker_targets(g: &str, group: &GroupConfig) -> Result<()> {
+fn ensure_group_has_no_docker_targets(g: &str, group: &GroupConfig) -> Result<()> {
     for (i, pre) in group.pre_commands.iter().enumerate() {
         if pre.service.is_some() || pre.container.is_some() {
             bail!(
@@ -503,9 +558,7 @@ impl CiConfig {
     ) -> Self {
         Self {
             version,
-            runner: RunnerMode::Docker,
-            docker: Some(docker),
-            local: LocalConfig::default(),
+            runner: ExecTarget::Docker(docker),
             git,
             file_patterns,
             checks,
@@ -515,11 +568,12 @@ impl CiConfig {
         }
     }
 
-    /// Docker config. Only call on docker-mode code paths — presence is validated at load.
-    pub fn docker(&self) -> &DockerConfig {
-        self.docker
-            .as_ref()
-            .expect("docker config required in docker runner mode (validated at load)")
+    /// Docker config; `None` in local mode.
+    pub fn docker(&self) -> Option<&DockerConfig> {
+        match &self.runner {
+            ExecTarget::Docker(docker) => Some(docker),
+            ExecTarget::Local(_) => None,
+        }
     }
 
     /// Check the schema version, then compile and cache every regex in
@@ -538,17 +592,16 @@ impl CiConfig {
                 self.version
             );
         }
-        if self.runner == RunnerMode::Docker && self.docker.is_none() {
-            bail!(
-                "`docker` section is required when runner is `docker` (the default). \
-                 Set `runner: local` to run checks on the host instead."
-            );
-        }
-        if self.runner == RunnerMode::Local && self.local.shell.trim().is_empty() {
-            bail!("`local.shell` must not be empty when runner is `local`");
-        }
-        if self.runner == RunnerMode::Local {
-            self.check_no_docker_targets()?;
+        match &self.runner {
+            // Docker section presence is enforced at parse time (RawCiConfig)
+            ExecTarget::Docker(_) => {}
+            ExecTarget::Local(local) => {
+                ensure!(
+                    !local.shell.trim().is_empty(),
+                    "`local.shell` must not be empty when runner is `local`"
+                );
+                self.check_no_docker_targets()?;
+            }
         }
         self.check_pattern_references()?;
         let _ = self
@@ -584,7 +637,7 @@ impl CiConfig {
     /// pre-command — those only make sense for Docker execution.
     fn check_no_docker_targets(&self) -> Result<()> {
         for (g, group) in self.checks.iter() {
-            group_docker_targets(g, group)?;
+            ensure_group_has_no_docker_targets(g, group)?;
         }
         Ok(())
     }
@@ -639,10 +692,9 @@ impl CiConfig {
             .unwrap_or("white")
     }
 
-    /// Get the default Docker service (from docker config). Empty string in local mode
-    /// (no services apply).
-    pub fn default_service(&self) -> &str {
-        self.docker.as_ref().map_or("", |d| d.service.as_str())
+    /// Default Docker service (from docker config); `None` in local mode.
+    pub fn default_service(&self) -> Option<&str> {
+        self.docker().map(|d| d.service.as_str())
     }
 
     /// Get group config by name
@@ -664,9 +716,9 @@ impl GroupConfig {
 }
 
 impl CheckDefinition {
-    /// Get the service for this check, with fallback to default
-    pub fn service_or_default<'a>(&'a self, default: &'a str) -> &'a str {
-        self.service.as_deref().unwrap_or(default)
+    /// Get the service for this check, with fallback to default (`None` in local mode)
+    pub fn service_or_default<'a>(&'a self, default: Option<&'a str>) -> Option<&'a str> {
+        self.service.as_deref().or(default)
     }
 
     /// Check if this check should always run (no triggers defined)
@@ -786,8 +838,7 @@ mod tests {
         fn build(self) -> CiConfig {
             CiConfig {
                 version: 2,
-                runner: RunnerMode::Docker,
-                docker: Some(DockerConfig {
+                runner: ExecTarget::Docker(DockerConfig {
                     project_dir: self.docker_project_dir,
                     service: self.docker_service,
                     container: None,
@@ -797,7 +848,6 @@ mod tests {
                     shell: "bash".to_string(),
                     env: HashMap::new(),
                 }),
-                local: LocalConfig::default(),
                 git: GitConfig {
                     base_branch: self.git_base,
                     fallback_branch: self.git_fallback,
@@ -932,7 +982,7 @@ mod tests {
         let config = ConfigBuilder::new()
             .with_docker("./infrastructure", "php")
             .build();
-        assert_eq!(config.default_service(), "php");
+        assert_eq!(config.default_service(), Some("php"));
     }
 
     #[test]
@@ -975,11 +1025,17 @@ mod tests {
 
         let fast = config.get_group("fast").unwrap();
         let php_lint = fast.checks.get("php-lint").unwrap();
-        assert_eq!(php_lint.service_or_default("default"), "default");
+        assert_eq!(
+            php_lint.service_or_default(Some("default")),
+            Some("default")
+        );
 
         let tests = config.get_group("tests").unwrap();
         let phpunit = tests.checks.get("phpunit").unwrap();
-        assert_eq!(phpunit.service_or_default("default"), "custom-service");
+        assert_eq!(
+            phpunit.service_or_default(Some("default")),
+            Some("custom-service")
+        );
     }
 
     #[test]
@@ -1158,7 +1214,10 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().container_name(), "explicit-container-name");
+            assert_eq!(
+                config.docker().unwrap().container_name(),
+                "explicit-container-name"
+            );
         }
 
         // Edge case: Tests container name derivation from project_dir and service - requires raw YAML to verify default derivation logic
@@ -1177,7 +1236,10 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().container_name(), "infrastructure-php-1");
+            assert_eq!(
+                config.docker().unwrap().container_name(),
+                "infrastructure-php-1"
+            );
         }
 
         // Edge case: Tests container name derivation with "." project_dir - requires raw YAML to verify special path handling
@@ -1196,7 +1258,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            let container_name = config.docker().container_name();
+            let container_name = config.docker().unwrap().container_name();
             // Should derive from current directory name
             assert!(container_name.ends_with("-app-1"));
             assert_ne!(container_name, ".-app-1"); // Should not use literal "."
@@ -1219,7 +1281,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().image_name(), "rust:latest");
+            assert_eq!(config.docker().unwrap().image_name(), "rust:latest");
         }
 
         // Edge case: Tests Docker image name derivation from container name - requires raw YAML to verify derivation logic
@@ -1239,7 +1301,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             // Image derived from container name by stripping -1 suffix
-            assert_eq!(config.docker().image_name(), "myproject-web");
+            assert_eq!(config.docker().unwrap().image_name(), "myproject-web");
         }
 
         // Edge case: project_dir basename is normalized like docker compose
@@ -1288,7 +1350,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             std::env::set_var("COMPOSE_PROJECT_NAME", "customproj");
-            let name = config.docker().container_name();
+            let name = config.docker().unwrap().container_name();
             std::env::remove_var("COMPOSE_PROJECT_NAME");
             assert_eq!(name, "customproj-web-1");
         }
@@ -1310,7 +1372,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             // container_name = "proj-x-1-1"; image must be "proj-x-1", not "proj-x"
-            assert_eq!(config.docker().image_name(), "proj-x-1");
+            assert_eq!(config.docker().unwrap().image_name(), "proj-x-1");
         }
 
         // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
@@ -1331,7 +1393,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(
-                config.docker().volume_args(),
+                config.docker().unwrap().volume_args(),
                 Some("-v .:/build".to_string())
             );
         }
@@ -1352,7 +1414,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().working_dir(), "/app");
+            assert_eq!(config.docker().unwrap().working_dir(), "/app");
         }
 
         // Edge case: Tests custom working directory configuration - requires raw YAML to verify work_dir field parsing
@@ -1372,7 +1434,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().working_dir(), "/custom/path");
+            assert_eq!(config.docker().unwrap().working_dir(), "/custom/path");
         }
 
         // Edge case: Tests that shell field is required - requires raw YAML missing shell to verify error handling
@@ -1415,7 +1477,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().shell, "/bin/sh");
+            assert_eq!(config.docker().unwrap().shell, "/bin/sh");
         }
 
         // volume_args() returns None when no volume_mount is configured
@@ -1434,7 +1496,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().volume_args(), None);
+            assert_eq!(config.docker().unwrap().volume_args(), None);
         }
 
         // volume_args() expands env vars when present
@@ -1456,7 +1518,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(
-                config.docker().volume_args(),
+                config.docker().unwrap().volume_args(),
                 Some("-v /tmp/ci-tui-vol:/build".to_string())
             );
             std::env::remove_var("CI_TUI_TEST_VOL");
@@ -1789,9 +1851,9 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.version, 2);
-            assert_eq!(config.docker().project_dir, ".");
-            assert_eq!(config.docker().service, "app"); // Default value
-            assert_eq!(config.docker().shell, "bash");
+            assert_eq!(config.docker().unwrap().project_dir, ".");
+            assert_eq!(config.docker().unwrap().service, "app"); // Default value
+            assert_eq!(config.docker().unwrap().shell, "bash");
             assert_eq!(config.git.base_branch, "main");
             assert_eq!(config.git.fallback_branch, "HEAD~1");
         }
@@ -1877,7 +1939,7 @@ checks:
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             let group = config.get_group("group").unwrap();
             let check = group.checks.get("check_with_service").unwrap();
-            assert_eq!(check.service_or_default("default"), "custom");
+            assert_eq!(check.service_or_default(Some("default")), Some("custom"));
         }
 
         // Edge case: Tests service_or_default() returns default when no service specified - requires raw YAML to verify fallback behavior
@@ -1903,8 +1965,8 @@ checks:
             let group = config.get_group("group").unwrap();
             let check = group.checks.get("check_no_service").unwrap();
             assert_eq!(
-                check.service_or_default("default_service"),
-                "default_service"
+                check.service_or_default(Some("default_service")),
+                Some("default_service")
             );
         }
     }
@@ -2020,24 +2082,29 @@ checks:
             let yaml = "version: 2\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             config.validate_and_compile().unwrap();
-            assert_eq!(config.runner, RunnerMode::Docker);
+            assert!(matches!(config.runner, ExecTarget::Docker(_)));
         }
 
         #[test]
         fn test_runner_local_without_docker_section_is_valid() {
             let config: CiConfig = serde_yaml::from_str(LOCAL_MIN).unwrap();
             config.validate_and_compile().unwrap();
-            assert_eq!(config.runner, RunnerMode::Local);
-            assert_eq!(config.local.shell, "bash");
-            assert_eq!(config.default_service(), "");
+            let ExecTarget::Local(local) = &config.runner else {
+                panic!("expected local runner, got {:?}", config.runner);
+            };
+            assert_eq!(local.shell, "bash");
+            assert_eq!(config.default_service(), None);
+            assert!(config.docker().is_none());
         }
 
         #[test]
         fn test_docker_mode_requires_docker_section() {
             let yaml = "version: 2\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            let err = config.validate_and_compile().unwrap_err().to_string();
+            let err = serde_yaml::from_str::<CiConfig>(yaml)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("`docker` section is required"), "got: {err}");
+            assert!(err.contains("runner: local"), "got: {err}");
         }
 
         #[test]
@@ -2047,8 +2114,11 @@ checks:
                 "runner: local\nlocal:\n  shell: /bin/sh\n  env:\n    APP_ENV: test\n",
             );
             let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
-            assert_eq!(config.local.shell, "/bin/sh");
-            assert_eq!(config.local.env.get("APP_ENV").unwrap(), "test");
+            let ExecTarget::Local(local) = &config.runner else {
+                panic!("expected local runner");
+            };
+            assert_eq!(local.shell, "/bin/sh");
+            assert_eq!(local.env.get("APP_ENV").unwrap(), "test");
         }
 
         #[test]
@@ -2064,8 +2134,8 @@ checks:
         fn test_clone_keeps_runner_and_local() {
             let config: CiConfig = serde_yaml::from_str(LOCAL_MIN).unwrap();
             let cloned = config.clone();
-            assert_eq!(cloned.runner, RunnerMode::Local);
-            assert!(cloned.docker.is_none());
+            assert!(matches!(cloned.runner, ExecTarget::Local(_)));
+            assert!(cloned.docker().is_none());
         }
 
         #[test]

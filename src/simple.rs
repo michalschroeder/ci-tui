@@ -36,7 +36,7 @@ pub async fn run_with_executor(
     project_root: PathBuf,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Result<Vec<CheckResult>> {
-    let target = ExecTarget::from_config(&config);
+    let target = &config.runner;
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
@@ -45,9 +45,9 @@ pub async fn run_with_executor(
             .map(|g| g.parallel)
             .unwrap_or(false);
         let results = if parallel {
-            run_parallel(group_checks, &project_root, &target, executor.clone()).await
+            run_parallel(group_checks, &project_root, target, executor.clone()).await
         } else {
-            run_sequential(group_checks, &project_root, &target, executor.as_ref()).await
+            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
         };
         all_results.extend(results);
     }
@@ -69,7 +69,7 @@ pub async fn run(
     project_root: PathBuf,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let target = ExecTarget::from_config(&config);
+    let target = &config.runner;
 
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
@@ -102,9 +102,9 @@ pub async fn run(
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, &target, executor.clone()).await
+            run_parallel(group_checks, &project_root, target, executor.clone()).await
         } else {
-            run_sequential(group_checks, &project_root, &target, executor.as_ref()).await
+            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
         };
 
         for result in results {
@@ -309,17 +309,15 @@ pub async fn run_check_with_executor(
     let check_id = check.id().to_string();
     let start = Instant::now();
 
-    let default_container = target.default_container();
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(&default_container);
-
     // Global env, then check-specific env (check wins) — same as the TUI runner
     let mut env = target.env().clone();
     env.extend(check.definition.env.clone());
-    let full_cmd = target.build_command(container_name, &env, &check.resolved_command, executor);
+    let full_cmd = target.build_command(
+        check.definition.container.as_deref(),
+        &env,
+        &check.resolved_command,
+        executor,
+    );
 
     let output = executor.execute(&full_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -363,7 +361,7 @@ mod tests {
                 on_demand: false,
                 env: HashMap::new(),
             },
-            service: String::new(),
+            service: None,
             files: CheckFiles::Files(vec![]),
             resolved_command: command.into(),
             resolved_fix_command: None,

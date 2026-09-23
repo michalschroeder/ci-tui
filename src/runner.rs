@@ -177,22 +177,9 @@ pub fn build_docker_run_command(
     parts.join(" ")
 }
 
-/// Where check commands execute, derived from the config's runner mode.
-#[derive(Debug, Clone)]
-pub enum ExecTarget {
-    Docker(crate::config::DockerConfig),
-    Local(crate::config::LocalConfig),
-}
+pub use crate::config::ExecTarget;
 
 impl ExecTarget {
-    /// Target for `config.runner`. Docker presence is validated at load.
-    pub fn from_config(config: &CiConfig) -> Self {
-        match config.runner {
-            crate::config::RunnerMode::Docker => Self::Docker(config.docker().clone()),
-            crate::config::RunnerMode::Local => Self::Local(config.local.clone()),
-        }
-    }
-
     /// Global env: `docker.env` or `local.env`.
     pub fn env(&self) -> &HashMap<String, String> {
         match self {
@@ -201,30 +188,45 @@ impl ExecTarget {
         }
     }
 
-    /// Default container for docker mode; empty in local mode (never used there).
-    pub fn default_container(&self) -> String {
-        match self {
-            Self::Docker(docker) => docker.container_name(),
-            Self::Local(_) => String::new(),
-        }
-    }
-
-    /// Full shell command for `command`. Queries container state ONLY in docker mode.
+    /// Full shell command for `command`. `container` overrides the docker
+    /// default container (`docker.container_name()`); ignored in local mode.
+    /// Queries container state ONLY in docker mode.
     pub fn build_command(
         &self,
-        container_name: &str,
+        container: Option<&str>,
         env: &HashMap<String, String>,
         command: &str,
         executor: &dyn CommandExecutor,
     ) -> String {
         match self {
             Self::Local(local) => build_local_command(local, env, command),
-            Self::Docker(docker) if executor.is_container_running(container_name) => {
-                build_docker_exec_command(container_name, env, command, &docker.shell)
-            }
-            Self::Docker(docker) => build_docker_run_command(docker, env, command),
+            Self::Docker(docker) => build_docker_command(docker, container, env, command, executor),
         }
     }
+}
+
+/// `docker exec` into `container` (default: `docker.container_name()`) when it
+/// is running, else standalone `docker run`.
+fn build_docker_command(
+    docker: &crate::config::DockerConfig,
+    container: Option<&str>,
+    env: &HashMap<String, String>,
+    command: &str,
+    executor: &dyn CommandExecutor,
+) -> String {
+    let name = container.map_or_else(|| docker.container_name(), str::to_owned);
+    if executor.is_container_running(&name) {
+        build_docker_exec_command(&name, env, command, &docker.shell)
+    } else {
+        build_docker_run_command(docker, env, command)
+    }
+}
+
+/// Env for a command: target (global) env, then `extra` on top (extra wins).
+fn merged_env(target: &ExecTarget, extra: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env = target.env().clone();
+    env.extend(extra.clone());
+    env
 }
 
 /// Status of a CI check during execution
@@ -336,10 +338,9 @@ pub enum RunnerEvent {
 /// - Parallel execution across groups (when configured)
 /// - Event streaming for UI updates
 pub struct CheckRunner {
+    /// Config; `config.runner` is the single source of truth for the target
     config: Arc<CiConfig>,
-    target: ExecTarget,
     project_root: Arc<Path>,
-    container_name: Arc<str>,
     executor: Arc<dyn CommandExecutor>,
 }
 
@@ -355,15 +356,16 @@ impl CheckRunner {
         project_root: &Path,
         executor: Arc<dyn CommandExecutor>,
     ) -> Self {
-        let target = ExecTarget::from_config(&config);
-        let container_name: Arc<str> = target.default_container().into();
         Self {
             config: Arc::new(config),
-            target,
             project_root: Arc::from(project_root),
-            container_name,
             executor,
         }
+    }
+
+    /// Where commands execute (`config.runner`)
+    fn target(&self) -> &ExecTarget {
+        &self.config.runner
     }
 
     /// Run all checks, grouped by execution group, sending events via the channel
@@ -450,21 +452,14 @@ impl CheckRunner {
         let check = check.clone();
         let event_tx = event_tx.clone();
         let project_root = self.project_root.clone();
-        let container_name: Arc<str> = check
-            .definition
-            .container
-            .clone()
-            .unwrap_or_else(|| self.container_name.to_string())
-            .into();
-        let target = self.target.clone();
+        let config = Arc::clone(&self.config);
         let executor = self.executor.clone();
 
         tokio::spawn(async move {
             let result = run_check_with_target(
                 &check,
                 &project_root,
-                &container_name,
-                &target,
+                &config.runner,
                 &event_tx,
                 executor.as_ref(),
             )
@@ -478,17 +473,10 @@ impl CheckRunner {
         check: &CheckToRun,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> CheckResult {
-        // Use per-check container if specified, otherwise use default
-        let container_name = check
-            .definition
-            .container
-            .as_deref()
-            .unwrap_or(&self.container_name);
         run_check_with_target(
             check,
             &self.project_root,
-            container_name,
-            &self.target,
+            self.target(),
             event_tx,
             self.executor.as_ref(),
         )
@@ -519,51 +507,44 @@ impl CheckRunner {
         (output.success, combined, duration_ms)
     }
 
-    /// Resolve the container for a check/pre-command.
-    ///
-    /// Precedence: explicit `container:` > compose-convention name for a
-    /// non-default service > cached default container.
-    ///
-    /// LIMITATION: assumes the Docker Compose v2 naming convention
-    /// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
-    /// override inside the compose file is not. Non-UTF8 project paths fall
-    /// back to the literal project name "project". Future work: resolve via
-    /// `docker compose ps -q <service>` instead of string construction.
-    fn resolve_container_name(&self, explicit: Option<&str>, service: &str) -> String {
-        if let Some(container) = explicit {
-            container.to_string()
-        } else if service != self.config.default_service() {
-            format!(
-                "{}-{}-1",
-                self.config.docker().compose_project_name(),
-                service
-            )
-        } else {
-            self.container_name.to_string()
-        }
-    }
-
     /// Shell command for a non-host pre-command. Local mode ignores
     /// `service`/`container` (rejected at load) and runs on the host.
     fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> String {
-        let mut env = self.target.env().clone();
-        env.extend(pre_cmd.env.clone());
-
-        if let ExecTarget::Local(local) = &self.target {
-            return build_local_command(local, &env, &pre_cmd.command);
-        }
-
-        let service = pre_cmd
-            .service
-            .as_deref()
-            .unwrap_or_else(|| self.config.default_service());
-        let container_name = self.resolve_container_name(pre_cmd.container.as_deref(), service);
-        self.target.build_command(
-            &container_name,
+        let env = merged_env(self.target(), &pre_cmd.env);
+        let container = match self.target() {
+            ExecTarget::Docker(docker) => Some(pre_command_container(docker, pre_cmd)),
+            ExecTarget::Local(_) => None,
+        };
+        self.target().build_command(
+            container.as_deref(),
             &env,
             &pre_cmd.command,
             self.executor.as_ref(),
         )
+    }
+}
+
+/// Resolve the container for a docker-mode pre-command.
+///
+/// Precedence: explicit `container:` > compose-convention name for a
+/// non-default service > default container.
+///
+/// LIMITATION: assumes the Docker Compose v2 naming convention
+/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
+/// override inside the compose file is not. Non-UTF8 project paths fall
+/// back to the literal project name "project". Future work: resolve via
+/// `docker compose ps -q <service>` instead of string construction.
+fn pre_command_container(
+    docker: &crate::config::DockerConfig,
+    pre_cmd: &crate::config::PreCommand,
+) -> String {
+    let service = pre_cmd.service.as_deref().unwrap_or(&docker.service);
+    match pre_cmd.container.as_deref() {
+        Some(container) => container.to_string(),
+        None if service != docker.service => {
+            format!("{}-{}-1", docker.compose_project_name(), service)
+        }
+        None => docker.container_name(),
     }
 }
 
@@ -635,16 +616,11 @@ async fn run_all_pre_commands(
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
-    container_name: &str,
     target: &ExecTarget,
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
-
-    // Merge global env with check-specific env (check env takes precedence)
-    let mut env = target.env().clone();
-    env.extend(check.definition.env.clone());
 
     let _ = event_tx
         .send(RunnerEvent::CheckStarted {
@@ -656,28 +632,32 @@ async fn run_check_with_target(
         check_id,
         &check.resolved_command,
         project_root,
-        container_name,
+        check.definition.container.as_deref(),
         target,
-        &env,
+        &check.definition.env,
         executor,
     )
     .await
 }
 
-/// Execute a command on `target` and return the result (for testing with executor)
+/// Execute a command on `target` and return the result (for testing with executor).
+///
+/// `container` overrides the docker default container (ignored in local mode).
+/// `check_env` is merged over the target's global env (check env wins).
 pub async fn execute_command_with_executor(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
+    container: Option<&str>,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
+    check_env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
 
-    let full_cmd = target.build_command(container_name, env, command, executor);
+    let env = merged_env(target, check_env);
+    let full_cmd = target.build_command(container, &env, command, executor);
     let output = executor.execute(&full_cmd, project_root).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -701,23 +681,13 @@ pub async fn execute_command_with_executor(
     }
 }
 
-/// Run a single check (for retry single)
+/// Run a single check (for retry single). Target env + check env apply.
 pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    default_container: &str,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
 ) -> CheckResult {
-    run_single_check_with_executor(
-        check,
-        project_root,
-        default_container,
-        target,
-        env,
-        &RealCommandExecutor,
-    )
-    .await
+    run_single_check_with_executor(check, project_root, target, &RealCommandExecutor).await
 }
 
 /// Run a single check with a custom executor (test-facing).
@@ -726,44 +696,32 @@ pub async fn run_single_check(
 pub async fn run_single_check_with_executor(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    default_container: &str,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(default_container);
-    let mut merged_env = env.clone();
-    merged_env.extend(check.definition.env.clone());
-    execute_command_with_executor(
-        check.id().to_string(),
+    run_check_with_command_with_executor(
+        check,
         &check.resolved_command,
         project_root,
-        container_name,
         target,
-        &merged_env,
         executor,
     )
     .await
 }
 
-/// Run a fix command for a check
+/// Run a fix command. `container` overrides the docker default container;
+/// target env applies.
 pub async fn run_fix_command(
     fix_command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
+    container: Option<&str>,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
 ) -> CheckResult {
     run_fix_command_with_executor(
         fix_command,
         project_root,
-        container_name,
+        container,
         target,
-        env,
         &RealCommandExecutor,
     )
     .await
@@ -773,18 +731,17 @@ pub async fn run_fix_command(
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
+    container: Option<&str>,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
     execute_command_with_executor(
         "fix".to_string(),
         fix_command,
         project_root,
-        container_name,
+        container,
         target,
-        env,
+        &HashMap::new(),
         executor,
     )
     .await
@@ -793,25 +750,15 @@ pub async fn run_fix_command_with_executor(
 /// Run a check with a custom command (e.g., for running without file filtering).
 ///
 /// This is used when running a check for "all files" by removing the {files}
-/// placeholder from the command.
+/// placeholder from the command. Check container override and env apply.
 pub async fn run_check_with_command(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    default_container: &str,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
 ) -> CheckResult {
-    run_check_with_command_with_executor(
-        check,
-        command,
-        project_root,
-        default_container,
-        target,
-        env,
-        &RealCommandExecutor,
-    )
-    .await
+    run_check_with_command_with_executor(check, command, project_root, target, &RealCommandExecutor)
+        .await
 }
 
 /// Run a check with a custom command and custom executor (test-facing).
@@ -819,25 +766,16 @@ pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    default_container: &str,
     target: &ExecTarget,
-    env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(default_container);
-    let mut merged_env = env.clone();
-    merged_env.extend(check.definition.env.clone());
     execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        container_name,
+        check.definition.container.as_deref(),
         target,
-        &merged_env,
+        &check.definition.env,
         executor,
     )
     .await
@@ -847,7 +785,7 @@ pub async fn run_check_with_command_with_executor(
 ///
 /// Invalid env keys are skipped (unquotable → shell injection), as in
 /// [`build_docker_exec_command`].
-pub fn build_local_command(
+fn build_local_command(
     local: &crate::config::LocalConfig,
     env: &HashMap<String, String>,
     command: &str,
@@ -912,7 +850,8 @@ mod tests {
     fn test_build_command_local_never_queries_docker() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().times(0);
-        let cmd = local_target().build_command("", &HashMap::new(), "cargo test", &mock);
+        let cmd =
+            local_target().build_command(Some("ignored"), &HashMap::new(), "cargo test", &mock);
         assert_eq!(cmd, "bash -c 'cargo test'");
     }
 
@@ -920,7 +859,7 @@ mod tests {
     fn test_build_command_docker_running_uses_exec() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        let cmd = docker_target().build_command("proj-app-1", &HashMap::new(), "ls", &mock);
+        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
         assert!(cmd.starts_with("docker exec proj-app-1"), "got: {cmd}");
     }
 
@@ -928,18 +867,28 @@ mod tests {
     fn test_build_command_docker_stopped_uses_run() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| false);
-        let cmd = docker_target().build_command("proj-app-1", &HashMap::new(), "ls", &mock);
+        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
         assert!(cmd.starts_with("docker run --rm"), "got: {cmd}");
     }
 
     #[test]
-    fn test_from_config_local_env() {
+    fn test_build_command_docker_defaults_to_config_container() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .withf(|name| name == "explicit-c")
+            .returning(|_| true);
+        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
+        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
+        let cmd = target.build_command(None, &HashMap::new(), "ls", &mock);
+        assert!(cmd.starts_with("docker exec explicit-c"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_config_runner_local_env() {
         let yaml = "version: 2\nrunner: local\nlocal:\n  env:\n    A: b\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
         let config: crate::config::CiConfig = serde_yaml::from_str(yaml).unwrap();
-        let target = ExecTarget::from_config(&config);
-        assert!(matches!(target, ExecTarget::Local(_)));
-        assert_eq!(target.env().get("A").unwrap(), "b");
-        assert_eq!(target.default_container(), "");
+        assert!(matches!(config.runner, ExecTarget::Local(_)));
+        assert_eq!(config.runner.env().get("A").unwrap(), "b");
     }
 
     #[test]

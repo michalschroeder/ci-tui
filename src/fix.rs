@@ -40,7 +40,6 @@ pub async fn run_with_executor(
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
-    let target = ExecTarget::from_config(&config);
 
     let mut fix_count = 0;
     let mut pass_count = 0;
@@ -55,7 +54,7 @@ pub async fn run_with_executor(
             display_name,
             &changed_files,
             &project_root,
-            &target,
+            &config.runner,
             executor,
         )
         .await;
@@ -278,10 +277,7 @@ pub async fn run_fix_command_with_executor(
 ) -> Result<u64> {
     let start = Instant::now();
 
-    let default_container = target.default_container();
-    let container_name = check_container.unwrap_or(&default_container);
-
-    let full_cmd = target.build_command(container_name, target.env(), command, executor);
+    let full_cmd = target.build_command(check_container, target.env(), command, executor);
     let output = executor.execute(&full_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -483,7 +479,7 @@ mod tests {
 
         #[tokio::test]
         async fn fix_command_includes_global_env() {
-            let mut docker = cfg_with_pattern("rust", r"\.rs$").docker().clone();
+            let mut docker = cfg_with_pattern("rust", r"\.rs$").docker().unwrap().clone();
             docker.env.insert("APP_ENV".into(), "ci".into());
             let target = ExecTarget::Docker(docker);
             let mut mock = MockCommandExecutor::new();
