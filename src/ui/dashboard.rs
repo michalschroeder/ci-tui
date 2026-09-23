@@ -1103,7 +1103,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         let (icon, color) = match msg.kind {
             StatusKind::Info { .. } => (" ℹ ", Color::Cyan),
             StatusKind::Error => (" ✗ ", Color::Red),
-            StatusKind::Progress => (" ⟳ ", Color::Yellow),
+            StatusKind::Progress { .. } => (" ⟳ ", Color::Yellow),
         };
         let status_line = Line::from(vec![
             Span::styled(

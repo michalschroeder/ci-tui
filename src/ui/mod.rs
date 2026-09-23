@@ -413,7 +413,10 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
     app.reset_check_for_retry(check.id());
-    app.set_status_message(StatusKind::Progress, "Running for all files...");
+    app.set_status_message(
+        StatusKind::progress_for(check.id()),
+        "Running for all files...",
+    );
     tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
     Action::Continue
 }
@@ -556,8 +559,9 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
             "Git refresh failed - retrying with previous file list",
         ),
         TaskEvent::RetryResult(result) => {
+            let check_id = result.check_id.clone();
             app.set_retry_result(result);
-            app.finish_progress();
+            app.finish_progress(&check_id);
         }
         TaskEvent::RetryAllReady {
             changed_files,
@@ -1035,18 +1039,57 @@ checks:
         );
     }
 
+    #[tokio::test]
+    async fn test_run_all_files_progress_cleared_only_by_own_result() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        );
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        assert_eq!(app.selected_check().map(|c| c.id()), Some("php-lint"));
+
+        handle_run_all_files(&mut app, &mut tasks);
+        let text = |app: &App| app.view.status_message.as_ref().map(|m| m.text.clone());
+        assert_eq!(text(&app).as_deref(), Some("Running for all files..."));
+
+        // Edge case: another check's retry/on-demand result arrives first
+        handle_task_event(
+            &mut app,
+            TaskEvent::RetryResult(CheckResult::pending("phpstan")),
+        );
+        assert_eq!(
+            text(&app).as_deref(),
+            Some("Running for all files..."),
+            "unrelated result must not clear progress"
+        );
+
+        handle_task_event(
+            &mut app,
+            TaskEvent::RetryResult(CheckResult::pending("php-lint")),
+        );
+        assert!(app.view.status_message.is_none(), "own result clears it");
+    }
+
     #[test]
-    fn test_run_all_files_progress_cleared_by_result() {
+    fn test_refresh_progress_survives_retry_result() {
         let config = test_config();
         let mut app = make_test_app(&config);
-        app.set_status_message(StatusKind::Progress, "Running for all files...");
+        app.start_refresh();
 
         handle_task_event(
             &mut app,
             TaskEvent::RetryResult(CheckResult::pending("php-lint")),
         );
 
-        assert!(app.view.status_message.is_none());
+        assert_eq!(
+            app.view.status_message.as_ref().map(|m| m.text.as_str()),
+            Some("Refreshing changed files...")
+        );
     }
 
     #[tokio::test]
