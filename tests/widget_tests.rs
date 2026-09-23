@@ -3,6 +3,7 @@
 //! These tests verify dashboard rendering by checking terminal buffer contents
 //! at fixed 80x24 dimensions.
 
+use ci_tui::ui::app::StatusKind;
 use ci_tui::ui::dashboard;
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
@@ -431,6 +432,31 @@ fn test_output_panel_shows_pending_status() {
 // ============================================================================
 // Footer Tests
 // ============================================================================
+
+#[test]
+fn test_footer_status_icon_colored_by_kind() {
+    let cases = [
+        (StatusKind::info(), 'ℹ', Color::Cyan),
+        (StatusKind::Error, '✗', Color::Red),
+        (StatusKind::Progress, '⟳', Color::Yellow),
+    ];
+    for (kind, icon, color) in cases {
+        let mut app = make_test_app();
+        app.set_status_message(kind, "msg");
+        let mut terminal = create_terminal();
+        terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Footer is the lowest row showing the icon (check list may use ✗ too)
+        let cell = (0..buffer.area.height)
+            .rev()
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|pos| &buffer[pos])
+            .find(|c| c.symbol() == icon.to_string())
+            .unwrap_or_else(|| panic!("footer should show {icon}"));
+        assert_eq!(cell.fg, color, "{icon} color");
+    }
+}
 
 #[test]
 fn test_footer_shows_quit_shortcut() {

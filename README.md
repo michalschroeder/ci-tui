@@ -126,7 +126,7 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
 
-While a status message (e.g. "Command copied") is shown, the first keypress only dismisses it — press again to trigger the action.
+Info messages (e.g. "Command copied") auto-dismiss after 3s; errors stay until a keypress; progress messages ("Refreshing changed files...") stay until the work finishes. Any keypress dismisses the message and still performs its action.
 
 ## CI / scripting usage
 
