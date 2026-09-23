@@ -2,7 +2,7 @@
 
 **Local CI that only runs what your diff touches — in your real CI containers, with a live terminal UI.**
 
-Stop pushing to find out CI is red. `ci-tui` detects your changed files against the base branch, figures out which checks and which *tests* are relevant, and runs them in the same Docker containers your CI uses — live per-check status in a TUI, output shown as each check completes.
+Stop pushing to find out CI is red. `ci-tui` detects your changed files against the base branch, figures out which checks and which *tests* are relevant, and runs them in the same Docker containers your CI uses (or directly on the host with `runner: local`) — live per-check status in a TUI, output shown as each check completes.
 
 ## Why
 
