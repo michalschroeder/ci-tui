@@ -90,7 +90,11 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
 }
 
 /// Header label once all checks finished (without the on-demand suffix)
-fn finished_status_text(counts: &super::app::StatusCounts, total: usize, elapsed: &str) -> String {
+pub(crate) fn finished_status_text(
+    counts: &super::app::StatusCounts,
+    total: usize,
+    elapsed: &str,
+) -> String {
     let (passed, failed, cancelled) = (counts.passed, counts.failed, counts.cancelled);
     if failed == 0 && cancelled == 0 {
         return format!("✓ All {} checks passed in {}", total, elapsed);
@@ -151,16 +155,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let counts = app.count_by_status();
-    let super::app::StatusCounts {
-        passed,
-        failed,
-        pending,
-        on_demand,
-        cancelled,
-    } = counts;
+    let on_demand = counts.on_demand;
     let total = app.checks.len();
     let auto_run_total = total - on_demand;
-    let completed = passed + failed + cancelled;
+    let completed = counts.completed();
     let ratio = if auto_run_total > 0 {
         completed as f64 / auto_run_total as f64
     } else {
@@ -186,10 +184,10 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     };
     let status_text = if app.run.all_finished {
         finished_status_text(&counts, auto_run_total, &elapsed_str) + &on_demand_text
-    } else if pending > 0 {
+    } else if counts.pending > 0 {
         format!(
             "Running... {}/{} ({} in progress){}",
-            completed, auto_run_total, pending, on_demand_text
+            completed, auto_run_total, counts.pending, on_demand_text
         )
     } else {
         format!(
@@ -199,9 +197,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let color = if app.run.all_finished {
-        if failed > 0 {
+        if counts.failed > 0 {
             Color::Red
-        } else if cancelled > 0 {
+        } else if counts.cancelled > 0 {
             Color::Yellow
         } else {
             Color::Green

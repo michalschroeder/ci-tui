@@ -24,7 +24,8 @@ use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
 use crate::runner::{
-    run_cancellable, run_check_with_command, CancelRegistry, CheckResult, CheckRunner, RunnerEvent,
+    run_check_cancellable, run_check_with_command, CancelRegistry, CheckResult, CheckRunner,
+    RunnerEvent,
 };
 use anyhow::Result;
 use app::{App, StatusKind};
@@ -217,10 +218,7 @@ impl TaskCtx {
 
     /// [`Self::run`], cancellable with 's' (then reports `Cancelled`)
     async fn run_cancellable(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        let started_at = chrono::Local::now();
-        run_cancellable(&self.cancels, check.id(), self.run(check, command))
-            .await
-            .unwrap_or_else(|| CheckResult::cancelled(check.id(), started_at))
+        run_check_cancellable(&self.cancels, check.id(), self.run(check, command)).await
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
@@ -279,16 +277,9 @@ impl Tasks {
         self.set.spawn(f(self.ctx.clone(), self.tx.clone()));
     }
 
-    /// Spawn a cancellable task running `command` as `check`, reporting a
-    /// [`TaskEvent::RetryResult`] (on-demand, run-all-files)
-    fn spawn_retry(&mut self, check: CheckToRun, command: String) {
-        self.spawn(|ctx, tx| async move {
-            let result = ctx.run_cancellable(&check, &command).await;
-            let _ = tx.send(TaskEvent::RetryResult(result)).await;
-        });
-    }
-
-    /// Spawn a task running `command` as `check`; `wrap` builds the event
+    /// Spawn a task running `command` as `check`, cancellable with 's';
+    /// `wrap` builds the event. Fix runs are cancellable too, but 's' only
+    /// acts on a `Running` check, which a fixed (failed) check is not.
     fn spawn_check(
         &mut self,
         check: CheckToRun,
@@ -296,7 +287,7 @@ impl Tasks {
         wrap: fn(CheckResult) -> TaskEvent,
     ) {
         self.spawn(|ctx, tx| async move {
-            let result = ctx.run(&check, &command).await;
+            let result = ctx.run_cancellable(&check, &command).await;
             let _ = tx.send(wrap(result)).await;
         });
     }
@@ -313,14 +304,11 @@ async fn retry_with_refresh(
     changed_files: ChangedFiles,
 ) {
     let check_id = check.id().to_string();
-    let started_at = chrono::Local::now();
     let run = refresh_and_run(&ctx, &tx, check, previous, changed_files);
-    let result = match run_cancellable(&ctx.cancels, &check_id, run).await {
-        Some(Some(result)) => result,
-        Some(None) => return, // not applicable, already reported
-        None => CheckResult::cancelled(&check_id, started_at),
-    };
-    let _ = tx.send(TaskEvent::RetryResult(result)).await;
+    // None: not applicable, already reported
+    if let Some(result) = run_check_cancellable(&ctx.cancels, &check_id, run).await {
+        let _ = tx.send(TaskEvent::RetryResult(result)).await;
+    }
 }
 
 /// Body of [`retry_with_refresh`]; `None` when the check no longer applies
@@ -439,7 +427,7 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
     let check = check.clone();
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_retry(check, command);
+    tasks.spawn_check(check, command, TaskEvent::RetryResult);
     Action::Continue
 }
 
@@ -458,7 +446,7 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_retry(check, all_files_cmd);
+    tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
     Action::Continue
 }
 
@@ -824,35 +812,20 @@ pub async fn run(
     Ok(app.exit_code())
 }
 
+/// Print the final summary: same wording as the dashboard header, colored
+/// green (all passed), yellow (some cancelled) or red (any failed)
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
-    let (passed, failed, cancelled) = (counts.passed, counts.failed, counts.cancelled);
-    let total = passed + failed + cancelled;
-
-    // Format elapsed time
-    let elapsed = app.elapsed_time();
-    let elapsed_str = dashboard::format_elapsed(elapsed);
-
-    if cancelled > 0 {
-        println!(
-            "\n\x1b[90m⊗ {} of {} checks cancelled\x1b[0m",
-            cancelled, total
-        );
-    }
-
-    if failed == 0 {
-        let label = if cancelled == 0 { "All " } else { "" };
-        println!(
-            "\n\x1b[32m✓ {}{} checks passed in {}\x1b[0m",
-            label, passed, elapsed_str
-        );
-        return;
-    }
-
-    println!(
-        "\n\x1b[31m✗ {} of {} checks failed in {}\x1b[0m",
-        failed, total, elapsed_str
-    );
+    let elapsed_str = dashboard::format_elapsed(app.elapsed_time());
+    let text = dashboard::finished_status_text(&counts, counts.completed(), &elapsed_str);
+    let color = if counts.failed > 0 {
+        31
+    } else if counts.cancelled > 0 {
+        33
+    } else {
+        32
+    };
+    println!("\n\x1b[{}m{}\x1b[0m", color, text);
 
     // Show failed checks
     for (id, result) in &app.results {
@@ -1222,15 +1195,9 @@ checks:
     /// reports a cancelled result once cancelled
     fn spawn_cancellable(tasks: &mut Tasks, check_id: &'static str) {
         tasks.spawn(move |ctx, tx| async move {
-            let started_at = chrono::Local::now();
-            let run = std::future::pending::<()>();
-            if crate::runner::run_cancellable(&ctx.cancels, check_id, run)
-                .await
-                .is_none()
-            {
-                let result = CheckResult::cancelled(check_id, started_at);
-                let _ = tx.send(TaskEvent::RetryResult(result)).await;
-            }
+            let run = std::future::pending::<CheckResult>();
+            let result = run_check_cancellable(&ctx.cancels, check_id, run).await;
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
         });
     }
 

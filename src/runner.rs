@@ -137,6 +137,7 @@ impl Drop for ProcessGroupGuard {
 }
 
 /// `docker kill`s a `docker run` container on drop unless disarmed
+/// (`name` cleared)
 struct ContainerGuard<'a> {
     executor: &'a dyn CommandExecutor,
     name: Option<&'a str>,
@@ -150,45 +151,51 @@ impl Drop for ContainerGuard<'_> {
     }
 }
 
-/// Run `command` via `executor`, bounded by `timeout` (`None` = unbounded).
+/// Run `command` via `executor`, cleaning up if it does not finish.
 ///
-/// Returns `Err(message)` on expiry. The timeout wraps the executor future
-/// rather than living in [`CommandExecutor`] so mocks stay unchanged.
-///
-/// Cleanup when the command does not finish normally — timeout expiry, a
-/// cancel, or this future being dropped (task aborted on quit, Ctrl-C,
-/// retry-all): dropping the executor future makes [`RealCommandExecutor`]
-/// SIGKILL the command's whole process group, and a `docker run` command
+/// Cleanup when this future is dropped before the command finished (timeout
+/// expiry, a cancel, or its task aborted on quit, Ctrl-C, retry-all):
+/// dropping the executor future makes [`RealCommandExecutor`] SIGKILL the
+/// command's whole process group, and a `docker run` command
 /// ([`BuiltCommand::container`]) gets `docker kill <name>`. LIMITATION: a
 /// `docker exec` command keeps running inside the container (only the local
 /// client is killed).
+pub async fn execute_built(
+    executor: &dyn CommandExecutor,
+    command: &BuiltCommand,
+    working_dir: &Path,
+) -> CommandOutput {
+    let mut container = ContainerGuard {
+        executor,
+        name: command.container.as_deref(),
+    };
+    let output = executor.execute(&command.command, working_dir).await;
+    container.name = None; // finished: `--rm` already removed it
+    output
+}
+
+/// [`execute_built`] bounded by `timeout` (`None` = unbounded).
+///
+/// Returns `Err(message)` on expiry; expiry drops the [`execute_built`]
+/// future, which kills the command (see there). The timeout wraps the
+/// executor future rather than living in [`CommandExecutor`] so mocks stay
+/// unchanged.
 pub async fn execute_with_timeout(
     executor: &dyn CommandExecutor,
     command: &BuiltCommand,
     working_dir: &Path,
     timeout: Option<Duration>,
 ) -> std::result::Result<CommandOutput, String> {
-    let mut container = ContainerGuard {
-        executor,
-        name: command.container.as_deref(),
-    };
-    let run = executor.execute(&command.command, working_dir);
-    let output = match timeout {
-        Some(limit) => {
-            let output = tokio::time::timeout(limit, run).await;
-            output.map_err(|_| {
-                format!(
-                    "timed out after {}",
-                    crate::utils::time::format_from_duration(limit)
-                )
-            })
-        }
+    let run = execute_built(executor, command, working_dir);
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| {
+            format!(
+                "timed out after {}",
+                crate::utils::time::format_from_duration(limit)
+            )
+        }),
         None => Ok(run.await),
-    };
-    if output.is_ok() {
-        container.name = None; // finished: `--rm` already removed it
     }
-    output
 }
 
 /// Filter out Docker Compose warning messages from stderr
@@ -310,8 +317,8 @@ pub struct BuiltCommand {
 }
 
 impl BuiltCommand {
-    /// Host command with no container to clean up
-    pub fn host(command: impl Into<String>) -> Self {
+    /// Command with no container to clean up (host, local or `docker exec`)
+    pub fn plain(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
             container: None,
@@ -339,7 +346,7 @@ impl ExecTarget {
         executor: &dyn CommandExecutor,
     ) -> BuiltCommand {
         match self {
-            Self::Local(local) => BuiltCommand::host(build_local_command(local, env, command)),
+            Self::Local(local) => BuiltCommand::plain(build_local_command(local, env, command)),
             Self::Docker(docker) => build_docker_command(docker, container, env, command, executor),
         }
     }
@@ -356,7 +363,7 @@ fn build_docker_command(
 ) -> BuiltCommand {
     let name = container.map_or_else(|| docker.container_name(), str::to_owned);
     if executor.is_container_running(&name) {
-        BuiltCommand::host(build_docker_exec_command(
+        BuiltCommand::plain(build_docker_exec_command(
             &name,
             env,
             command,
@@ -404,6 +411,11 @@ impl CheckStatus {
     /// failed filter, retry/fix eligibility).
     pub fn is_failure(&self) -> bool {
         matches!(self, Self::Failed | Self::TimedOut)
+    }
+
+    /// True once the check ran to an outcome: passed, cancelled or a failure
+    pub fn is_finished(&self) -> bool {
+        matches!(self, Self::Passed | Self::Cancelled) || self.is_failure()
     }
 }
 
@@ -483,83 +495,53 @@ impl CheckResult {
 
 /// Per-check cancel switches for running commands, keyed by check id.
 ///
-/// Cloning shares the registry. A run registers via [`run_cancellable`];
+/// Cloning shares the registry. A run registers via [`run_check_cancellable`];
 /// [`CancelRegistry::cancel`] drops that run's future, whose drop guards kill
-/// the process group / container (see [`execute_with_timeout`]).
+/// the process group / container (see [`execute_built`]).
 #[derive(Clone, Default)]
 pub struct CancelRegistry {
-    inner: Arc<Mutex<CancelMap>>,
-}
-
-#[derive(Default)]
-struct CancelMap {
-    /// Token for the next registration (tells a stale unregister apart)
-    next_token: u64,
-    entries: HashMap<String, (u64, oneshot::Sender<()>)>,
+    inner: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 impl CancelRegistry {
     /// Cancel the registered run of `check_id`. False if none is running.
     pub fn cancel(&self, check_id: &str) -> bool {
-        let entry = self.lock().entries.remove(check_id);
-        entry.is_some_and(|(_, tx)| tx.send(()).is_ok())
+        let tx = self.lock().remove(check_id);
+        tx.is_some_and(|tx| tx.send(()).is_ok())
     }
 
-    /// Register a run of `check_id` (replacing any previous one)
-    fn register(&self, check_id: &str) -> (Registration<'_>, oneshot::Receiver<()>) {
+    /// Register a run of `check_id`, replacing any previous one (whose
+    /// receiver then sees `Err`). Finished runs' entries are pruned here.
+    fn register(&self, check_id: &str) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         let mut map = self.lock();
-        let token = map.next_token;
-        map.next_token += 1;
-        map.entries.insert(check_id.to_string(), (token, tx));
-        let registration = Registration {
-            registry: self,
-            check_id: check_id.to_string(),
-            token,
-        };
-        (registration, rx)
+        map.retain(|_, tx| !tx.is_closed());
+        map.insert(check_id.to_string(), tx);
+        rx
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, CancelMap> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<()>>> {
         // A panic while holding the lock leaves the map consistent
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-/// Removes its own registry entry on drop (not a newer run's)
-struct Registration<'a> {
-    registry: &'a CancelRegistry,
-    check_id: String,
-    token: u64,
-}
-
-impl Drop for Registration<'_> {
-    fn drop(&mut self) {
-        let mut map = self.registry.lock();
-        if map
-            .entries
-            .get(&self.check_id)
-            .is_some_and(|(token, _)| *token == self.token)
-        {
-            map.entries.remove(&self.check_id);
-        }
-    }
-}
-
 /// Run `run` as `check_id`, cancellable through `cancels`.
 ///
-/// Returns `None` if cancelled: `run` is dropped, which kills its command
-/// (see [`execute_with_timeout`]).
-pub async fn run_cancellable<T>(
+/// If cancelled, `run` is dropped (which kills its command, see
+/// [`execute_built`]) and a [`CheckResult::cancelled`] is returned instead;
+/// `T` is `CheckResult` or `Option<CheckResult>`.
+pub async fn run_check_cancellable<T: From<CheckResult>>(
     cancels: &CancelRegistry,
     check_id: &str,
     run: impl Future<Output = T>,
-) -> Option<T> {
-    let (_registration, cancelled) = cancels.register(check_id);
+) -> T {
+    let started_at = Local::now();
+    let cancelled = cancels.register(check_id);
     tokio::select! {
-        output = run => Some(output),
+        output = run => output,
         // Err = replaced by a newer run of the same id: keep running
-        Ok(()) = cancelled => None,
+        Ok(()) = cancelled => CheckResult::cancelled(check_id, started_at).into(),
     }
 }
 
@@ -758,7 +740,7 @@ impl CheckRunner {
         let start = std::time::Instant::now();
 
         let cmd = if pre_cmd.host {
-            BuiltCommand::host(pre_cmd.command.clone())
+            BuiltCommand::plain(pre_cmd.command.clone())
         } else {
             self.build_pre_command_cmd(pre_cmd)
         };
@@ -903,7 +885,6 @@ async fn run_check_with_target(
     executor: &dyn CommandExecutor,
     cancels: &CancelRegistry,
 ) -> CheckResult {
-    let started_at = Local::now();
     let run = async {
         let _ = event_tx
             .send(RunnerEvent::CheckStarted {
@@ -912,9 +893,7 @@ async fn run_check_with_target(
             .await;
         run_single_check_with_executor(check, project_root, target, executor).await
     };
-    run_cancellable(cancels, check.id(), run)
-        .await
-        .unwrap_or_else(|| CheckResult::cancelled(check.id(), started_at))
+    run_check_cancellable(cancels, check.id(), run).await
 }
 
 /// Execute a command on `target` and return the result (for testing with executor).
@@ -1134,7 +1113,7 @@ mod tests {
         mock.expect_is_container_running().times(0);
         let cmd =
             local_target().build_command(Some("ignored"), &HashMap::new(), "cargo test", &mock);
-        assert_eq!(cmd, BuiltCommand::host("bash -c 'cargo test'"));
+        assert_eq!(cmd, BuiltCommand::plain("bash -c 'cargo test'"));
     }
 
     #[test]

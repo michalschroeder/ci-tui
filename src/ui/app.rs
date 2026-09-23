@@ -302,6 +302,13 @@ pub struct StatusCounts {
     pub cancelled: usize,
 }
 
+impl StatusCounts {
+    /// Checks that ran to an outcome (passed, failed or cancelled)
+    pub fn completed(&self) -> usize {
+        self.passed + self.failed + self.cancelled
+    }
+}
+
 /// What the currently selected check can do — computed once, read many times per frame
 #[derive(Debug, Clone, Copy)]
 pub struct SelectedCaps {
@@ -405,9 +412,7 @@ impl App {
             .and_then(|c| self.results.get(c.id()))
             .map(|r| r.status.clone());
         let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
-        let finished = status.as_ref().is_some_and(|s| {
-            matches!(s, CheckStatus::Passed | CheckStatus::Cancelled) || s.is_failure()
-        });
+        let finished = status.as_ref().is_some_and(CheckStatus::is_finished);
         SelectedCaps {
             can_fix: !busy && status.as_ref().is_some_and(CheckStatus::is_failure) && has_fix,
             can_retry: !busy && finished,

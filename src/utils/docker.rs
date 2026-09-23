@@ -20,18 +20,22 @@ pub(crate) fn is_running(container_name: &str) -> bool {
     }
 }
 
-/// `docker kill` a container, waiting for the client (best effort: errors,
-/// e.g. the container already gone, are ignored).
+/// `docker kill` a container, fire-and-forget (best effort: errors, e.g.
+/// the container already gone, are ignored).
 ///
-/// Blocking on purpose: called from drop guards, possibly while the process
-/// is quitting, so the kill must be sent before we exit.
+/// Not waited on: called from drop guards on tokio workers, which must not
+/// block. The client is reaped on a helper thread; it outlives our exit, so
+/// the kill still reaches the daemon when quitting.
 pub(crate) fn kill(container_name: &str) {
-    let _ = std::process::Command::new("docker")
+    let child = std::process::Command::new("docker")
         .args(["kill", container_name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .spawn();
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 #[cfg(test)]
