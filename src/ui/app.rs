@@ -903,7 +903,7 @@ checks:
                 on_demand: false,
                 env: std::collections::HashMap::new(),
             },
-            service: "php".to_string(),
+            service: Some("php".to_string()),
             files: if on_demand {
                 CheckFiles::OnDemand
             } else {

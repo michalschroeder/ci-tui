@@ -513,8 +513,8 @@ mod tests {
     fn test_minimal_config_has_required_fields() {
         let config = minimal_config();
         assert_eq!(config.version, 2);
-        assert_eq!(config.docker.project_dir, "./test");
-        assert_eq!(config.docker.service, "app");
+        assert_eq!(config.docker().unwrap().project_dir, "./test");
+        assert_eq!(config.docker().unwrap().service, "app");
         assert_eq!(config.git.base_branch, "main");
         assert_eq!(config.git.fallback_branch, "HEAD~1");
         assert!(config.checks.is_empty());
@@ -540,8 +540,8 @@ mod tests {
             .with_file_pattern("custom", r"\.custom$", Some("green"))
             .build();
 
-        assert_eq!(config.docker.project_dir, "./custom");
-        assert_eq!(config.docker.service, "web");
+        assert_eq!(config.docker().unwrap().project_dir, "./custom");
+        assert_eq!(config.docker().unwrap().service, "web");
         assert_eq!(config.git.base_branch, "develop");
         assert_eq!(config.git.fallback_branch, "HEAD~5");
         assert!(config.file_patterns.contains_key("custom"));

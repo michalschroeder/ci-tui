@@ -2,7 +2,7 @@
 
 **Local CI that only runs what your diff touches — in your real CI containers, with a live terminal UI.**
 
-Stop pushing to find out CI is red. `ci-tui` detects your changed files against the base branch, figures out which checks and which *tests* are relevant, and runs them in the same Docker containers your CI uses — live per-check status in a TUI, output shown as each check completes.
+Stop pushing to find out CI is red. `ci-tui` detects your changed files against the base branch, figures out which checks and which *tests* are relevant, and runs them in the same Docker containers your CI uses (or directly on the host with `runner: local`) — live per-check status in a TUI, output shown as each check completes.
 
 ## Why
 
@@ -24,6 +24,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
+- `runner: local` runs checks directly on the host when you don't use Docker
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 
 ## Install
@@ -34,6 +35,8 @@ From source:
 git clone https://github.com/michalschroeder/ci-tui && cd ci-tui
 cargo install --path .
 ```
+
+`runner: local` needs ci-tui installed on the host (from source / cargo), not the Docker image, since checks use the host toolchain.
 
 Docker image (published to GHCR on each release):
 

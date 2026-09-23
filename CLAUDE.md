@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers, reporting progress via lifecycle events.
+CI-TUI is a terminal UI application for running CI checks on changed files. It detects git changes, determines which checks to run based on file patterns, and executes them in Docker containers (or on the host with `runner: local`), reporting progress via lifecycle events.
 
 ## Code Validation (REQUIRED)
 
@@ -112,7 +112,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 2. **config.rs** - YAML config parsing with `CiConfig` as the root type. Uses `IndexMap` to preserve YAML key ordering for group execution order
 3. **git.rs** - Git change detection comparing against base branch (tries `origin/{base}`, `{base}`, fallback in order)
 4. **checks/** - `determine_checks()` matches changed files against file patterns and test discovery rules to build `CheckToRun` list (`mod.rs` + `determine.rs`)
-5. **runner.rs** - `CheckRunner` executes checks via `docker compose exec` with event streaming through mpsc channels
+5. **runner.rs** - `CheckRunner` executes checks via `ExecTarget` (docker exec / docker run, or host shell in local mode) with event streaming through mpsc channels
 6. **ui/mod.rs** - Main TUI event loop using ratatui. Keyboard input runs on dedicated OS thread for responsiveness under high CPU load
 
 ### Key Design Patterns
@@ -131,7 +131,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 - **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching
 - **checks/**: `CheckToRun` struct (`mod.rs`), `determine_checks()` logic (`determine.rs`), `group_checks()` for execution grouping
-- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, Docker command execution, `RunnerEvent` variants
+- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
@@ -144,8 +144,10 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 ## Config File Structure
 
 The tool expects a YAML config with:
-- `docker.project_dir`: Path for `docker compose --project-directory`
-- `docker.service`: Default container service name
+- `runner`: `docker` (default) or `local` — where checks execute
+- `docker.project_dir`: Path for `docker compose --project-directory` (required in docker mode)
+- `docker.service`: Default container service name (docker mode)
+- `local.shell` / `local.env`: Shell and env vars for `runner: local` (docker section optional/ignored in this mode)
 - `git.base_branch` / `git.fallback_branch`: For change detection
 - `file_patterns`: Named regex patterns with optional colors
 - `checks`: Groups containing check definitions with triggers

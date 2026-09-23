@@ -15,9 +15,9 @@
 //! - `1`: One or more checks failed
 
 use crate::checks::{group_checks, CheckToRun};
-use crate::config::{CiConfig, DockerConfig};
+use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::runner::{CheckResult, CheckStatus};
+use crate::runner::{CheckResult, CheckStatus, ExecTarget};
 use crate::utils::time;
 use anyhow::Result;
 use std::fmt::Write;
@@ -36,7 +36,7 @@ pub async fn run_with_executor(
     project_root: PathBuf,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Result<Vec<CheckResult>> {
-    let docker_config = &config.docker;
+    let target = &config.runner;
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
@@ -45,15 +45,9 @@ pub async fn run_with_executor(
             .map(|g| g.parallel)
             .unwrap_or(false);
         let results = if parallel {
-            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
+            run_parallel(group_checks, &project_root, target, executor.clone()).await
         } else {
-            run_sequential(
-                group_checks,
-                &project_root,
-                docker_config,
-                executor.as_ref(),
-            )
-            .await
+            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
         };
         all_results.extend(results);
     }
@@ -75,7 +69,7 @@ pub async fn run(
     project_root: PathBuf,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let docker_config = &config.docker;
+    let target = &config.runner;
 
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
@@ -108,15 +102,9 @@ pub async fn run(
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, docker_config, executor.clone()).await
+            run_parallel(group_checks, &project_root, target, executor.clone()).await
         } else {
-            run_sequential(
-                group_checks,
-                &project_root,
-                docker_config,
-                executor.as_ref(),
-            )
-            .await
+            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
         };
 
         for result in results {
@@ -265,7 +253,7 @@ pub fn format_failed_check(result: &CheckResult, fix_command: Option<&str>) -> S
 async fn run_sequential(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    docker_config: &DockerConfig,
+    target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
@@ -273,7 +261,7 @@ async fn run_sequential(
         if check.is_on_demand() {
             continue;
         }
-        let result = run_check_with_executor(check, project_root, docker_config, executor).await;
+        let result = run_check_with_executor(check, project_root, target, executor).await;
         results.push(result);
     }
     results
@@ -282,7 +270,7 @@ async fn run_sequential(
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
-    docker_config: &DockerConfig,
+    target: &ExecTarget,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
@@ -293,11 +281,11 @@ async fn run_parallel(
         }
         let check = check.clone();
         let project_root = project_root.to_path_buf();
-        let docker_config = docker_config.clone();
+        let target = target.clone();
         let executor = executor.clone();
 
         let handle = tokio::spawn(async move {
-            run_check_with_executor(&check, &project_root, &docker_config, executor.as_ref()).await
+            run_check_with_executor(&check, &project_root, &target, executor.as_ref()).await
         });
         handles.push(handle);
     }
@@ -315,32 +303,23 @@ async fn run_parallel(
 pub async fn run_check_with_executor(
     check: &CheckToRun,
     project_root: &Path,
-    docker_config: &DockerConfig,
+    target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
     let start = Instant::now();
 
-    let default_container = docker_config.container_name();
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(&default_container);
+    // Global env, then check-specific env (check wins) — same as the TUI runner
+    let mut env = target.env().clone();
+    env.extend(check.definition.env.clone());
+    let full_cmd = target.build_command(
+        check.definition.container.as_deref(),
+        &env,
+        &check.resolved_command,
+        executor,
+    );
 
-    let env = std::collections::HashMap::new();
-    let docker_cmd = if executor.is_container_running(container_name) {
-        crate::runner::build_docker_exec_command(
-            container_name,
-            &env,
-            &check.resolved_command,
-            &docker_config.shell,
-        )
-    } else {
-        crate::runner::build_docker_run_command(docker_config, &env, &check.resolved_command)
-    };
-
-    let output = executor.execute(&docker_cmd, project_root).await;
+    let output = executor.execute(&full_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let status = if output.success {
@@ -357,5 +336,56 @@ pub async fn run_check_with_executor(
         duration_ms,
         started_at: None,
         finished_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::CheckFiles;
+    use crate::config::{CheckDefinition, LocalConfig};
+    use crate::runner::{CommandOutput, MockCommandExecutor};
+    use std::collections::HashMap;
+
+    fn check(command: &str) -> CheckToRun {
+        CheckToRun {
+            id: "c".into(),
+            group: "g".into(),
+            definition: CheckDefinition {
+                name: "C".into(),
+                command: command.into(),
+                service: None,
+                container: None,
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: HashMap::new(),
+            },
+            service: None,
+            files: CheckFiles::Files(vec![]),
+            resolved_command: command.into(),
+            resolved_fix_command: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn check_command_includes_global_env() {
+        let local = LocalConfig {
+            env: HashMap::from([("APP_ENV".to_string(), "ci".to_string())]),
+            ..LocalConfig::default()
+        };
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().times(0);
+        mock.expect_execute()
+            .withf(|cmd, _| cmd == "env APP_ENV='ci' bash -c 'ls'")
+            .times(1)
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        let target = ExecTarget::Local(local);
+        let res = run_check_with_executor(&check("ls"), Path::new("."), &target, &mock).await;
+        assert_eq!(res.status, CheckStatus::Passed);
     }
 }

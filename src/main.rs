@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
+use ci_tui::runner::ExecTarget;
 use ci_tui::{checks, commands, config, fix, git, simple, ui};
 use std::io::IsTerminal;
 
@@ -18,6 +19,29 @@ fn git_detect_changes_or_exit(
             std::process::exit(1);
         }
     }
+}
+
+/// `--files` entry as a changed-file path. With `repo_root` (local mode only),
+/// cwd-relative paths are rewritten repo-relative (matching git output);
+/// otherwise (docker mode) they are kept as given.
+fn cli_file_path(
+    cwd: &std::path::Path,
+    repo_root: Option<&std::path::Path>,
+    path: &std::path::Path,
+) -> String {
+    match repo_root {
+        Some(root) => git::to_repo_relative(cwd, root, path),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Local-mode execution root: the git repo root, or `cwd` (with a warning)
+/// when it cannot be resolved (e.g. `--files` outside a repo).
+fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
+    git::repo_root(cwd).unwrap_or_else(|e| {
+        eprintln!("Warning: {e:#}; running checks from the current directory");
+        cwd.to_path_buf()
+    })
 }
 
 /// Run `init` / `validate` and print the outcome.
@@ -65,7 +89,16 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = config::load_config(&config_path)?;
 
-    // Get changed files: from --files arg or git detection
+    // Local mode runs commands from the repo root so repo-relative {files}
+    // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
+    let repo_root = match config.runner {
+        ExecTarget::Local(_) => Some(local_exec_root(&project_root)),
+        ExecTarget::Docker(_) => None,
+    };
+    let exec_root = repo_root.clone().unwrap_or_else(|| project_root.clone());
+
+    // Get changed files: from --files arg or git detection. In local mode
+    // `--files` (cwd-relative) are rewritten repo-relative to match git paths.
     let mut changed_files = if cli.files.is_empty() {
         git_detect_changes_or_exit(&project_root, &config.git)
     } else {
@@ -73,7 +106,7 @@ async fn main() -> Result<()> {
             files: cli
                 .files
                 .iter()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| cli_file_path(&project_root, repo_root.as_deref(), p))
                 .collect(),
             base_ref: git::CLI_FILES_BASE_REF.to_string(),
         }
@@ -82,17 +115,24 @@ async fn main() -> Result<()> {
 
     // Run fix mode if requested
     if cli.fix {
-        return fix::run(config, changed_files, project_root).await;
+        return fix::run(config, changed_files, exec_root).await;
     }
 
     // Determine which checks to run
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &project_root);
+    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
 
     if simple_mode {
         // Run in simple console mode
-        simple::run(config, changed_files, checks_to_run, project_root).await
+        simple::run(config, changed_files, checks_to_run, exec_root).await
     } else {
         // Run the TUI
-        ui::run(config, changed_files, checks_to_run, project_root).await
+        ui::run(
+            config,
+            changed_files,
+            checks_to_run,
+            project_root,
+            exec_root,
+        )
+        .await
     }
 }

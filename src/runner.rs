@@ -1,8 +1,8 @@
-//! Check execution in Docker containers with event streaming.
+//! Check execution (Docker or local host) with event streaming.
 //!
-//! This module handles the actual execution of CI checks via Docker. It supports
-//! both `docker exec` (for running containers) and `docker run` (for standalone
-//! execution). Output is captured when a command completes and delivered as
+//! This module handles the actual execution of CI checks. [`ExecTarget`] picks
+//! the mode: Docker (`docker exec` for running containers, `docker run` for
+//! standalone execution) or local host (`shell -c`). Output is captured when a command completes and delivered as
 //! lifecycle events ([`RunnerEvent`]) through async channels.
 //!
 //! # Key Types
@@ -22,6 +22,7 @@ use crate::config::CiConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -105,36 +106,44 @@ fn is_valid_env_key(key: &str) -> bool {
 /// identifiers are skipped entirely to prevent shell injection.
 pub fn build_docker_exec_command(
     container_name: &str,
-    env: &std::collections::HashMap<String, String>,
+    env: &HashMap<String, String>,
     command: &str,
     shell: &str,
 ) -> String {
-    let env_flags: String = env
-        .iter()
-        .filter(|(k, _)| is_valid_env_key(k))
-        .map(|(k, v)| format!("-e {}='{}' ", k, v.replace('\'', "'\\''")))
-        .collect();
+    let env_flags: String = env_assignments(env).map(|a| format!("-e {a} ")).collect();
 
     // Single format path: env_flags is either empty or ends with a trailing space.
     format!(
-        "docker exec {}{} {} -c '{}'",
+        "docker exec {}{} {} -c {}",
         env_flags,
         container_name,
         shell,
-        command.replace('\'', "'\\''")
+        single_quote(command)
     )
+}
+
+/// `KEY='VALUE'` for each valid env key; invalid keys are skipped (unquotable
+/// → shell injection). Values are single-quoted with `'` escaped.
+fn env_assignments(env: &HashMap<String, String>) -> impl Iterator<Item = String> + '_ {
+    env.iter()
+        .filter(|(k, _)| is_valid_env_key(k))
+        .map(|(k, v)| format!("{k}={}", single_quote(v)))
+}
+
+/// Always single-quote `s` for POSIX shells (`'` escaped as `'\''`).
+fn single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Build a docker run command with environment variables
 pub fn build_docker_run_command(
     docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    env: &HashMap<String, String>,
     command: &str,
 ) -> String {
     // Build env flags for docker run (-e KEY='VALUE' for each)
-    let env_flags: String = env
-        .iter()
-        .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
+    let env_flags: String = env_assignments(env)
+        .map(|a| format!("-e {a}"))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -163,9 +172,61 @@ pub fn build_docker_run_command(
 
     parts.push(format!("-w {}", work_dir));
     parts.push(image_name);
-    parts.push(format!("{} -c '{}'", shell, command.replace('\'', "'\\''")));
+    parts.push(format!("{} -c {}", shell, single_quote(command)));
 
     parts.join(" ")
+}
+
+pub use crate::config::ExecTarget;
+
+impl ExecTarget {
+    /// Global env: `docker.env` or `local.env`.
+    pub fn env(&self) -> &HashMap<String, String> {
+        match self {
+            Self::Docker(docker) => &docker.env,
+            Self::Local(local) => &local.env,
+        }
+    }
+
+    /// Full shell command for `command`. `container` overrides the docker
+    /// default container (`docker.container_name()`); ignored in local mode.
+    /// Queries container state ONLY in docker mode.
+    pub fn build_command(
+        &self,
+        container: Option<&str>,
+        env: &HashMap<String, String>,
+        command: &str,
+        executor: &dyn CommandExecutor,
+    ) -> String {
+        match self {
+            Self::Local(local) => build_local_command(local, env, command),
+            Self::Docker(docker) => build_docker_command(docker, container, env, command, executor),
+        }
+    }
+}
+
+/// `docker exec` into `container` (default: `docker.container_name()`) when it
+/// is running, else standalone `docker run`.
+fn build_docker_command(
+    docker: &crate::config::DockerConfig,
+    container: Option<&str>,
+    env: &HashMap<String, String>,
+    command: &str,
+    executor: &dyn CommandExecutor,
+) -> String {
+    let name = container.map_or_else(|| docker.container_name(), str::to_owned);
+    if executor.is_container_running(&name) {
+        build_docker_exec_command(&name, env, command, &docker.shell)
+    } else {
+        build_docker_run_command(docker, env, command)
+    }
+}
+
+/// Env for a command: target (global) env, then `extra` on top (extra wins).
+fn merged_env(target: &ExecTarget, extra: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env = target.env().clone();
+    env.extend(extra.clone());
+    env
 }
 
 /// Status of a CI check during execution
@@ -277,9 +338,9 @@ pub enum RunnerEvent {
 /// - Parallel execution across groups (when configured)
 /// - Event streaming for UI updates
 pub struct CheckRunner {
+    /// Config; `config.runner` is the single source of truth for the target
     config: Arc<CiConfig>,
     project_root: Arc<Path>,
-    container_name: Arc<str>,
     executor: Arc<dyn CommandExecutor>,
 }
 
@@ -295,13 +356,16 @@ impl CheckRunner {
         project_root: &Path,
         executor: Arc<dyn CommandExecutor>,
     ) -> Self {
-        let container_name: Arc<str> = config.docker.container_name().into();
         Self {
             config: Arc::new(config),
             project_root: Arc::from(project_root),
-            container_name,
             executor,
         }
+    }
+
+    /// Where commands execute (`config.runner`)
+    fn target(&self) -> &ExecTarget {
+        &self.config.runner
     }
 
     /// Run all checks, grouped by execution group, sending events via the channel
@@ -388,23 +452,14 @@ impl CheckRunner {
         let check = check.clone();
         let event_tx = event_tx.clone();
         let project_root = self.project_root.clone();
-        let container_name: Arc<str> = check
-            .definition
-            .container
-            .clone()
-            .unwrap_or_else(|| self.container_name.to_string())
-            .into();
-        let docker_config = self.config.docker.clone();
-        let global_env = self.config.docker.env.clone();
+        let config = Arc::clone(&self.config);
         let executor = self.executor.clone();
 
         tokio::spawn(async move {
-            let result = run_docker_check_with_executor(
+            let result = run_check_with_target(
                 &check,
                 &project_root,
-                &container_name,
-                &docker_config,
-                &global_env,
+                &config.runner,
                 &event_tx,
                 executor.as_ref(),
             )
@@ -418,18 +473,10 @@ impl CheckRunner {
         check: &CheckToRun,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> CheckResult {
-        // Use per-check container if specified, otherwise use default
-        let container_name = check
-            .definition
-            .container
-            .as_deref()
-            .unwrap_or(&self.container_name);
-        run_docker_check_with_executor(
+        run_check_with_target(
             check,
             &self.project_root,
-            container_name,
-            &self.config.docker,
-            &self.config.docker.env,
+            self.target(),
             event_tx,
             self.executor.as_ref(),
         )
@@ -444,7 +491,7 @@ impl CheckRunner {
         let cmd = if pre_cmd.host {
             pre_cmd.command.clone()
         } else {
-            self.build_pre_command_docker_cmd(pre_cmd)
+            self.build_pre_command_cmd(pre_cmd)
         };
 
         let output = self.executor.execute(&cmd, &self.project_root).await;
@@ -460,51 +507,44 @@ impl CheckRunner {
         (output.success, combined, duration_ms)
     }
 
-    /// Resolve the container for a check/pre-command.
-    ///
-    /// Precedence: explicit `container:` > compose-convention name for a
-    /// non-default service > cached default container.
-    ///
-    /// LIMITATION: assumes the Docker Compose v2 naming convention
-    /// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
-    /// override inside the compose file is not. Non-UTF8 project paths fall
-    /// back to the literal project name "project". Future work: resolve via
-    /// `docker compose ps -q <service>` instead of string construction.
-    fn resolve_container_name(&self, explicit: Option<&str>, service: &str) -> String {
-        if let Some(container) = explicit {
-            container.to_string()
-        } else if service != self.config.default_service() {
-            format!(
-                "{}-{}-1",
-                self.config.docker.compose_project_name(),
-                service
-            )
-        } else {
-            self.container_name.to_string()
-        }
+    /// Shell command for a non-host pre-command. Local mode ignores
+    /// `service`/`container` (rejected at load) and runs on the host.
+    fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> String {
+        let env = merged_env(self.target(), &pre_cmd.env);
+        let container = match self.target() {
+            ExecTarget::Docker(docker) => Some(pre_command_container(docker, pre_cmd)),
+            ExecTarget::Local(_) => None,
+        };
+        self.target().build_command(
+            container.as_deref(),
+            &env,
+            &pre_cmd.command,
+            self.executor.as_ref(),
+        )
     }
+}
 
-    fn build_pre_command_docker_cmd(&self, pre_cmd: &crate::config::PreCommand) -> String {
-        let service = pre_cmd
-            .service
-            .as_deref()
-            .unwrap_or_else(|| self.config.default_service());
-
-        let mut env = self.config.docker.env.clone();
-        env.extend(pre_cmd.env.clone());
-
-        let container_name = self.resolve_container_name(pre_cmd.container.as_deref(), service);
-
-        if self.executor.is_container_running(&container_name) {
-            build_docker_exec_command(
-                &container_name,
-                &env,
-                &pre_cmd.command,
-                &self.config.docker.shell,
-            )
-        } else {
-            build_docker_run_command(&self.config.docker, &env, &pre_cmd.command)
+/// Resolve the container for a docker-mode pre-command.
+///
+/// Precedence: explicit `container:` > compose-convention name for a
+/// non-default service > default container.
+///
+/// LIMITATION: assumes the Docker Compose v2 naming convention
+/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
+/// override inside the compose file is not. Non-UTF8 project paths fall
+/// back to the literal project name "project". Future work: resolve via
+/// `docker compose ps -q <service>` instead of string construction.
+fn pre_command_container(
+    docker: &crate::config::DockerConfig,
+    pre_cmd: &crate::config::PreCommand,
+) -> String {
+    let service = pre_cmd.service.as_deref().unwrap_or(&docker.service);
+    match pre_cmd.container.as_deref() {
+        Some(container) => container.to_string(),
+        None if service != docker.service => {
+            format!("{}-{}-1", docker.compose_project_name(), service)
         }
+        None => docker.container_name(),
     }
 }
 
@@ -573,20 +613,14 @@ async fn run_all_pre_commands(
     true
 }
 
-async fn run_docker_check_with_executor(
+async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
-    container_name: &str,
-    docker_config: &crate::config::DockerConfig,
-    global_env: &std::collections::HashMap<String, String>,
+    target: &ExecTarget,
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
     let check_id = check.id().to_string();
-
-    // Merge global env with check-specific env (check env takes precedence)
-    let mut env = global_env.clone();
-    env.extend(check.definition.env.clone());
 
     let _ = event_tx
         .send(RunnerEvent::CheckStarted {
@@ -594,39 +628,37 @@ async fn run_docker_check_with_executor(
         })
         .await;
 
-    execute_docker_command_with_executor(
+    execute_command_with_executor(
         check_id,
         &check.resolved_command,
         project_root,
-        container_name,
-        docker_config,
-        &env,
+        check.definition.container.as_deref(),
+        target,
+        &check.definition.env,
         executor,
     )
     .await
 }
 
-/// Execute a command in Docker and return the result (for testing with executor)
-pub async fn execute_docker_command_with_executor(
+/// Execute a command on `target` and return the result (for testing with executor).
+///
+/// `container` overrides the docker default container (ignored in local mode).
+/// `check_env` is merged over the target's global env (check env wins).
+pub async fn execute_command_with_executor(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    container: Option<&str>,
+    target: &ExecTarget,
+    check_env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
 
-    // Check if container is running, use exec if yes, run if no
-    let docker_cmd = if executor.is_container_running(container_name) {
-        build_docker_exec_command(container_name, env, command, &docker_config.shell)
-    } else {
-        build_docker_run_command(docker_config, env, command)
-    };
-
-    let output = executor.execute(&docker_cmd, project_root).await;
+    let env = merged_env(target, check_env);
+    let full_cmd = target.build_command(container, &env, command, executor);
+    let output = executor.execute(&full_cmd, project_root).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let finished_at = chrono::Local::now();
@@ -649,23 +681,13 @@ pub async fn execute_docker_command_with_executor(
     }
 }
 
-/// Run a single check (for retry single)
+/// Run a single check (for retry single). Target env + check env apply.
 pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    default_container: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    target: &ExecTarget,
 ) -> CheckResult {
-    run_single_check_with_executor(
-        check,
-        project_root,
-        default_container,
-        docker_config,
-        env,
-        &RealCommandExecutor,
-    )
-    .await
+    run_single_check_with_executor(check, project_root, target, &RealCommandExecutor).await
 }
 
 /// Run a single check with a custom executor (test-facing).
@@ -674,44 +696,32 @@ pub async fn run_single_check(
 pub async fn run_single_check_with_executor(
     check: &CheckToRun,
     project_root: &std::path::Path,
-    default_container: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    target: &ExecTarget,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(default_container);
-    let mut merged_env = env.clone();
-    merged_env.extend(check.definition.env.clone());
-    execute_docker_command_with_executor(
-        check.id().to_string(),
+    run_check_with_command_with_executor(
+        check,
         &check.resolved_command,
         project_root,
-        container_name,
-        docker_config,
-        &merged_env,
+        target,
         executor,
     )
     .await
 }
 
-/// Run a fix command for a check
+/// Run a fix command. `container` overrides the docker default container;
+/// target env applies.
 pub async fn run_fix_command(
     fix_command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    container: Option<&str>,
+    target: &ExecTarget,
 ) -> CheckResult {
     run_fix_command_with_executor(
         fix_command,
         project_root,
-        container_name,
-        docker_config,
-        env,
+        container,
+        target,
         &RealCommandExecutor,
     )
     .await
@@ -721,18 +731,17 @@ pub async fn run_fix_command(
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
-    container_name: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    container: Option<&str>,
+    target: &ExecTarget,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    execute_docker_command_with_executor(
+    execute_command_with_executor(
         "fix".to_string(),
         fix_command,
         project_root,
-        container_name,
-        docker_config,
-        env,
+        container,
+        target,
+        &HashMap::new(),
         executor,
     )
     .await
@@ -741,25 +750,15 @@ pub async fn run_fix_command_with_executor(
 /// Run a check with a custom command (e.g., for running without file filtering).
 ///
 /// This is used when running a check for "all files" by removing the {files}
-/// placeholder from the command.
+/// placeholder from the command. Check container override and env apply.
 pub async fn run_check_with_command(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    default_container: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    target: &ExecTarget,
 ) -> CheckResult {
-    run_check_with_command_with_executor(
-        check,
-        command,
-        project_root,
-        default_container,
-        docker_config,
-        env,
-        &RealCommandExecutor,
-    )
-    .await
+    run_check_with_command_with_executor(check, command, project_root, target, &RealCommandExecutor)
+        .await
 }
 
 /// Run a check with a custom command and custom executor (test-facing).
@@ -767,26 +766,135 @@ pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
-    default_container: &str,
-    docker_config: &crate::config::DockerConfig,
-    env: &std::collections::HashMap<String, String>,
+    target: &ExecTarget,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let container_name = check
-        .definition
-        .container
-        .as_deref()
-        .unwrap_or(default_container);
-    let mut merged_env = env.clone();
-    merged_env.extend(check.definition.env.clone());
-    execute_docker_command_with_executor(
+    execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        container_name,
-        docker_config,
-        &merged_env,
+        check.definition.container.as_deref(),
+        target,
+        &check.definition.env,
         executor,
     )
     .await
+}
+
+/// Build a host-local command: optional `env K='V'...` prefix + `shell -c` wrapper.
+///
+/// Invalid env keys are skipped (unquotable → shell injection), as in
+/// [`build_docker_exec_command`].
+fn build_local_command(
+    local: &crate::config::LocalConfig,
+    env: &HashMap<String, String>,
+    command: &str,
+) -> String {
+    let env_flags: String = env_assignments(env).map(|a| format!("{a} ")).collect();
+    let prefix = if env_flags.is_empty() {
+        String::new()
+    } else {
+        format!("env {env_flags}")
+    };
+    format!("{}{} -c {}", prefix, local.shell, single_quote(command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_local_command_no_env() {
+        let local = crate::config::LocalConfig::default();
+        let cmd = build_local_command(&local, &HashMap::new(), "cargo test");
+        assert_eq!(cmd, "bash -c 'cargo test'");
+    }
+
+    #[test]
+    fn test_build_local_command_with_env_and_quotes() {
+        let local = crate::config::LocalConfig::default();
+        let env = HashMap::from([("APP_ENV".to_string(), "it's".to_string())]);
+        let cmd = build_local_command(&local, &env, "echo 'hi'");
+        assert_eq!(cmd, "env APP_ENV='it'\\''s' bash -c 'echo '\\''hi'\\'''");
+    }
+
+    #[test]
+    fn test_build_local_command_skips_invalid_env_keys() {
+        let local = crate::config::LocalConfig::default();
+        let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
+        let cmd = build_local_command(&local, &env, "ls");
+        assert_eq!(cmd, "bash -c 'ls'");
+    }
+
+    #[test]
+    fn test_build_docker_run_command_skips_invalid_env_keys() {
+        let docker: crate::config::DockerConfig =
+            serde_yaml::from_str("project_dir: .\nservice: app\nshell: bash\nimage: img\n")
+                .unwrap();
+        let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
+        let cmd = build_docker_run_command(&docker, &env, "ls");
+        assert!(!cmd.contains("BAD"), "got: {cmd}");
+        assert!(!cmd.contains(" -e "), "got: {cmd}");
+    }
+
+    fn local_target() -> ExecTarget {
+        ExecTarget::Local(crate::config::LocalConfig::default())
+    }
+
+    fn docker_target() -> ExecTarget {
+        let yaml = "project_dir: .\nservice: app\nshell: bash\nimage: test-img\n";
+        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+    }
+
+    #[test]
+    fn test_build_command_local_never_queries_docker() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().times(0);
+        let cmd =
+            local_target().build_command(Some("ignored"), &HashMap::new(), "cargo test", &mock);
+        assert_eq!(cmd, "bash -c 'cargo test'");
+    }
+
+    #[test]
+    fn test_build_command_docker_running_uses_exec() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
+        assert!(cmd.starts_with("docker exec proj-app-1"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_docker_stopped_uses_run() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| false);
+        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
+        assert!(cmd.starts_with("docker run --rm"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_docker_defaults_to_config_container() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running()
+            .withf(|name| name == "explicit-c")
+            .returning(|_| true);
+        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
+        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
+        let cmd = target.build_command(None, &HashMap::new(), "ls", &mock);
+        assert!(cmd.starts_with("docker exec explicit-c"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_config_runner_local_env() {
+        let yaml = "version: 2\nrunner: local\nlocal:\n  env:\n    A: b\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+        let config: crate::config::CiConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(config.runner, ExecTarget::Local(_)));
+        assert_eq!(config.runner.env().get("A").unwrap(), "b");
+    }
+
+    #[test]
+    fn test_build_local_command_custom_shell() {
+        let local: crate::config::LocalConfig = serde_yaml::from_str("shell: /bin/sh").unwrap();
+        let cmd = build_local_command(&local, &HashMap::new(), "ls");
+        assert_eq!(cmd, "/bin/sh -c 'ls'");
+    }
 }

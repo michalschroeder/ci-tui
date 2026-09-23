@@ -16,7 +16,7 @@ async fn passes_when_executor_succeeds() {
         stdout: "output".into(),
         stderr: String::new(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let result = run_check_with_executor(
         &common::make_exec_check("c", "cargo test", None),
         Path::new("/app"),
@@ -37,7 +37,7 @@ async fn fails_with_stderr_when_executor_reports_failure() {
         stdout: String::new(),
         stderr: "boom".into(),
     });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     let result = run_check_with_executor(
         &common::make_exec_check("c", "cargo test", None),
         Path::new("/app"),
@@ -60,7 +60,7 @@ async fn uses_docker_run_when_container_not_running() {
             stdout: String::new(),
             stderr: String::new(),
         });
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     run_check_with_executor(
         &common::make_exec_check("c", "cargo test", None),
         Path::new("/app"),
@@ -85,7 +85,7 @@ async fn per_check_container_overrides_default() {
         });
     let mut c = common::make_exec_check("c", "cargo test", None);
     c.definition.container = Some("override".into());
-    let cfg = common::test_docker_config("img:latest");
+    let cfg = common::test_docker_target("img:latest");
     run_check_with_executor(&c, Path::new("/app"), &cfg, &mock).await;
 }
 

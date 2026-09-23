@@ -195,25 +195,18 @@ enum Action {
 /// Shared handles for spawned async tasks (Arcs for cheap cloning)
 #[derive(Clone)]
 struct TaskCtx {
+    /// Git change detection root (cwd)
     project_root: Arc<PathBuf>,
-    /// Config (docker settings, env, ignore patterns, check rules)
+    /// Command execution + test discovery root (repo root in local mode, cwd in docker mode)
+    exec_root: Arc<PathBuf>,
+    /// Config; `config.runner` is where commands execute (docker or local host)
     config: Arc<CiConfig>,
-    /// Default container name for docker exec/run commands
-    container_name: Arc<str>,
 }
 
 impl TaskCtx {
     /// Run `command` as `check` (check's container override and env apply)
     async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        run_check_with_command(
-            check,
-            command,
-            &self.project_root,
-            &self.container_name,
-            &self.config.docker,
-            &self.config.docker.env,
-        )
-        .await
+        run_check_with_command(check, command, &self.exec_root, &self.config.runner).await
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
@@ -227,7 +220,7 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let checks = determine_checks(&self.config, &changed_files, &self.project_root);
+        let checks = determine_checks(&self.config, &changed_files, &self.exec_root);
         Ok((changed_files, checks))
     }
 
@@ -440,7 +433,7 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
                     files: vec![],
                     base_ref,
                 };
-                let checks = determine_checks(&ctx.config, &changed_files, &ctx.project_root);
+                let checks = determine_checks(&ctx.config, &changed_files, &ctx.exec_root);
                 (changed_files, checks)
             }
         };
@@ -625,6 +618,7 @@ pub async fn run(
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
+    exec_root: PathBuf,
 ) -> Result<()> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -643,14 +637,14 @@ pub async fn run(
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
 
     // Start the runner in background
-    let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);
+    let (mut runner_handle, mut event_rx) = start_runner(&config, &exec_root, checks);
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
     let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
+        exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
-        container_name: config.docker.container_name().into(),
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -709,7 +703,7 @@ pub async fn run(
                 tasks.set.abort_all();
                 (tasks, task_rx) = Tasks::new(tasks.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
-                let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
+                let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks);
                 runner_handle = new_handle;
                 event_rx = new_rx;
             }
@@ -820,8 +814,8 @@ checks:
     fn make_test_tasks(config: &CiConfig) -> (Tasks, mpsc::Receiver<TaskEvent>) {
         Tasks::new(TaskCtx {
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
+            exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
-            container_name: "app".into(),
         })
     }
 
@@ -856,7 +850,7 @@ checks:
                 on_demand: false,
                 env: std::collections::HashMap::new(),
             },
-            service: "php".to_string(),
+            service: Some("php".to_string()),
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,

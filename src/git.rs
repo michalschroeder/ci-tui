@@ -18,7 +18,7 @@ use crate::config::GitConfig;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Trait for executing git commands.
@@ -291,9 +291,77 @@ pub fn short_commit_with_executor(
     Ok(output.trim().to_string())
 }
 
+/// Top-level directory of the git repo containing `cwd`. Errors outside a repo.
+pub fn repo_root(cwd: &Path) -> Result<PathBuf> {
+    repo_root_with_executor(cwd, &RealGitExecutor)
+}
+
+/// Repo root using a custom executor (testable version). See [`repo_root`].
+pub(crate) fn repo_root_with_executor(cwd: &Path, executor: &impl GitExecutor) -> Result<PathBuf> {
+    let args = vec!["rev-parse".to_string(), "--show-toplevel".to_string()];
+    let output = executor
+        .run_command(cwd, &args)
+        .context("failed to resolve git repository root")?;
+    let root = output.trim();
+    anyhow::ensure!(
+        !root.is_empty(),
+        "failed to resolve git repository root: empty `git rev-parse --show-toplevel` output"
+    );
+    Ok(PathBuf::from(root))
+}
+
+/// Rewrite a cwd-relative path to repo-relative (`cwd.join(path)` stripped of
+/// `repo_root`). Paths outside the repo are returned unchanged.
+pub fn to_repo_relative(cwd: &Path, repo_root: &Path, path: &Path) -> String {
+    let joined = cwd.join(path);
+    match joined.strip_prefix(repo_root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_repo_relative_rewrites_cwd_relative_paths() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/sub");
+        assert_eq!(to_repo_relative(cwd, root, Path::new("a.rs")), "sub/a.rs");
+        assert_eq!(
+            to_repo_relative(root, root, Path::new("src/a.rs")),
+            "src/a.rs"
+        );
+        assert_eq!(to_repo_relative(cwd, root, Path::new("/repo/b.rs")), "b.rs");
+        assert_eq!(
+            to_repo_relative(cwd, root, Path::new("/other/c.rs")),
+            "/other/c.rs"
+        );
+    }
+
+    #[test]
+    fn repo_root_trims_show_toplevel_output() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args == ["rev-parse", "--show-toplevel"])
+            .times(1)
+            .returning(|_, _| Ok("/home/u/repo\n".to_string()));
+        let root = repo_root_with_executor(Path::new("/home/u/repo/src"), &mock).unwrap();
+        assert_eq!(root, PathBuf::from("/home/u/repo"));
+    }
+
+    #[test]
+    fn repo_root_err_on_git_error() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .returning(|_, _| Err(anyhow::anyhow!("not a git repository")));
+        let err = repo_root_with_executor(Path::new("/tmp"), &mock).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a git repository"),
+            "got: {err:#}"
+        );
+    }
 
     fn make_changed_files(files: Vec<&str>) -> ChangedFiles {
         ChangedFiles {
