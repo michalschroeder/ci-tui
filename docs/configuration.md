@@ -317,7 +317,7 @@ checks:
 - Max runtime as `<n>s`, `<n>m` or `<n>h` (e.g. `30s`, `10m`, `1h`); must be > 0
 - On expiry the check process is killed and reported as **timed out** (counts as a failure)
 - Falls back to the top-level `timeout:`; if neither is set the check runs unbounded
-- In docker mode only the local `docker` client is killed; a command started with `docker exec` may keep running inside the container
+- Only the top-level local process is killed: its child processes (e.g. of `a && b` commands in local mode) may survive, and in docker mode the command keeps running inside the container (`docker exec`) or the `docker run` container keeps running until it exits
 
 ### The `{files}` Placeholder
 

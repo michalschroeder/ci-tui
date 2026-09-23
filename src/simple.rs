@@ -166,7 +166,7 @@ pub fn print_result(result: &CheckResult) {
 /// One colored status line for a check result:
 /// - Passed: green checkmark with duration
 /// - Failed: red X with duration
-/// - TimedOut: magenta hourglass, "(timed out)" and duration
+/// - TimedOut: magenta hourglass, "timed out" and duration
 /// - Running: yellow dot with "(running)"
 /// - Pending: gray circle with "(pending)"
 /// - Skipped: gray slashed circle with "(skipped)"

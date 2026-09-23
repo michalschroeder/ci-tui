@@ -86,7 +86,8 @@ impl CommandExecutor for RealCommandExecutor {
 /// Returns `Err(message)` on expiry. The timeout wraps the executor future rather than
 /// living in [`CommandExecutor`] so mocks stay unchanged; expiry drops the
 /// future, and [`RealCommandExecutor`]'s `kill_on_drop` kills the spawned
-/// process. Only that local process is killed: a `docker exec`'d command keeps
+/// process. Only that process is killed (SIGKILL, no process group): its
+/// descendants may survive, and a `docker exec`/`docker run` command keeps
 /// running inside the container.
 pub async fn execute_with_timeout(
     executor: &dyn CommandExecutor,
@@ -667,25 +668,13 @@ async fn run_check_with_target(
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
 ) -> CheckResult {
-    let check_id = check.id().to_string();
-
     let _ = event_tx
         .send(RunnerEvent::CheckStarted {
-            check_id: check_id.clone(),
+            check_id: check.id().to_string(),
         })
         .await;
 
-    execute_command_with_executor(
-        check_id,
-        &check.resolved_command,
-        project_root,
-        check.definition.container.as_deref(),
-        target,
-        &check.definition.env,
-        executor,
-        check.definition.timeout,
-    )
-    .await
+    run_single_check_with_executor(check, project_root, target, executor).await
 }
 
 /// Execute a command on `target` and return the result (for testing with executor).
