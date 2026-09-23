@@ -51,8 +51,9 @@ checks:
     checks:
       lint:
         name: Lint
-        # {files} expands to the changed files matching the trigger
-        command: echo "replace me — e.g. cargo clippy -- -D warnings" {files}
+        # {files} expands to the changed files matching the trigger.
+        # Placeholder fails on purpose until replaced with a real command.
+        command: echo "replace me — e.g. cargo clippy -- -D warnings" {files} && false
         # fix_command: echo "optional autofix — runs with --fix / 'x' key"
         triggers:
           file_pattern: source
