@@ -36,6 +36,8 @@ git clone https://github.com/michalschroeder/ci-tui && cd ci-tui
 cargo install --path .
 ```
 
+`runner: local` needs ci-tui installed on the host (from source / cargo), not the Docker image, since checks use the host toolchain.
+
 Docker image (published to GHCR on each release):
 
 ```bash

@@ -50,11 +50,11 @@ local:
     APP_ENV: testing
 ```
 
-With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory); the `docker` section becomes optional and is ignored. Per-check / pre-command `service` and `container` are rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
+With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory; untracked-file detection and the default `ci-tui.yaml` lookup still use the current directory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` and `container` are rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
 
 ## Docker Configuration
 
-The `docker` section configures how CI-TUI interacts with Docker containers. Required in docker mode (the default); optional and ignored when `runner: local` (see [Runner Mode](#runner-mode)).
+The `docker` section configures how CI-TUI interacts with Docker containers. Required in docker mode (the default); optional and ignored when `runner: local`, though if present it must still be valid (see [Runner Mode](#runner-mode)).
 
 ```yaml
 docker:
