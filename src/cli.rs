@@ -1,11 +1,17 @@
 //! Command-line interface: argument parsing and config-path resolution.
 
 use clap::{CommandFactory, Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// CI TUI - Run CI checks for changed files
 #[derive(Parser)]
-#[command(name = "ci-tui", version, about, long_about = None)]
+#[command(
+    name = "ci-tui",
+    version,
+    about,
+    long_about = None
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -25,6 +31,31 @@ pub struct Cli {
     /// Run checks on specific files instead of git-detected changes
     #[arg(short, long, num_args = 1..)]
     pub files: Vec<PathBuf>,
+}
+
+impl Cli {
+    /// Parse process args, exiting with a clap error on invalid combinations.
+    pub fn parse_checked() -> Self {
+        Self::try_parse_checked(std::env::args_os()).unwrap_or_else(|e| e.exit())
+    }
+
+    /// Parse `args` and reject run-mode flags combined with a subcommand.
+    ///
+    /// Not `args_conflicts_with_subcommands`: that also rejects the global `--config`.
+    pub fn try_parse_checked<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(args)?;
+        if cli.command.is_some() && (cli.simple || cli.fix || !cli.files.is_empty()) {
+            return Err(Self::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--simple, --fix and --files cannot be used with a subcommand",
+            ));
+        }
+        Ok(cli)
+    }
 }
 
 #[derive(Subcommand)]
@@ -71,12 +102,22 @@ mod tests {
 
     /// Parse `args` and return the resolved `init` / `validate` config path.
     fn resolved(args: &[&str]) -> PathBuf {
-        let cli = Cli::try_parse_from(args).unwrap();
+        let cli = Cli::try_parse_checked(args).unwrap();
         let path = match cli.command {
             Some(Command::Init { path } | Command::Validate { path }) => path,
             None => panic!("expected a subcommand"),
         };
         resolve_config_path(path, cli.config)
+    }
+
+    #[rstest::rstest]
+    #[case::fix_before_validate(&["ci-tui", "--fix", "validate"])]
+    #[case::simple_before_init(&["ci-tui", "-s", "init"])]
+    fn test_run_flags_conflict_with_subcommands(#[case] args: &[&str]) {
+        let err = Cli::try_parse_checked(args)
+            .err()
+            .expect("expected conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[rstest::rstest]

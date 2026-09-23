@@ -1,7 +1,6 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, resolve_config_path, Cli, Command};
 use ci_tui::{checks, commands, config, fix, git, simple, ui};
-use clap::Parser;
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -26,7 +25,7 @@ async fn main() -> Result<()> {
     // Install color-eyre for better panic handling (errors are ignored if it fails)
     let _ = color_eyre::install();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked();
 
     match cli.command {
         Some(Command::Init { path }) => {
