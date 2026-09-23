@@ -232,7 +232,7 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let checks = determine_checks(&self.config, &changed_files, &self.project_root);
+        let checks = determine_checks(&self.config, &changed_files, &self.exec_root);
         Ok((changed_files, checks))
     }
 
@@ -445,7 +445,7 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
                     files: vec![],
                     base_ref,
                 };
-                let checks = determine_checks(&ctx.config, &changed_files, &ctx.project_root);
+                let checks = determine_checks(&ctx.config, &changed_files, &ctx.exec_root);
                 (changed_files, checks)
             }
         };

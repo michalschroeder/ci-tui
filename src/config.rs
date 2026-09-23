@@ -544,6 +544,9 @@ impl CiConfig {
                  Set `runner: local` to run checks on the host instead."
             );
         }
+        if self.runner == RunnerMode::Local && self.local.shell.trim().is_empty() {
+            bail!("`local.shell` must not be empty when runner is `local`");
+        }
         if self.runner == RunnerMode::Local {
             self.check_no_docker_targets()?;
         }
@@ -2046,6 +2049,15 @@ checks:
             let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(config.local.shell, "/bin/sh");
             assert_eq!(config.local.env.get("APP_ENV").unwrap(), "test");
+        }
+
+        #[test]
+        fn test_local_mode_rejects_empty_shell() {
+            let yaml =
+                LOCAL_MIN.replace("runner: local\n", "runner: local\nlocal:\n  shell: '  '\n");
+            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let err = config.validate_and_compile().unwrap_err().to_string();
+            assert!(err.contains("local.shell"), "got: {err}");
         }
 
         #[test]

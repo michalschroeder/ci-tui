@@ -20,6 +20,21 @@ fn git_detect_changes_or_exit(
     }
 }
 
+/// `--files` entry as a changed-file path. Local mode rewrites cwd-relative
+/// paths repo-relative (matching git output); docker mode keeps them as given.
+fn cli_file_path(
+    local: bool,
+    cwd: &std::path::Path,
+    exec_root: &std::path::Path,
+    path: &std::path::Path,
+) -> String {
+    if local {
+        git::to_repo_relative(cwd, exec_root, path)
+    } else {
+        path.to_string_lossy().into_owned()
+    }
+}
+
 /// Run `init` / `validate` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
     let path = command.config_path(config);
@@ -65,7 +80,17 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = config::load_config(&config_path)?;
 
-    // Get changed files: from --files arg or git detection
+    // Local mode runs commands from the repo root so repo-relative {files}
+    // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
+    let local = config.runner == config::RunnerMode::Local;
+    let exec_root = if local {
+        git::repo_root(&project_root).unwrap_or_else(|| project_root.clone())
+    } else {
+        project_root.clone()
+    };
+
+    // Get changed files: from --files arg or git detection. In local mode
+    // `--files` (cwd-relative) are rewritten repo-relative to match git paths.
     let mut changed_files = if cli.files.is_empty() {
         git_detect_changes_or_exit(&project_root, &config.git)
     } else {
@@ -73,20 +98,12 @@ async fn main() -> Result<()> {
             files: cli
                 .files
                 .iter()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| cli_file_path(local, &project_root, &exec_root, p))
                 .collect(),
             base_ref: git::CLI_FILES_BASE_REF.to_string(),
         }
     };
     changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
-
-    // Local mode runs commands from the repo root so repo-relative {files}
-    // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
-    let exec_root = if config.runner == config::RunnerMode::Local {
-        git::repo_root(&project_root).unwrap_or_else(|| project_root.clone())
-    } else {
-        project_root.clone()
-    };
 
     // Run fix mode if requested
     if cli.fix {
@@ -94,7 +111,7 @@ async fn main() -> Result<()> {
     }
 
     // Determine which checks to run
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &project_root);
+    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
 
     if simple_mode {
         // Run in simple console mode

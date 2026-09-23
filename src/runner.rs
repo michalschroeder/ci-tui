@@ -132,9 +132,11 @@ pub fn build_docker_run_command(
     env: &HashMap<String, String>,
     command: &str,
 ) -> String {
-    // Build env flags for docker run (-e KEY='VALUE' for each)
+    // Build env flags for docker run (-e KEY='VALUE' for each); invalid keys
+    // are skipped (unquotable, see build_docker_exec_command).
     let env_flags: String = env
         .iter()
+        .filter(|(k, _)| is_valid_env_key(k))
         .map(|(k, v)| format!("-e {}='{}'", k, v.replace('\'', "'\\''")))
         .collect::<Vec<_>>()
         .join(" ");
@@ -887,6 +889,17 @@ mod tests {
         let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
         let cmd = build_local_command(&local, &env, "ls");
         assert_eq!(cmd, "bash -c 'ls'");
+    }
+
+    #[test]
+    fn test_build_docker_run_command_skips_invalid_env_keys() {
+        let docker: crate::config::DockerConfig =
+            serde_yaml::from_str("project_dir: .\nservice: app\nshell: bash\nimage: img\n")
+                .unwrap();
+        let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
+        let cmd = build_docker_run_command(&docker, &env, "ls");
+        assert!(!cmd.contains("BAD"), "got: {cmd}");
+        assert!(!cmd.contains(" -e "), "got: {cmd}");
     }
 
     fn local_target() -> ExecTarget {

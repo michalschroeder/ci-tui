@@ -304,9 +304,35 @@ pub fn repo_root_with_executor(cwd: &Path, executor: &impl GitExecutor) -> Optio
     (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
+/// Rewrite a cwd-relative path to repo-relative (`cwd.join(path)` stripped of
+/// `repo_root`). Paths outside the repo are returned unchanged.
+pub fn to_repo_relative(cwd: &Path, repo_root: &Path, path: &Path) -> String {
+    let joined = cwd.join(path);
+    match joined.strip_prefix(repo_root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_repo_relative_rewrites_cwd_relative_paths() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/sub");
+        assert_eq!(to_repo_relative(cwd, root, Path::new("a.rs")), "sub/a.rs");
+        assert_eq!(
+            to_repo_relative(root, root, Path::new("src/a.rs")),
+            "src/a.rs"
+        );
+        assert_eq!(to_repo_relative(cwd, root, Path::new("/repo/b.rs")), "b.rs");
+        assert_eq!(
+            to_repo_relative(cwd, root, Path::new("/other/c.rs")),
+            "/other/c.rs"
+        );
+    }
 
     #[test]
     fn repo_root_trims_show_toplevel_output() {

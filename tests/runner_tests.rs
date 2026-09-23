@@ -776,6 +776,48 @@ mod check_runner_tests {
     }
 
     #[tokio::test]
+    async fn local_mode_pre_command_runs_on_host_shell() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().times(0);
+        mock.expect_execute()
+            .withf(|cmd, _| cmd == "bash -c 'echo warmup'")
+            .times(1)
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+            });
+        mock.expect_execute()
+            .withf(|cmd, _| cmd != "bash -c 'echo warmup'")
+            .returning(|_, _| CommandOutput {
+                success: true,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+            });
+
+        let mut config = ConfigBuilder::new()
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+        config.runner = ci_tui::config::RunnerMode::Local;
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+        assert!(
+            events.iter().any(|e| matches!(e,
+            RunnerEvent::PreCommandFinished { name, success, .. } if name == "warmup" && *success))
+        );
+    }
+
+    #[tokio::test]
     async fn run_checks_pre_command_failure_stops_execution() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
