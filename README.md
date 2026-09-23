@@ -143,7 +143,7 @@ Simple mode is auto-enabled when stdout is not a terminal, so `ci-tui` works as 
 3. `triggers.file_pattern` is matched against the list; if it's set and nothing matches, the check becomes `t`-triggerable instead.
 4. `triggers.test_discovery` maps changed sources to test files; if none are found: `on_demand: true` makes it wait for you to press `t` (never runs in `--simple`), otherwise it runs the full command if the command has no `{files}`, else it's skipped. `on_demand` only has an effect here — it's ignored on checks without `test_discovery`.
 
-Test discovery is heuristic (path conventions + grep) — it does not do dependency analysis, so a passing run is a fast pre-push signal, not a replacement for full CI.
+Test discovery is heuristic (path conventions + grep) — it does not do dependency analysis, so a passing run is a fast pre-push signal, not a replacement for full CI. See [limitations](docs/configuration.md#test-discovery-limitations).
 
 ## Development
 
