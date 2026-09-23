@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ci_tui::cli::{missing_config_error, resolve_config_path, Cli, Command};
+use ci_tui::cli::{missing_config_error, resolve_config_path, run_config_path, Cli, Command};
 use ci_tui::{checks, commands, config, fix, git, simple, ui};
 use std::io::IsTerminal;
 
@@ -47,16 +47,16 @@ async fn main() -> Result<()> {
         None => {}
     }
 
+    // Use current working directory as project root
+    let project_root = std::env::current_dir()?;
+
     // Enforced here, not via clap `required`: clap forbids required global args.
-    let Some(config_path) = cli.config else {
+    let Some(config_path) = run_config_path(cli.config, &project_root) else {
         missing_config_error().exit();
     };
 
     // Auto-detect TUI mode: use simple mode if stdout is not a terminal
     let simple_mode = cli.simple || !std::io::stdout().is_terminal();
-
-    // Use current working directory as project root
-    let project_root = std::env::current_dir()?;
 
     // Load configuration
     let config = config::load_config(&config_path)?;

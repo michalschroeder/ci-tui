@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// CI TUI - Run CI checks for changed files
 #[derive(Parser)]
@@ -16,7 +16,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Path to config file (required unless a subcommand is given; create one with `ci-tui init`)
+    /// Path to config file [default: ci-tui.yaml if present; create one with `ci-tui init`]
     #[arg(short, long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -87,7 +87,7 @@ pub enum Command {
 pub fn missing_config_error() -> clap::Error {
     Cli::command().error(
         clap::error::ErrorKind::MissingRequiredArgument,
-        "--config <CONFIG> is required (or run `ci-tui init` to create one)",
+        "--config <CONFIG> is required: no ci-tui.yaml in the current directory (run `ci-tui init` to create one)",
     )
 }
 
@@ -96,6 +96,16 @@ pub fn missing_config_error() -> clap::Error {
 pub fn resolve_config_path(path: Option<PathBuf>, config: Option<PathBuf>) -> PathBuf {
     path.or(config)
         .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
+}
+
+/// Config path for running checks: `--config`, else `ci-tui.yaml` in `cwd` if
+/// present. `None` means no config was given or found.
+pub fn run_config_path(config: Option<PathBuf>, cwd: &Path) -> Option<PathBuf> {
+    config.or_else(|| {
+        cwd.join(crate::commands::DEFAULT_CONFIG_FILE)
+            .is_file()
+            .then(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
+    })
 }
 
 #[cfg(test)]
@@ -150,5 +160,31 @@ mod tests {
     #[case::init_honors_config(&["ci-tui", "-c", "a.yaml", "init"], "a.yaml")]
     fn test_resolve_config_path(#[case] args: &[&str], #[case] expected: &str) {
         assert_eq!(resolved(args), PathBuf::from(expected));
+    }
+
+    #[test]
+    fn test_run_config_path_none_without_config_or_default_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(run_config_path(None, dir.path()), None);
+    }
+
+    #[test]
+    fn test_run_config_path_falls_back_to_default_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ci-tui.yaml"), "").unwrap();
+        assert_eq!(
+            run_config_path(None, dir.path()),
+            Some(PathBuf::from("ci-tui.yaml"))
+        );
+    }
+
+    #[test]
+    fn test_run_config_path_prefers_config_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ci-tui.yaml"), "").unwrap();
+        assert_eq!(
+            run_config_path(Some("a.yaml".into()), dir.path()),
+            Some(PathBuf::from("a.yaml"))
+        );
     }
 }

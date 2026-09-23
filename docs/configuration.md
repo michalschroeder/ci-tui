@@ -13,7 +13,7 @@ A configuration file defines:
 - Check definitions with commands and execution rules
 - Test discovery strategies for intelligent test selection
 
-Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it.
+Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it. Without `--config`, ci-tui uses `ci-tui.yaml` from the current directory.
 
 ## Top-Level Structure
 
