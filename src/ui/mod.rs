@@ -195,7 +195,10 @@ enum Action {
 /// Shared handles for spawned async tasks (Arcs for cheap cloning)
 #[derive(Clone)]
 struct TaskCtx {
+    /// Git change detection + test discovery root (cwd)
     project_root: Arc<PathBuf>,
+    /// Command execution dir (repo root in local mode, cwd in docker mode)
+    exec_root: Arc<PathBuf>,
     /// Config (docker settings, env, ignore patterns, check rules)
     config: Arc<CiConfig>,
     /// Where commands execute (docker or local host)
@@ -210,7 +213,7 @@ impl TaskCtx {
         run_check_with_command(
             check,
             command,
-            &self.project_root,
+            &self.exec_root,
             &self.container_name,
             &self.target,
             self.target.env(),
@@ -627,6 +630,7 @@ pub async fn run(
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
+    exec_root: PathBuf,
 ) -> Result<()> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -645,13 +649,14 @@ pub async fn run(
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
 
     // Start the runner in background
-    let (mut runner_handle, mut event_rx) = start_runner(&config, &project_root, checks);
+    let (mut runner_handle, mut event_rx) = start_runner(&config, &exec_root, checks);
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
     let project_root = Arc::new(project_root);
     let target = ExecTarget::from_config(&config);
     let (mut tasks, mut task_rx) = Tasks::new(TaskCtx {
         project_root: Arc::clone(&project_root),
+        exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
         container_name: target.default_container().into(),
         target,
@@ -713,7 +718,7 @@ pub async fn run(
                 tasks.set.abort_all();
                 (tasks, task_rx) = Tasks::new(tasks.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
-                let (new_handle, new_rx) = start_runner(&config, &project_root, new_checks);
+                let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks);
                 runner_handle = new_handle;
                 event_rx = new_rx;
             }
@@ -824,6 +829,7 @@ checks:
     fn make_test_tasks(config: &CiConfig) -> (Tasks, mpsc::Receiver<TaskEvent>) {
         Tasks::new(TaskCtx {
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
+            exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
             target: ExecTarget::from_config(config),
             container_name: "app".into(),

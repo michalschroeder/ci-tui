@@ -101,6 +101,13 @@ async fn main() -> Result<()> {
         simple::run(config, changed_files, checks_to_run, exec_root).await
     } else {
         // Run the TUI
-        ui::run(config, changed_files, checks_to_run, exec_root).await
+        ui::run(
+            config,
+            changed_files,
+            checks_to_run,
+            project_root,
+            exec_root,
+        )
+        .await
     }
 }
