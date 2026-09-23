@@ -31,6 +31,10 @@ pub struct Cli {
     /// Run checks on specific files instead of git-detected changes
     #[arg(short, long, num_args = 1.., value_parser = parse_file_arg)]
     pub files: Vec<PathBuf>,
+
+    /// Compare against this git ref instead of `git.base_branch` (exact ref, no fallback)
+    #[arg(long, value_name = "REF", conflicts_with = "files")]
+    pub base: Option<String>,
 }
 
 /// `--files` value parser. `--files` takes 1.. values, so a trailing subcommand
@@ -59,10 +63,12 @@ impl Cli {
         T: Into<OsString> + Clone,
     {
         let cli = Self::try_parse_from(args)?;
-        if cli.command.is_some() && (cli.simple || cli.fix || !cli.files.is_empty()) {
+        if cli.command.is_some()
+            && (cli.simple || cli.fix || !cli.files.is_empty() || cli.base.is_some())
+        {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix and --files cannot be used with a subcommand",
+                "--simple, --fix, --files and --base cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -137,7 +143,25 @@ mod tests {
     #[case::fix_before_validate(&["ci-tui", "--fix", "validate"])]
     #[case::simple_before_init(&["ci-tui", "-s", "init"])]
     #[case::files_before_init(&["ci-tui", "--files", "a.rs", "-s", "init"])]
+    #[case::base_before_validate(&["ci-tui", "--base", "v1.0", "validate"])]
     fn test_run_flags_conflict_with_subcommands(#[case] args: &[&str]) {
+        let err = Cli::try_parse_checked(args)
+            .err()
+            .expect("expected conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_base_flag_parsed() {
+        let cli = Cli::try_parse_checked(["ci-tui", "--base", "v1.0"]).unwrap();
+        assert_eq!(cli.base.as_deref(), Some("v1.0"));
+        assert!(Cli::try_parse_checked(["ci-tui"]).unwrap().base.is_none());
+    }
+
+    #[rstest::rstest]
+    #[case::base_then_files(&["ci-tui", "--base", "main", "--files", "a.rs"])]
+    #[case::files_then_base(&["ci-tui", "-f", "a.rs", "--base", "main"])]
+    fn test_base_conflicts_with_files(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
             .expect("expected conflict");

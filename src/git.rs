@@ -166,6 +166,36 @@ pub fn detect_changes_with_executor(
     })
 }
 
+/// Detect changed files against `base_override` (the `--base` flag) when given,
+/// else via the config fallback chain ([`detect_changes`]).
+///
+/// # Errors
+///
+/// Returns an error naming the ref if `base_override` does not resolve (no
+/// fallback), or any [`detect_changes`] error.
+pub fn resolve_changes(
+    project_root: &Path,
+    git_config: &GitConfig,
+    base_override: Option<&str>,
+) -> Result<ChangedFiles> {
+    resolve_changes_with_executor(project_root, git_config, base_override, &RealGitExecutor)
+}
+
+/// Resolve changed files using a custom executor (testable version).
+///
+/// See [`resolve_changes`] for details.
+pub fn resolve_changes_with_executor(
+    project_root: &Path,
+    git_config: &GitConfig,
+    base_override: Option<&str>,
+    executor: &impl GitExecutor,
+) -> Result<ChangedFiles> {
+    match base_override {
+        Some(base_ref) => get_changed_files_with_executor(project_root, base_ref, executor),
+        None => detect_changes_with_executor(project_root, git_config, executor),
+    }
+}
+
 /// Get list of files changed compared to a specific git reference.
 ///
 /// # Errors
@@ -183,7 +213,9 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let committed = run_committed_diff(project_root, base_ref, executor)?;
+    // Flattened (not `.context`) so the git error survives `to_string()`.
+    let committed = run_committed_diff(project_root, base_ref, executor)
+        .map_err(|e| anyhow::anyhow!("could not resolve git base ref `{base_ref}`: {e}"))?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {

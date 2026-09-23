@@ -7,15 +7,18 @@ use std::io::IsTerminal;
 fn git_detect_changes_or_exit(
     project_root: &std::path::Path,
     git_config: &ci_tui::config::GitConfig,
+    base_override: Option<&str>,
 ) -> git::ChangedFiles {
-    match git::detect_changes(project_root, git_config) {
+    match git::resolve_changes(project_root, git_config, base_override) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e}");
-            eprintln!(
-                "\nNo base ref could be resolved against the current repository. \
-                If this is intentional, bypass git with --files <paths...>."
-            );
+            if base_override.is_none() {
+                eprintln!(
+                    "\nNo base ref could be resolved against the current repository. \
+                    If this is intentional, bypass git with --files <paths...>."
+                );
+            }
             std::process::exit(1);
         }
     }
@@ -100,7 +103,7 @@ async fn main() -> Result<()> {
     // Get changed files: from --files arg or git detection. In local mode
     // `--files` (cwd-relative) are rewritten repo-relative to match git paths.
     let mut changed_files = if cli.files.is_empty() {
-        git_detect_changes_or_exit(&project_root, &config.git)
+        git_detect_changes_or_exit(&project_root, &config.git, cli.base.as_deref())
     } else {
         git::ChangedFiles {
             files: cli

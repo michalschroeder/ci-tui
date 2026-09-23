@@ -8,7 +8,7 @@ mod common;
 use ci_tui::config::GitConfig;
 use ci_tui::git::{
     current_branch_with_executor, detect_changes_with_executor, get_changed_files_with_executor,
-    short_commit_with_executor, MockGitExecutor,
+    resolve_changes_with_executor, short_commit_with_executor, MockGitExecutor,
 };
 use common::{mock_git_error, mock_git_with_output};
 use rstest::rstest;
@@ -203,6 +203,83 @@ mod detect_changes {
 
         assert_eq!(result.base_ref, "origin/development");
         assert_eq!(result.files, vec!["src/main.rs"]);
+    }
+}
+
+mod resolve_changes {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn config() -> GitConfig {
+        GitConfig {
+            base_branch: "development".to_string(),
+            fallback_branch: "HEAD~1".to_string(),
+        }
+    }
+
+    #[test]
+    fn base_override_uses_exact_ref_without_fallback() {
+        let mut mock = MockGitExecutor::new();
+
+        // Committed diff against exactly `v1.0` — no origin/ prefix, no chain.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == "v1.0")
+            })
+            .times(1)
+            .returning(|_, _| Ok("src/a.rs\n".to_string()));
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        let result =
+            resolve_changes_with_executor(Path::new("/tmp"), &config(), Some("v1.0"), &mock)
+                .unwrap();
+
+        assert_eq!(result.base_ref, "v1.0");
+        assert_eq!(result.files, vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn unresolvable_base_override_errors_naming_ref() {
+        let mut mock = MockGitExecutor::new();
+
+        // Only one attempt: the override ref. Any fallback call would panic.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "no-such-ref"))
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("git command failed: fatal: bad revision")));
+
+        let result =
+            resolve_changes_with_executor(Path::new("/tmp"), &config(), Some("no-such-ref"), &mock);
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no-such-ref"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn no_override_uses_config_fallback_chain() {
+        let mut mock = MockGitExecutor::new();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "--merge-base")
+                    && args.iter().any(|a| a == "origin/development")
+            })
+            .times(1)
+            .returning(|_, _| Ok("src/main.rs\n".to_string()));
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        let result =
+            resolve_changes_with_executor(Path::new("/tmp"), &config(), None, &mock).unwrap();
+
+        assert_eq!(result.base_ref, "origin/development");
     }
 }
 

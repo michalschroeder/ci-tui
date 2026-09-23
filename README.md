@@ -23,6 +23,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--fix` mode runs each check's `fix_command` (formatters, etc.)
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
+- `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
@@ -134,6 +135,7 @@ Info messages (e.g. "Command copied") auto-dismiss after 3s; errors stay until a
 ci-tui --simple            # plain console output, exit code reflects results
 ci-tui --fix               # run fix commands only
 ci-tui --files src/a.rs    # bypass git detection
+ci-tui --base v1.2.0       # diff against a ref instead of git.base_branch
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 
