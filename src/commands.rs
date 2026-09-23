@@ -1,7 +1,7 @@
 //! `ci-tui init` / `ci-tui validate` subcommands: scaffold and check config files.
 
 use anyhow::{Context, Result};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 /// Default config path for `init` / `validate` when none is given.
@@ -60,8 +60,6 @@ checks:
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
 pub fn init(path: &Path) -> Result<()> {
-    use std::io::Write;
-
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -72,8 +70,11 @@ pub fn init(path: &Path) -> Result<()> {
             }
             _ => anyhow::Error::new(e).context(format!("failed to write {}", path.display())),
         })?;
-    file.write_all(TEMPLATE.as_bytes())
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    if let Err(e) = file.write_all(TEMPLATE.as_bytes()) {
+        // Remove the partial file so a retry is not refused as "already exists".
+        let _ = std::fs::remove_file(path);
+        return Err(e).with_context(|| format!("failed to write {}", path.display()));
+    }
     Ok(())
 }
 
