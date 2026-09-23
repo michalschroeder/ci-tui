@@ -278,7 +278,7 @@ pub async fn run_fix_command_with_executor(
     let start = Instant::now();
 
     let full_cmd = target.build_command(check_container, target.env(), command, executor);
-    let output = executor.execute(&full_cmd, project_root).await;
+    let output = crate::runner::execute_built(executor, &full_cmd, project_root).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if !output.success {

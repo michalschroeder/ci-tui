@@ -658,3 +658,31 @@ fn test_timed_out_check_shows_distinct_icon_and_label() {
     assert!(buffer_contains(buffer, "TIMED OUT"));
     assert!(buffer_contains(buffer, "timed out after 1s"));
 }
+
+#[test]
+fn test_footer_shows_cancel_only_for_running_check() {
+    // clippy is selected and running
+    let mut app = make_test_app_running();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(buffer_contains(terminal.backend().buffer(), "s cancel"));
+
+    let mut app = make_test_app();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(!buffer_contains(terminal.backend().buffer(), "cancel"));
+}
+
+#[test]
+fn test_cancelled_check_shows_label() {
+    let mut app = make_test_app();
+    // clippy is selected by default
+    let started_at = chrono::Local::now();
+    *app.results.get_mut("clippy").unwrap() =
+        ci_tui::runner::CheckResult::cancelled("clippy", started_at);
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(buffer_contains(buffer, "CANCELLED"));
+    assert!(buffer_contains(buffer, "cancelled by user"));
+}

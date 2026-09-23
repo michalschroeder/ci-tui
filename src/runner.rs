@@ -11,6 +11,16 @@
 //! - [`CheckResult`]: Result of executing a check including output and timing
 //! - [`CheckStatus`]: Current status of a check (Pending, Running, Passed, TimedOut, etc.)
 //! - [`RunnerEvent`]: Events emitted during execution for UI updates
+//! - [`CancelRegistry`]: Per-check cancel switches (TUI `s` key)
+//!
+//! # Process cleanup
+//!
+//! A command that does not finish normally (cancel, timeout, or its task
+//! aborted/dropped on quit or retry-all) is cleaned up by drop guards:
+//! [`RealCommandExecutor`] kills the command's whole process group, and a
+//! `docker run` fallback (always started with a unique `--name`) gets a
+//! `docker kill`. LIMITATION: for `docker exec` only the local client dies;
+//! the process inside the container keeps running until it exits.
 //!
 //! # Key Functions
 //!
@@ -23,10 +33,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Output from executing a command
 #[derive(Debug, Clone)]
@@ -45,6 +57,10 @@ pub trait CommandExecutor: Send + Sync {
 
     /// Check if a Docker container is running
     fn is_container_running(&self, container_name: &str) -> bool;
+
+    /// Kill a Docker container (best effort; errors ignored). Called when a
+    /// `docker run` command is cancelled, times out or is dropped.
+    fn kill_container(&self, name: &str);
 }
 
 /// Production implementation of CommandExecutor
@@ -53,14 +69,31 @@ pub struct RealCommandExecutor;
 #[async_trait]
 impl CommandExecutor for RealCommandExecutor {
     async fn execute(&self, command: &str, working_dir: &Path) -> CommandOutput {
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(working_dir)
-            // Aborted tasks (e.g. on retry-all) must not leave docker running
-            .kill_on_drop(true)
-            .output()
-            .await;
+            // Null stdin: a child outside the terminal's foreground group
+            // must not read the TTY (SIGTTIN)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        // Own process group, so cancel/timeout/drop can kill the whole tree
+        // (kill_on_drop alone only kills `sh`)
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let output = match cmd.spawn() {
+            Ok(child) => {
+                let mut group = ProcessGroupGuard(child.id());
+                let output = child.wait_with_output().await;
+                // Finished normally: leave anything it backgrounded alone
+                group.0 = None;
+                output
+            }
+            Err(e) => Err(e),
+        };
 
         match output {
             Ok(output) => CommandOutput {
@@ -79,23 +112,81 @@ impl CommandExecutor for RealCommandExecutor {
     fn is_container_running(&self, container_name: &str) -> bool {
         crate::utils::docker::is_running(container_name)
     }
+
+    fn kill_container(&self, name: &str) {
+        crate::utils::docker::kill(name);
+    }
 }
 
-/// Run `command` via `executor`, bounded by `timeout` (`None` = unbounded).
+/// SIGKILLs process group `.0` on drop, i.e. when [`RealCommandExecutor`]'s
+/// future is dropped before the command finished. Forgotten on normal exit.
+struct ProcessGroupGuard(Option<u32>);
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            // Shelling out to kill(1) instead of adding a libc dependency.
+            // Blocking but brief; must finish before a quitting process exits.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", "--", &format!("-{pgid}")])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// `docker kill`s a `docker run` container on drop unless disarmed
+/// (`name` cleared)
+struct ContainerGuard<'a> {
+    executor: &'a dyn CommandExecutor,
+    name: Option<&'a str>,
+}
+
+impl Drop for ContainerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = self.name {
+            self.executor.kill_container(name);
+        }
+    }
+}
+
+/// Run `command` via `executor`, cleaning up if it does not finish.
 ///
-/// Returns `Err(message)` on expiry. The timeout wraps the executor future rather than
-/// living in [`CommandExecutor`] so mocks stay unchanged; expiry drops the
-/// future, and [`RealCommandExecutor`]'s `kill_on_drop` kills the spawned
-/// process. Only that process is killed (SIGKILL, no process group): its
-/// descendants may survive, and a `docker exec`/`docker run` command keeps
-/// running inside the container.
+/// Cleanup when this future is dropped before the command finished (timeout
+/// expiry, a cancel, or its task aborted on quit, Ctrl-C, retry-all):
+/// dropping the executor future makes [`RealCommandExecutor`] SIGKILL the
+/// command's whole process group, and a `docker run` command
+/// ([`BuiltCommand::container`]) gets `docker kill <name>`. LIMITATION: a
+/// `docker exec` command keeps running inside the container (only the local
+/// client is killed).
+pub async fn execute_built(
+    executor: &dyn CommandExecutor,
+    command: &BuiltCommand,
+    working_dir: &Path,
+) -> CommandOutput {
+    let mut container = ContainerGuard {
+        executor,
+        name: command.container.as_deref(),
+    };
+    let output = executor.execute(&command.command, working_dir).await;
+    container.name = None; // finished: `--rm` already removed it
+    output
+}
+
+/// [`execute_built`] bounded by `timeout` (`None` = unbounded).
+///
+/// Returns `Err(message)` on expiry; expiry drops the [`execute_built`]
+/// future, which kills the command (see there). The timeout wraps the
+/// executor future rather than living in [`CommandExecutor`] so mocks stay
+/// unchanged.
 pub async fn execute_with_timeout(
     executor: &dyn CommandExecutor,
-    command: &str,
+    command: &BuiltCommand,
     working_dir: &Path,
     timeout: Option<Duration>,
 ) -> std::result::Result<CommandOutput, String> {
-    let run = executor.execute(command, working_dir);
+    let run = execute_built(executor, command, working_dir);
     match timeout {
         Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| {
             format!(
@@ -162,11 +253,20 @@ fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build a docker run command with environment variables
+/// Unique `docker run --name` for this process: `ci-tui-<pid>-<n>`
+fn unique_container_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!("ci-tui-{}-{n}", std::process::id())
+}
+
+/// Build a docker run command with environment variables. `name` becomes
+/// `--name`, so cancel/timeout can `docker kill` the container.
 pub fn build_docker_run_command(
     docker_config: &crate::config::DockerConfig,
     env: &HashMap<String, String>,
     command: &str,
+    name: &str,
 ) -> String {
     // Build env flags for docker run (-e KEY='VALUE' for each)
     let env_flags: String = env_assignments(env)
@@ -187,7 +287,7 @@ pub fn build_docker_run_command(
     let volume_args = docker_config.volume_args().unwrap_or_default();
 
     // Build docker run command with --rm flag
-    let mut parts = vec!["docker run --rm".to_string()];
+    let mut parts = vec![format!("docker run --rm --name {name}")];
 
     if !volume_args.is_empty() {
         parts.push(volume_args);
@@ -205,6 +305,26 @@ pub fn build_docker_run_command(
 }
 
 pub use crate::config::ExecTarget;
+
+/// Shell command built for an [`ExecTarget`]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltCommand {
+    /// Full shell command line
+    pub command: String,
+    /// `--name` of the container a `docker run` command starts (killed on
+    /// cancel/timeout/drop); `None` for `docker exec` and host commands
+    pub container: Option<String>,
+}
+
+impl BuiltCommand {
+    /// Command with no container to clean up (host, local or `docker exec`)
+    pub fn plain(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            container: None,
+        }
+    }
+}
 
 impl ExecTarget {
     /// Global env: `docker.env` or `local.env`.
@@ -224,9 +344,9 @@ impl ExecTarget {
         env: &HashMap<String, String>,
         command: &str,
         executor: &dyn CommandExecutor,
-    ) -> String {
+    ) -> BuiltCommand {
         match self {
-            Self::Local(local) => build_local_command(local, env, command),
+            Self::Local(local) => BuiltCommand::plain(build_local_command(local, env, command)),
             Self::Docker(docker) => build_docker_command(docker, container, env, command, executor),
         }
     }
@@ -240,12 +360,21 @@ fn build_docker_command(
     env: &HashMap<String, String>,
     command: &str,
     executor: &dyn CommandExecutor,
-) -> String {
+) -> BuiltCommand {
     let name = container.map_or_else(|| docker.container_name(), str::to_owned);
     if executor.is_container_running(&name) {
-        build_docker_exec_command(&name, env, command, &docker.shell)
+        BuiltCommand::plain(build_docker_exec_command(
+            &name,
+            env,
+            command,
+            &docker.shell,
+        ))
     } else {
-        build_docker_run_command(docker, env, command)
+        let run_name = unique_container_name();
+        BuiltCommand {
+            command: build_docker_run_command(docker, env, command, &run_name),
+            container: Some(run_name),
+        }
     }
 }
 
@@ -273,6 +402,8 @@ pub enum CheckStatus {
     OnDemand,
     /// Check exceeded its `timeout` and was killed
     TimedOut,
+    /// Check was cancelled by the user (press 's') and killed; not a failure
+    Cancelled,
 }
 
 impl CheckStatus {
@@ -280,6 +411,11 @@ impl CheckStatus {
     /// failed filter, retry/fix eligibility).
     pub fn is_failure(&self) -> bool {
         matches!(self, Self::Failed | Self::TimedOut)
+    }
+
+    /// True once the check ran to an outcome: passed, cancelled or a failure
+    pub fn is_finished(&self) -> bool {
+        matches!(self, Self::Passed | Self::Cancelled) || self.is_failure()
     }
 }
 
@@ -329,6 +465,20 @@ impl CheckResult {
         }
     }
 
+    /// Create a cancelled check result (killed by the user after `started_at`)
+    pub fn cancelled(check_id: &str, started_at: DateTime<Local>) -> Self {
+        let finished_at = Local::now();
+        Self {
+            check_id: check_id.to_string(),
+            status: CheckStatus::Cancelled,
+            output: "cancelled by user".to_string(),
+            error_output: String::new(),
+            duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
+            started_at: Some(started_at),
+            finished_at: Some(finished_at),
+        }
+    }
+
     /// Create an on-demand check result (requires manual trigger)
     pub fn on_demand(check_id: &str) -> Self {
         Self {
@@ -340,6 +490,58 @@ impl CheckResult {
             started_at: None,
             finished_at: None,
         }
+    }
+}
+
+/// Per-check cancel switches for running commands, keyed by check id.
+///
+/// Cloning shares the registry. A run registers via [`run_check_cancellable`];
+/// [`CancelRegistry::cancel`] drops that run's future, whose drop guards kill
+/// the process group / container (see [`execute_built`]).
+#[derive(Clone, Default)]
+pub struct CancelRegistry {
+    inner: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+}
+
+impl CancelRegistry {
+    /// Cancel the registered run of `check_id`. False if none is running.
+    pub fn cancel(&self, check_id: &str) -> bool {
+        let tx = self.lock().remove(check_id);
+        tx.is_some_and(|tx| tx.send(()).is_ok())
+    }
+
+    /// Register a run of `check_id`, replacing any previous one (whose
+    /// receiver then sees `Err`). Finished runs' entries are pruned here.
+    fn register(&self, check_id: &str) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        let mut map = self.lock();
+        map.retain(|_, tx| !tx.is_closed());
+        map.insert(check_id.to_string(), tx);
+        rx
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<()>>> {
+        // A panic while holding the lock leaves the map consistent
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Run `run` as `check_id`, cancellable through `cancels`.
+///
+/// If cancelled, `run` is dropped (which kills its command, see
+/// [`execute_built`]) and a [`CheckResult::cancelled`] is returned instead;
+/// `T` is `CheckResult` or `Option<CheckResult>`.
+pub async fn run_check_cancellable<T: From<CheckResult>>(
+    cancels: &CancelRegistry,
+    check_id: &str,
+    run: impl Future<Output = T>,
+) -> T {
+    let started_at = Local::now();
+    let cancelled = cancels.register(check_id);
+    tokio::select! {
+        output = run => output,
+        // Err = replaced by a newer run of the same id: keep running
+        Ok(()) = cancelled => CheckResult::cancelled(check_id, started_at).into(),
     }
 }
 
@@ -379,6 +581,7 @@ pub struct CheckRunner {
     config: Arc<CiConfig>,
     project_root: Arc<Path>,
     executor: Arc<dyn CommandExecutor>,
+    cancels: CancelRegistry,
 }
 
 impl CheckRunner {
@@ -397,7 +600,14 @@ impl CheckRunner {
             config: Arc::new(config),
             project_root: Arc::from(project_root),
             executor,
+            cancels: CancelRegistry::default(),
         }
+    }
+
+    /// Register running checks in `cancels` so they can be cancelled
+    pub fn with_cancels(mut self, cancels: CancelRegistry) -> Self {
+        self.cancels = cancels;
+        self
     }
 
     /// Where commands execute (`config.runner`)
@@ -471,38 +681,41 @@ impl CheckRunner {
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
         let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
-        let mut handles = Vec::new();
+        // JoinSet, not detached spawns: aborting the runner (quit, retry-all)
+        // drops the set, which aborts the checks and kills their commands
+        let mut set = tokio::task::JoinSet::new();
         for check in runnable {
-            handles.push(self.spawn_check(check, event_tx));
+            set.spawn(self.check_task(check, event_tx));
         }
-        for handle in handles {
-            let _ = handle.await;
-        }
+        while set.join_next().await.is_some() {}
         Ok(())
     }
 
-    fn spawn_check(
+    /// Owned future running `check` and reporting its result
+    fn check_task(
         &self,
         check: &CheckToRun,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> impl Future<Output = ()> + Send + 'static {
         let check = check.clone();
         let event_tx = event_tx.clone();
         let project_root = self.project_root.clone();
         let config = Arc::clone(&self.config);
         let executor = self.executor.clone();
+        let cancels = self.cancels.clone();
 
-        tokio::spawn(async move {
+        async move {
             let result = run_check_with_target(
                 &check,
                 &project_root,
                 &config.runner,
                 &event_tx,
                 executor.as_ref(),
+                &cancels,
             )
             .await;
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
-        })
+        }
     }
 
     async fn run_single_check(
@@ -516,6 +729,7 @@ impl CheckRunner {
             self.target(),
             event_tx,
             self.executor.as_ref(),
+            &self.cancels,
         )
         .await
     }
@@ -526,7 +740,7 @@ impl CheckRunner {
         let start = std::time::Instant::now();
 
         let cmd = if pre_cmd.host {
-            pre_cmd.command.clone()
+            BuiltCommand::plain(pre_cmd.command.clone())
         } else {
             self.build_pre_command_cmd(pre_cmd)
         };
@@ -557,7 +771,7 @@ impl CheckRunner {
 
     /// Shell command for a non-host pre-command. Local mode ignores
     /// `service`/`container` (rejected at load) and runs on the host.
-    fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> String {
+    fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> BuiltCommand {
         let env = merged_env(self.target(), &pre_cmd.env);
         let container = match self.target() {
             ExecTarget::Docker(docker) => Some(pre_command_container(docker, pre_cmd)),
@@ -661,20 +875,25 @@ async fn run_all_pre_commands(
     true
 }
 
+/// Run `check`, cancellable via `cancels`. `CheckStarted` is sent once
+/// registered, so a check shown as running can always be cancelled.
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
     target: &ExecTarget,
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
+    cancels: &CancelRegistry,
 ) -> CheckResult {
-    let _ = event_tx
-        .send(RunnerEvent::CheckStarted {
-            check_id: check.id().to_string(),
-        })
-        .await;
-
-    run_single_check_with_executor(check, project_root, target, executor).await
+    let run = async {
+        let _ = event_tx
+            .send(RunnerEvent::CheckStarted {
+                check_id: check.id().to_string(),
+            })
+            .await;
+        run_single_check_with_executor(check, project_root, target, executor).await
+    };
+    run_check_cancellable(cancels, check.id(), run).await
 }
 
 /// Execute a command on `target` and return the result (for testing with executor).
@@ -874,7 +1093,7 @@ mod tests {
             serde_yaml::from_str("project_dir: .\nservice: app\nshell: bash\nimage: img\n")
                 .unwrap();
         let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
-        let cmd = build_docker_run_command(&docker, &env, "ls");
+        let cmd = build_docker_run_command(&docker, &env, "ls", "ci-tui-test-1");
         assert!(!cmd.contains("BAD"), "got: {cmd}");
         assert!(!cmd.contains(" -e "), "got: {cmd}");
     }
@@ -894,7 +1113,7 @@ mod tests {
         mock.expect_is_container_running().times(0);
         let cmd =
             local_target().build_command(Some("ignored"), &HashMap::new(), "cargo test", &mock);
-        assert_eq!(cmd, "bash -c 'cargo test'");
+        assert_eq!(cmd, BuiltCommand::plain("bash -c 'cargo test'"));
     }
 
     #[test]
@@ -902,7 +1121,11 @@ mod tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
         let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
-        assert!(cmd.starts_with("docker exec proj-app-1"), "got: {cmd}");
+        assert!(
+            cmd.command.starts_with("docker exec proj-app-1"),
+            "got: {cmd:?}"
+        );
+        assert_eq!(cmd.container, None, "exec starts no container");
     }
 
     #[test]
@@ -910,7 +1133,28 @@ mod tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| false);
         let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
-        assert!(cmd.starts_with("docker run --rm"), "got: {cmd}");
+        assert!(cmd.command.starts_with("docker run --rm"), "got: {cmd:?}");
+    }
+
+    #[test]
+    fn test_build_command_docker_run_gets_unique_name() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| false);
+        let build = || docker_target().build_command(None, &HashMap::new(), "ls", &mock);
+        let (first, second) = (build(), build());
+
+        let name = first.container.clone().expect("docker run is named");
+        assert!(name.starts_with("ci-tui-"), "got: {name}");
+        assert!(
+            first.command.contains(&format!("--name {name} ")),
+            "got: {first:?}"
+        );
+        assert_ne!(first.container, second.container, "names must be unique");
+    }
+
+    #[test]
+    fn test_cancelled_is_not_failure() {
+        assert!(!CheckStatus::Cancelled.is_failure());
     }
 
     #[test]
@@ -922,7 +1166,10 @@ mod tests {
         let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
         let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
         let cmd = target.build_command(None, &HashMap::new(), "ls", &mock);
-        assert!(cmd.starts_with("docker exec explicit-c"), "got: {cmd}");
+        assert!(
+            cmd.command.starts_with("docker exec explicit-c"),
+            "got: {cmd:?}"
+        );
     }
 
     #[test]

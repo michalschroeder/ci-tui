@@ -317,7 +317,8 @@ checks:
 - Max runtime as `<n>s`, `<n>m` or `<n>h` (e.g. `30s`, `10m`, `1h`); must be > 0
 - On expiry the check process is killed and reported as **timed out** (counts as a failure)
 - Falls back to the top-level `timeout:`; if neither is set the check runs unbounded
-- Only the top-level local process is killed: its child processes (e.g. of `a && b` commands in local mode) may survive, and in docker mode the command keeps running inside the container (`docker exec`) or the `docker run` container keeps running until it exits
+- The command's whole local process tree is killed (it runs in its own process group), and a `docker run` fallback container (started with a unique `--name ci-tui-<pid>-<n>`) gets `docker kill`. The same cleanup applies to cancel (`s`), quit, Ctrl-C and rerun
+- Limitation: with `docker exec` (container already running) only the local client is killed; the command keeps running inside the container until it exits
 
 ### The `{files}` Placeholder
 
@@ -610,7 +611,7 @@ ci-tui --config ci-tui.yaml
 Full TUI interface with:
 - Real-time check execution
 - Interactive output viewing
-- Hotkeys for filtering, retrying, expanding output
+- Hotkeys for filtering, retrying, cancelling (`s`), expanding output
 - Color-coded file display
 
 ### Simple Mode

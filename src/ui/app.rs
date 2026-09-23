@@ -298,6 +298,15 @@ pub struct StatusCounts {
     /// Pending or running
     pub pending: usize,
     pub on_demand: usize,
+    /// Cancelled by the user (neither passed nor failed)
+    pub cancelled: usize,
+}
+
+impl StatusCounts {
+    /// Checks that ran to an outcome (passed, failed or cancelled)
+    pub fn completed(&self) -> usize {
+        self.passed + self.failed + self.cancelled
+    }
 }
 
 /// What the currently selected check can do — computed once, read many times per frame
@@ -307,6 +316,7 @@ pub struct SelectedCaps {
     pub can_retry: bool,
     pub can_trigger: bool,
     pub can_run_all_files: bool,
+    pub can_cancel: bool,
 }
 
 impl App {
@@ -402,14 +412,13 @@ impl App {
             .and_then(|c| self.results.get(c.id()))
             .map(|r| r.status.clone());
         let has_fix = selected.map(|c| c.has_fix()).unwrap_or(false);
-        let finished = status
-            .as_ref()
-            .is_some_and(|s| *s == CheckStatus::Passed || s.is_failure());
+        let finished = status.as_ref().is_some_and(CheckStatus::is_finished);
         SelectedCaps {
             can_fix: !busy && status.as_ref().is_some_and(CheckStatus::is_failure) && has_fix,
             can_retry: !busy && finished,
             can_trigger: !busy && status == Some(CheckStatus::OnDemand),
             can_run_all_files: !busy && (finished || status == Some(CheckStatus::OnDemand)),
+            can_cancel: status == Some(CheckStatus::Running),
         }
     }
 
@@ -826,6 +835,7 @@ impl App {
                 CheckStatus::Failed | CheckStatus::TimedOut => counts.failed += 1,
                 CheckStatus::Pending | CheckStatus::Running => counts.pending += 1,
                 CheckStatus::OnDemand => counts.on_demand += 1,
+                CheckStatus::Cancelled => counts.cancelled += 1,
                 CheckStatus::Skipped => (),
             }
         }
@@ -1116,6 +1126,28 @@ checks:
     }
 
     #[test]
+    fn test_cancelled_is_not_failure_and_retryable() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Cancelled;
+
+        let counts = app.count_by_status();
+        assert_eq!((counts.passed, counts.failed, counts.cancelled), (0, 0, 1));
+        assert_eq!(app.exit_code(), 0);
+
+        let caps = app.selected_capabilities(); // php-lint selected
+        assert!(caps.can_retry && caps.can_run_all_files);
+        assert!(!caps.can_cancel && !caps.can_fix);
+    }
+
+    #[test]
+    fn test_only_running_check_can_cancel() {
+        let mut app = make_app();
+        assert!(!app.selected_capabilities().can_cancel, "pending");
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Running;
+        assert!(app.selected_capabilities().can_cancel);
+    }
+
+    #[test]
     fn test_toggle_failed_filter() {
         let mut app = make_app();
 
@@ -1150,7 +1182,8 @@ checks:
                 passed: 0,
                 failed: 0,
                 pending: 2,
-                on_demand: 1
+                on_demand: 1,
+                cancelled: 0
             }
         );
 
@@ -1164,7 +1197,8 @@ checks:
                 passed: 1,
                 failed: 0,
                 pending: 1,
-                on_demand: 1
+                on_demand: 1,
+                cancelled: 0
             }
         );
 
@@ -1178,7 +1212,8 @@ checks:
                 passed: 1,
                 failed: 1,
                 pending: 0,
-                on_demand: 1
+                on_demand: 1,
+                cancelled: 0
             }
         );
     }

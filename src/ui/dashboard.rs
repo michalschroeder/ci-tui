@@ -80,12 +80,35 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
         Some(CheckStatus::Passed) => ("✓", Style::default().fg(Color::Green)),
         Some(CheckStatus::Failed) => ("✗", Style::default().fg(Color::Red)),
         Some(CheckStatus::TimedOut) => ("⧗", Style::default().fg(Color::Magenta)),
+        Some(CheckStatus::Cancelled) => ("⊗", Style::default().fg(Color::Gray)),
         Some(CheckStatus::Running) => ("●", Style::default().fg(Color::Yellow)),
         Some(CheckStatus::Pending) => ("○", Style::default().fg(Color::DarkGray)),
         Some(CheckStatus::Skipped) => ("⊘", Style::default().fg(Color::DarkGray)),
         Some(CheckStatus::OnDemand) => ("◇", Style::default().fg(Color::Cyan)),
         None => ("?", Style::default().fg(Color::DarkGray)),
     }
+}
+
+/// Header label once all checks finished (without the on-demand suffix)
+pub(crate) fn finished_status_text(
+    counts: &super::app::StatusCounts,
+    total: usize,
+    elapsed: &str,
+) -> String {
+    let (passed, failed, cancelled) = (counts.passed, counts.failed, counts.cancelled);
+    if failed == 0 && cancelled == 0 {
+        return format!("✓ All {} checks passed in {}", total, elapsed);
+    }
+    let mark = if failed > 0 { "✗ " } else { "" };
+    let cancelled_text = if cancelled > 0 {
+        format!(", {} cancelled", cancelled)
+    } else {
+        String::new()
+    };
+    format!(
+        "{}{}/{} passed, {} failed{} in {}",
+        mark, passed, total, failed, cancelled_text, elapsed
+    )
 }
 
 /// Longest prefix of `s` at most `max` terminal columns wide (wide CJK/emoji
@@ -131,15 +154,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
-    let super::app::StatusCounts {
-        passed,
-        failed,
-        pending,
-        on_demand,
-    } = app.count_by_status();
+    let counts = app.count_by_status();
+    let on_demand = counts.on_demand;
     let total = app.checks.len();
     let auto_run_total = total - on_demand;
-    let completed = passed + failed;
+    let completed = counts.completed();
     let ratio = if auto_run_total > 0 {
         completed as f64 / auto_run_total as f64
     } else {
@@ -164,21 +183,11 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         String::new()
     };
     let status_text = if app.run.all_finished {
-        if failed == 0 {
-            format!(
-                "✓ All {} checks passed in {}{}",
-                auto_run_total, elapsed_str, on_demand_text
-            )
-        } else {
-            format!(
-                "✗ {}/{} passed, {} failed in {}{}",
-                passed, auto_run_total, failed, elapsed_str, on_demand_text
-            )
-        }
-    } else if pending > 0 {
+        finished_status_text(&counts, auto_run_total, &elapsed_str) + &on_demand_text
+    } else if counts.pending > 0 {
         format!(
             "Running... {}/{} ({} in progress){}",
-            completed, auto_run_total, pending, on_demand_text
+            completed, auto_run_total, counts.pending, on_demand_text
         )
     } else {
         format!(
@@ -188,10 +197,12 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let color = if app.run.all_finished {
-        if failed == 0 {
-            Color::Green
-        } else {
+        if counts.failed > 0 {
             Color::Red
+        } else if counts.cancelled > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
         }
     } else {
         Color::Yellow
@@ -832,6 +843,7 @@ fn build_check_output_text(
         CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
         CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
         CheckStatus::TimedOut => "\x1b[35m⧗ TIMED OUT\x1b[0m",
+        CheckStatus::Cancelled => "\x1b[37m⊗ CANCELLED\x1b[0m",
         CheckStatus::Running => "\x1b[33m◉ RUNNING...\x1b[0m",
         CheckStatus::Pending => "\x1b[90m○ PENDING\x1b[0m",
         CheckStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
@@ -844,6 +856,10 @@ fn build_check_output_text(
         raw_output.push_str("  \x1b[33m← press 't' to run\x1b[0m");
     } else if result.status.is_failure() && check.has_fix() {
         raw_output.push_str("  \x1b[33m← press 'x' to fix\x1b[0m");
+    } else if result.status == CheckStatus::Cancelled {
+        raw_output.push_str("  \x1b[33m← press 'r' to retry\x1b[0m");
+    } else if result.status == CheckStatus::Running {
+        raw_output.push_str("  \x1b[33m← press 's' to cancel\x1b[0m");
     }
     raw_output.push_str("\n\n");
 
@@ -1039,6 +1055,11 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
         ));
         spans.push(Span::styled(" run test", Style::default().fg(Color::Cyan)));
         spans.push(Span::raw("  "));
+    }
+
+    if caps.can_cancel {
+        spans.push(Span::styled("s", Style::default().fg(Color::Red)));
+        spans.push(Span::raw(" cancel  "));
     }
 
     if caps.can_retry {

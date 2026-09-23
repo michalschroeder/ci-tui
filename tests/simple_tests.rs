@@ -48,6 +48,7 @@ fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> Check
 #[case(CheckStatus::Skipped, "skipped-check", 0)]
 #[case(CheckStatus::OnDemand, "on-demand-check", 0)]
 #[case(CheckStatus::TimedOut, "timed-out-check", 1000)]
+#[case(CheckStatus::Cancelled, "cancelled-check", 1000)]
 fn print_result_handles_all_status_variants(
     #[case] status: CheckStatus,
     #[case] check_id: &str,
@@ -171,4 +172,13 @@ fn format_result_timed_out_shows_label_and_duration() {
 fn format_result_failed_is_not_timed_out() {
     let line = format_result(&make_result("x", CheckStatus::Failed, 1000));
     assert!(!line.contains("timed out"), "got: {line}");
+}
+
+#[test]
+fn format_result_cancelled_says_cancelled() {
+    let line = format_result(&make_result("slow", CheckStatus::Cancelled, 1000));
+    assert!(
+        line.contains("slow") && line.contains("cancelled"),
+        "got: {line}"
+    );
 }
