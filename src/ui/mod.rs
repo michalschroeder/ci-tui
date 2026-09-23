@@ -217,18 +217,27 @@ impl TaskCtx {
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
-    /// system): call from `spawn_blocking`.
-    fn refresh(&self, base_ref: &str) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
-        let mut changed_files = get_changed_files(&self.project_root, base_ref)?;
-        changed_files.apply_ignore_patterns(self.config.compiled_ignore_patterns());
+    /// system): call from `spawn_blocking`. `--files` lists are kept as-is
+    /// (no git base to diff against); only the checks are re-determined.
+    fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+        let changed_files = if previous.is_cli_files() {
+            previous
+        } else {
+            let mut changed = get_changed_files(&self.project_root, &previous.base_ref)?;
+            changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
+            changed
+        };
         let checks = determine_checks(&self.config, &changed_files, &self.project_root);
         Ok((changed_files, checks))
     }
 
     /// [`Self::refresh`] on the blocking pool
-    async fn refresh_async(&self, base_ref: String) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+    async fn refresh_async(
+        &self,
+        previous: ChangedFiles,
+    ) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
         let ctx = self.clone();
-        tokio::task::spawn_blocking(move || ctx.refresh(&base_ref)).await?
+        tokio::task::spawn_blocking(move || ctx.refresh(previous)).await?
     }
 }
 
@@ -284,9 +293,9 @@ async fn retry_with_refresh(
     tx: mpsc::Sender<TaskEvent>,
     check: CheckToRun,
     previous: CheckResult,
-    base_ref: String,
+    changed_files: ChangedFiles,
 ) {
-    let check = match ctx.refresh_async(base_ref).await {
+    let check = match ctx.refresh_async(changed_files).await {
         Ok((changed_files, checks)) => {
             let Some(new_check) = checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
@@ -374,12 +383,12 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         .get(check.id())
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
-    let base_ref = app.changed_files.base_ref.clone();
+    let changed_files = app.changed_files.clone();
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
     app.reset_check_for_retry(check.id());
-    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, base_ref));
+    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files));
     Action::Continue
 }
 
@@ -419,10 +428,11 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.can_retry_all() {
         return Action::Continue;
     }
-    let base_ref = app.changed_files.base_ref.clone();
+    let previous = app.changed_files.clone();
+    let base_ref = previous.base_ref.clone();
     app.set_status_message(Some("Refreshing changed files...".to_string()));
     tasks.spawn(|ctx, tx| async move {
-        let (changed_files, checks) = match ctx.refresh_async(base_ref.clone()).await {
+        let (changed_files, checks) = match ctx.refresh_async(previous).await {
             Ok(refreshed) => refreshed,
             // Git refresh failed - restart with no changed files
             Err(_) => {
@@ -541,9 +551,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         } => app.replace_check(changed_files, *check),
         TaskEvent::CheckNotApplicable(previous) => {
             app.set_retry_result(previous);
-            app.set_status_message(Some(
-                "Check no longer applicable after git refresh".to_string(),
-            ));
+            app.set_status_message(Some("Check no longer applicable after refresh".to_string()));
         }
         TaskEvent::GitRefreshFailed => app.set_status_message(Some(
             "Git refresh failed - retrying with previous file list".to_string(),
@@ -896,6 +904,52 @@ checks:
         let event = rx.recv().await.expect("refresh task must report");
         let action = handle_task_event(&mut app, event);
         assert!(matches!(action, Action::RestartRunner { .. }));
+    }
+
+    fn cli_files() -> ChangedFiles {
+        ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: crate::git::CLI_FILES_BASE_REF.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_all_in_files_mode_keeps_file_list() {
+        let config = test_config();
+        let mut app = App::new(config.clone(), cli_files(), vec![], "main".to_string());
+        let (mut tasks, mut rx) = make_test_tasks(&config); // git would fail here
+
+        handle_retry_all(&mut app, &mut tasks);
+
+        let event = rx.recv().await.expect("refresh task must report");
+        let TaskEvent::RetryAllReady {
+            changed_files,
+            checks,
+        } = event
+        else {
+            panic!("expected RetryAllReady, got {:?}", event);
+        };
+        assert_eq!(changed_files.files, vec!["src/Foo.php".to_string()]);
+        assert_eq!(changed_files.base_ref, crate::git::CLI_FILES_BASE_REF);
+        assert_eq!(checks.len(), 1, "php-lint must still match the file");
+    }
+
+    #[tokio::test]
+    async fn test_retry_selected_in_files_mode_skips_git() {
+        let config = test_config();
+        let checks = vec![make_test_check("php-lint", "fast")];
+        let mut app = App::new(config.clone(), cli_files(), checks, "main".to_string());
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
+        let (mut tasks, mut rx) = make_test_tasks(&config); // git would fail here
+
+        handle_retry_selected(&mut app, &mut tasks);
+
+        let event = rx.recv().await.expect("refresh task must report");
+        assert!(
+            matches!(event, TaskEvent::CheckRefreshed { .. }),
+            "--files mode must not report a git refresh failure, got {:?}",
+            event
+        );
     }
 
     #[test]

@@ -80,6 +80,11 @@ pub struct ChangedFiles {
 }
 
 impl ChangedFiles {
+    /// True when files came from `--files` (no git base to refresh against)
+    pub fn is_cli_files(&self) -> bool {
+        self.base_ref == CLI_FILES_BASE_REF
+    }
+
     /// Check if there are no changed files
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
