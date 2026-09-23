@@ -135,6 +135,8 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
+- **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
+- **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`)
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
 - **simple.rs**: Non-TUI console output mode for CI pipelines
 - **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)

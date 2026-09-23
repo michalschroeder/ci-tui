@@ -1,29 +1,7 @@
 use anyhow::Result;
-use ci_tui::{checks, config, fix, git, simple, ui};
-use clap::Parser;
+use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
+use ci_tui::{checks, commands, config, fix, git, simple, ui};
 use std::io::IsTerminal;
-use std::path::PathBuf;
-
-/// CI TUI - Run CI checks for changed files
-#[derive(Parser)]
-#[command(name = "ci-tui", version, about, long_about = None)]
-struct Cli {
-    /// Path to ci-config.yaml
-    #[arg(short, long)]
-    config: PathBuf,
-
-    /// Run in simple console mode (no TUI)
-    #[arg(short, long)]
-    simple: bool,
-
-    /// Run only fix commands (skip checks)
-    #[arg(long)]
-    fix: bool,
-
-    /// Run checks on specific files instead of git-detected changes
-    #[arg(short, long, num_args = 1..)]
-    files: Vec<PathBuf>,
-}
 
 fn git_detect_changes_or_exit(
     project_root: &std::path::Path,
@@ -42,21 +20,50 @@ fn git_detect_changes_or_exit(
     }
 }
 
+/// Run `init` / `validate` and print the outcome.
+fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
+    let path = command.config_path(config);
+    match command {
+        Command::Init { .. } => {
+            commands::init(&path)?;
+            println!("Wrote {}", path.display());
+            println!(
+                "Edit the checks section, then run: ci-tui --config {}",
+                path.display()
+            );
+        }
+        Command::Validate { .. } => {
+            commands::validate(&path)?;
+            println!("OK: {} is valid", path.display());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install color-eyre for better panic handling (errors are ignored if it fails)
     let _ = color_eyre::install();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked();
 
-    // Auto-detect TUI mode: use simple mode if stdout is not a terminal
-    let simple_mode = cli.simple || !std::io::stdout().is_terminal();
+    if let Some(command) = cli.command {
+        return run_subcommand(command, cli.config);
+    }
 
     // Use current working directory as project root
     let project_root = std::env::current_dir()?;
 
+    // Enforced here, not via clap `required`: clap forbids required global args.
+    let Some(config_path) = run_config_path(cli.config, &project_root) else {
+        missing_config_error().exit();
+    };
+
+    // Auto-detect TUI mode: use simple mode if stdout is not a terminal
+    let simple_mode = cli.simple || !std::io::stdout().is_terminal();
+
     // Load configuration
-    let config = config::load_config(&cli.config)?;
+    let config = config::load_config(&config_path)?;
 
     // Get changed files: from --files arg or git detection
     let mut changed_files = if cli.files.is_empty() {
