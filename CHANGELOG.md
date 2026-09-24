@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/michalschroeder/ci-tui/compare/v0.1.19...v0.2.0) (2026-09-24)
+
+
+### Features
+
+* --base &lt;ref&gt; override for git change detection ([#175](https://github.com/michalschroeder/ci-tui/issues/175)) ([acad6a2](https://github.com/michalschroeder/ci-tui/commit/acad6a2a84530cc7770665fec3ca8f03aee7fdc6))
+* cancel single running check + process/container cleanup ([#174](https://github.com/michalschroeder/ci-tui/issues/174)) ([80c3f2b](https://github.com/michalschroeder/ci-tui/commit/80c3f2b54efa965181b49a7f9dfdfd15de922b09))
+* mouse wheel scroll + click-to-select in TUI ([#176](https://github.com/michalschroeder/ci-tui/issues/176)) ([addafbb](https://github.com/michalschroeder/ci-tui/commit/addafbb26c4bd2209aa98879af7a0e2bc4510220))
+* per-check timeout ([#173](https://github.com/michalschroeder/ci-tui/issues/173)) ([c716322](https://github.com/michalschroeder/ci-tui/commit/c71632216ecabec6c9d84a88b106203f6c14fb63))
+
+
+### Bug Fixes
+
+* guard git base ref with --end-of-options, clearer --base errors ([50ed271](https://github.com/michalschroeder/ci-tui/commit/50ed2711d337b0e337eebec524918277032864e0))
+* progress message cleared only by its own check result ([#170](https://github.com/michalschroeder/ci-tui/issues/170)) ([e8fd533](https://github.com/michalschroeder/ci-tui/commit/e8fd533611e387336a86114a05fa4d287d68f4d6))
+* status message no longer swallows first keypress ([#165](https://github.com/michalschroeder/ci-tui/issues/165)) ([112f2cd](https://github.com/michalschroeder/ci-tui/commit/112f2cd7492be84c22eb381efa9f31fe12cd05c2))
+* TUI exits non-zero when checks fail ([#163](https://github.com/michalschroeder/ci-tui/issues/163)) ([63f63db](https://github.com/michalschroeder/ci-tui/commit/63f63dbad9bb7d3360056f5b15b047fb56358cf6))
+
 ## [0.1.19](https://github.com/michalschroeder/ci-tui/compare/v0.1.18...v0.1.19) (2026-09-23)
 
 
