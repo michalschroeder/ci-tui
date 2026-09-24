@@ -212,17 +212,17 @@ pub fn filter_docker_warnings(stderr: &str) -> String {
 
 /// Cap `text` at `max_lines` lines, keeping the *last* `max_lines` (a runaway
 /// command's most recent output is usually the relevant part). When lines are
-/// dropped, a `"... N lines truncated"` marker is prepended.
-pub fn truncate_output(text: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max_lines {
-        return text.to_string();
+/// dropped, a `"... N lines truncated"` marker is prepended. Returns `text`
+/// unchanged (no copy) when it's already within the cap.
+pub fn truncate_output(text: String, max_lines: usize) -> String {
+    let total = text.lines().count();
+    if total <= max_lines {
+        return text;
     }
-    let truncated = lines.len() - max_lines;
-    let kept = &lines[truncated..];
+    let truncated = total - max_lines;
     let marker = format!("… {truncated} lines truncated");
     std::iter::once(marker.as_str())
-        .chain(kept.iter().copied())
+        .chain(text.lines().skip(truncated))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -957,8 +957,8 @@ pub async fn execute_command_with_executor(
     CheckResult {
         check_id,
         status,
-        output: truncate_output(&stdout, max_output_lines),
-        error_output: truncate_output(&filter_docker_warnings(&stderr), max_output_lines),
+        output: truncate_output(stdout, max_output_lines),
+        error_output: truncate_output(filter_docker_warnings(&stderr), max_output_lines),
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
@@ -1141,25 +1141,25 @@ mod tests {
     #[test]
     fn test_truncate_output_under_cap_is_unchanged() {
         let text = "a\nb\nc";
-        assert_eq!(truncate_output(text, 10), text);
+        assert_eq!(truncate_output(text.to_string(), 10), text);
     }
 
     #[test]
     fn test_truncate_output_at_cap_is_unchanged() {
         let text = "a\nb\nc";
-        assert_eq!(truncate_output(text, 3), text);
+        assert_eq!(truncate_output(text.to_string(), 3), text);
     }
 
     #[test]
     fn test_truncate_output_over_cap_keeps_last_n_with_marker() {
         let text = "1\n2\n3\n4\n5";
-        let result = truncate_output(text, 2);
+        let result = truncate_output(text.to_string(), 2);
         assert_eq!(result, "… 3 lines truncated\n4\n5");
     }
 
     #[test]
     fn test_truncate_output_empty_text_is_unchanged() {
-        assert_eq!(truncate_output("", 5), "");
+        assert_eq!(truncate_output(String::new(), 5), "");
     }
 
     #[test]
