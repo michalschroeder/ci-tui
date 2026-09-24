@@ -812,10 +812,11 @@ impl CheckRunner {
 /// non-default service > default container.
 ///
 /// LIMITATION: assumes the Docker Compose v2 naming convention
-/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` is honored; a `name:`
-/// override inside the compose file is not. Non-UTF8 project paths fall
-/// back to the literal project name "project". Future work: resolve via
-/// `docker compose ps -q <service>` instead of string construction.
+/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` and a top-level `name:`
+/// key in the compose file are both honored (see `DockerConfig::compose_project_name`).
+/// Non-UTF8 project paths fall back to the literal project name "project".
+/// Future work: resolve via `docker compose ps -q <service>` instead of
+/// string construction.
 fn pre_command_container(
     docker: &crate::config::DockerConfig,
     pre_cmd: &crate::config::PreCommand,
