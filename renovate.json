@@ -10,16 +10,5 @@
   "schedule": [
     "after 8am and before 9am"
   ],
-  "packageRules": [
-    {
-      "description": "Disable digest pinning for taiki-e/install-action (uses tool names as refs, not versions)",
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchPackageNames": [
-        "taiki-e/install-action"
-      ],
-      "pinDigests": false
-    }
-  ]
+  "minimumReleaseAge": "3 days"
 }
