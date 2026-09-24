@@ -356,10 +356,10 @@ fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
 /// Compose file names to look for in `project_dir`, in docker compose's own
 /// default discovery order. Only the first one found is read.
 const COMPOSE_FILE_NAMES: &[&str] = &[
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
     "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
 ];
 
 /// Minimal shape for reading just the top-level `name:` key from a compose file.
@@ -1495,6 +1495,17 @@ checks: {}
             // normalize_project_name lowercases, so "FromCompose" -> "fromcompose"
             assert_eq!(config.compose_project_name(), "fromcompose");
             assert_eq!(config.container_name(), "fromcompose-web-1");
+        }
+
+        // When both a canonical `compose.yaml` and a legacy `docker-compose.yml` are
+        // present, the canonical file wins (matches Docker Compose's own discovery order).
+        #[test]
+        fn test_compose_project_name_prefers_canonical_compose_yaml_over_legacy() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("compose.yaml"), "name: Canonical\n").unwrap();
+            std::fs::write(dir.path().join("docker-compose.yml"), "name: Legacy\n").unwrap();
+            let config = docker_config_for(dir.path());
+            assert_eq!(config.compose_project_name(), "canonical");
         }
 
         // COMPOSE_PROJECT_NAME still takes precedence over the compose file's `name:` key.
