@@ -686,6 +686,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
 /// select a check in the checks list. Anything else (clicks/scroll outside
 /// those panels, other buttons) is ignored.
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
+    if app.view.help_visible {
+        return Action::Continue;
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp if app.is_over_output(mouse.column, mouse.row) => {
             app.scroll_up(MOUSE_SCROLL_LINES);

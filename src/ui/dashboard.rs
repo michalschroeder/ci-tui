@@ -977,6 +977,7 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
         line_count,
         highlighted: None,
     });
+    refresh_confirmed_search(app);
     true
 }
 
@@ -1040,8 +1041,14 @@ fn line_start_scroll(text: &Text<'static>, target_line: usize, width: u16) -> us
 }
 
 /// Split `plain` into spans, styling every case-insensitive occurrence of
-/// `needle` (lowercased `query`) as a highlight; `query` gives the original
-/// case/length of the match text to slice out of `plain`.
+/// `needle` (ASCII-lowercased `query`) as a highlight; `query` gives the
+/// original case/length of the match text to slice out of `plain`.
+///
+/// Case-folding is ASCII-only (not [`str::to_lowercase`]) so `lower` is
+/// guaranteed to have the same byte length and boundaries as `plain` — full
+/// Unicode lowercasing can change a character's byte length (e.g. `İ`
+/// U+0130 is 2 bytes but lowercases to a 3-byte sequence), which would
+/// desync the byte offsets found in `lower` from `plain` and panic on slice.
 fn highlight_line_spans(plain: &str, lower: &str, needle: &str, query: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut idx = 0;
@@ -1066,8 +1073,8 @@ fn highlight_line_spans(plain: &str, lower: &str, needle: &str, query: &str) -> 
 
 /// Rebuild `text` with every occurrence of `query` on the given `matches`
 /// line indices styled as a highlight (indices already known to contain a
-/// case-insensitive match, e.g. from [`confirm_search`] — this does not
-/// rescan every line to find them). Lines outside `matches` are returned
+/// case-insensitive match, e.g. from [`compute_search_matches`] — this does
+/// not rescan every line to find them). Lines outside `matches` are returned
 /// unchanged (styling preserved); matching lines lose their original ANSI
 /// styling in favor of a plain highlight — an acceptable simplification for
 /// search results.
@@ -1075,7 +1082,7 @@ fn highlight_matches(text: &Text<'static>, matches: &[usize], query: &str) -> Te
     if matches.is_empty() || query.is_empty() {
         return text.clone();
     }
-    let needle = query.to_lowercase();
+    let needle = query.to_ascii_lowercase();
     let match_lines: std::collections::HashSet<usize> = matches.iter().copied().collect();
     let lines = text
         .lines
@@ -1086,11 +1093,62 @@ fn highlight_matches(text: &Text<'static>, matches: &[usize], query: &str) -> Te
                 return line.clone();
             }
             let plain = line_plain_text(line);
-            let lower = plain.to_lowercase();
+            let lower = plain.to_ascii_lowercase();
             Line::from(highlight_line_spans(&plain, &lower, &needle, query))
         })
         .collect::<Vec<_>>();
     Text::from(lines)
+}
+
+/// Line indices in `cache.text` that case-insensitively contain `query`
+/// (ASCII-only fold, matching [`highlight_matches`]/[`highlight_line_spans`]
+/// so a line that's counted as a match is always one that highlights
+/// correctly), plus the highlighted text if there was at least one match.
+fn compute_search_matches(cache: &OutputCache, query: &str) -> (Vec<usize>, Option<Text<'static>>) {
+    if query.is_empty() {
+        return (Vec::new(), None);
+    }
+    let needle = query.to_ascii_lowercase();
+    let matches: Vec<usize> = cache
+        .text
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line_plain_text(line).to_ascii_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    if matches.is_empty() {
+        return (matches, None);
+    }
+    let highlighted = highlight_matches(&cache.text, &matches, query);
+    (matches, Some(highlighted))
+}
+
+/// Recompute a confirmed search's matches/highlight against the current
+/// output cache. Called after [`ensure_output_cache`] rebuilds the cache
+/// (retry, resize, ...) so a stale `search.matches` (and the footer's match
+/// count) don't linger against output that no longer matches them. No-op
+/// while still typing (nothing confirmed yet) or with no search open.
+fn refresh_confirmed_search(app: &mut App) {
+    let Some(query) = app
+        .view
+        .search
+        .as_ref()
+        .filter(|s| !s.typing)
+        .map(|s| s.query.clone())
+    else {
+        return;
+    };
+    let Some(cache) = app.output_cache.as_ref() else {
+        return;
+    };
+    let (matches, highlighted) = compute_search_matches(cache, &query);
+    if let Some(search) = app.view.search.as_mut() {
+        search.matches = matches;
+    }
+    if let Some(cache) = app.output_cache.as_mut() {
+        cache.highlighted = highlighted;
+    }
 }
 
 /// Confirm the in-progress output search (`Enter` while typing): computes
@@ -1111,27 +1169,14 @@ pub(crate) fn confirm_search(app: &mut App) {
     };
 
     let (matches, first_scroll, highlighted) = match &app.output_cache {
-        Some(cache) if !query.is_empty() => {
-            let needle = query.to_lowercase();
-            let matches: Vec<usize> = cache
-                .text
-                .lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| line_plain_text(line).to_lowercase().contains(&needle))
-                .map(|(i, _)| i)
-                .collect();
+        Some(cache) => {
+            let (matches, highlighted) = compute_search_matches(cache, &query);
             let first_scroll = matches
                 .first()
                 .map(|&idx| line_start_scroll(&cache.text, idx, width));
-            let highlighted = if matches.is_empty() {
-                None
-            } else {
-                Some(highlight_matches(&cache.text, &matches, &query))
-            };
             (matches, first_scroll, highlighted)
         }
-        _ => (Vec::new(), None, None),
+        None => (Vec::new(), None, None),
     };
 
     if let Some(search) = app.view.search.as_mut() {
@@ -1612,9 +1657,15 @@ fn search_footer_line(search: &super::app::SearchState) -> Line<'static> {
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
+    // status_message takes priority: it's transient (cleared on the next
+    // keypress) and would otherwise be set but never shown while a search
+    // is open, e.g. pressing 'c' to copy while a confirmed search/highlight
+    // is displayed.
     if let Some(ref search) = app.view.search {
-        frame.render_widget(Paragraph::new(search_footer_line(search)), area);
-        return;
+        if app.view.status_message.is_none() {
+            frame.render_widget(Paragraph::new(search_footer_line(search)), area);
+            return;
+        }
     }
     if let Some(ref msg) = app.view.status_message {
         let (icon, color) = match msg.kind {
@@ -1820,5 +1871,15 @@ mod tests {
         let highlighted = highlight_matches(&text, &[0], "");
         assert_eq!(highlighted.lines.len(), 1);
         assert_eq!(line_plain_text(&highlighted.lines[0]), "some text");
+    }
+
+    #[test]
+    fn test_highlight_matches_does_not_panic_on_multibyte_case_folding() {
+        // U+0130 (İ) is 2 bytes but full-Unicode-lowercases to a 3-byte
+        // sequence ("i̇"); ASCII-only folding must be used so `lower` and
+        // `plain` stay byte-aligned, or slicing panics on a char boundary.
+        let text = Text::from(vec![Line::from("İ says foo")]);
+        let highlighted = highlight_matches(&text, &[0], "foo");
+        assert_eq!(line_plain_text(&highlighted.lines[0]), "İ says foo");
     }
 }

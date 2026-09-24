@@ -982,6 +982,7 @@ impl App {
             StatusFilter::All => StatusFilter::Failed,
             StatusFilter::Failed => StatusFilter::All,
         };
+        self.reset_selection_view();
         self.view.selected_check = 0;
         self.needs_redraw = true;
     }
@@ -989,6 +990,7 @@ impl App {
     /// Show all checks (clear the failed filter)
     pub fn show_all(&mut self) {
         self.view.status_filter = StatusFilter::All;
+        self.reset_selection_view();
         self.view.selected_check = 0;
         self.needs_redraw = true;
     }
