@@ -396,7 +396,8 @@ fn render_check_item(
 }
 
 fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
-    let (items, selected_row) = build_checks_list_items(app, area);
+    let (items, selected_row, row_to_item) = build_checks_list_items(app, area);
+    app.set_checks_list_layout(area, row_to_item);
 
     let filter_info = match app.view.status_filter {
         super::app::StatusFilter::All => "",
@@ -419,14 +420,19 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
     app.view.checks_list_offset = state.offset();
 }
 
-/// Build the checks list rows and the row index of the selected item.
+/// Build the checks list rows, the row index of the selected item, and a
+/// row -> [`App::selectable_items`] index mapping (`None` for group headers).
 ///
 /// Rows come from [`App::selectable_items`] (plus a header whenever the group
 /// changes), so the list and the selection can never disagree.
-fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Option<usize>) {
+fn build_checks_list_items(
+    app: &App,
+    area: Rect,
+) -> (Vec<ListItem<'static>>, Option<usize>, Vec<Option<usize>>) {
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = None;
     let mut current_group = None;
+    let mut row_to_item: Vec<Option<usize>> = Vec::new();
 
     for (idx, item) in app.selectable_items().enumerate() {
         let group = match item {
@@ -436,6 +442,7 @@ fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Op
         if current_group != Some(group) {
             current_group = Some(group);
             items.push(group_header_item(app, group));
+            row_to_item.push(None);
         }
 
         let is_selected = idx == app.view.selected_check;
@@ -446,9 +453,10 @@ fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Op
             SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
             SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
         });
+        row_to_item.push(Some(idx));
     }
 
-    (items, selected_row)
+    (items, selected_row, row_to_item)
 }
 
 /// Group header row; highlighted while the group runs
@@ -998,6 +1006,7 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // Update the visible lines for scroll calculations (subtract 2 for borders)
     app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
     app.output_area_width = area.width;
+    app.set_output_area(area);
     app.clamp_output_scroll();
 
     // Dispatch to appropriate sub-renderer based on state

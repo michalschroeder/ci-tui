@@ -32,7 +32,7 @@ use app::{App, StatusKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -62,6 +62,8 @@ const RUNNER_CHANNEL_CAPACITY: usize = 100;
 const TASK_CHANNEL_CAPACITY: usize = 16;
 /// Lines to scroll per PageUp/PageDown press
 const PAGE_SCROLL_LINES: usize = 10;
+/// Lines to scroll per mouse wheel tick (smaller than a page scroll)
+const MOUSE_SCROLL_LINES: usize = 3;
 
 /// System stats data sent from background task
 #[derive(Debug, Clone)]
@@ -77,6 +79,7 @@ enum Message {
     KeyPress(KeyEvent),
     /// Terminal resized - redraw with the new layout
     Resize,
+    Mouse(MouseEvent),
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
     Task(TaskEvent),
@@ -111,7 +114,7 @@ enum TaskEvent {
     },
 }
 
-/// Read keyboard and resize events and send them through a channel
+/// Read keyboard, mouse and resize events and send them through a channel
 ///
 /// This runs on a dedicated OS thread for responsiveness under high CPU load.
 fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
@@ -123,6 +126,7 @@ fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
             // Filter for Press events only (Windows sends Press+Release)
             Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => Event::Key(key),
             Ok(event @ Event::Resize(..)) => event,
+            Ok(event @ Event::Mouse(..)) => event,
             _ => continue,
         };
         // If send fails, receiver is dropped - exit thread
@@ -579,6 +583,25 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
     }
 }
 
+/// Handle a mouse event: wheel scroll over the output panel, left-click to
+/// select a check in the checks list. Anything else (clicks/scroll outside
+/// those panels, other buttons) is ignored.
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
+    match mouse.kind {
+        MouseEventKind::ScrollUp if app.is_over_output(mouse.column, mouse.row) => {
+            app.scroll_up(MOUSE_SCROLL_LINES);
+        }
+        MouseEventKind::ScrollDown if app.is_over_output(mouse.column, mouse.row) => {
+            app.scroll_down(MOUSE_SCROLL_LINES);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.select_check_at_position(mouse.column, mouse.row);
+        }
+        _ => {}
+    }
+    Action::Continue
+}
+
 /// Apply an event from a background task
 fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
     match event {
@@ -645,6 +668,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             app.needs_redraw = true;
             Action::Continue
         }
+        Message::Mouse(mouse) => handle_mouse_event(app, mouse),
         Message::RunnerEvent(event) => {
             app.handle_runner_event(event);
             Action::Continue
@@ -730,6 +754,7 @@ pub async fn run(
             // Keyboard (and resize) events have highest priority
             Some(event) = input_rx.recv() => match event {
                 Event::Key(key) => Message::KeyPress(key),
+                Event::Mouse(mouse) => Message::Mouse(mouse),
                 _ => Message::Resize,
             },
 
@@ -1361,5 +1386,133 @@ checks:
             "intermediate results must not finish the run"
         );
         assert_eq!(app.fix.all_results.len(), 1);
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Set up the output panel so it has something to scroll: long output,
+    /// a small visible window, and a known-size rendered area.
+    fn app_with_scrollable_output(config: &CiConfig) -> App {
+        let mut app = make_test_app_with_checks(config, vec![make_test_check("php-lint", "fast")]);
+        app.results.get_mut("php-lint").unwrap().output = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.set_output_area(ratatui::layout::Rect::new(10, 0, 80, 7));
+        app
+    }
+
+    #[tokio::test]
+    async fn test_mouse_wheel_scrolls_output_panel_by_small_increment() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::ScrollDown, 20, 3)),
+            &mut tasks,
+        );
+
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(
+            app.view.output_scroll, MOUSE_SCROLL_LINES,
+            "one wheel tick scrolls by the small increment"
+        );
+        assert!(
+            MOUSE_SCROLL_LINES < PAGE_SCROLL_LINES,
+            "wheel scroll must be smaller than a page scroll"
+        );
+
+        handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::ScrollUp, 20, 3)),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mouse_wheel_outside_output_panel_is_ignored() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        // Column 0 is left of the output panel (which starts at x=10)
+        handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::ScrollDown, 0, 3)),
+            &mut tasks,
+        );
+
+        assert_eq!(
+            app.view.output_scroll, 0,
+            "scroll outside panel must be a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mouse_click_selects_check() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        );
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        // Single group "fast": header row 0, php-lint row 1, phpstan row 2
+        app.set_checks_list_layout(area, vec![None, Some(0), Some(1)]);
+
+        let action = handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 3)),
+            &mut tasks,
+        );
+
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(
+            app.selected_check().map(|c| c.id()),
+            Some("phpstan"),
+            "clicking a row selects that check, like keyboard navigation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mouse_click_outside_checks_list_is_ignored() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        );
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        app.set_checks_list_layout(area, vec![None, Some(0), Some(1)]);
+
+        handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 100, 100)),
+            &mut tasks,
+        );
+
+        assert_eq!(
+            app.selected_check().map(|c| c.id()),
+            Some("php-lint"),
+            "click outside the checks list must not change selection"
+        );
     }
 }
