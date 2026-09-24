@@ -669,35 +669,32 @@ enum OutputCacheKey {
         output_len: usize,
         error_len: usize,
         show_full_command: bool,
-        width: u16,
     },
     PreCommand {
         name: String,
         status: PreCommandStatus,
         output_len: usize,
-        width: u16,
     },
     FixResult {
         status: CheckStatus,
         output_len: usize,
         error_len: usize,
-        width: u16,
     },
     FixAllResults {
         len: usize,
         passed: usize,
         failed: usize,
-        width: u16,
     },
 }
 
 /// Cached parsed ANSI [`Text`] and its wrapped line count for the output
-/// panel, keyed on [`OutputCacheKey`]. Shared by [`output_line_count`]
-/// (scroll clamping) and [`render_scrollable`] (drawing) so a frame where
-/// nothing changed parses/wraps the output at most once instead of twice
-/// (see issue #126).
+/// panel, keyed on [`OutputCacheKey`] plus the width it was wrapped at.
+/// Shared by [`output_line_count`] (scroll clamping) and [`render_scrollable`]
+/// (drawing) so a frame where nothing changed parses/wraps the output at
+/// most once instead of twice (see issue #126).
 pub(crate) struct OutputCache {
     key: OutputCacheKey,
+    width: u16,
     text: Text<'static>,
     line_count: usize,
 }
@@ -705,39 +702,33 @@ pub(crate) struct OutputCache {
 /// Cheap key describing the current output view, or `None` for views that
 /// don't scroll (running spinners) / have no result to show yet — mirrors
 /// the `return 0` cases the old `output_line_count` had.
-fn output_cache_key(app: &App, width: u16) -> Option<OutputCacheKey> {
+fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
     match output_view(app) {
         OutputView::FixAllResults => {
-            let passed = app
-                .fix
-                .all_results
-                .iter()
-                .filter(|r| r.status == CheckStatus::Passed)
-                .count();
-            let failed = app
-                .fix
-                .all_results
-                .iter()
-                .filter(|r| r.status == CheckStatus::Failed)
-                .count();
+            let (passed, failed) =
+                app.fix
+                    .all_results
+                    .iter()
+                    .fold((0, 0), |(p, f), r| match r.status {
+                        CheckStatus::Passed => (p + 1, f),
+                        CheckStatus::Failed => (p, f + 1),
+                        _ => (p, f),
+                    });
             Some(OutputCacheKey::FixAllResults {
                 len: app.fix.all_results.len(),
                 passed,
                 failed,
-                width,
             })
         }
         OutputView::FixResult(result) => Some(OutputCacheKey::FixResult {
             status: result.status.clone(),
             output_len: result.output.len(),
             error_len: result.error_output.len(),
-            width,
         }),
         OutputView::PreCommand(pc) => Some(OutputCacheKey::PreCommand {
             name: pc.name.clone(),
             status: pc.status.clone(),
             output_len: pc.output.len(),
-            width,
         }),
         OutputView::Check(Some(check)) => {
             let result = app.results.get(check.id())?;
@@ -747,7 +738,6 @@ fn output_cache_key(app: &App, width: u16) -> Option<OutputCacheKey> {
                 output_len: result.output.len(),
                 error_len: result.error_output.len(),
                 show_full_command: app.view.show_full_command,
-                width,
             })
         }
         OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => None,
@@ -802,11 +792,15 @@ fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
 /// cache (running spinners / no result yet), in which case any stale cache
 /// entry is cleared.
 fn ensure_output_cache(app: &mut App, width: u16) -> bool {
-    let Some(key) = output_cache_key(app, width) else {
+    let Some(key) = output_cache_key(app) else {
         app.output_cache = None;
         return false;
     };
-    if app.output_cache.as_ref().is_some_and(|c| c.key == key) {
+    if app
+        .output_cache
+        .as_ref()
+        .is_some_and(|c| c.key == key && c.width == width)
+    {
         return true;
     }
     let Some(raw_output) = build_raw_output(app, width) else {
@@ -816,6 +810,7 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
     let (text, line_count) = parse_and_wrap(&raw_output, width);
     app.output_cache = Some(OutputCache {
         key,
+        width,
         text,
         line_count,
     });
