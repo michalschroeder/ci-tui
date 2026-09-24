@@ -427,7 +427,7 @@ Maps source file paths to test file paths using path templates.
   - `tests/Feature/Services/UserServiceTest.php`
 - Result: Only existing files are added to check
 
-**Multiple rules:** Rules are tried in order. First matching rule is used.
+**Multiple rules:** All rules are checked. Every rule whose `source` pattern matches contributes its existing test files; results are unioned (duplicates removed).
 
 ### Strategy: grep_search
 
