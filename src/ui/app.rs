@@ -14,8 +14,16 @@ use crate::checks::CheckToRun;
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus, RunnerEvent};
+use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+
+/// True when `(col, row)` falls inside `area`. Shared by every mouse
+/// hit-test (output panel scroll, checks list click) so they all use the
+/// same point-in-rect convention.
+fn contains_point(area: Rect, col: u16, row: u16) -> bool {
+    area.contains(Position { x: col, y: row })
+}
 
 /// Maximum number of samples to keep in history for sparklines
 const MAX_HISTORY_SAMPLES: usize = 60;
@@ -161,6 +169,15 @@ pub struct ViewState {
     /// First visible row of the checks list (kept so the list scrolls only
     /// when the selection leaves the window)
     pub checks_list_offset: usize,
+    /// Rendered area of the checks list panel (updated during render, used
+    /// for mapping mouse clicks back to a selectable item)
+    pub checks_list_area: Rect,
+    /// Maps each rendered row of the checks list to a [`App::selectable_items`]
+    /// index; `None` for group header rows (updated during render)
+    pub checks_list_row_to_item: Vec<Option<usize>>,
+    /// Rendered area of the output panel (updated during render, used for
+    /// mapping mouse wheel scroll events)
+    pub output_area: Rect,
 }
 
 impl Default for ViewState {
@@ -173,6 +190,9 @@ impl Default for ViewState {
             show_full_command: false,
             status_message: None,
             checks_list_offset: 0,
+            checks_list_area: Rect::default(),
+            checks_list_row_to_item: Vec::new(),
+            output_area: Rect::default(),
         }
     }
 }
@@ -740,13 +760,18 @@ impl App {
 
     // Navigation - all methods set needs_redraw for immediate visual feedback
 
-    /// Select the next item (stops at the last one)
-    pub fn next_check(&mut self) {
-        // Clear fix results and reset command view when navigating
+    /// Clear fix results and reset command view; shared by all selection
+    /// changes (keyboard navigation and mouse click)
+    fn reset_selection_view(&mut self) {
         self.fix.result = None;
         self.fix.all_results.clear();
         self.view.output_scroll = 0;
         self.view.show_full_command = false;
+    }
+
+    /// Select the next item (stops at the last one)
+    pub fn next_check(&mut self) {
+        self.reset_selection_view();
 
         let max = self.selectable_items().count().saturating_sub(1);
         if self.view.selected_check < max {
@@ -757,16 +782,59 @@ impl App {
 
     /// Select the previous item (stops at the first one)
     pub fn previous_check(&mut self) {
-        // Clear fix results and reset command view when navigating
-        self.fix.result = None;
-        self.fix.all_results.clear();
-        self.view.output_scroll = 0;
-        self.view.show_full_command = false;
+        self.reset_selection_view();
 
         if self.view.selected_check > 0 {
             self.view.selected_check -= 1;
         }
         self.needs_redraw = true;
+    }
+
+    /// Select item `idx` directly (mouse click). Same reset-on-navigate
+    /// behavior as [`Self::next_check`]/[`Self::previous_check`].
+    fn select_item_index(&mut self, idx: usize) {
+        self.reset_selection_view();
+        self.view.selected_check = idx;
+        self.needs_redraw = true;
+    }
+
+    /// Store the checks list's inner (border-excluded) content rect and its
+    /// row->item mapping (called during render), so mouse clicks can be
+    /// mapped back to a check.
+    pub fn set_checks_list_layout(&mut self, content_area: Rect, row_to_item: Vec<Option<usize>>) {
+        self.view.checks_list_area = content_area;
+        self.view.checks_list_row_to_item = row_to_item;
+    }
+
+    /// Store the output panel's render-time layout in one call so its
+    /// derived fields can't drift out of sync with each other: visible line
+    /// count and wrapped-text width from the outer (border-inclusive) area,
+    /// matching the `PANEL_BORDER_COLS` subtraction used elsewhere, plus the
+    /// inner (border-excluded) rect for mouse hit-testing — the same
+    /// inner-rect convention as [`Self::set_checks_list_layout`].
+    pub fn set_output_layout(&mut self, outer_area: Rect, inner_area: Rect) {
+        self.view.output_visible_lines = outer_area.height.saturating_sub(2) as usize;
+        self.output_area_width = outer_area.width;
+        self.view.output_area = inner_area;
+    }
+
+    /// True when `(col, row)` falls inside the rendered output panel
+    pub fn is_over_output(&self, col: u16, row: u16) -> bool {
+        contains_point(self.view.output_area, col, row)
+    }
+
+    /// Select the check under a left-click at `(col, row)`. No-op when the
+    /// click lands outside the checks list's content area or on a group
+    /// header row.
+    pub fn select_check_at_position(&mut self, col: u16, row: u16) {
+        let content_area = self.view.checks_list_area;
+        if !contains_point(content_area, col, row) {
+            return;
+        }
+        let item_row = (row - content_area.y) as usize + self.view.checks_list_offset;
+        if let Some(Some(idx)) = self.view.checks_list_row_to_item.get(item_row).copied() {
+            self.select_item_index(idx);
+        }
     }
 
     /// Scroll the output panel up by `n` rows
@@ -1520,6 +1588,89 @@ checks:
         // Can't scroll below 0
         app.scroll_up(10);
         assert_eq!(app.view.output_scroll, 0);
+    }
+
+    /// row_to_item for `make_app()`'s three checks (fast: php-lint; tests:
+    /// phpunit, behat): a header row before each group change.
+    fn app_row_to_item() -> Vec<Option<usize>> {
+        vec![None, Some(0), None, Some(1), Some(2)]
+    }
+
+    /// `set_checks_list_layout` takes the list's inner content rect (borders
+    /// already excluded), so tests click directly against content rows.
+    fn content_area() -> Rect {
+        Rect::new(0, 0, 40, 8)
+    }
+
+    #[test]
+    fn test_click_selects_check_in_list() {
+        let mut app = make_app();
+        app.set_checks_list_layout(content_area(), app_row_to_item());
+
+        // Content row 3 (after the "tests" header) maps to phpunit (idx 1)
+        app.select_check_at_position(5, 3);
+
+        assert_eq!(app.view.selected_check, 1);
+        assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
+        assert!(app.needs_redraw);
+    }
+
+    #[test]
+    fn test_click_on_group_header_row_is_noop() {
+        let mut app = make_app();
+        app.set_checks_list_layout(content_area(), app_row_to_item());
+        app.view.selected_check = 1;
+
+        // Content row 0 is the "fast" group header (row_to_item[0] = None)
+        app.select_check_at_position(5, 0);
+
+        assert_eq!(
+            app.view.selected_check, 1,
+            "header row must not change selection"
+        );
+    }
+
+    #[test]
+    fn test_click_outside_checks_list_is_noop() {
+        let mut app = make_app();
+        app.set_checks_list_layout(content_area(), app_row_to_item());
+        app.view.selected_check = 0;
+
+        // Well outside the list area
+        app.select_check_at_position(100, 100);
+
+        assert_eq!(
+            app.view.selected_check, 0,
+            "click outside list must not change selection"
+        );
+    }
+
+    #[test]
+    fn test_click_respects_list_scroll_offset() {
+        let mut app = make_app();
+        app.set_checks_list_layout(content_area(), app_row_to_item());
+        app.view.checks_list_offset = 2; // scrolled past the first header + php-lint
+
+        // Content row 0 now shows row_to_item[2 + 0] = None (tests header)
+        app.select_check_at_position(5, 0);
+        assert_eq!(
+            app.view.selected_check, 0,
+            "header row after scroll must not select"
+        );
+
+        // Content row 1 shows row_to_item[2 + 1] = Some(1) (phpunit)
+        app.select_check_at_position(5, 1);
+        assert_eq!(app.view.selected_check, 1);
+    }
+
+    #[test]
+    fn test_is_over_output() {
+        let mut app = make_app();
+        app.view.output_area = Rect::new(10, 0, 30, 10);
+
+        assert!(app.is_over_output(15, 5));
+        assert!(!app.is_over_output(0, 0));
+        assert!(!app.is_over_output(50, 5));
     }
 
     #[test]

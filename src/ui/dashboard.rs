@@ -396,19 +396,22 @@ fn render_check_item(
 }
 
 fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
-    let (items, selected_row) = build_checks_list_items(app, area);
+    let (items, selected_row, row_to_item) = build_checks_list_items(app, area);
 
     let filter_info = match app.view.status_filter {
         super::app::StatusFilter::All => "",
         super::app::StatusFilter::Failed => " [failed]",
     };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Checks{} ", filter_info));
+    // Store the block's inner (border-excluded) rect so mouse click
+    // hit-testing maps 1:1 onto the rows the list actually draws into.
+    app.set_checks_list_layout(block.inner(area), row_to_item);
+
     // scroll_padding keeps the neighbor rows (e.g. group headers) in view
-    let list = List::new(items).scroll_padding(1).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Checks{} ", filter_info)),
-    );
+    let list = List::new(items).scroll_padding(1).block(block);
 
     // Persist the scroll offset so the list scrolls only when the selection
     // leaves the visible window
@@ -419,12 +422,18 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
     app.view.checks_list_offset = state.offset();
 }
 
-/// Build the checks list rows and the row index of the selected item.
+/// Build the checks list rows, the row index of the selected item, and a
+/// row -> [`App::selectable_items`] index mapping (`None` for group headers).
 ///
 /// Rows come from [`App::selectable_items`] (plus a header whenever the group
 /// changes), so the list and the selection can never disagree.
-fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Option<usize>) {
-    let mut items: Vec<ListItem> = Vec::new();
+fn build_checks_list_items(
+    app: &App,
+    area: Rect,
+) -> (Vec<ListItem<'static>>, Option<usize>, Vec<Option<usize>>) {
+    // Each row is pushed as a (widget, row_to_item entry) pair, so the two
+    // can't drift out of index alignment the way two parallel Vecs could.
+    let mut rows: Vec<(ListItem<'static>, Option<usize>)> = Vec::new();
     let mut selected_row = None;
     let mut current_group = None;
 
@@ -435,20 +444,22 @@ fn build_checks_list_items(app: &App, area: Rect) -> (Vec<ListItem<'static>>, Op
         };
         if current_group != Some(group) {
             current_group = Some(group);
-            items.push(group_header_item(app, group));
+            rows.push((group_header_item(app, group), None));
         }
 
         let is_selected = idx == app.view.selected_check;
         if is_selected {
-            selected_row = Some(items.len());
+            selected_row = Some(rows.len());
         }
-        items.push(match item {
+        let item_widget = match item {
             SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
             SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
-        });
+        };
+        rows.push((item_widget, Some(idx)));
     }
 
-    (items, selected_row)
+    let (items, row_to_item) = rows.into_iter().unzip();
+    (items, selected_row, row_to_item)
 }
 
 /// Group header row; highlighted while the group runs
@@ -995,9 +1006,10 @@ fn render_pre_command_output(app: &App, pre_cmd: &PreCommandState, frame: &mut F
 }
 
 fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
-    // Update the visible lines for scroll calculations (subtract 2 for borders)
-    app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
-    app.output_area_width = area.width;
+    // All sub-renderers below draw a Borders::ALL block into `area`; derive
+    // the same inner rect here so mouse hit-testing matches what's drawn.
+    let inner_area = Block::default().borders(Borders::ALL).inner(area);
+    app.set_output_layout(area, inner_area);
     app.clamp_output_scroll();
 
     // Dispatch to appropriate sub-renderer based on state
