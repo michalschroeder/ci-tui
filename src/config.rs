@@ -277,16 +277,18 @@ impl DockerConfig {
         format!("{}-{}-1", project_name, self.service)
     }
 
-    /// Compose project name: `COMPOSE_PROJECT_NAME` env var if set (compose's own
-    /// precedence), otherwise derived from `project_dir`'s last path component.
+    /// Compose project name, in docker compose's own precedence order:
+    /// 1. `COMPOSE_PROJECT_NAME` env var
+    /// 2. top-level `name:` key in a compose file found in `project_dir`
+    /// 3. `project_dir`'s last path component
     ///
-    /// LIMITATION: a `name:` key inside the compose file is NOT detected — deriving
-    /// the real project name would require running `docker compose ps`.
-    /// Future work: resolve containers via `docker compose ps -q <service>`.
+    /// LIMITATION: does not honor `COMPOSE_FILE` / `-f` overrides or multiple/override
+    /// compose files — only the first default-named file in `project_dir` is read.
     pub(crate) fn compose_project_name(&self) -> String {
         let name = std::env::var("COMPOSE_PROJECT_NAME")
             .ok()
             .filter(|name| !name.is_empty())
+            .or_else(|| compose_file_name(&self.project_dir))
             .unwrap_or_else(|| self.derive_project_name());
         let normalized = normalize_project_name(&name);
         if normalized.is_empty() {
@@ -349,6 +351,42 @@ fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
         _ => return None,
     };
     resolved.file_name()?.to_str().map(String::from)
+}
+
+/// Compose file names to look for in `project_dir`, in docker compose's own
+/// default discovery order. Only the first one found is read.
+const COMPOSE_FILE_NAMES: &[&str] = &[
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+];
+
+/// Minimal shape for reading just the top-level `name:` key from a compose file.
+/// `deny_unknown_fields` is deliberately omitted — compose files have many other
+/// top-level keys (`services`, `volumes`, ...) we don't care about here.
+#[derive(Deserialize)]
+struct ComposeFileName {
+    name: Option<String>,
+}
+
+/// Read the top-level `name:` key from the first compose file found in `project_dir`.
+/// Returns `None` if no compose file is found, it fails to parse, or it has no
+/// (non-empty) `name:` key — callers fall back to the basename-derived name.
+fn compose_file_name(project_dir: &str) -> Option<String> {
+    let dir = Path::new(project_dir);
+    for filename in COMPOSE_FILE_NAMES {
+        let Ok(contents) = std::fs::read_to_string(dir.join(filename)) else {
+            continue;
+        };
+        // Compose only ever reads the first file it finds, so stop here regardless
+        // of whether this file has a usable `name:` key.
+        return serde_yaml::from_str::<ComposeFileName>(&contents)
+            .ok()
+            .and_then(|parsed| parsed.name)
+            .filter(|name| !name.is_empty());
+    }
+    None
 }
 
 /// Normalize a compose project name like docker compose (compose-go
@@ -1427,6 +1465,95 @@ checks: {}
             let name = config.docker().unwrap().container_name();
             std::env::remove_var("COMPOSE_PROJECT_NAME");
             assert_eq!(name, "customproj-web-1");
+        }
+
+        // Compose file's top-level `name:` key is honored when COMPOSE_PROJECT_NAME is unset.
+        #[test]
+        fn test_compose_project_name_honors_compose_file_name_key() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("docker-compose.yml"),
+                "name: FromCompose\nservices:\n  web: {}\n",
+            )
+            .unwrap();
+            let config = DockerConfig {
+                project_dir: dir.path().to_str().unwrap().to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            };
+            // normalize_project_name lowercases, so "FromCompose" -> "fromcompose"
+            assert_eq!(config.compose_project_name(), "fromcompose");
+            assert_eq!(config.container_name(), "fromcompose-web-1");
+        }
+
+        // COMPOSE_PROJECT_NAME still takes precedence over the compose file's `name:` key.
+        #[test]
+        fn test_compose_project_name_env_var_wins_over_name_key() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("docker-compose.yml"), "name: FromCompose\n").unwrap();
+            let config = DockerConfig {
+                project_dir: dir.path().to_str().unwrap().to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            };
+            std::env::set_var("COMPOSE_PROJECT_NAME", "fromenv");
+            let name = config.compose_project_name();
+            std::env::remove_var("COMPOSE_PROJECT_NAME");
+            assert_eq!(name, "fromenv");
+        }
+
+        // No compose file in project_dir: fall back to the basename-derived name.
+        #[test]
+        fn test_compose_project_name_missing_compose_file_falls_back_to_basename() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = DockerConfig {
+                project_dir: dir.path().to_str().unwrap().to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            };
+            let expected =
+                normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
+            assert_eq!(config.compose_project_name(), expected);
+        }
+
+        // Compose file present but with no top-level `name:` key (and a malformed one):
+        // both fall back to the basename-derived name.
+        #[rstest]
+        #[case::no_name_key("services:\n  web: {}\n")]
+        #[case::malformed_yaml("not: [valid: yaml")]
+        fn test_compose_project_name_bad_compose_file_falls_back_to_basename(
+            #[case] compose_contents: &str,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("docker-compose.yml"), compose_contents).unwrap();
+            let config = DockerConfig {
+                project_dir: dir.path().to_str().unwrap().to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            };
+            let expected =
+                normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
+            assert_eq!(config.compose_project_name(), expected);
         }
 
         // Edge case: container name itself ending in -1 must lose only ONE -1 suffix
