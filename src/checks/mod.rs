@@ -183,6 +183,7 @@ mod tests {
     fn checks_test_config() -> CiConfig {
         use crate::config::{
             CheckDefinition, CheckTriggers, DockerConfig, FilePattern, GitConfig, GroupConfig,
+            DEFAULT_MAX_OUTPUT_LINES,
         };
         use indexmap::IndexMap;
         use std::collections::HashMap;
@@ -361,6 +362,7 @@ mod tests {
             file_patterns,
             checks,
             ignore_patterns: Vec::new(),
+            max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }
