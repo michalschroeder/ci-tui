@@ -575,9 +575,24 @@ fn handle_help_key_event(app: &mut App, key: KeyEvent) -> Action {
     Action::Continue
 }
 
-/// Handle a key press while typing an output search (`/`): characters build
-/// the query, `Enter` confirms, `Esc` cancels, `Backspace` edits.
-fn handle_search_key_event(app: &mut App, key: KeyEvent) -> Action {
+/// Handle a key press while an output search (`/`) is open, whether still
+/// typing or confirmed (highlight visible). While typing, every key is
+/// intercepted (characters build the query, `Enter` confirms, `Backspace`
+/// edits, `Esc` cancels). Once confirmed, only `Esc` (clear highlight) is
+/// intercepted; anything else returns `None` so the caller falls through to
+/// normal handling (list nav, retry, etc. keep acting while a highlight is
+/// shown).
+fn handle_search_key_event(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let typing = app.view.search.as_ref()?.typing;
+    if !typing {
+        return match key.code {
+            KeyCode::Esc => {
+                app.cancel_search();
+                Some(Action::Continue)
+            }
+            _ => None,
+        };
+    }
     match key.code {
         KeyCode::Esc => app.cancel_search(),
         KeyCode::Enter => dashboard::confirm_search(app),
@@ -585,13 +600,13 @@ fn handle_search_key_event(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char(c) => app.search_push(c),
         _ => {}
     }
-    Action::Continue
+    Some(Action::Continue)
 }
 
 /// Selection/scroll navigation keys: list jump (g/G, n/N, arrows/jk) and
-/// output scroll (PageUp/Down, Home/End, J/K, Ctrl-d/u). Returns `None` for
+/// output scroll (PageUp/Down, Home/End, J/K, Ctrl-d/u). Returns `false` for
 /// anything it doesn't handle, so the caller can fall through to actions.
-fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> Option<Action> {
+fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> bool {
     match (key.code, key.modifiers) {
         (KeyCode::Up | KeyCode::Char('k'), _) => app.previous_check(),
         (KeyCode::Down | KeyCode::Char('j'), _) => app.next_check(),
@@ -611,9 +626,9 @@ fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
             app.scroll_up(app.view.output_visible_lines / 2)
         }
-        _ => return None,
+        _ => return false,
     }
-    Some(Action::Continue)
+    true
 }
 
 /// Handle a key event and return the action for the main loop
@@ -621,17 +636,11 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
     if app.view.help_visible {
         return handle_help_key_event(app, key);
     }
-    if app.view.search.as_ref().is_some_and(|s| s.typing) {
-        return handle_search_key_event(app, key);
-    }
-    // Confirmed search stays open (highlight visible) until Esc clears it;
-    // other keys keep acting normally (list nav, retry, etc.)
-    if app.view.search.is_some() && key.code == KeyCode::Esc {
-        app.cancel_search();
-        return Action::Continue;
-    }
-    if let Some(action) = handle_nav_key_event(app, key) {
+    if let Some(action) = handle_search_key_event(app, key) {
         return action;
+    }
+    if handle_nav_key_event(app, key) {
+        return Action::Continue;
     }
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,

@@ -779,6 +779,10 @@ pub(crate) struct OutputCache {
     width: u16,
     text: Text<'static>,
     line_count: usize,
+    /// Text with the confirmed search query's matches styled, computed once
+    /// by [`confirm_search`] rather than every frame — `None` when there is
+    /// no confirmed search (or it had no matches).
+    highlighted: Option<Text<'static>>,
 }
 
 /// Count passed/failed among `fix.all_results` in a single pass.
@@ -931,10 +935,17 @@ fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let text = raw_output.into_text().unwrap_or_default();
-    let line_count = Paragraph::new(text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width.saturating_sub(PANEL_BORDER_COLS));
+    let line_count = wrapped_line_count(&text, width);
     (text, line_count)
+}
+
+/// Number of wrapped display rows `text` occupies at `width` — the wrapping
+/// idiom shared by [`parse_and_wrap`] (whole output) and [`line_start_scroll`]
+/// (a prefix of it).
+fn wrapped_line_count(text: &Text<'static>, width: u16) -> usize {
+    Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(PANEL_BORDER_COLS))
 }
 
 /// Make sure `app.output_cache` holds the current output panel's parsed
@@ -964,6 +975,7 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
         width,
         text,
         line_count,
+        highlighted: None,
     });
     true
 }
@@ -998,12 +1010,14 @@ fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, title: &str) {
     };
     // ratatui scrolls by u16; larger offsets saturate instead of wrapping
     let scroll = u16::try_from(app.view.output_scroll).unwrap_or(u16::MAX);
-    let text = match &app.view.search {
-        Some(search) if !search.typing && !search.matches.is_empty() => {
-            highlight_matches(&cache.text, &search.query)
-        }
-        _ => cache.text.clone(),
-    };
+    let confirmed_highlight = app
+        .view
+        .search
+        .as_ref()
+        .is_some_and(|s| !s.typing)
+        .then(|| cache.highlighted.clone())
+        .flatten();
+    let text = confirmed_highlight.unwrap_or_else(|| cache.text.clone());
     let paragraph = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -1022,9 +1036,7 @@ fn line_plain_text(line: &Line<'_>) -> String {
 /// logic [`parse_and_wrap`] uses for the total count.
 fn line_start_scroll(text: &Text<'static>, target_line: usize, width: u16) -> usize {
     let before = Text::from(text.lines[..target_line].to_vec());
-    Paragraph::new(before)
-        .wrap(Wrap { trim: false })
-        .line_count(width.saturating_sub(PANEL_BORDER_COLS))
+    wrapped_line_count(&before, width)
 }
 
 /// Split `plain` into spans, styling every case-insensitive occurrence of
@@ -1052,24 +1064,29 @@ fn highlight_line_spans(plain: &str, lower: &str, needle: &str, query: &str) -> 
     spans
 }
 
-/// Rebuild `text` with every case-insensitive occurrence of `query` styled
-/// as a highlight. Lines without a match are returned unchanged (styling
-/// preserved); matching lines lose their original ANSI styling in favor of
-/// a plain highlight — an acceptable simplification for search results.
-fn highlight_matches(text: &Text<'static>, query: &str) -> Text<'static> {
-    if query.is_empty() {
+/// Rebuild `text` with every occurrence of `query` on the given `matches`
+/// line indices styled as a highlight (indices already known to contain a
+/// case-insensitive match, e.g. from [`confirm_search`] — this does not
+/// rescan every line to find them). Lines outside `matches` are returned
+/// unchanged (styling preserved); matching lines lose their original ANSI
+/// styling in favor of a plain highlight — an acceptable simplification for
+/// search results.
+fn highlight_matches(text: &Text<'static>, matches: &[usize], query: &str) -> Text<'static> {
+    if matches.is_empty() || query.is_empty() {
         return text.clone();
     }
     let needle = query.to_lowercase();
+    let match_lines: std::collections::HashSet<usize> = matches.iter().copied().collect();
     let lines = text
         .lines
         .iter()
-        .map(|line| {
-            let plain = line_plain_text(line);
-            let lower = plain.to_lowercase();
-            if !lower.contains(&needle) {
+        .enumerate()
+        .map(|(i, line)| {
+            if !match_lines.contains(&i) {
                 return line.clone();
             }
+            let plain = line_plain_text(line);
+            let lower = plain.to_lowercase();
             Line::from(highlight_line_spans(&plain, &lower, &needle, query))
         })
         .collect::<Vec<_>>();
@@ -1093,7 +1110,7 @@ pub(crate) fn confirm_search(app: &mut App) {
         return;
     };
 
-    let (matches, first_scroll) = match &app.output_cache {
+    let (matches, first_scroll, highlighted) = match &app.output_cache {
         Some(cache) if !query.is_empty() => {
             let needle = query.to_lowercase();
             let matches: Vec<usize> = cache
@@ -1107,14 +1124,22 @@ pub(crate) fn confirm_search(app: &mut App) {
             let first_scroll = matches
                 .first()
                 .map(|&idx| line_start_scroll(&cache.text, idx, width));
-            (matches, first_scroll)
+            let highlighted = if matches.is_empty() {
+                None
+            } else {
+                Some(highlight_matches(&cache.text, &matches, &query))
+            };
+            (matches, first_scroll, highlighted)
         }
-        _ => (Vec::new(), None),
+        _ => (Vec::new(), None, None),
     };
 
     if let Some(search) = app.view.search.as_mut() {
         search.typing = false;
         search.matches = matches;
+    }
+    if let Some(cache) = app.output_cache.as_mut() {
+        cache.highlighted = highlighted;
     }
     if let Some(scroll) = first_scroll {
         app.view.output_scroll = 0;
@@ -1772,7 +1797,7 @@ mod tests {
             Line::from("has FOO in it"),
         ]);
 
-        let highlighted = highlight_matches(&text, "foo");
+        let highlighted = highlight_matches(&text, &[1], "foo");
 
         assert_eq!(highlighted.lines.len(), 2);
         // Unrelated line is untouched
@@ -1792,7 +1817,7 @@ mod tests {
     #[test]
     fn test_highlight_matches_empty_query_returns_text_unchanged() {
         let text = Text::from(vec![Line::from("some text")]);
-        let highlighted = highlight_matches(&text, "");
+        let highlighted = highlight_matches(&text, &[0], "");
         assert_eq!(highlighted.lines.len(), 1);
         assert_eq!(line_plain_text(&highlighted.lines[0]), "some text");
     }
