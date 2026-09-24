@@ -431,10 +431,11 @@ fn build_checks_list_items(
     app: &App,
     area: Rect,
 ) -> (Vec<ListItem<'static>>, Option<usize>, Vec<Option<usize>>) {
-    let mut items: Vec<ListItem> = Vec::new();
+    // Each row is pushed as a (widget, row_to_item entry) pair, so the two
+    // can't drift out of index alignment the way two parallel Vecs could.
+    let mut rows: Vec<(ListItem<'static>, Option<usize>)> = Vec::new();
     let mut selected_row = None;
     let mut current_group = None;
-    let mut row_to_item: Vec<Option<usize>> = Vec::new();
 
     for (idx, item) in app.selectable_items().enumerate() {
         let group = match item {
@@ -443,21 +444,21 @@ fn build_checks_list_items(
         };
         if current_group != Some(group) {
             current_group = Some(group);
-            items.push(group_header_item(app, group));
-            row_to_item.push(None);
+            rows.push((group_header_item(app, group), None));
         }
 
         let is_selected = idx == app.view.selected_check;
         if is_selected {
-            selected_row = Some(items.len());
+            selected_row = Some(rows.len());
         }
-        items.push(match item {
+        let item_widget = match item {
             SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
             SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
-        });
-        row_to_item.push(Some(idx));
+        };
+        rows.push((item_widget, Some(idx)));
     }
 
+    let (items, row_to_item) = rows.into_iter().unzip();
     (items, selected_row, row_to_item)
 }
 
@@ -1005,10 +1006,10 @@ fn render_pre_command_output(app: &App, pre_cmd: &PreCommandState, frame: &mut F
 }
 
 fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
-    // Update the visible lines for scroll calculations (subtract 2 for borders)
-    app.set_output_visible_lines(area.height.saturating_sub(2) as usize);
-    app.output_area_width = area.width;
-    app.set_output_area(area);
+    // All sub-renderers below draw a Borders::ALL block into `area`; derive
+    // the same inner rect here so mouse hit-testing matches what's drawn.
+    let inner_area = Block::default().borders(Borders::ALL).inner(area);
+    app.set_output_layout(area, inner_area);
     app.clamp_output_scroll();
 
     // Dispatch to appropriate sub-renderer based on state

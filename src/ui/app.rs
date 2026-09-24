@@ -18,6 +18,13 @@ use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// True when `(col, row)` falls inside `area`. Shared by every mouse
+/// hit-test (output panel scroll, checks list click) so they all use the
+/// same point-in-rect convention.
+fn contains_point(area: Rect, col: u16, row: u16) -> bool {
+    area.contains(Position { x: col, y: row })
+}
+
 /// Maximum number of samples to keep in history for sparklines
 const MAX_HISTORY_SAMPLES: usize = 60;
 
@@ -799,15 +806,21 @@ impl App {
         self.view.checks_list_row_to_item = row_to_item;
     }
 
-    /// Store the output panel area (called during render), so mouse wheel
-    /// events can be mapped to the panel they occurred over.
-    pub fn set_output_area(&mut self, area: Rect) {
-        self.view.output_area = area;
+    /// Store the output panel's render-time layout in one call so its
+    /// derived fields can't drift out of sync with each other: visible line
+    /// count and wrapped-text width from the outer (border-inclusive) area,
+    /// matching the `PANEL_BORDER_COLS` subtraction used elsewhere, plus the
+    /// inner (border-excluded) rect for mouse hit-testing — the same
+    /// inner-rect convention as [`Self::set_checks_list_layout`].
+    pub fn set_output_layout(&mut self, outer_area: Rect, inner_area: Rect) {
+        self.view.output_visible_lines = outer_area.height.saturating_sub(2) as usize;
+        self.output_area_width = outer_area.width;
+        self.view.output_area = inner_area;
     }
 
     /// True when `(col, row)` falls inside the rendered output panel
     pub fn is_over_output(&self, col: u16, row: u16) -> bool {
-        self.view.output_area.contains(Position { x: col, y: row })
+        contains_point(self.view.output_area, col, row)
     }
 
     /// Select the check under a left-click at `(col, row)`. No-op when the
@@ -815,7 +828,7 @@ impl App {
     /// header row.
     pub fn select_check_at_position(&mut self, col: u16, row: u16) {
         let content_area = self.view.checks_list_area;
-        if !content_area.contains(Position { x: col, y: row }) {
+        if !contains_point(content_area, col, row) {
             return;
         }
         let item_row = (row - content_area.y) as usize + self.view.checks_list_offset;
@@ -1653,8 +1666,7 @@ checks:
     #[test]
     fn test_is_over_output() {
         let mut app = make_app();
-        let area = Rect::new(10, 0, 30, 10);
-        app.set_output_area(area);
+        app.view.output_area = Rect::new(10, 0, 30, 10);
 
         assert!(app.is_over_output(15, 5));
         assert!(!app.is_over_output(0, 0));

@@ -126,7 +126,17 @@ fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
             // Filter for Press events only (Windows sends Press+Release)
             Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => Event::Key(key),
             Ok(event @ Event::Resize(..)) => event,
-            Ok(event @ Event::Mouse(..)) => event,
+            // Only the mouse kinds handle_mouse_event acts on; drop Moved/Drag/Up
+            // and other buttons here rather than churning the event channel
+            Ok(
+                event @ Event::Mouse(MouseEvent {
+                    kind:
+                        MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown,
+                    ..
+                }),
+            ) => event,
             _ => continue,
         };
         // If send fails, receiver is dropped - exit thread
@@ -353,6 +363,20 @@ async fn refresh_and_run(
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+}
+
+/// Restores the terminal when dropped. Covers any early return via `?`
+/// between terminal setup and the explicit cleanup at the end of `run()`
+/// (e.g. `Terminal::new` or a mid-loop `terminal.draw` failing) that would
+/// otherwise leave the shell in raw mode / alt screen / mouse capture.
+/// `restore_terminal` is idempotent (errors ignored), so it running again
+/// on the normal success path is harmless.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
 }
 
 /// Copy text to clipboard using OSC 52 escape sequence
@@ -699,8 +723,10 @@ pub async fn run(
     // Install panic hook to restore terminal on panic
     install_panic_hook();
 
-    // Setup terminal
+    // Setup terminal. The guard restores it on any early return below,
+    // including a setup failure that occurs after raw mode is already on.
     enable_raw_mode()?;
+    let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -1407,7 +1433,7 @@ checks:
             .join("\n");
         app.set_output_visible_lines(5);
         app.output_area_width = 80;
-        app.set_output_area(ratatui::layout::Rect::new(10, 0, 80, 7));
+        app.view.output_area = ratatui::layout::Rect::new(10, 0, 80, 7);
         app
     }
 
