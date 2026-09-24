@@ -1467,6 +1467,21 @@ checks: {}
             assert_eq!(name, "customproj-web-1");
         }
 
+        // Shared by the compose-file-`name:`-key tests below: a `DockerConfig` pointed
+        // at `dir`, varying only in project_dir.
+        fn docker_config_for(dir: &std::path::Path) -> DockerConfig {
+            DockerConfig {
+                project_dir: dir.to_str().unwrap().to_string(),
+                service: "web".to_string(),
+                container: None,
+                image: None,
+                volume_mount: None,
+                work_dir: None,
+                shell: "bash".to_string(),
+                env: Default::default(),
+            }
+        }
+
         // Compose file's top-level `name:` key is honored when COMPOSE_PROJECT_NAME is unset.
         #[test]
         fn test_compose_project_name_honors_compose_file_name_key() {
@@ -1476,16 +1491,7 @@ checks: {}
                 "name: FromCompose\nservices:\n  web: {}\n",
             )
             .unwrap();
-            let config = DockerConfig {
-                project_dir: dir.path().to_str().unwrap().to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            };
+            let config = docker_config_for(dir.path());
             // normalize_project_name lowercases, so "FromCompose" -> "fromcompose"
             assert_eq!(config.compose_project_name(), "fromcompose");
             assert_eq!(config.container_name(), "fromcompose-web-1");
@@ -1496,16 +1502,7 @@ checks: {}
         fn test_compose_project_name_env_var_wins_over_name_key() {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("docker-compose.yml"), "name: FromCompose\n").unwrap();
-            let config = DockerConfig {
-                project_dir: dir.path().to_str().unwrap().to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            };
+            let config = docker_config_for(dir.path());
             std::env::set_var("COMPOSE_PROJECT_NAME", "fromenv");
             let name = config.compose_project_name();
             std::env::remove_var("COMPOSE_PROJECT_NAME");
@@ -1516,16 +1513,7 @@ checks: {}
         #[test]
         fn test_compose_project_name_missing_compose_file_falls_back_to_basename() {
             let dir = tempfile::tempdir().unwrap();
-            let config = DockerConfig {
-                project_dir: dir.path().to_str().unwrap().to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            };
+            let config = docker_config_for(dir.path());
             let expected =
                 normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
             assert_eq!(config.compose_project_name(), expected);
@@ -1541,16 +1529,7 @@ checks: {}
         ) {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("docker-compose.yml"), compose_contents).unwrap();
-            let config = DockerConfig {
-                project_dir: dir.path().to_str().unwrap().to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            };
+            let config = docker_config_for(dir.path());
             let expected =
                 normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
             assert_eq!(config.compose_project_name(), expected);
