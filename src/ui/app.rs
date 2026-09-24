@@ -418,10 +418,9 @@ impl App {
         if let Some(slot) = self.checks.iter_mut().find(|c| c.id() == check.id()) {
             *slot = check;
         }
-        // The resolved command line shown at the top of the output panel may
-        // have changed even though status/output length didn't yet, which
-        // the cache key wouldn't otherwise notice.
-        self.output_cache = None;
+        // resolved_command is part of OutputCacheKey::Check, so a changed
+        // command line invalidates the cache on the next read without a
+        // manual clear here.
         self.needs_redraw = true;
     }
 
@@ -1011,14 +1010,14 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::checks::{CheckFiles, CheckToRun};
     use crate::config::{CheckDefinition, CiConfig};
     use crate::git::ChangedFiles;
     use crate::runner::{CheckResult, CheckStatus};
 
-    fn minimal_config_yaml() -> &'static str {
+    pub(crate) fn minimal_config_yaml() -> &'static str {
         r#"
 version: 2
 
@@ -1061,7 +1060,13 @@ checks:
         serde_yaml::from_str(minimal_config_yaml()).expect("Failed to parse config")
     }
 
-    fn make_check(id: &str, group: &str, name: &str, has_fix: bool, on_demand: bool) -> CheckToRun {
+    pub(crate) fn make_check(
+        id: &str,
+        group: &str,
+        name: &str,
+        has_fix: bool,
+        on_demand: bool,
+    ) -> CheckToRun {
         CheckToRun {
             id: id.to_string(),
             group: group.to_string(),

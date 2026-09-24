@@ -660,7 +660,9 @@ fn output_view(app: &App) -> OutputView<'_> {
 ///
 /// Streaming output only ever appends, so `output_len`/`error_len` catch
 /// content growth; `status` catches transitions (e.g. Running -> Passed)
-/// that don't change length; `width` catches resize.
+/// that don't change length; `width` catches resize; `resolved_command`
+/// catches a retried check's command line changing without status/output
+/// changing yet.
 #[derive(Debug, Clone, PartialEq)]
 enum OutputCacheKey {
     Check {
@@ -669,6 +671,7 @@ enum OutputCacheKey {
         output_len: usize,
         error_len: usize,
         show_full_command: bool,
+        resolved_command: String,
     },
     PreCommand {
         name: String,
@@ -699,21 +702,27 @@ pub(crate) struct OutputCache {
     line_count: usize,
 }
 
+/// Count passed/failed among `fix.all_results` in a single pass.
+fn fix_all_passed_failed(app: &App) -> (usize, usize) {
+    app.fix
+        .all_results
+        .iter()
+        .fold((0, 0), |(p, f), r| match r.status {
+            CheckStatus::Passed => (p + 1, f),
+            CheckStatus::Failed => (p, f + 1),
+            _ => (p, f),
+        })
+}
+
 /// Cheap key describing the current output view, or `None` for views that
 /// don't scroll (running spinners) / have no result to show yet — mirrors
-/// the `return 0` cases the old `output_line_count` had.
+/// the `return 0` cases the old `output_line_count` had. Only called on a
+/// cache miss; [`output_cache_key_matches`] checks validity on a hit without
+/// allocating a fresh key.
 fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
     match output_view(app) {
         OutputView::FixAllResults => {
-            let (passed, failed) =
-                app.fix
-                    .all_results
-                    .iter()
-                    .fold((0, 0), |(p, f), r| match r.status {
-                        CheckStatus::Passed => (p + 1, f),
-                        CheckStatus::Failed => (p, f + 1),
-                        _ => (p, f),
-                    });
+            let (passed, failed) = fix_all_passed_failed(app);
             Some(OutputCacheKey::FixAllResults {
                 len: app.fix.all_results.len(),
                 passed,
@@ -738,9 +747,72 @@ fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
                 output_len: result.output.len(),
                 error_len: result.error_output.len(),
                 show_full_command: app.view.show_full_command,
+                resolved_command: check.resolved_command.clone(),
             })
         }
         OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => None,
+    }
+}
+
+/// Whether `cache.key` still matches the current output view, compared
+/// field-by-field against borrowed data so a cache hit — the common case,
+/// checked every frame — doesn't allocate a fresh [`OutputCacheKey`] just to
+/// throw it away.
+fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
+    match (output_view(app), &cache.key) {
+        (
+            OutputView::FixAllResults,
+            OutputCacheKey::FixAllResults {
+                len,
+                passed,
+                failed,
+            },
+        ) => {
+            let (p, f) = fix_all_passed_failed(app);
+            *len == app.fix.all_results.len() && *passed == p && *failed == f
+        }
+        (
+            OutputView::FixResult(result),
+            OutputCacheKey::FixResult {
+                status,
+                output_len,
+                error_len,
+            },
+        ) => {
+            *status == result.status
+                && *output_len == result.output.len()
+                && *error_len == result.error_output.len()
+        }
+        (
+            OutputView::PreCommand(pc),
+            OutputCacheKey::PreCommand {
+                name,
+                status,
+                output_len,
+            },
+        ) => *name == pc.name && *status == pc.status && *output_len == pc.output.len(),
+        (
+            OutputView::Check(Some(check)),
+            OutputCacheKey::Check {
+                id,
+                status,
+                output_len,
+                error_len,
+                show_full_command,
+                resolved_command,
+            },
+        ) => {
+            let Some(result) = app.results.get(check.id()) else {
+                return false;
+            };
+            id == check.id()
+                && *status == result.status
+                && *output_len == result.output.len()
+                && *error_len == result.error_output.len()
+                && *show_full_command == app.view.show_full_command
+                && *resolved_command == check.resolved_command
+        }
+        _ => false,
     }
 }
 
@@ -792,17 +864,17 @@ fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
 /// cache (running spinners / no result yet), in which case any stale cache
 /// entry is cleared.
 fn ensure_output_cache(app: &mut App, width: u16) -> bool {
+    if app
+        .output_cache
+        .as_ref()
+        .is_some_and(|c| c.width == width && output_cache_key_matches(app, c))
+    {
+        return true;
+    }
     let Some(key) = output_cache_key(app) else {
         app.output_cache = None;
         return false;
     };
-    if app
-        .output_cache
-        .as_ref()
-        .is_some_and(|c| c.key == key && c.width == width)
-    {
-        return true;
-    }
     let Some(raw_output) = build_raw_output(app, width) else {
         app.output_cache = None;
         return false;
@@ -1364,69 +1436,21 @@ mod tests {
         );
     }
 
-    use crate::checks::{CheckFiles, CheckToRun};
-    use crate::config::{CheckDefinition, CiConfig};
+    use super::super::app::tests::{make_check, minimal_config_yaml};
     use crate::git::ChangedFiles;
     use crate::runner::CheckStatus;
     use ratatui::{backend::TestBackend, Terminal};
-
-    fn minimal_config_yaml() -> &'static str {
-        r#"
-version: 2
-
-docker:
-  project_dir: ./infrastructure
-  service: php
-  shell: bash
-
-git:
-  base_branch: development
-  fallback_branch: HEAD~1
-
-file_patterns:
-  php:
-    pattern: '\.php$'
-
-checks:
-  fast:
-    checks:
-      php-lint:
-        name: PHP syntax check
-        command: php-lint {files}
-        triggers:
-          file_pattern: php
-"#
-    }
 
     /// App with one check whose output is large enough to make re-parsing
     /// wasteful (mirrors #126's "MBs of test output" scenario at a test-
     /// friendly size).
     fn make_test_app() -> App {
-        let config: CiConfig =
-            serde_yaml::from_str(minimal_config_yaml()).expect("failed to parse config");
+        let config = serde_yaml::from_str(minimal_config_yaml()).expect("failed to parse config");
         let changed_files = ChangedFiles {
             files: vec!["src/Foo.php".to_string()],
             base_ref: "development".to_string(),
         };
-        let check = CheckToRun {
-            id: "php-lint".to_string(),
-            group: "fast".to_string(),
-            definition: CheckDefinition {
-                name: "PHP syntax check".to_string(),
-                command: "php-lint {files}".to_string(),
-                service: None,
-                container: None,
-                fix_command: None,
-                triggers: None,
-                on_demand: false,
-                env: std::collections::HashMap::new(),
-                timeout: None,
-            },
-            service: Some("php".to_string()),
-            files: CheckFiles::Files(vec!["test.php".to_string()]),
-            resolved_command: "php-lint test.php".to_string(),
-            resolved_fix_command: None,
-        };
+        let check = make_check("php-lint", "fast", "PHP Lint", false, false);
         let mut app = App::new(config, changed_files, vec![check], "main".to_string());
         let result = app.results.get_mut("php-lint").unwrap();
         result.status = CheckStatus::Passed;
