@@ -753,13 +753,18 @@ impl App {
 
     // Navigation - all methods set needs_redraw for immediate visual feedback
 
-    /// Select the next item (stops at the last one)
-    pub fn next_check(&mut self) {
-        // Clear fix results and reset command view when navigating
+    /// Clear fix results and reset command view; shared by all selection
+    /// changes (keyboard navigation and mouse click)
+    fn reset_selection_view(&mut self) {
         self.fix.result = None;
         self.fix.all_results.clear();
         self.view.output_scroll = 0;
         self.view.show_full_command = false;
+    }
+
+    /// Select the next item (stops at the last one)
+    pub fn next_check(&mut self) {
+        self.reset_selection_view();
 
         let max = self.selectable_items().count().saturating_sub(1);
         if self.view.selected_check < max {
@@ -770,11 +775,7 @@ impl App {
 
     /// Select the previous item (stops at the first one)
     pub fn previous_check(&mut self) {
-        // Clear fix results and reset command view when navigating
-        self.fix.result = None;
-        self.fix.all_results.clear();
-        self.view.output_scroll = 0;
-        self.view.show_full_command = false;
+        self.reset_selection_view();
 
         if self.view.selected_check > 0 {
             self.view.selected_check -= 1;
@@ -785,18 +786,16 @@ impl App {
     /// Select item `idx` directly (mouse click). Same reset-on-navigate
     /// behavior as [`Self::next_check`]/[`Self::previous_check`].
     fn select_item_index(&mut self, idx: usize) {
-        self.fix.result = None;
-        self.fix.all_results.clear();
-        self.view.output_scroll = 0;
-        self.view.show_full_command = false;
+        self.reset_selection_view();
         self.view.selected_check = idx;
         self.needs_redraw = true;
     }
 
-    /// Store the checks list panel area and its row->item mapping (called
-    /// during render), so mouse clicks can be mapped back to a check.
-    pub fn set_checks_list_layout(&mut self, area: Rect, row_to_item: Vec<Option<usize>>) {
-        self.view.checks_list_area = area;
+    /// Store the checks list's inner (border-excluded) content rect and its
+    /// row->item mapping (called during render), so mouse clicks can be
+    /// mapped back to a check.
+    pub fn set_checks_list_layout(&mut self, content_area: Rect, row_to_item: Vec<Option<usize>>) {
+        self.view.checks_list_area = content_area;
         self.view.checks_list_row_to_item = row_to_item;
     }
 
@@ -812,18 +811,14 @@ impl App {
     }
 
     /// Select the check under a left-click at `(col, row)`. No-op when the
-    /// click lands outside the checks list, on a border row, or on a group
+    /// click lands outside the checks list's content area or on a group
     /// header row.
     pub fn select_check_at_position(&mut self, col: u16, row: u16) {
-        let area = self.view.checks_list_area;
-        if !area.contains(Position { x: col, y: row }) {
+        let content_area = self.view.checks_list_area;
+        if !content_area.contains(Position { x: col, y: row }) {
             return;
         }
-        // Exclude the top/bottom border rows the List's block draws
-        if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
-            return;
-        }
-        let item_row = (row - area.y - 1) as usize + self.view.checks_list_offset;
+        let item_row = (row - content_area.y) as usize + self.view.checks_list_offset;
         if let Some(Some(idx)) = self.view.checks_list_row_to_item.get(item_row).copied() {
             self.select_item_index(idx);
         }
@@ -1588,14 +1583,19 @@ checks:
         vec![None, Some(0), None, Some(1), Some(2)]
     }
 
+    /// `set_checks_list_layout` takes the list's inner content rect (borders
+    /// already excluded), so tests click directly against content rows.
+    fn content_area() -> Rect {
+        Rect::new(0, 0, 40, 8)
+    }
+
     #[test]
     fn test_click_selects_check_in_list() {
         let mut app = make_app();
-        let area = Rect::new(0, 0, 40, 10);
-        app.set_checks_list_layout(area, app_row_to_item());
+        app.set_checks_list_layout(content_area(), app_row_to_item());
 
-        // Row 4 (content row 3, after the "tests" header) maps to phpunit (idx 1)
-        app.select_check_at_position(5, 4);
+        // Content row 3 (after the "tests" header) maps to phpunit (idx 1)
+        app.select_check_at_position(5, 3);
 
         assert_eq!(app.view.selected_check, 1);
         assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
@@ -1605,12 +1605,11 @@ checks:
     #[test]
     fn test_click_on_group_header_row_is_noop() {
         let mut app = make_app();
-        let area = Rect::new(0, 0, 40, 10);
-        app.set_checks_list_layout(area, app_row_to_item());
+        app.set_checks_list_layout(content_area(), app_row_to_item());
         app.view.selected_check = 1;
 
-        // Row 1 is the "fast" group header (row_to_item[0] = None)
-        app.select_check_at_position(5, 1);
+        // Content row 0 is the "fast" group header (row_to_item[0] = None)
+        app.select_check_at_position(5, 0);
 
         assert_eq!(
             app.view.selected_check, 1,
@@ -1621,8 +1620,7 @@ checks:
     #[test]
     fn test_click_outside_checks_list_is_noop() {
         let mut app = make_app();
-        let area = Rect::new(0, 0, 40, 10);
-        app.set_checks_list_layout(area, app_row_to_item());
+        app.set_checks_list_layout(content_area(), app_row_to_item());
         app.view.selected_check = 0;
 
         // Well outside the list area
@@ -1637,19 +1635,18 @@ checks:
     #[test]
     fn test_click_respects_list_scroll_offset() {
         let mut app = make_app();
-        let area = Rect::new(0, 0, 40, 10);
-        app.set_checks_list_layout(area, app_row_to_item());
+        app.set_checks_list_layout(content_area(), app_row_to_item());
         app.view.checks_list_offset = 2; // scrolled past the first header + php-lint
 
-        // Content row 0 (row=1) now shows row_to_item[2 + 0] = None (tests header)
-        app.select_check_at_position(5, 1);
+        // Content row 0 now shows row_to_item[2 + 0] = None (tests header)
+        app.select_check_at_position(5, 0);
         assert_eq!(
             app.view.selected_check, 0,
             "header row after scroll must not select"
         );
 
-        // Content row 1 (row=2) shows row_to_item[2 + 1] = Some(1) (phpunit)
-        app.select_check_at_position(5, 2);
+        // Content row 1 shows row_to_item[2 + 1] = Some(1) (phpunit)
+        app.select_check_at_position(5, 1);
         assert_eq!(app.view.selected_check, 1);
     }
 

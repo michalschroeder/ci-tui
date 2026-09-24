@@ -397,19 +397,21 @@ fn render_check_item(
 
 fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let (items, selected_row, row_to_item) = build_checks_list_items(app, area);
-    app.set_checks_list_layout(area, row_to_item);
 
     let filter_info = match app.view.status_filter {
         super::app::StatusFilter::All => "",
         super::app::StatusFilter::Failed => " [failed]",
     };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Checks{} ", filter_info));
+    // Store the block's inner (border-excluded) rect so mouse click
+    // hit-testing maps 1:1 onto the rows the list actually draws into.
+    app.set_checks_list_layout(block.inner(area), row_to_item);
+
     // scroll_padding keeps the neighbor rows (e.g. group headers) in view
-    let list = List::new(items).scroll_padding(1).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Checks{} ", filter_info)),
-    );
+    let list = List::new(items).scroll_padding(1).block(block);
 
     // Persist the scroll offset so the list scrolls only when the selection
     // leaves the visible window

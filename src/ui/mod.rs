@@ -1471,13 +1471,14 @@ checks:
             ],
         );
         let (mut tasks, _rx) = make_test_tasks(&config);
-        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
-        // Single group "fast": header row 0, php-lint row 1, phpstan row 2
+        // set_checks_list_layout takes the inner content rect (no border rows)
+        let area = ratatui::layout::Rect::new(0, 0, 40, 8);
+        // Single group "fast": header at content row 0, php-lint row 1, phpstan row 2
         app.set_checks_list_layout(area, vec![None, Some(0), Some(1)]);
 
         let action = handle_message(
             &mut app,
-            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 3)),
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 2)),
             &mut tasks,
         );
 
