@@ -12,7 +12,7 @@
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
 
-use super::app::{App, PreCommandState, SelectableItem, StatusKind};
+use super::app::{App, PreCommandState, PreCommandStatus, SelectableItem, StatusKind};
 use crate::checks::CheckFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
@@ -21,7 +21,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap},
     Frame,
 };
@@ -653,34 +653,263 @@ fn output_view(app: &App) -> OutputView<'_> {
     }
 }
 
+/// Cheap fields that change whenever the output panel's rendered content
+/// would change. Comparing these against the previous frame's key tells us
+/// whether the cached [`Text`] is still valid, without needing to rebuild
+/// the raw output string (the expensive part) just to check for staleness.
+///
+/// Streaming output only ever appends, so `output_len`/`error_len` catch
+/// content growth; `status` catches transitions (e.g. Running -> Passed)
+/// that don't change length; `width` catches resize; `resolved_command`
+/// catches a retried check's command line changing without status/output
+/// changing yet.
+#[derive(Debug, Clone, PartialEq)]
+enum OutputCacheKey {
+    Check {
+        id: String,
+        status: CheckStatus,
+        output_len: usize,
+        error_len: usize,
+        show_full_command: bool,
+        resolved_command: String,
+    },
+    PreCommand {
+        name: String,
+        status: PreCommandStatus,
+        output_len: usize,
+    },
+    FixResult {
+        status: CheckStatus,
+        output_len: usize,
+        error_len: usize,
+    },
+    FixAllResults {
+        len: usize,
+        passed: usize,
+        failed: usize,
+    },
+}
+
+/// Cached parsed ANSI [`Text`] and its wrapped line count for the output
+/// panel, keyed on [`OutputCacheKey`] plus the width it was wrapped at.
+/// Shared by [`output_line_count`] (scroll clamping) and [`render_scrollable`]
+/// (drawing) so a frame where nothing changed parses/wraps the output at
+/// most once instead of twice (see issue #126).
+pub(crate) struct OutputCache {
+    key: OutputCacheKey,
+    width: u16,
+    text: Text<'static>,
+    line_count: usize,
+}
+
+/// Count passed/failed among `fix.all_results` in a single pass.
+fn fix_all_passed_failed(app: &App) -> (usize, usize) {
+    app.fix
+        .all_results
+        .iter()
+        .fold((0, 0), |(p, f), r| match r.status {
+            CheckStatus::Passed => (p + 1, f),
+            CheckStatus::Failed => (p, f + 1),
+            _ => (p, f),
+        })
+}
+
+/// Cheap key describing the current output view, or `None` for views that
+/// don't scroll (running spinners) / have no result to show yet — mirrors
+/// the `return 0` cases the old `output_line_count` had. Only called on a
+/// cache miss; [`output_cache_key_matches`] checks validity on a hit without
+/// allocating a fresh key.
+fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
+    match output_view(app) {
+        OutputView::FixAllResults => {
+            let (passed, failed) = fix_all_passed_failed(app);
+            Some(OutputCacheKey::FixAllResults {
+                len: app.fix.all_results.len(),
+                passed,
+                failed,
+            })
+        }
+        OutputView::FixResult(result) => Some(OutputCacheKey::FixResult {
+            status: result.status.clone(),
+            output_len: result.output.len(),
+            error_len: result.error_output.len(),
+        }),
+        OutputView::PreCommand(pc) => Some(OutputCacheKey::PreCommand {
+            name: pc.name.clone(),
+            status: pc.status.clone(),
+            output_len: pc.output.len(),
+        }),
+        OutputView::Check(Some(check)) => {
+            let result = app.results.get(check.id())?;
+            Some(OutputCacheKey::Check {
+                id: check.id().to_string(),
+                status: result.status.clone(),
+                output_len: result.output.len(),
+                error_len: result.error_output.len(),
+                show_full_command: app.view.show_full_command,
+                resolved_command: check.resolved_command.clone(),
+            })
+        }
+        OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => None,
+    }
+}
+
+/// Whether `cache.key` still matches the current output view, compared
+/// field-by-field against borrowed data so a cache hit — the common case,
+/// checked every frame — doesn't allocate a fresh [`OutputCacheKey`] just to
+/// throw it away.
+fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
+    match (output_view(app), &cache.key) {
+        (
+            OutputView::FixAllResults,
+            OutputCacheKey::FixAllResults {
+                len,
+                passed,
+                failed,
+            },
+        ) => {
+            let (p, f) = fix_all_passed_failed(app);
+            *len == app.fix.all_results.len() && *passed == p && *failed == f
+        }
+        (
+            OutputView::FixResult(result),
+            OutputCacheKey::FixResult {
+                status,
+                output_len,
+                error_len,
+            },
+        ) => {
+            *status == result.status
+                && *output_len == result.output.len()
+                && *error_len == result.error_output.len()
+        }
+        (
+            OutputView::PreCommand(pc),
+            OutputCacheKey::PreCommand {
+                name,
+                status,
+                output_len,
+            },
+        ) => *name == pc.name && *status == pc.status && *output_len == pc.output.len(),
+        (
+            OutputView::Check(Some(check)),
+            OutputCacheKey::Check {
+                id,
+                status,
+                output_len,
+                error_len,
+                show_full_command,
+                resolved_command,
+            },
+        ) => {
+            let Some(result) = app.results.get(check.id()) else {
+                return false;
+            };
+            id == check.id()
+                && *status == result.status
+                && *output_len == result.output.len()
+                && *error_len == result.error_output.len()
+                && *show_full_command == app.view.show_full_command
+                && *resolved_command == check.resolved_command
+        }
+        _ => false,
+    }
+}
+
+/// Build the raw output string for the current view. Only called on a cache
+/// miss — this is the work the cache exists to avoid repeating every frame.
+fn build_raw_output(app: &App, width: u16) -> Option<String> {
+    match output_view(app) {
+        OutputView::FixAllResults => Some(fix_all_results_text(app)),
+        OutputView::FixResult(result) => Some(fix_result_text(result)),
+        OutputView::PreCommand(pc) => Some(pre_command_output_text(pc)),
+        OutputView::Check(Some(check)) => {
+            let result = app.results.get(check.id())?;
+            Some(build_check_output_text(app, check, result, width))
+        }
+        OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => None,
+    }
+}
+
+#[cfg(test)]
+static PARSE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn parse_calls() -> usize {
+    PARSE_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parse_calls() {
+    PARSE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Parse ANSI output into a [`Text`] and compute its wrapped line count at
+/// `width`. This is the expensive step (`ansi_to_tui` parsing + paragraph
+/// line-wrapping) that [`ensure_output_cache`] avoids repeating every frame.
+fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
+    #[cfg(test)]
+    PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let text = raw_output.into_text().unwrap_or_default();
+    let line_count = Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(PANEL_BORDER_COLS));
+    (text, line_count)
+}
+
+/// Make sure `app.output_cache` holds the current output panel's parsed
+/// text and wrapped line count, rebuilding only when [`OutputCacheKey`]
+/// changed since the last call. Returns `false` for views with nothing to
+/// cache (running spinners / no result yet), in which case any stale cache
+/// entry is cleared.
+fn ensure_output_cache(app: &mut App, width: u16) -> bool {
+    if app
+        .output_cache
+        .as_ref()
+        .is_some_and(|c| c.width == width && output_cache_key_matches(app, c))
+    {
+        return true;
+    }
+    let Some(key) = output_cache_key(app) else {
+        app.output_cache = None;
+        return false;
+    };
+    let Some(raw_output) = build_raw_output(app, width) else {
+        app.output_cache = None;
+        return false;
+    };
+    let (text, line_count) = parse_and_wrap(&raw_output, width);
+    app.output_cache = Some(OutputCache {
+        key,
+        width,
+        text,
+        line_count,
+    });
+    true
+}
+
 /// Count the screen rows the output panel currently draws (after wrapping
 /// at the panel's inner width).
 ///
 /// Used by [`App`] scroll clamping. Running panels do not scroll (0).
-pub fn output_line_count(app: &App, width: u16) -> usize {
-    let text = match output_view(app) {
-        OutputView::FixAllResults => fix_all_results_text(app),
-        OutputView::FixResult(result) => fix_result_text(result),
-        OutputView::PreCommand(pc) => pre_command_output_text(pc),
-        OutputView::Check(Some(check)) => match app.results.get(check.id()) {
-            Some(result) => build_check_output_text(app, check, result, width),
-            None => return 0,
-        },
-        OutputView::FixAllRunning | OutputView::FixRunning | OutputView::Check(None) => return 0,
+pub fn output_line_count(app: &mut App, width: u16) -> usize {
+    if !ensure_output_cache(app, width) {
+        return 0;
+    }
+    app.output_cache.as_ref().map_or(0, |c| c.line_count)
+}
+
+/// Render scrollable ANSI output from the cache populated by
+/// [`ensure_output_cache`] (already primed this frame by
+/// [`App::clamp_output_scroll`], called from [`render_output`] with the
+/// same `area.width` before dispatch). The title gets `[row/total]` when
+/// the wrapped text overflows the panel.
+fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, title: &str) {
+    let Some(cache) = app.output_cache.as_ref() else {
+        return;
     };
-    output_paragraph(&text).line_count(width.saturating_sub(PANEL_BORDER_COLS))
-}
-
-/// Wrapped paragraph of ANSI output text (no block)
-fn output_paragraph(raw_output: &str) -> Paragraph<'static> {
-    Paragraph::new(raw_output.into_text().unwrap_or_default()).wrap(Wrap { trim: false })
-}
-
-/// Render scrollable ANSI output. The title gets `[row/total]` when the
-/// wrapped text overflows the panel.
-fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, raw_output: &str, title: &str) {
-    let paragraph = output_paragraph(raw_output);
-    let total_lines = paragraph.line_count(area.width.saturating_sub(PANEL_BORDER_COLS));
+    let total_lines = cache.line_count;
     let visible_lines = app.view.output_visible_lines;
     let title = if total_lines > visible_lines && visible_lines > 0 {
         let current_line = app.view.output_scroll + 1;
@@ -690,7 +919,8 @@ fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, raw_output: &str,
     };
     // ratatui scrolls by u16; larger offsets saturate instead of wrapping
     let scroll = u16::try_from(app.view.output_scroll).unwrap_or(u16::MAX);
-    let paragraph = paragraph
+    let paragraph = Paragraph::new(cache.text.clone())
+        .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title))
         .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
@@ -752,13 +982,7 @@ fn fix_all_results_text(app: &App) -> String {
 
 /// Render fix-all results (completed)
 fn render_fix_all_results(app: &App, frame: &mut Frame, area: Rect) {
-    render_scrollable(
-        app,
-        frame,
-        area,
-        &fix_all_results_text(app),
-        "Fix All Results",
-    );
+    render_scrollable(app, frame, area, "Fix All Results");
 }
 
 /// Render fix-all running status
@@ -807,8 +1031,8 @@ fn fix_result_text(fix_result: &CheckResult) -> String {
 }
 
 /// Render single fix result
-fn render_fix_result(app: &App, fix_result: &CheckResult, frame: &mut Frame, area: Rect) {
-    render_scrollable(app, frame, area, &fix_result_text(fix_result), "Fix Result");
+fn render_fix_result(app: &App, frame: &mut Frame, area: Rect) {
+    render_scrollable(app, frame, area, "Fix Result");
 }
 
 /// Render fix running status
@@ -947,7 +1171,7 @@ fn render_check_output(
         return;
     };
 
-    let Some(result) = app.results.get(check.id()) else {
+    if !app.results.contains_key(check.id()) {
         let title = format!(" {} ", check.name());
         let block = Block::default().borders(Borders::ALL).title(title);
         let paragraph = Paragraph::new("Select a check to view details")
@@ -955,10 +1179,9 @@ fn render_check_output(
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
-    };
+    }
 
-    let raw_output = build_check_output_text(app, check, result, area.width);
-    render_scrollable(app, frame, area, &raw_output, check.name());
+    render_scrollable(app, frame, area, check.name());
 }
 
 /// Build the pre-command output text
@@ -1001,8 +1224,7 @@ fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
 
 /// Render pre-command output details
 fn render_pre_command_output(app: &App, pre_cmd: &PreCommandState, frame: &mut Frame, area: Rect) {
-    let raw_output = pre_command_output_text(pre_cmd);
-    render_scrollable(app, frame, area, &raw_output, &pre_cmd.name);
+    render_scrollable(app, frame, area, &pre_cmd.name);
 }
 
 fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -1010,13 +1232,18 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // the same inner rect here so mouse hit-testing matches what's drawn.
     let inner_area = Block::default().borders(Borders::ALL).inner(area);
     app.set_output_layout(area, inner_area);
+    // Prime the cache once up front: `clamp_output_scroll` below only
+    // consults it when there's a nonzero scroll offset to clamp, but
+    // `render_scrollable` always needs it, so it can't rely on that path
+    // alone to populate it (e.g. the very first frame, scroll == 0).
+    ensure_output_cache(app, area.width);
     app.clamp_output_scroll();
 
     // Dispatch to appropriate sub-renderer based on state
     match output_view(app) {
         OutputView::FixAllResults => render_fix_all_results(app, frame, area),
         OutputView::FixAllRunning => render_fix_all_running(app, frame, area),
-        OutputView::FixResult(result) => render_fix_result(app, result, frame, area),
+        OutputView::FixResult(_) => render_fix_result(app, frame, area),
         OutputView::FixRunning => render_fix_running(frame, area),
         OutputView::PreCommand(pc) => render_pre_command_output(app, pc, frame, area),
         OutputView::Check(check) => render_check_output(app, check, frame, area),
@@ -1206,6 +1433,58 @@ mod tests {
         assert_eq!(
             truncate_path("a/very/long/dir/path/file.rs", 16),
             "…r/path/file.rs"
+        );
+    }
+
+    use super::super::app::tests::{make_check, minimal_config_yaml};
+    use crate::git::ChangedFiles;
+    use crate::runner::CheckStatus;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// App with one check whose output is large enough to make re-parsing
+    /// wasteful (mirrors #126's "MBs of test output" scenario at a test-
+    /// friendly size).
+    fn make_test_app() -> App {
+        let config = serde_yaml::from_str(minimal_config_yaml()).expect("failed to parse config");
+        let changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "development".to_string(),
+        };
+        let check = make_check("php-lint", "fast", "PHP Lint", false, false);
+        let mut app = App::new(config, changed_files, vec![check], "main".to_string());
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = CheckStatus::Passed;
+        result.output = "\x1b[32mok\x1b[0m line\n".repeat(2000);
+        app
+    }
+
+    /// #126: rendering a frame calls into the cache from two places
+    /// (`App::clamp_output_scroll` -> `output_line_count`, then
+    /// `render_scrollable`); an unchanged second frame must not reparse.
+    #[test]
+    fn test_render_output_shares_cache_across_call_sites_and_frames() {
+        reset_parse_calls();
+        let mut app = make_test_app();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, 80, 20);
+
+        terminal
+            .draw(|f| render_output(&mut app, f, area))
+            .expect("draw");
+        assert_eq!(
+            parse_calls(),
+            1,
+            "first frame should parse/wrap exactly once, shared by clamp + render"
+        );
+
+        terminal
+            .draw(|f| render_output(&mut app, f, area))
+            .expect("draw");
+        assert_eq!(
+            parse_calls(),
+            1,
+            "second frame with unchanged content/width must hit the cache, not reparse"
         );
     }
 }

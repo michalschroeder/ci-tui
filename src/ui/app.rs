@@ -289,6 +289,12 @@ pub struct App {
     /// command-line truncation when counting rendered lines)
     pub(crate) output_area_width: u16,
 
+    /// Cached parsed ANSI text + wrapped line count for the output panel
+    /// (see [`crate::ui::dashboard::output_line_count`] and
+    /// [`super::dashboard::OutputCache`]). Avoids re-parsing/re-wrapping
+    /// output every frame when nothing about it changed (#126).
+    pub(crate) output_cache: Option<super::dashboard::OutputCache>,
+
     /// UI view state: selection, scrolling, filtering, toggles, status line
     pub(crate) view: ViewState,
 
@@ -366,6 +372,7 @@ impl App {
             results,
             current_branch,
             output_area_width: 80,
+            output_cache: None,
             view: ViewState::default(),
             run: RunState::started_now(),
             pre_commands,
@@ -401,6 +408,7 @@ impl App {
         self.run = RunState::started_now();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
+        self.output_cache = None;
         self.needs_redraw = true;
     }
 
@@ -410,6 +418,9 @@ impl App {
         if let Some(slot) = self.checks.iter_mut().find(|c| c.id() == check.id()) {
             *slot = check;
         }
+        // resolved_command is part of OutputCacheKey::Check, so a changed
+        // command line invalidates the cache on the next read without a
+        // manual clear here.
         self.needs_redraw = true;
     }
 
@@ -852,8 +863,9 @@ impl App {
 
     /// Compute maximum scroll offset for whatever the output panel shows.
     /// Capped at `u16::MAX`, the largest offset ratatui can scroll to.
-    fn compute_max_scroll(&self) -> usize {
-        super::dashboard::output_line_count(self, self.output_area_width)
+    fn compute_max_scroll(&mut self) -> usize {
+        let width = self.output_area_width;
+        crate::ui::dashboard::output_line_count(self, width)
             .saturating_sub(self.view.output_visible_lines)
             .min(u16::MAX as usize)
     }
@@ -998,14 +1010,14 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::checks::{CheckFiles, CheckToRun};
     use crate::config::{CheckDefinition, CiConfig};
     use crate::git::ChangedFiles;
     use crate::runner::{CheckResult, CheckStatus};
 
-    fn minimal_config_yaml() -> &'static str {
+    pub(crate) fn minimal_config_yaml() -> &'static str {
         r#"
 version: 2
 
@@ -1048,7 +1060,13 @@ checks:
         serde_yaml::from_str(minimal_config_yaml()).expect("Failed to parse config")
     }
 
-    fn make_check(id: &str, group: &str, name: &str, has_fix: bool, on_demand: bool) -> CheckToRun {
+    pub(crate) fn make_check(
+        id: &str,
+        group: &str,
+        name: &str,
+        has_fix: bool,
+        on_demand: bool,
+    ) -> CheckToRun {
         CheckToRun {
             id: id.to_string(),
             group: group.to_string(),
@@ -1952,6 +1970,53 @@ checks:
         // 6 header rows + 200 chars wrapped at 40 cols (5 rows) = 11 rows;
         // 11 - 5 visible = 6. Counting text lines gave 7 - 5 = 2.
         assert_eq!(app.view.output_scroll, 6);
+    }
+
+    /// #126: the cached line count must reflect appended (streamed) output
+    /// on the very next call, not a stale count from before the append.
+    #[test]
+    fn test_output_line_count_reflects_streamed_append() {
+        let mut app = make_app();
+        {
+            let r = app.results.get_mut("php-lint").unwrap();
+            r.status = CheckStatus::Running;
+            r.output = "line1\n".to_string();
+        }
+        let before = crate::ui::dashboard::output_line_count(&mut app, 80);
+
+        app.results
+            .get_mut("php-lint")
+            .unwrap()
+            .output
+            .push_str("line2\nline3\n");
+        let after = crate::ui::dashboard::output_line_count(&mut app, 80);
+
+        assert!(
+            after > before,
+            "line count must grow after streamed append, not reuse a stale cached value \
+             (before={before}, after={after})"
+        );
+    }
+
+    /// #126: a panel resize (width change) must invalidate the cache and
+    /// rewrap at the new width, not reuse the old width's line count.
+    #[test]
+    fn test_output_line_count_recomputes_on_width_change() {
+        let mut app = make_app();
+        {
+            let r = app.results.get_mut("php-lint").unwrap();
+            r.status = CheckStatus::Passed;
+            r.output = "x".repeat(200);
+        }
+
+        let wide = crate::ui::dashboard::output_line_count(&mut app, 100);
+        let narrow = crate::ui::dashboard::output_line_count(&mut app, 40);
+
+        assert!(
+            narrow > wide,
+            "narrower width must rewrap into more lines, not reuse the wide-width cached count \
+             (wide={wide}, narrow={narrow})"
+        );
     }
 
     #[test]
