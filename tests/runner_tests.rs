@@ -827,6 +827,46 @@ mod check_runner_tests {
     }
 
     #[tokio::test]
+    async fn run_checks_truncates_pre_command_output() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: "1\n2\n3\n4\n5".to_string(),
+            stderr: String::new(),
+        });
+
+        let mut config = ConfigBuilder::new()
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+        config.max_output_lines = 2;
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+        let pre_output = events.iter().find_map(|e| match e {
+            RunnerEvent::PreCommandFinished { output, .. } => Some(output.clone()),
+            _ => None,
+        });
+
+        assert_eq!(
+            pre_output.as_deref(),
+            Some("… 3 lines truncated\n4\n5"),
+            "pre-command output should be capped at max_output_lines like check output"
+        );
+    }
+
+    #[tokio::test]
     async fn local_mode_pre_command_runs_on_host_shell() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().times(0);

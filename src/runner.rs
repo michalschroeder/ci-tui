@@ -781,10 +781,11 @@ impl CheckRunner {
 
         let stderr = filter_docker_warnings(&output.stderr);
         let combined = if stderr.is_empty() {
-            output.stdout.clone()
+            output.stdout
         } else {
             format!("{}\n{}", output.stdout, stderr)
         };
+        let combined = truncate_output(combined, self.config.max_output_lines);
         (output.success, combined, duration_ms)
     }
 
@@ -924,8 +925,10 @@ async fn run_check_with_target(
 /// `check_env` is merged over the target's global env (check env wins).
 /// `timeout` bounds the run (`None` = unbounded); expiry yields
 /// [`CheckStatus::TimedOut`] with the reason in `error_output`.
-/// `max_output_lines` caps stdout/stderr to their last N lines each (see
-/// [`truncate_output`]), bounding memory for a runaway command.
+/// `max_output_lines` caps stored stdout/stderr to their last N lines each
+/// (see [`truncate_output`]), bounding *retained* memory for a runaway
+/// command. Peak memory during capture is unbounded until the command exits
+/// or times out — output is buffered in full before truncation.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command_with_executor(
     check_id: String,

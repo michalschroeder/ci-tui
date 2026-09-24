@@ -224,8 +224,9 @@ pub fn format_result(result: &CheckResult) -> String {
 
 /// Format a failed check's output for display.
 ///
-/// Shows the full stdout and stderr output without truncation, framed with
-/// a box header/footer. Optionally includes a fix command hint.
+/// Shows `result.output`/`error_output` as stored (already capped at
+/// `max_output_lines` upstream), framed with a box header/footer. Optionally
+/// includes a fix command hint.
 pub fn format_failed_check(result: &CheckResult, fix_command: Option<&str>) -> String {
     let mut buf = String::new();
 
