@@ -3,6 +3,7 @@
 
 mod common;
 
+use ci_tui::config::DEFAULT_MAX_OUTPUT_LINES;
 use ci_tui::runner::{CheckStatus, CommandOutput, MockCommandExecutor};
 use ci_tui::simple::run_check_with_executor;
 use std::path::Path;
@@ -22,6 +23,7 @@ async fn passes_when_executor_succeeds() {
         Path::new("/app"),
         &cfg,
         &mock,
+        DEFAULT_MAX_OUTPUT_LINES,
     )
     .await;
     assert_eq!(result.status, CheckStatus::Passed);
@@ -43,6 +45,7 @@ async fn fails_with_stderr_when_executor_reports_failure() {
         Path::new("/app"),
         &cfg,
         &mock,
+        DEFAULT_MAX_OUTPUT_LINES,
     )
     .await;
     assert_eq!(result.status, CheckStatus::Failed);
@@ -66,6 +69,7 @@ async fn uses_docker_run_when_container_not_running() {
         Path::new("/app"),
         &cfg,
         &mock,
+        DEFAULT_MAX_OUTPUT_LINES,
     )
     .await;
 }
@@ -86,7 +90,7 @@ async fn per_check_container_overrides_default() {
     let mut c = common::make_exec_check("c", "cargo test", None);
     c.definition.container = Some("override".into());
     let cfg = common::test_docker_target("img:latest");
-    run_check_with_executor(&c, Path::new("/app"), &cfg, &mock).await;
+    run_check_with_executor(&c, Path::new("/app"), &cfg, &mock, DEFAULT_MAX_OUTPUT_LINES).await;
 }
 
 use ci_tui::simple::run_with_executor;

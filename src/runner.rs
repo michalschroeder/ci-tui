@@ -210,6 +210,23 @@ pub fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
+/// Cap `text` at `max_lines` lines, keeping the *last* `max_lines` (a runaway
+/// command's most recent output is usually the relevant part). When lines are
+/// dropped, a `"... N lines truncated"` marker is prepended. Returns `text`
+/// unchanged (no copy) when it's already within the cap.
+pub fn truncate_output(text: String, max_lines: usize) -> String {
+    let total = text.lines().count();
+    if total <= max_lines {
+        return text;
+    }
+    let truncated = total - max_lines;
+    let marker = format!("… {truncated} lines truncated");
+    std::iter::once(marker.as_str())
+        .chain(text.lines().skip(truncated))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// True if `key` is a valid environment variable identifier: `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
@@ -712,6 +729,7 @@ impl CheckRunner {
                 &event_tx,
                 executor.as_ref(),
                 &cancels,
+                config.max_output_lines,
             )
             .await;
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
@@ -730,6 +748,7 @@ impl CheckRunner {
             event_tx,
             self.executor.as_ref(),
             &self.cancels,
+            self.config.max_output_lines,
         )
         .await
     }
@@ -762,10 +781,11 @@ impl CheckRunner {
 
         let stderr = filter_docker_warnings(&output.stderr);
         let combined = if stderr.is_empty() {
-            output.stdout.clone()
+            output.stdout
         } else {
             format!("{}\n{}", output.stdout, stderr)
         };
+        let combined = truncate_output(combined, self.config.max_output_lines);
         (output.success, combined, duration_ms)
     }
 
@@ -877,6 +897,7 @@ async fn run_all_pre_commands(
 
 /// Run `check`, cancellable via `cancels`. `CheckStarted` is sent once
 /// registered, so a check shown as running can always be cancelled.
+#[allow(clippy::too_many_arguments)]
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
@@ -884,6 +905,7 @@ async fn run_check_with_target(
     event_tx: &mpsc::Sender<RunnerEvent>,
     executor: &dyn CommandExecutor,
     cancels: &CancelRegistry,
+    max_output_lines: usize,
 ) -> CheckResult {
     let run = async {
         let _ = event_tx
@@ -891,7 +913,8 @@ async fn run_check_with_target(
                 check_id: check.id().to_string(),
             })
             .await;
-        run_single_check_with_executor(check, project_root, target, executor).await
+        run_single_check_with_executor(check, project_root, target, executor, max_output_lines)
+            .await
     };
     run_check_cancellable(cancels, check.id(), run).await
 }
@@ -902,6 +925,10 @@ async fn run_check_with_target(
 /// `check_env` is merged over the target's global env (check env wins).
 /// `timeout` bounds the run (`None` = unbounded); expiry yields
 /// [`CheckStatus::TimedOut`] with the reason in `error_output`.
+/// `max_output_lines` caps stored stdout/stderr to their last N lines each
+/// (see [`truncate_output`]), bounding *retained* memory for a runaway
+/// command. Peak memory during capture is unbounded until the command exits
+/// or times out — output is buffered in full before truncation.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command_with_executor(
     check_id: String,
@@ -912,6 +939,7 @@ pub async fn execute_command_with_executor(
     check_env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
     timeout: Option<Duration>,
+    max_output_lines: usize,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
@@ -932,8 +960,8 @@ pub async fn execute_command_with_executor(
     CheckResult {
         check_id,
         status,
-        output: stdout,
-        error_output: filter_docker_warnings(&stderr),
+        output: truncate_output(stdout, max_output_lines),
+        error_output: truncate_output(filter_docker_warnings(&stderr), max_output_lines),
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
@@ -945,8 +973,16 @@ pub async fn run_single_check(
     check: &CheckToRun,
     project_root: &std::path::Path,
     target: &ExecTarget,
+    max_output_lines: usize,
 ) -> CheckResult {
-    run_single_check_with_executor(check, project_root, target, &RealCommandExecutor).await
+    run_single_check_with_executor(
+        check,
+        project_root,
+        target,
+        &RealCommandExecutor,
+        max_output_lines,
+    )
+    .await
 }
 
 /// Run a single check with a custom executor (test-facing).
@@ -957,6 +993,7 @@ pub async fn run_single_check_with_executor(
     project_root: &std::path::Path,
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
+    max_output_lines: usize,
 ) -> CheckResult {
     run_check_with_command_with_executor(
         check,
@@ -964,6 +1001,7 @@ pub async fn run_single_check_with_executor(
         project_root,
         target,
         executor,
+        max_output_lines,
     )
     .await
 }
@@ -975,6 +1013,7 @@ pub async fn run_fix_command(
     project_root: &std::path::Path,
     container: Option<&str>,
     target: &ExecTarget,
+    max_output_lines: usize,
 ) -> CheckResult {
     run_fix_command_with_executor(
         fix_command,
@@ -982,17 +1021,20 @@ pub async fn run_fix_command(
         container,
         target,
         &RealCommandExecutor,
+        max_output_lines,
     )
     .await
 }
 
 /// Run a fix command with a custom executor (test-facing).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
     container: Option<&str>,
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
+    max_output_lines: usize,
 ) -> CheckResult {
     execute_command_with_executor(
         "fix".to_string(),
@@ -1003,6 +1045,7 @@ pub async fn run_fix_command_with_executor(
         &HashMap::new(),
         executor,
         None,
+        max_output_lines,
     )
     .await
 }
@@ -1016,18 +1059,28 @@ pub async fn run_check_with_command(
     command: &str,
     project_root: &std::path::Path,
     target: &ExecTarget,
+    max_output_lines: usize,
 ) -> CheckResult {
-    run_check_with_command_with_executor(check, command, project_root, target, &RealCommandExecutor)
-        .await
+    run_check_with_command_with_executor(
+        check,
+        command,
+        project_root,
+        target,
+        &RealCommandExecutor,
+        max_output_lines,
+    )
+    .await
 }
 
 /// Run a check with a custom command and custom executor (test-facing).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
+    max_output_lines: usize,
 ) -> CheckResult {
     execute_command_with_executor(
         check.id().to_string(),
@@ -1038,6 +1091,7 @@ pub async fn run_check_with_command_with_executor(
         &check.definition.env,
         executor,
         check.definition.timeout,
+        max_output_lines,
     )
     .await
 }
@@ -1085,6 +1139,30 @@ mod tests {
         let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
         let cmd = build_local_command(&local, &env, "ls");
         assert_eq!(cmd, "bash -c 'ls'");
+    }
+
+    #[test]
+    fn test_truncate_output_under_cap_is_unchanged() {
+        let text = "a\nb\nc";
+        assert_eq!(truncate_output(text.to_string(), 10), text);
+    }
+
+    #[test]
+    fn test_truncate_output_at_cap_is_unchanged() {
+        let text = "a\nb\nc";
+        assert_eq!(truncate_output(text.to_string(), 3), text);
+    }
+
+    #[test]
+    fn test_truncate_output_over_cap_keeps_last_n_with_marker() {
+        let text = "1\n2\n3\n4\n5";
+        let result = truncate_output(text.to_string(), 2);
+        assert_eq!(result, "… 3 lines truncated\n4\n5");
+    }
+
+    #[test]
+    fn test_truncate_output_empty_text_is_unchanged() {
+        assert_eq!(truncate_output(String::new(), 5), "");
     }
 
     #[test]

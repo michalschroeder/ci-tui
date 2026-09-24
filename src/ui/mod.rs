@@ -227,7 +227,14 @@ struct TaskCtx {
 impl TaskCtx {
     /// Run `command` as `check` (check's container override and env apply)
     async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        run_check_with_command(check, command, &self.exec_root, &self.config.runner).await
+        run_check_with_command(
+            check,
+            command,
+            &self.exec_root,
+            &self.config.runner,
+            self.config.max_output_lines,
+        )
+        .await
     }
 
     /// [`Self::run`], cancellable with 's' (then reports `Cancelled`)

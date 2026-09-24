@@ -45,12 +45,21 @@ pub struct CiConfig {
     /// Check groups in execution order (YAML key order preserved)
     pub checks: IndexMap<String, GroupConfig>,
     pub ignore_patterns: Vec<String>,
+    /// Max lines kept per stdout/stderr stream on a `CheckResult` (last N lines
+    /// kept; older lines dropped with a "... X lines truncated" marker). Bounds
+    /// memory for runaway commands. Defaults to [`DEFAULT_MAX_OUTPUT_LINES`].
+    pub max_output_lines: usize,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
     /// Compiled file_patterns regexes keyed by pattern name. Populated eagerly in `load_config`.
     pub(crate) compiled_file_patterns: OnceLock<HashMap<String, Regex>>,
 }
+
+/// Default cap on stored lines per stdout/stderr stream when `max_output_lines`
+/// is omitted from the config. Generous enough for normal CI logs while still
+/// bounding a runaway command.
+pub const DEFAULT_MAX_OUTPUT_LINES: usize = 10_000;
 
 /// On-disk YAML shape of [`CiConfig`]: flat `runner` flag + optional sections.
 /// Converted to [`CiConfig`] (with a typed [`ExecTarget`]) right after parsing.
@@ -74,6 +83,9 @@ struct RawCiConfig {
     /// Default timeout for checks and pre-commands that set none
     #[serde(default, deserialize_with = "deserialize_timeout")]
     timeout: Option<Duration>,
+    /// Max lines kept per stdout/stderr stream (see [`DEFAULT_MAX_OUTPUT_LINES`])
+    #[serde(default)]
+    max_output_lines: Option<usize>,
 }
 
 impl TryFrom<RawCiConfig> for CiConfig {
@@ -103,6 +115,7 @@ impl TryFrom<RawCiConfig> for CiConfig {
             file_patterns: raw.file_patterns,
             checks,
             ignore_patterns: raw.ignore_patterns,
+            max_output_lines: raw.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         })
@@ -173,6 +186,7 @@ impl Clone for CiConfig {
             file_patterns: self.file_patterns.clone(),
             checks: self.checks.clone(),
             ignore_patterns: self.ignore_patterns.clone(),
+            max_output_lines: self.max_output_lines,
             // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -606,6 +620,7 @@ impl CiConfig {
             file_patterns,
             checks,
             ignore_patterns,
+            max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }
@@ -777,7 +792,8 @@ mod tests {
 
     // Import builder types from the main config module
     use super::{
-        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig,
+        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig,
+        GroupConfig, DEFAULT_MAX_OUTPUT_LINES,
     };
     use indexmap::IndexMap;
     use std::collections::HashMap;
@@ -792,6 +808,7 @@ mod tests {
         file_patterns: HashMap<String, FilePattern>,
         checks: IndexMap<String, GroupConfig>,
         ignore_patterns: Vec<String>,
+        max_output_lines: usize,
     }
 
     impl ConfigBuilder {
@@ -799,6 +816,7 @@ mod tests {
             Self {
                 docker_project_dir: "./test".to_string(),
                 docker_service: "app".to_string(),
+                max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
                 git_base: "main".to_string(),
                 git_fallback: "HEAD~1".to_string(),
                 file_patterns: HashMap::new(),
@@ -878,6 +896,11 @@ mod tests {
             self
         }
 
+        fn with_max_output_lines(mut self, max_output_lines: usize) -> Self {
+            self.max_output_lines = max_output_lines;
+            self
+        }
+
         fn build(self) -> CiConfig {
             CiConfig {
                 version: 2,
@@ -898,6 +921,7 @@ mod tests {
                 file_patterns: self.file_patterns,
                 checks: self.checks,
                 ignore_patterns: self.ignore_patterns,
+                max_output_lines: self.max_output_lines,
                 compiled_ignore_patterns: OnceLock::new(),
                 compiled_file_patterns: OnceLock::new(),
             }
@@ -982,6 +1006,12 @@ mod tests {
         ConfigBuilder::new()
             .with_ignore_patterns(vec![r"\.md$", r"\.github/"])
             .build()
+    }
+
+    #[test]
+    fn test_config_builder_with_max_output_lines() {
+        let config = ConfigBuilder::new().with_max_output_lines(50).build();
+        assert_eq!(config.max_output_lines, 50);
     }
 
     #[test]
@@ -2339,6 +2369,32 @@ checks:
             let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
             assert!(msg.contains(path), "error should name `{path}`: {msg}");
             assert!(msg.contains("duration"), "error should explain: {msg}");
+        }
+    }
+
+    mod test_max_output_lines {
+        use super::*;
+
+        /// Minimal local-mode config; `max_output_lines` line optional.
+        fn yaml(max_output_lines: Option<usize>) -> String {
+            let extra = max_output_lines
+                .map(|n| format!("max_output_lines: {n}\n"))
+                .unwrap_or_default();
+            format!(
+                "version: 2\nrunner: local\n{extra}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
+            )
+        }
+
+        #[test]
+        fn defaults_when_omitted() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(None)).unwrap();
+            assert_eq!(config.max_output_lines, DEFAULT_MAX_OUTPUT_LINES);
+        }
+
+        #[test]
+        fn custom_value_is_applied() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(Some(500))).unwrap();
+            assert_eq!(config.max_output_lines, 500);
         }
     }
 }

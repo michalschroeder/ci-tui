@@ -6,6 +6,7 @@
 //! - CheckResult factory methods
 //! - CheckRunner orchestration
 
+use ci_tui::config::DEFAULT_MAX_OUTPUT_LINES;
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_command_with_executor,
     filter_docker_warnings, CheckResult, CheckStatus,
@@ -334,6 +335,7 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -367,6 +369,7 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -402,6 +405,7 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
     }
@@ -434,6 +438,7 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
     }
@@ -453,6 +458,7 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -483,12 +489,42 @@ mod execute_docker_command_tests {
             &env,
             &mock,
             None,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
         // Docker warnings should be filtered from error output
         assert!(!result.error_output.contains("variable is not set"));
         assert!(result.error_output.contains("Actual error"));
+    }
+
+    #[tokio::test]
+    async fn caps_stdout_and_stderr_to_max_output_lines() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: "1\n2\n3\n4\n5".to_string(),
+            stderr: "e1\ne2\ne3".to_string(),
+        });
+
+        let config = super::common::test_docker_target("test-image:latest");
+        let env = HashMap::new();
+        let result = execute_command_with_executor(
+            "test-check".to_string(),
+            "test",
+            Path::new("/app"),
+            Some("test-container"),
+            &config,
+            &env,
+            &mock,
+            None,
+            2,
+        )
+        .await;
+
+        assert_eq!(result.output, "… 3 lines truncated\n4\n5");
+        assert_eq!(result.error_output, "… 1 lines truncated\ne2\ne3");
     }
 }
 
@@ -791,6 +827,46 @@ mod check_runner_tests {
     }
 
     #[tokio::test]
+    async fn run_checks_truncates_pre_command_output() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(|_, _| CommandOutput {
+            success: true,
+            stdout: "1\n2\n3\n4\n5".to_string(),
+            stderr: String::new(),
+        });
+
+        let mut config = ConfigBuilder::new()
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "clippy",
+                common::configs::CheckBuilder::new("Clippy", "cargo clippy").build(),
+            )
+            .build();
+        config.max_output_lines = 2;
+
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = vec![make_widget_check("clippy", "lint", "Clippy", false)];
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+        let pre_output = events.iter().find_map(|e| match e {
+            RunnerEvent::PreCommandFinished { output, .. } => Some(output.clone()),
+            _ => None,
+        });
+
+        assert_eq!(
+            pre_output.as_deref(),
+            Some("… 3 lines truncated\n4\n5"),
+            "pre-command output should be capped at max_output_lines like check output"
+        );
+    }
+
+    #[tokio::test]
     async fn local_mode_pre_command_runs_on_host_shell() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().times(0);
@@ -1014,7 +1090,14 @@ mod run_single_check_with_executor_tests {
         let mut docker = super::common::test_docker_config("img:latest");
         docker.container = Some("default-container".into());
         let cfg = ExecTarget::Docker(docker);
-        let result = run_single_check_with_executor(&check, Path::new("/app"), &cfg, &mock).await;
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
 
         assert_eq!(result.status, CheckStatus::Passed);
         assert_eq!(result.check_id, "c1");
@@ -1039,7 +1122,14 @@ mod run_single_check_with_executor_tests {
         let mut docker = super::common::test_docker_config("img:latest");
         docker.container = Some("default-container".into());
         let cfg = ExecTarget::Docker(docker);
-        let _ = run_single_check_with_executor(&check, Path::new("/app"), &cfg, &mock).await;
+        let _ = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1065,7 +1155,14 @@ mod run_single_check_with_executor_tests {
         docker.env.insert("BAR".into(), "global".into());
         let cfg = ExecTarget::Docker(docker);
 
-        let _ = run_single_check_with_executor(&check, Path::new("/app"), &cfg, &mock).await;
+        let _ = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1080,7 +1177,14 @@ mod run_single_check_with_executor_tests {
 
         let check = super::common::make_exec_check("c1", "false", None);
         let cfg = super::common::test_docker_target("img:latest");
-        let result = run_single_check_with_executor(&check, Path::new("/app"), &cfg, &mock).await;
+        let result = run_single_check_with_executor(
+            &check,
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
         assert_eq!(result.status, CheckStatus::Failed);
         assert!(result.error_output.contains("oops"));
     }
@@ -1106,9 +1210,15 @@ mod run_check_with_command_with_executor_tests {
 
         let c = super::common::make_exec_check("phpunit", "phpunit a.rs", None);
         let cfg = super::common::test_docker_target("img:latest");
-        let _ =
-            run_check_with_command_with_executor(&c, "phpunit-all", Path::new("/app"), &cfg, &mock)
-                .await;
+        let _ = run_check_with_command_with_executor(
+            &c,
+            "phpunit-all",
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
     }
 }
 
@@ -1134,6 +1244,7 @@ mod run_fix_command_with_executor_tests {
             Some("container"),
             &cfg,
             &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
         assert_eq!(result.check_id, "fix");
@@ -1159,6 +1270,7 @@ mod run_fix_command_with_executor_tests {
             Some("container"),
             &cfg,
             &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
     }
@@ -1193,6 +1305,7 @@ mod timeout_tests {
             Path::new("/tmp"),
             &local_sh(),
             &RealCommandExecutor,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -1219,6 +1332,7 @@ mod timeout_tests {
             Path::new("/tmp"),
             &local_sh(),
             &RealCommandExecutor,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
         assert_eq!(result.status, CheckStatus::Passed);
@@ -1489,6 +1603,7 @@ mod cancel_tests {
             Path::new("/tmp"),
             &local_sh(),
             &RealCommandExecutor,
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -1554,6 +1669,7 @@ mod cancel_tests {
             &HashMap::new(),
             &executor,
             Some(Duration::from_millis(20)),
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 
@@ -1585,6 +1701,7 @@ mod cancel_tests {
             &HashMap::new(),
             &mock,
             Some(Duration::from_secs(5)),
+            DEFAULT_MAX_OUTPUT_LINES,
         )
         .await;
 

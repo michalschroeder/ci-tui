@@ -37,6 +37,7 @@ pub async fn run_with_executor(
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Result<Vec<CheckResult>> {
     let target = &config.runner;
+    let max_output_lines = config.max_output_lines;
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
@@ -45,9 +46,23 @@ pub async fn run_with_executor(
             .map(|g| g.parallel)
             .unwrap_or(false);
         let results = if parallel {
-            run_parallel(group_checks, &project_root, target, executor.clone()).await
+            run_parallel(
+                group_checks,
+                &project_root,
+                target,
+                executor.clone(),
+                max_output_lines,
+            )
+            .await
         } else {
-            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
+            run_sequential(
+                group_checks,
+                &project_root,
+                target,
+                executor.as_ref(),
+                max_output_lines,
+            )
+            .await
         };
         all_results.extend(results);
     }
@@ -70,6 +85,7 @@ pub async fn run(
 ) -> Result<()> {
     let start_time = Instant::now();
     let target = &config.runner;
+    let max_output_lines = config.max_output_lines;
 
     println!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
@@ -102,9 +118,23 @@ pub async fn run(
             .unwrap_or(false);
 
         let results = if parallel {
-            run_parallel(group_checks, &project_root, target, executor.clone()).await
+            run_parallel(
+                group_checks,
+                &project_root,
+                target,
+                executor.clone(),
+                max_output_lines,
+            )
+            .await
         } else {
-            run_sequential(group_checks, &project_root, target, executor.as_ref()).await
+            run_sequential(
+                group_checks,
+                &project_root,
+                target,
+                executor.as_ref(),
+                max_output_lines,
+            )
+            .await
         };
 
         for result in results {
@@ -194,8 +224,9 @@ pub fn format_result(result: &CheckResult) -> String {
 
 /// Format a failed check's output for display.
 ///
-/// Shows the full stdout and stderr output without truncation, framed with
-/// a box header/footer. Optionally includes a fix command hint.
+/// Shows `result.output`/`error_output` as stored (already capped at
+/// `max_output_lines` upstream), framed with a box header/footer. Optionally
+/// includes a fix command hint.
 pub fn format_failed_check(result: &CheckResult, fix_command: Option<&str>) -> String {
     let mut buf = String::new();
 
@@ -233,13 +264,15 @@ async fn run_sequential(
     project_root: &Path,
     target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
+    max_output_lines: usize,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
         if check.is_on_demand() {
             continue;
         }
-        let result = run_check_with_executor(check, project_root, target, executor).await;
+        let result =
+            run_check_with_executor(check, project_root, target, executor, max_output_lines).await;
         results.push(result);
     }
     results
@@ -250,6 +283,7 @@ async fn run_parallel(
     project_root: &Path,
     target: &ExecTarget,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
+    max_output_lines: usize,
 ) -> Vec<CheckResult> {
     let mut handles = Vec::new();
 
@@ -263,7 +297,14 @@ async fn run_parallel(
         let executor = executor.clone();
 
         let handle = tokio::spawn(async move {
-            run_check_with_executor(&check, &project_root, &target, executor.as_ref()).await
+            run_check_with_executor(
+                &check,
+                &project_root,
+                &target,
+                executor.as_ref(),
+                max_output_lines,
+            )
+            .await
         });
         handles.push(handle);
     }
@@ -283,15 +324,23 @@ pub async fn run_check_with_executor(
     project_root: &Path,
     target: &ExecTarget,
     executor: &dyn crate::runner::CommandExecutor,
+    max_output_lines: usize,
 ) -> CheckResult {
-    crate::runner::run_single_check_with_executor(check, project_root, target, executor).await
+    crate::runner::run_single_check_with_executor(
+        check,
+        project_root,
+        target,
+        executor,
+        max_output_lines,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::checks::CheckFiles;
-    use crate::config::{CheckDefinition, LocalConfig};
+    use crate::config::{CheckDefinition, LocalConfig, DEFAULT_MAX_OUTPUT_LINES};
     use crate::runner::{CommandOutput, MockCommandExecutor};
     use std::collections::HashMap;
 
@@ -334,7 +383,14 @@ mod tests {
                 stderr: String::new(),
             });
         let target = ExecTarget::Local(local);
-        let res = run_check_with_executor(&check("ls"), Path::new("."), &target, &mock).await;
+        let res = run_check_with_executor(
+            &check("ls"),
+            Path::new("."),
+            &target,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+        )
+        .await;
         assert_eq!(res.status, CheckStatus::Passed);
     }
 }
