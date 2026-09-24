@@ -151,6 +151,18 @@ pub struct StatusMessage {
     pub kind: StatusKind,
 }
 
+/// State of an in-progress or confirmed output search (`/` key)
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    /// Query typed so far (or confirmed on `Enter`)
+    pub query: String,
+    /// True while the query is still being typed (before `Enter`)
+    pub typing: bool,
+    /// Logical (unwrapped) line indices in the output that matched the
+    /// query, populated when the search is confirmed
+    pub matches: Vec<usize>,
+}
+
 /// UI view state: selection, scrolling, filtering, toggles, status line
 #[derive(Debug)]
 pub struct ViewState {
@@ -178,6 +190,10 @@ pub struct ViewState {
     /// Rendered area of the output panel (updated during render, used for
     /// mapping mouse wheel scroll events)
     pub output_area: Rect,
+    /// True while the `?` help overlay is shown; swallows all other keys
+    pub help_visible: bool,
+    /// Output search state (`/` key); `None` when not searching
+    pub search: Option<SearchState>,
 }
 
 impl Default for ViewState {
@@ -193,6 +209,8 @@ impl Default for ViewState {
             checks_list_area: Rect::default(),
             checks_list_row_to_item: Vec::new(),
             output_area: Rect::default(),
+            help_visible: false,
+            search: None,
         }
     }
 }
@@ -772,12 +790,14 @@ impl App {
     // Navigation - all methods set needs_redraw for immediate visual feedback
 
     /// Clear fix results and reset command view; shared by all selection
-    /// changes (keyboard navigation and mouse click)
+    /// changes (keyboard navigation and mouse click). Also clears any
+    /// output search, which is scoped to the previously selected check.
     fn reset_selection_view(&mut self) {
         self.fix.result = None;
         self.fix.all_results.clear();
         self.view.output_scroll = 0;
         self.view.show_full_command = false;
+        self.view.search = None;
     }
 
     /// Select the next item (stops at the last one)
@@ -799,6 +819,66 @@ impl App {
             self.view.selected_check -= 1;
         }
         self.needs_redraw = true;
+    }
+
+    /// Select the first item in the (filtered) list
+    pub fn select_first(&mut self) {
+        self.reset_selection_view();
+        self.view.selected_check = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Select the last item in the (filtered) list
+    pub fn select_last(&mut self) {
+        self.reset_selection_view();
+        self.view.selected_check = self.selectable_items().count().saturating_sub(1);
+        self.needs_redraw = true;
+    }
+
+    /// Indices (in the filtered list) of checks whose result is a failure,
+    /// i.e. `CheckStatus::Failed` or `CheckStatus::TimedOut` — the same
+    /// predicate used for the failed count in [`Self::count_by_status`].
+    fn failed_indices(&self) -> Vec<usize> {
+        self.selectable_items()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                SelectableItem::Check(check) => self
+                    .results
+                    .get(check.id())
+                    .filter(|r| r.status.is_failure())
+                    .map(|_| i),
+                SelectableItem::PreCommand(_) => None,
+            })
+            .collect()
+    }
+
+    /// Select the next failed/timed-out check, wrapping around. No-op when
+    /// no check is currently failed/timed-out.
+    pub fn select_next_failed(&mut self) {
+        let failed = self.failed_indices();
+        let Some(&next) = failed
+            .iter()
+            .find(|&&i| i > self.view.selected_check)
+            .or_else(|| failed.first())
+        else {
+            return;
+        };
+        self.select_item_index(next);
+    }
+
+    /// Select the previous failed/timed-out check, wrapping around. No-op
+    /// when no check is currently failed/timed-out.
+    pub fn select_prev_failed(&mut self) {
+        let failed = self.failed_indices();
+        let Some(&prev) = failed
+            .iter()
+            .rev()
+            .find(|&&i| i < self.view.selected_check)
+            .or_else(|| failed.last())
+        else {
+            return;
+        };
+        self.select_item_index(prev);
     }
 
     /// Select item `idx` directly (mouse click). Same reset-on-navigate
@@ -861,6 +941,19 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Scroll the output panel to the top (offset 0)
+    pub fn scroll_to_top(&mut self) {
+        self.view.output_scroll = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Scroll the output panel to the bottom (max scroll, same clamping as
+    /// [`Self::scroll_down`])
+    pub fn scroll_to_bottom(&mut self) {
+        self.view.output_scroll = self.compute_max_scroll();
+        self.needs_redraw = true;
+    }
+
     /// Compute maximum scroll offset for whatever the output panel shows.
     /// Capped at `u16::MAX`, the largest offset ratatui can scroll to.
     fn compute_max_scroll(&mut self) -> usize {
@@ -889,6 +982,7 @@ impl App {
             StatusFilter::All => StatusFilter::Failed,
             StatusFilter::Failed => StatusFilter::All,
         };
+        self.reset_selection_view();
         self.view.selected_check = 0;
         self.needs_redraw = true;
     }
@@ -896,6 +990,7 @@ impl App {
     /// Show all checks (clear the failed filter)
     pub fn show_all(&mut self) {
         self.view.status_filter = StatusFilter::All;
+        self.reset_selection_view();
         self.view.selected_check = 0;
         self.needs_redraw = true;
     }
@@ -903,6 +998,52 @@ impl App {
     /// Toggle full vs truncated command (and file list) in the output panel
     pub fn toggle_full_command(&mut self) {
         self.view.show_full_command = !self.view.show_full_command;
+        self.needs_redraw = true;
+    }
+
+    /// Toggle the `?` help overlay. While visible, other keys are swallowed
+    /// by the key handler rather than dispatched.
+    pub fn toggle_help(&mut self) {
+        self.view.help_visible = !self.view.help_visible;
+        self.needs_redraw = true;
+    }
+
+    /// Close the help overlay (`Esc` while it is shown)
+    pub fn close_help(&mut self) {
+        self.view.help_visible = false;
+        self.needs_redraw = true;
+    }
+
+    /// Start an output search (`/` key): future characters build the query
+    /// until confirmed (`Enter`) or cancelled (`Esc`)
+    pub fn open_search(&mut self) {
+        self.view.search = Some(SearchState {
+            query: String::new(),
+            typing: true,
+            matches: Vec::new(),
+        });
+        self.needs_redraw = true;
+    }
+
+    /// Append a typed character to the in-progress search query
+    pub fn search_push(&mut self, c: char) {
+        if let Some(search) = self.view.search.as_mut().filter(|s| s.typing) {
+            search.query.push(c);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Remove the last character from the in-progress search query
+    pub fn search_backspace(&mut self) {
+        if let Some(search) = self.view.search.as_mut().filter(|s| s.typing) {
+            search.query.pop();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Cancel search mode and clear any highlight (`Esc`)
+    pub fn cancel_search(&mut self) {
+        self.view.search = None;
         self.needs_redraw = true;
     }
 
@@ -2134,6 +2275,138 @@ checks:
                 app.expire_status_message(Instant::now() + STATUS_MESSAGE_TTL * 10);
                 assert!(app.view.status_message.is_some(), "{:?} must stay", kind);
             }
+        }
+
+        #[test]
+        fn test_toggle_help_shows_and_hides_overlay() {
+            let mut app = make_app();
+            assert!(!app.view.help_visible);
+            app.toggle_help();
+            assert!(app.view.help_visible);
+            app.needs_redraw = false;
+            app.toggle_help();
+            assert!(!app.view.help_visible);
+            assert!(app.needs_redraw);
+        }
+
+        #[test]
+        fn test_close_help_is_idempotent() {
+            let mut app = make_app();
+            app.toggle_help();
+            app.close_help();
+            assert!(!app.view.help_visible);
+            app.close_help();
+            assert!(!app.view.help_visible);
+        }
+
+        #[test]
+        fn test_select_first_and_last() {
+            let mut app = make_app();
+            app.view.selected_check = 1;
+
+            app.select_last();
+            assert_eq!(app.view.selected_check, 2);
+
+            app.select_first();
+            assert_eq!(app.view.selected_check, 0);
+        }
+
+        #[test]
+        fn test_select_first_last_clear_search() {
+            let mut app = make_app();
+            app.view.selected_check = 1;
+            app.open_search();
+
+            app.select_last();
+            assert!(app.view.search.is_none(), "changing check clears search");
+        }
+
+        #[test]
+        fn test_scroll_to_top_and_bottom() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().output = "line\n".repeat(50);
+            app.set_output_visible_lines(5);
+            app.scroll_to_bottom();
+            assert!(app.view.output_scroll > 0);
+
+            app.scroll_to_top();
+            assert_eq!(app.view.output_scroll, 0);
+        }
+
+        #[test]
+        fn test_select_next_prev_failed_wraps() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+            app.results.get_mut("phpunit").unwrap().status = CheckStatus::TimedOut;
+            // behat (index 2) stays on_demand, not failed
+
+            app.view.selected_check = 0; // on php-lint (failed)
+            app.select_next_failed();
+            assert_eq!(app.view.selected_check, 1, "moves to next failed (phpunit)");
+
+            app.select_next_failed();
+            assert_eq!(
+                app.view.selected_check, 0,
+                "wraps back to first failed (php-lint)"
+            );
+
+            app.select_prev_failed();
+            assert_eq!(app.view.selected_check, 1, "wraps to last failed (phpunit)");
+        }
+
+        #[test]
+        fn test_select_next_failed_noop_when_none_failed() {
+            let mut app = make_app();
+            app.view.selected_check = 0;
+
+            app.select_next_failed();
+            app.select_prev_failed();
+
+            assert_eq!(app.view.selected_check, 0, "no-op when nothing failed");
+        }
+
+        #[test]
+        fn test_search_open_push_backspace_cancel() {
+            let mut app = make_app();
+            assert!(app.view.search.is_none());
+
+            app.open_search();
+            let search = app.view.search.as_ref().expect("search open");
+            assert!(search.typing);
+            assert_eq!(search.query, "");
+
+            app.search_push('f');
+            app.search_push('o');
+            app.search_push('o');
+            assert_eq!(app.view.search.as_ref().unwrap().query, "foo");
+
+            app.search_backspace();
+            assert_eq!(app.view.search.as_ref().unwrap().query, "fo");
+
+            app.cancel_search();
+            assert!(app.view.search.is_none());
+        }
+
+        #[test]
+        fn test_search_push_ignored_when_not_typing() {
+            let mut app = make_app();
+            app.open_search();
+            app.view.search.as_mut().unwrap().typing = false;
+
+            app.search_push('x');
+
+            assert_eq!(app.view.search.as_ref().unwrap().query, "");
+        }
+
+        #[test]
+        fn test_search_cleared_when_selection_changes() {
+            let mut app = make_app();
+            app.open_search();
+            assert!(app.view.search.is_some());
+
+            app.next_check();
+
+            assert!(app.view.search.is_none(), "next_check clears search");
         }
 
         #[test]

@@ -564,24 +564,92 @@ fn handle_fix_all(app: &mut App, tasks: &mut Tasks) -> Action {
     Action::Continue
 }
 
+/// Handle a key press while the `?` help overlay is shown: only `?`/`Esc`
+/// close it, everything else is swallowed (no normal action dispatches).
+fn handle_help_key_event(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('?') => app.toggle_help(),
+        KeyCode::Esc => app.close_help(),
+        _ => {}
+    }
+    Action::Continue
+}
+
+/// Handle a key press while an output search (`/`) is open, whether still
+/// typing or confirmed (highlight visible). While typing, every key is
+/// intercepted (characters build the query, `Enter` confirms, `Backspace`
+/// edits, `Esc` cancels). Once confirmed, only `Esc` (clear highlight) is
+/// intercepted; anything else returns `None` so the caller falls through to
+/// normal handling (list nav, retry, etc. keep acting while a highlight is
+/// shown).
+fn handle_search_key_event(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let typing = app.view.search.as_ref()?.typing;
+    if !typing {
+        return match key.code {
+            KeyCode::Esc => {
+                app.cancel_search();
+                Some(Action::Continue)
+            }
+            _ => None,
+        };
+    }
+    match key.code {
+        KeyCode::Esc => app.cancel_search(),
+        KeyCode::Enter => dashboard::confirm_search(app),
+        KeyCode::Backspace => app.search_backspace(),
+        KeyCode::Char(c) => app.search_push(c),
+        _ => {}
+    }
+    Some(Action::Continue)
+}
+
+/// Selection/scroll navigation keys: list jump (g/G, n/N, arrows/jk) and
+/// output scroll (PageUp/Down, Home/End, J/K, Ctrl-d/u). Returns `false` for
+/// anything it doesn't handle, so the caller can fall through to actions.
+fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> bool {
+    match (key.code, key.modifiers) {
+        (KeyCode::Up | KeyCode::Char('k'), _) => app.previous_check(),
+        (KeyCode::Down | KeyCode::Char('j'), _) => app.next_check(),
+        (KeyCode::Char('g'), KeyModifiers::NONE) => app.select_first(),
+        (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_last(),
+        (KeyCode::Char('n'), KeyModifiers::NONE) => app.select_next_failed(),
+        (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.select_prev_failed(),
+        (KeyCode::PageUp, _) => app.scroll_up(PAGE_SCROLL_LINES),
+        (KeyCode::PageDown, _) => app.scroll_down(PAGE_SCROLL_LINES),
+        (KeyCode::Home, _) => app.scroll_to_top(),
+        (KeyCode::End, _) => app.scroll_to_bottom(),
+        (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.scroll_down(1),
+        (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.scroll_up(1),
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            app.scroll_down(app.view.output_visible_lines / 2)
+        }
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.scroll_up(app.view.output_visible_lines / 2)
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Handle a key event and return the action for the main loop
 fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
+    if app.view.help_visible {
+        return handle_help_key_event(app, key);
+    }
+    if let Some(action) = handle_search_key_event(app, key) {
+        return action;
+    }
+    if handle_nav_key_event(app, key) {
+        return Action::Continue;
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
-        (KeyCode::Up | KeyCode::Char('k'), _) => {
-            app.previous_check();
+        (KeyCode::Char('?'), _) => {
+            app.toggle_help();
             Action::Continue
         }
-        (KeyCode::Down | KeyCode::Char('j'), _) => {
-            app.next_check();
-            Action::Continue
-        }
-        (KeyCode::PageUp, _) => {
-            app.scroll_up(PAGE_SCROLL_LINES);
-            Action::Continue
-        }
-        (KeyCode::PageDown, _) => {
-            app.scroll_down(PAGE_SCROLL_LINES);
+        (KeyCode::Char('/'), _) => {
+            app.open_search();
             Action::Continue
         }
         (KeyCode::Char('f'), _) => {
@@ -618,6 +686,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
 /// select a check in the checks list. Anything else (clicks/scroll outside
 /// those panels, other buttons) is ignored.
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
+    if app.view.help_visible {
+        return Action::Continue;
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp if app.is_over_output(mouse.column, mouse.row) => {
             app.scroll_up(MOUSE_SCROLL_LINES);
@@ -1521,6 +1592,306 @@ checks:
             Some("phpstan"),
             "clicking a row selects that check, like keyboard navigation"
         );
+    }
+
+    #[test]
+    fn test_help_key_toggles_overlay() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_key_event(
+            &mut app,
+            press(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(matches!(action, Action::Continue));
+        assert!(app.view.help_visible);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(!app.view.help_visible);
+    }
+
+    #[test]
+    fn test_help_overlay_swallows_other_keys() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Failed;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.toggle_help();
+
+        // r/x/s must not retry/fix/cancel while help is shown
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('s'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+
+        assert!(app.view.help_visible, "still open after unrelated keys");
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            crate::runner::CheckStatus::Failed,
+            "no retry/fix/cancel dispatched while help is shown"
+        );
+        assert_eq!(app.view.selected_check, 0, "list nav swallowed too");
+
+        // '?' closes it again
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(!app.view.help_visible);
+    }
+
+    #[test]
+    fn test_g_and_shift_g_jump_list_selection() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+                make_test_check("phpunit", "fast"),
+            ],
+        );
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.view.selected_check = 1;
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            &mut tasks,
+        );
+        assert_eq!(app.view.selected_check, 2);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('g'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert_eq!(app.view.selected_check, 0);
+    }
+
+    #[test]
+    fn test_home_and_end_scroll_output() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::End, KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(app.view.output_scroll > 0, "End scrolls to the bottom");
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Home, KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 0, "Home scrolls to the top");
+    }
+
+    #[test]
+    fn test_shift_j_and_k_scroll_output_by_one_line() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('J'), KeyModifiers::SHIFT),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 1);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 0);
+
+        // lowercase j/k must remain list navigation, not output scroll
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 0);
+        assert_eq!(app.view.selected_check, 0, "only one check in this fixture");
+    }
+
+    #[test]
+    fn test_ctrl_d_and_ctrl_u_scroll_half_page() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        app.set_output_visible_lines(10); // half page = 5
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 5);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, 0);
+    }
+
+    #[test]
+    fn test_n_and_shift_n_navigate_failed_checks() {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(
+            &config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        );
+        app.results.get_mut("phpstan").unwrap().status = crate::runner::CheckStatus::Failed;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert_eq!(app.view.selected_check, 1, "jumps to the only failed check");
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            &mut tasks,
+        );
+        assert_eq!(app.view.selected_check, 1, "wraps back to itself");
+    }
+
+    #[test]
+    fn test_slash_opens_search_and_types_query() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(app.view.search.as_ref().unwrap().typing);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert_eq!(app.view.search.as_ref().unwrap().query, "err");
+
+        // while typing, keys build the query rather than dispatching (e.g. 'e' expand)
+        assert!(!app.view.show_full_command);
+    }
+
+    #[test]
+    fn test_search_esc_cancels_and_clears_highlight() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('5'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(app.view.search.is_some());
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(
+            app.view.search.is_none(),
+            "Esc clears search state entirely"
+        );
+    }
+
+    #[test]
+    fn test_search_enter_confirms_jumps_and_finds_matches() {
+        let config = test_config();
+        let mut app = app_with_scrollable_output(&config); // lines "line 1".."line 20"
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        for c in "line 15".chars() {
+            handle_key_event(
+                &mut app,
+                press(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut tasks,
+            );
+        }
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            &mut tasks,
+        );
+
+        let search = app
+            .view
+            .search
+            .as_ref()
+            .expect("search stays open after confirm");
+        assert!(!search.typing, "Enter confirms out of typing mode");
+        assert_eq!(search.matches.len(), 1, "only one line contains 'line 15'");
     }
 
     #[tokio::test]

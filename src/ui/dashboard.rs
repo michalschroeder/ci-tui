@@ -22,7 +22,9 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap},
+    widgets::{
+        Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap,
+    },
     Frame,
 };
 use std::collections::VecDeque;
@@ -151,6 +153,83 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_system_stats(app, frame, chunks[1]);
     render_main(app, frame, chunks[2]);
     render_footer(app, frame, chunks[3]);
+
+    if app.view.help_visible {
+        render_help_overlay(frame);
+    }
+}
+
+/// Centered rect covering `percent_x`/`percent_y` of `area` — the standard
+/// ratatui popup idiom.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+/// Centered popup listing all key bindings (`?` to toggle, `Esc` to close)
+fn render_help_overlay(frame: &mut Frame) {
+    let area = centered_rect(64, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Navigation",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  ↑/k  ↓/j       previous / next check"),
+        Line::from("  g  /  G        first / last check"),
+        Line::from("  n  /  N        next / previous failed check"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Output",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  PageUp/Down    scroll by page"),
+        Line::from("  Home / End     scroll to top / bottom"),
+        Line::from("  J  /  K        scroll one line down / up"),
+        Line::from("  Ctrl-d/Ctrl-u  scroll half page down / up"),
+        Line::from("  /              search output (Enter confirms, Esc cancels)"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Actions",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  f / a          filter failed / show all"),
+        Line::from("  r / R          retry selected / retry all"),
+        Line::from("  t              trigger on-demand check"),
+        Line::from("  s              cancel running check"),
+        Line::from("  x / X          fix selected / fix all"),
+        Line::from("  A              run selected check for all files"),
+        Line::from("  c / e          copy command / expand command"),
+        Line::from("  q / Ctrl-c     quit"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Help ")
+            .style(Style::default()),
+    );
+    frame.render_widget(paragraph, area);
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -700,6 +779,10 @@ pub(crate) struct OutputCache {
     width: u16,
     text: Text<'static>,
     line_count: usize,
+    /// Text with the confirmed search query's matches styled, computed once
+    /// by [`confirm_search`] rather than every frame — `None` when there is
+    /// no confirmed search (or it had no matches).
+    highlighted: Option<Text<'static>>,
 }
 
 /// Count passed/failed among `fix.all_results` in a single pass.
@@ -852,10 +935,17 @@ fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let text = raw_output.into_text().unwrap_or_default();
-    let line_count = Paragraph::new(text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width.saturating_sub(PANEL_BORDER_COLS));
+    let line_count = wrapped_line_count(&text, width);
     (text, line_count)
+}
+
+/// Number of wrapped display rows `text` occupies at `width` — the wrapping
+/// idiom shared by [`parse_and_wrap`] (whole output) and [`line_start_scroll`]
+/// (a prefix of it).
+fn wrapped_line_count(text: &Text<'static>, width: u16) -> usize {
+    Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(PANEL_BORDER_COLS))
 }
 
 /// Make sure `app.output_cache` holds the current output panel's parsed
@@ -885,7 +975,9 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
         width,
         text,
         line_count,
+        highlighted: None,
     });
+    refresh_confirmed_search(app);
     true
 }
 
@@ -919,11 +1011,186 @@ fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, title: &str) {
     };
     // ratatui scrolls by u16; larger offsets saturate instead of wrapping
     let scroll = u16::try_from(app.view.output_scroll).unwrap_or(u16::MAX);
-    let paragraph = Paragraph::new(cache.text.clone())
+    let confirmed_highlight = app
+        .view
+        .search
+        .as_ref()
+        .is_some_and(|s| !s.typing)
+        .then(|| cache.highlighted.clone())
+        .flatten();
+    let text = confirmed_highlight.unwrap_or_else(|| cache.text.clone());
+    let paragraph = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title))
         .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
+}
+
+/// Plain-text content of a line (concatenated span contents, styles dropped)
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Number of wrapped display rows the lines *before* `target_line` occupy at
+/// `width` — i.e. the scroll offset needed to bring `target_line` to the top
+/// of the output panel. Reuses [`Paragraph::line_count`], the same wrapping
+/// logic [`parse_and_wrap`] uses for the total count.
+fn line_start_scroll(text: &Text<'static>, target_line: usize, width: u16) -> usize {
+    let before = Text::from(text.lines[..target_line].to_vec());
+    wrapped_line_count(&before, width)
+}
+
+/// Split `plain` into spans, styling every case-insensitive occurrence of
+/// `needle` (ASCII-lowercased `query`) as a highlight; `query` gives the
+/// original case/length of the match text to slice out of `plain`.
+///
+/// Case-folding is ASCII-only (not [`str::to_lowercase`]) so `lower` is
+/// guaranteed to have the same byte length and boundaries as `plain` — full
+/// Unicode lowercasing can change a character's byte length (e.g. `İ`
+/// U+0130 is 2 bytes but lowercases to a 3-byte sequence), which would
+/// desync the byte offsets found in `lower` from `plain` and panic on slice.
+fn highlight_line_spans(plain: &str, lower: &str, needle: &str, query: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut idx = 0;
+    while idx < plain.len() {
+        let Some(pos) = lower[idx..].find(needle) else {
+            spans.push(Span::raw(plain[idx..].to_string()));
+            break;
+        };
+        let start = idx + pos;
+        if start > idx {
+            spans.push(Span::raw(plain[idx..start].to_string()));
+        }
+        let end = start + query.len();
+        spans.push(Span::styled(
+            plain[start..end].to_string(),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        ));
+        idx = end;
+    }
+    spans
+}
+
+/// Rebuild `text` with every occurrence of `query` on the given `matches`
+/// line indices styled as a highlight (indices already known to contain a
+/// case-insensitive match, e.g. from [`compute_search_matches`] — this does
+/// not rescan every line to find them). Lines outside `matches` are returned
+/// unchanged (styling preserved); matching lines lose their original ANSI
+/// styling in favor of a plain highlight — an acceptable simplification for
+/// search results.
+fn highlight_matches(text: &Text<'static>, matches: &[usize], query: &str) -> Text<'static> {
+    if matches.is_empty() || query.is_empty() {
+        return text.clone();
+    }
+    let needle = query.to_ascii_lowercase();
+    let match_lines: std::collections::HashSet<usize> = matches.iter().copied().collect();
+    let lines = text
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if !match_lines.contains(&i) {
+                return line.clone();
+            }
+            let plain = line_plain_text(line);
+            let lower = plain.to_ascii_lowercase();
+            Line::from(highlight_line_spans(&plain, &lower, &needle, query))
+        })
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+/// Line indices in `cache.text` that case-insensitively contain `query`
+/// (ASCII-only fold, matching [`highlight_matches`]/[`highlight_line_spans`]
+/// so a line that's counted as a match is always one that highlights
+/// correctly), plus the highlighted text if there was at least one match.
+fn compute_search_matches(cache: &OutputCache, query: &str) -> (Vec<usize>, Option<Text<'static>>) {
+    if query.is_empty() {
+        return (Vec::new(), None);
+    }
+    let needle = query.to_ascii_lowercase();
+    let matches: Vec<usize> = cache
+        .text
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line_plain_text(line).to_ascii_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    if matches.is_empty() {
+        return (matches, None);
+    }
+    let highlighted = highlight_matches(&cache.text, &matches, query);
+    (matches, Some(highlighted))
+}
+
+/// Recompute a confirmed search's matches/highlight against the current
+/// output cache. Called after [`ensure_output_cache`] rebuilds the cache
+/// (retry, resize, ...) so a stale `search.matches` (and the footer's match
+/// count) don't linger against output that no longer matches them. No-op
+/// while still typing (nothing confirmed yet) or with no search open.
+fn refresh_confirmed_search(app: &mut App) {
+    let Some(query) = app
+        .view
+        .search
+        .as_ref()
+        .filter(|s| !s.typing)
+        .map(|s| s.query.clone())
+    else {
+        return;
+    };
+    let Some(cache) = app.output_cache.as_ref() else {
+        return;
+    };
+    let (matches, highlighted) = compute_search_matches(cache, &query);
+    if let Some(search) = app.view.search.as_mut() {
+        search.matches = matches;
+    }
+    if let Some(cache) = app.output_cache.as_mut() {
+        cache.highlighted = highlighted;
+    }
+}
+
+/// Confirm the in-progress output search (`Enter` while typing): computes
+/// matches against the currently selected check's output and jumps the
+/// scroll offset to the first one. No-op if not currently typing a search.
+pub(crate) fn confirm_search(app: &mut App) {
+    let width = app.output_area_width;
+    ensure_output_cache(app, width);
+
+    let Some(query) = app
+        .view
+        .search
+        .as_ref()
+        .filter(|s| s.typing)
+        .map(|s| s.query.clone())
+    else {
+        return;
+    };
+
+    let (matches, first_scroll, highlighted) = match &app.output_cache {
+        Some(cache) => {
+            let (matches, highlighted) = compute_search_matches(cache, &query);
+            let first_scroll = matches
+                .first()
+                .map(|&idx| line_start_scroll(&cache.text, idx, width));
+            (matches, first_scroll, highlighted)
+        }
+        None => (Vec::new(), None, None),
+    };
+
+    if let Some(search) = app.view.search.as_mut() {
+        search.typing = false;
+        search.matches = matches;
+    }
+    if let Some(cache) = app.output_cache.as_mut() {
+        cache.highlighted = highlighted;
+    }
+    if let Some(scroll) = first_scroll {
+        app.view.output_scroll = 0;
+        app.scroll_down(scroll);
+    }
+    app.needs_redraw = true;
 }
 
 /// Build the fix-all results text
@@ -1360,7 +1627,46 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
+/// "no matches" / "1 match" / "N matches" summary for the search footer
+fn match_count_summary(count: usize) -> String {
+    if count == 0 {
+        return "no matches".to_string();
+    }
+    let suffix = if count == 1 { "" } else { "es" };
+    format!("{} match{}", count, suffix)
+}
+
+/// Footer line while an output search is open (typing or confirmed)
+fn search_footer_line(search: &super::app::SearchState) -> Line<'static> {
+    let hint = if search.typing {
+        Span::styled(
+            "  [Enter confirm, Esc cancel]",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(format!(
+            "  ({})  ",
+            match_count_summary(search.matches.len())
+        ))
+    };
+    Line::from(vec![
+        Span::styled("Search: ", Style::default().fg(Color::Yellow)),
+        Span::raw(format!("/{}", search.query)),
+        hint,
+    ])
+}
+
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
+    // status_message takes priority: it's transient (cleared on the next
+    // keypress) and would otherwise be set but never shown while a search
+    // is open, e.g. pressing 'c' to copy while a confirmed search/highlight
+    // is displayed.
+    if let Some(ref search) = app.view.search {
+        if app.view.status_message.is_none() {
+            frame.render_widget(Paragraph::new(search_footer_line(search)), area);
+            return;
+        }
+    }
     if let Some(ref msg) = app.view.status_message {
         let (icon, color) = match msg.kind {
             StatusKind::Info { .. } => (" ℹ ", Color::Cyan),
@@ -1486,5 +1792,94 @@ mod tests {
             1,
             "second frame with unchanged content/width must hit the cache, not reparse"
         );
+    }
+
+    #[test]
+    fn test_confirm_search_finds_matches_and_jumps_scroll() {
+        let mut app = make_test_app();
+        app.results.get_mut("php-lint").unwrap().output = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.open_search();
+        app.search_push('l');
+        app.search_push('i');
+        app.search_push('n');
+        app.search_push('e');
+        app.search_push(' ');
+        app.search_push('1');
+        app.search_push('5');
+
+        confirm_search(&mut app);
+
+        let search = app.view.search.as_ref().expect("search stays open");
+        assert!(!search.typing);
+        assert_eq!(search.matches.len(), 1, "only 'line 15' matches");
+        assert!(
+            app.view.output_scroll > 0,
+            "scrolled to bring match into view"
+        );
+    }
+
+    #[test]
+    fn test_confirm_search_no_match_leaves_scroll_and_empty_matches() {
+        let mut app = make_test_app();
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.open_search();
+        for c in "nope-not-there".chars() {
+            app.search_push(c);
+        }
+
+        confirm_search(&mut app);
+
+        let search = app.view.search.as_ref().expect("search stays open");
+        assert!(!search.typing);
+        assert!(search.matches.is_empty());
+        assert_eq!(app.view.output_scroll, 0);
+    }
+
+    #[test]
+    fn test_highlight_matches_splits_matching_line_into_styled_spans() {
+        let text = Text::from(vec![
+            Line::from("no match here"),
+            Line::from("has FOO in it"),
+        ]);
+
+        let highlighted = highlight_matches(&text, &[1], "foo");
+
+        assert_eq!(highlighted.lines.len(), 2);
+        // Unrelated line is untouched
+        assert_eq!(line_plain_text(&highlighted.lines[0]), "no match here");
+        // Matching line is rebuilt with the match as a separate styled span
+        let matched_line = &highlighted.lines[1];
+        assert_eq!(line_plain_text(matched_line), "has FOO in it");
+        assert!(
+            matched_line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "FOO" && s.style.bg == Some(Color::Yellow)),
+            "matched text gets a highlight background"
+        );
+    }
+
+    #[test]
+    fn test_highlight_matches_empty_query_returns_text_unchanged() {
+        let text = Text::from(vec![Line::from("some text")]);
+        let highlighted = highlight_matches(&text, &[0], "");
+        assert_eq!(highlighted.lines.len(), 1);
+        assert_eq!(line_plain_text(&highlighted.lines[0]), "some text");
+    }
+
+    #[test]
+    fn test_highlight_matches_does_not_panic_on_multibyte_case_folding() {
+        // U+0130 (İ) is 2 bytes but full-Unicode-lowercases to a 3-byte
+        // sequence ("i̇"); ASCII-only folding must be used so `lower` and
+        // `plain` stay byte-aligned, or slicing panics on a char boundary.
+        let text = Text::from(vec![Line::from("İ says foo")]);
+        let highlighted = highlight_matches(&text, &[0], "foo");
+        assert_eq!(line_plain_text(&highlighted.lines[0]), "İ says foo");
     }
 }
