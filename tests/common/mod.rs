@@ -152,6 +152,15 @@ pub fn test_docker_target(image: &str) -> ci_tui::runner::ExecTarget {
     ci_tui::runner::ExecTarget::Docker(test_docker_config(image))
 }
 
+/// `ExecTarget::Local` running commands via host `sh`
+#[allow(dead_code)]
+pub fn local_sh() -> ci_tui::runner::ExecTarget {
+    ci_tui::runner::ExecTarget::Local(ci_tui::config::LocalConfig {
+        shell: "sh".to_string(),
+        ..Default::default()
+    })
+}
+
 /// CheckToRun whose resolved_command equals `command`, for executor tests.
 /// `container` sets the per-check container override.
 #[allow(dead_code)]

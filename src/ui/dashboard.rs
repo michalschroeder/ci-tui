@@ -737,9 +737,10 @@ fn output_view(app: &App) -> OutputView<'_> {
 /// whether the cached [`Text`] is still valid, without needing to rebuild
 /// the raw output string (the expensive part) just to check for staleness.
 ///
-/// `output_len`/`error_len` catch content growth; `generation`
-/// ([`App::output_generation`]) catches a streamed append to a rolling-capped
-/// buffer that keeps its length; `status` catches transitions (e.g. Running -> Passed)
+/// `output_len`/`error_len` catch content growth (a streamed append to a
+/// rolling-capped buffer that keeps its length is not caught here:
+/// `App::on_check_output` drops the cache instead); `status` catches
+/// transitions (e.g. Running -> Passed)
 /// that don't change length; `width` catches resize; `resolved_command`
 /// catches a retried check's command line changing without status/output
 /// changing yet.
@@ -750,7 +751,6 @@ enum OutputCacheKey {
         status: CheckStatus,
         output_len: usize,
         error_len: usize,
-        generation: u64,
         show_full_command: bool,
         resolved_command: String,
     },
@@ -831,7 +831,6 @@ fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
                 status: result.status.clone(),
                 output_len: result.output.len(),
                 error_len: result.error_output.len(),
-                generation: app.output_generation,
                 show_full_command: app.view.show_full_command,
                 resolved_command: check.resolved_command.clone(),
             })
@@ -884,7 +883,6 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
                 status,
                 output_len,
                 error_len,
-                generation,
                 show_full_command,
                 resolved_command,
             },
@@ -896,7 +894,6 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
                 && *status == result.status
                 && *output_len == result.output.len()
                 && *error_len == result.error_output.len()
-                && *generation == app.output_generation
                 && *show_full_command == app.view.show_full_command
                 && *resolved_command == check.resolved_command
         }
@@ -1193,8 +1190,7 @@ pub(crate) fn confirm_search(app: &mut App) {
         cache.highlighted = highlighted;
     }
     if let Some(scroll) = first_scroll {
-        app.view.output_scroll = 0;
-        app.scroll_down(scroll);
+        app.view.output_scroll = scroll.min(app.compute_max_scroll());
         // Stay at the match rather than following streamed output
         app.view.follow_output = false;
     }
@@ -1752,9 +1748,9 @@ mod tests {
         );
     }
 
-    use super::super::app::tests::{make_check, minimal_config_yaml};
+    use super::super::app::tests::{make_check, minimal_config_yaml, output_event};
     use crate::git::ChangedFiles;
-    use crate::runner::{CheckStatus, RunnerEvent};
+    use crate::runner::CheckStatus;
     use ratatui::{backend::TestBackend, Terminal};
 
     /// App with one check whose output is large enough to make re-parsing
@@ -1864,14 +1860,9 @@ mod tests {
         let result = app.results.get_mut("php-lint").unwrap();
         result.status = CheckStatus::Running;
         result.output.clear();
-        let chunk = |s: &str| RunnerEvent::CheckOutput {
-            check_id: "php-lint".to_string(),
-            stdout: s.to_string(),
-            stderr: String::new(),
-        };
-        app.handle_runner_event(chunk("a1\na2\na3\n"));
+        app.handle_runner_event(output_event("php-lint", "a1\na2\na3\n", ""));
         ensure_output_cache(&mut app, 80);
-        app.handle_runner_event(chunk("b1\nb2\n"));
+        app.handle_runner_event(output_event("php-lint", "b1\nb2\n", ""));
         ensure_output_cache(&mut app, 80);
 
         let text = app.output_cache.as_ref().unwrap().text.clone();

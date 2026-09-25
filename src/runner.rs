@@ -72,6 +72,11 @@ impl OutputSink {
         Self(Some((check_id.into(), tx)))
     }
 
+    /// True if live output goes somewhere
+    pub fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Send one chunk (Docker warning lines dropped from `stderr`). Skipped
     /// when empty; send errors (receiver gone) are ignored.
     pub async fn send(&self, stdout: String, stderr: String) {
@@ -147,8 +152,8 @@ impl CommandExecutor for RealCommandExecutor {
         match output {
             Ok((status, stdout, stderr)) => CommandOutput {
                 success: status.success(),
-                stdout: String::from_utf8_lossy(&stdout).to_string(),
-                stderr: String::from_utf8_lossy(&stderr).to_string(),
+                stdout: bytes_to_string(stdout),
+                stderr: bytes_to_string(stderr),
             },
             Err(e) => CommandOutput {
                 success: false,
@@ -200,7 +205,7 @@ async fn read_streaming(
                     err_pipe = None;
                 }
             }
-            _ = flush.tick() => {
+            _ = flush.tick(), if sink.is_some() => {
                 let out = unsent(&stdout, &mut out_sent, false);
                 let err = unsent(&stderr, &mut err_sent, false);
                 sink.send(out, err).await;
@@ -213,6 +218,12 @@ async fn read_streaming(
 
     let status = child.wait().await?;
     Ok((status, stdout, stderr))
+}
+
+/// Decode owned bytes, reusing the buffer when valid UTF-8 (lossy copy only
+/// otherwise)
+fn bytes_to_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Buffer growth step for [`read_streaming`]
@@ -340,6 +351,15 @@ pub fn filter_docker_warnings(stderr: &str) -> String {
         .join("\n")
 }
 
+/// Truncation marker line is `TRUNCATED_PREFIX` + count + `TRUNCATED_SUFFIX`
+const TRUNCATED_PREFIX: &str = "… ";
+const TRUNCATED_SUFFIX: &str = " lines truncated";
+
+/// Marker line for `n` dropped lines (`"… N lines truncated"`)
+fn truncation_marker(n: usize) -> String {
+    format!("{TRUNCATED_PREFIX}{n}{TRUNCATED_SUFFIX}")
+}
+
 /// Cap `text` at `max_lines` lines, keeping the *last* `max_lines` (a runaway
 /// command's most recent output is usually the relevant part). When lines are
 /// dropped, a `"... N lines truncated"` marker is prepended. Returns `text`
@@ -350,7 +370,7 @@ pub fn truncate_output(text: String, max_lines: usize) -> String {
         return text;
     }
     let truncated = total - max_lines;
-    let marker = format!("… {truncated} lines truncated");
+    let marker = truncation_marker(truncated);
     std::iter::once(marker.as_str())
         .chain(text.lines().skip(truncated))
         .collect::<Vec<_>>()
@@ -359,8 +379,8 @@ pub fn truncate_output(text: String, max_lines: usize) -> String {
 
 /// Line count of a [`truncate_output`] marker line (`"… N lines truncated"`)
 fn truncated_marker_count(line: &str) -> Option<usize> {
-    line.strip_prefix("… ")?
-        .strip_suffix(" lines truncated")?
+    line.strip_prefix(TRUNCATED_PREFIX)?
+        .strip_suffix(TRUNCATED_SUFFIX)?
         .parse()
         .ok()
 }
@@ -388,7 +408,7 @@ pub fn append_output(buf: &mut String, chunk: &str, max_lines: usize) {
         .match_indices('\n')
         .nth(drop - 1)
         .map_or(body.len(), |(i, _)| i + 1);
-    *buf = format!("… {} lines truncated\n{}", dropped + drop, &body[cut..]);
+    *buf = format!("{}\n{}", truncation_marker(dropped + drop), &body[cut..]);
 }
 
 /// True if `key` is a valid environment variable identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -1071,7 +1091,6 @@ async fn run_all_pre_commands(
 
 /// Run `check`, cancellable via `cancels`. `CheckStarted` is sent once
 /// registered, so a check shown as running can always be cancelled.
-#[allow(clippy::too_many_arguments)]
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
@@ -1088,7 +1107,7 @@ async fn run_check_with_target(
             })
             .await;
         let sink = OutputSink::new(check.id(), event_tx.clone());
-        run_check_streaming(
+        run_check_with_command_with_executor(
             check,
             &check.resolved_command,
             project_root,
@@ -1112,36 +1131,9 @@ async fn run_check_with_target(
 /// (see [`truncate_output`]), bounding *retained* memory for a runaway
 /// command. Peak memory during capture is unbounded until the command exits
 /// or times out — output is buffered in full before truncation.
+/// Live output chunks stream to `sink` while the command runs.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command_with_executor(
-    check_id: String,
-    command: &str,
-    project_root: &std::path::Path,
-    container: Option<&str>,
-    target: &ExecTarget,
-    check_env: &HashMap<String, String>,
-    executor: &dyn CommandExecutor,
-    timeout: Option<Duration>,
-    max_output_lines: usize,
-) -> CheckResult {
-    execute_command_streaming(
-        check_id,
-        command,
-        project_root,
-        container,
-        target,
-        check_env,
-        executor,
-        timeout,
-        max_output_lines,
-        &OutputSink::none(),
-    )
-    .await
-}
-
-/// [`execute_command_with_executor`] streaming live output to `sink`
-#[allow(clippy::too_many_arguments)]
-async fn execute_command_streaming(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
@@ -1214,6 +1206,7 @@ pub async fn run_single_check_with_executor(
         target,
         executor,
         max_output_lines,
+        &OutputSink::none(),
     )
     .await
 }
@@ -1239,7 +1232,6 @@ pub async fn run_fix_command(
 }
 
 /// Run a fix command with a custom executor (test-facing).
-#[allow(clippy::too_many_arguments)]
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
@@ -1258,57 +1250,17 @@ pub async fn run_fix_command_with_executor(
         executor,
         None,
         max_output_lines,
-    )
-    .await
-}
-
-/// Run a check with a custom command (e.g., for running without file filtering).
-///
-/// This is used when running a check for "all files" by removing the {files}
-/// placeholder from the command. Check container override and env apply.
-pub async fn run_check_with_command(
-    check: &CheckToRun,
-    command: &str,
-    project_root: &std::path::Path,
-    target: &ExecTarget,
-    max_output_lines: usize,
-) -> CheckResult {
-    run_check_with_command_with_executor(
-        check,
-        command,
-        project_root,
-        target,
-        &RealCommandExecutor,
-        max_output_lines,
-    )
-    .await
-}
-
-/// Run a check with a custom command and custom executor (test-facing).
-#[allow(clippy::too_many_arguments)]
-pub async fn run_check_with_command_with_executor(
-    check: &CheckToRun,
-    command: &str,
-    project_root: &std::path::Path,
-    target: &ExecTarget,
-    executor: &dyn CommandExecutor,
-    max_output_lines: usize,
-) -> CheckResult {
-    run_check_streaming(
-        check,
-        command,
-        project_root,
-        target,
-        executor,
-        max_output_lines,
         &OutputSink::none(),
     )
     .await
 }
 
-/// [`run_check_with_command_with_executor`] streaming live output to `sink`
-/// as [`RunnerEvent::CheckOutput`] chunks while the command runs.
-pub async fn run_check_streaming(
+/// Run a check with a custom command, streaming live output to `sink` as
+/// [`RunnerEvent::CheckOutput`] chunks while the command runs.
+///
+/// Used e.g. when running a check for "all files" by removing the {files}
+/// placeholder from the command. Check container override and env apply.
+pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
     project_root: &std::path::Path,
@@ -1317,7 +1269,7 @@ pub async fn run_check_streaming(
     max_output_lines: usize,
     sink: &OutputSink,
 ) -> CheckResult {
-    execute_command_streaming(
+    execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,

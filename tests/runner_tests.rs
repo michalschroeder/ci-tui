@@ -9,13 +9,13 @@
 use ci_tui::config::DEFAULT_MAX_OUTPUT_LINES;
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_command_with_executor,
-    filter_docker_warnings, CheckResult, CheckStatus,
+    filter_docker_warnings, CheckResult, CheckStatus, OutputSink,
 };
 use rstest::rstest;
 use std::collections::HashMap;
 
 mod common;
-use common::{mock_executor_success, CommandOutput, MockCommandExecutor};
+use common::{local_sh, mock_executor_success, CommandOutput, MockCommandExecutor};
 
 mod build_docker_exec_command_tests {
     use super::*;
@@ -336,6 +336,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -370,6 +371,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -406,6 +408,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
     }
@@ -439,6 +442,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
     }
@@ -459,6 +463,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -490,6 +495,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -520,6 +526,7 @@ mod execute_docker_command_tests {
             &mock,
             None,
             2,
+            &OutputSink::none(),
         )
         .await;
 
@@ -1217,6 +1224,7 @@ mod run_check_with_command_with_executor_tests {
             &cfg,
             &mock,
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
     }
@@ -1278,7 +1286,6 @@ mod run_fix_command_with_executor_tests {
 
 mod timeout_tests {
     use super::*;
-    use ci_tui::config::{ExecTarget, LocalConfig};
     use ci_tui::runner::{
         run_single_check_with_executor, CheckRunner, RealCommandExecutor, RunnerEvent,
     };
@@ -1286,13 +1293,6 @@ mod timeout_tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    fn local_sh() -> ExecTarget {
-        ExecTarget::Local(LocalConfig {
-            shell: "sh".to_string(),
-            ..Default::default()
-        })
-    }
 
     #[tokio::test]
     async fn real_executor_kills_hung_check_and_reports_timed_out() {
@@ -1374,7 +1374,6 @@ mod timeout_tests {
 mod cancel_tests {
     use super::*;
     use async_trait::async_trait;
-    use ci_tui::config::{ExecTarget, LocalConfig};
     use ci_tui::runner::{
         run_single_check_with_executor, CancelRegistry, CheckRunner, CommandExecutor, OutputSink,
         RealCommandExecutor, RunnerEvent,
@@ -1384,13 +1383,6 @@ mod cancel_tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-
-    fn local_sh() -> ExecTarget {
-        ExecTarget::Local(LocalConfig {
-            shell: "sh".to_string(),
-            ..Default::default()
-        })
-    }
 
     /// Executor whose commands never finish; records commands and container kills
     #[derive(Default)]
@@ -1675,6 +1667,7 @@ mod cancel_tests {
             &executor,
             Some(Duration::from_millis(20)),
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -1707,6 +1700,7 @@ mod cancel_tests {
             &mock,
             Some(Duration::from_secs(5)),
             DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
         )
         .await;
 
@@ -1716,7 +1710,6 @@ mod cancel_tests {
 
 mod streaming_tests {
     use super::*;
-    use ci_tui::config::{ExecTarget, LocalConfig};
     use ci_tui::runner::{CheckRunner, RealCommandExecutor, RunnerEvent};
     use common::configs::{CheckBuilder, ConfigBuilder};
     use std::path::Path;
@@ -1727,10 +1720,7 @@ mod streaming_tests {
         let mut config = ConfigBuilder::new()
             .with_check("g", "live", CheckBuilder::new("Live", command).build())
             .build();
-        config.runner = ExecTarget::Local(LocalConfig {
-            shell: "sh".to_string(),
-            ..Default::default()
-        });
+        config.runner = local_sh();
         let runner =
             CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(RealCommandExecutor));
         let checks = vec![common::make_exec_check("live", command, None)];

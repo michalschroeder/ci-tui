@@ -25,8 +25,8 @@ use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
 use crate::runner::{
-    run_check_cancellable, run_check_streaming, run_check_with_command, CancelRegistry,
-    CheckResult, CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
+    run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
+    CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
 };
 use anyhow::Result;
 use app::{App, StatusKind};
@@ -228,14 +228,17 @@ struct TaskCtx {
 }
 
 impl TaskCtx {
-    /// Run `command` as `check` (check's container override and env apply)
-    async fn run(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        run_check_with_command(
+    /// Run `command` as `check` (check's container override and env apply),
+    /// streaming live output to `sink`. The only runner call site here.
+    async fn run(&self, check: &CheckToRun, command: &str, sink: &OutputSink) -> CheckResult {
+        run_check_with_command_with_executor(
             check,
             command,
             &self.exec_root,
             &self.config.runner,
+            &RealCommandExecutor,
             self.config.max_output_lines,
+            sink,
         )
         .await
     }
@@ -252,16 +255,7 @@ impl TaskCtx {
         let run = async move {
             // Sink dropped at the end of this block, ending `forward`
             let sink = OutputSink::new(check.id(), out_tx);
-            run_check_streaming(
-                check,
-                command,
-                &self.exec_root,
-                &self.config.runner,
-                &RealCommandExecutor,
-                self.config.max_output_lines,
-                &sink,
-            )
-            .await
+            self.run(check, command, &sink).await
         };
         let (result, ()) = tokio::join!(run, forward_output(&mut out_rx, tx));
         result
@@ -597,7 +591,7 @@ fn handle_fix_all(app: &mut App, tasks: &mut Tasks) -> Action {
     app.start_fix_all(fix_commands.len());
     tasks.spawn(|ctx, tx| async move {
         for job in fix_commands {
-            let result = ctx.run(&job.check, &job.command).await;
+            let result = ctx.run(&job.check, &job.command, &OutputSink::none()).await;
             let _ = tx.send(TaskEvent::FixAllResult(result)).await;
         }
         // Always signal completion, decoupled from per-result send success.

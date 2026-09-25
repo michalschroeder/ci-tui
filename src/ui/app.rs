@@ -334,10 +334,6 @@ pub struct App {
     /// System monitoring history (updated by background stats worker)
     pub(crate) sys: SysStats,
 
-    /// Bumped on every streamed output append. Part of the output cache key:
-    /// a rolling-capped buffer can change content without changing length.
-    pub(crate) output_generation: u64,
-
     /// Dirty flag - set when state changes, cleared after render
     /// Used to avoid unnecessary re-renders for better responsiveness
     pub(crate) needs_redraw: bool,
@@ -405,7 +401,6 @@ impl App {
             pre_commands,
             fix: FixState::default(),
             sys: SysStats::default(),
-            output_generation: 0,
             needs_redraw: true, // Initial render needed
         }
     }
@@ -715,14 +710,15 @@ impl App {
 
     /// Apply a lifecycle event from the check runner
     pub fn handle_runner_event(&mut self, event: RunnerEvent) {
-        self.needs_redraw = true;
+        // Every event but an invisible output chunk changes what's drawn
+        let mut redraw = true;
         match event {
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
             RunnerEvent::CheckOutput {
                 check_id,
                 stdout,
                 stderr,
-            } => self.on_check_output(&check_id, &stdout, &stderr),
+            } => redraw = self.on_check_output(&check_id, &stdout, &stderr),
             RunnerEvent::CheckFinished { result } => {
                 self.results.insert(result.check_id.clone(), result);
             }
@@ -748,6 +744,7 @@ impl App {
                 self.run.finished_at = Some(Instant::now());
             }
         }
+        self.needs_redraw |= redraw;
         self.clamp_selection();
     }
 
@@ -761,18 +758,27 @@ impl App {
     /// Append a streamed chunk to a running check's result, capped at
     /// `max_output_lines` (rolling tail). Late chunks for a check that is no
     /// longer running (finished, or a fix run) are ignored.
-    fn on_check_output(&mut self, check_id: &str, stdout: &str, stderr: &str) {
+    ///
+    /// Returns true if the chunk was appended to the selected check, i.e. the
+    /// output panel changed and needs a redraw.
+    fn on_check_output(&mut self, check_id: &str, stdout: &str, stderr: &str) -> bool {
         let max_lines = self.config.max_output_lines;
         let Some(result) = self
             .results
             .get_mut(check_id)
             .filter(|r| r.status == CheckStatus::Running)
         else {
-            return;
+            return false;
         };
         append_output(&mut result.output, stdout, max_lines);
         append_output(&mut result.error_output, stderr, max_lines);
-        self.output_generation += 1;
+        let selected = self.selected_check().is_some_and(|c| c.id() == check_id);
+        if selected {
+            // A rolling-capped append can keep the buffer's length, which the
+            // output cache key would miss: drop the cache explicitly
+            self.output_cache = None;
+        }
+        selected
     }
 
     fn on_pre_command_started(&mut self, group: &str, name: &str) {
@@ -1006,7 +1012,7 @@ impl App {
 
     /// Compute maximum scroll offset for whatever the output panel shows.
     /// Capped at `u16::MAX`, the largest offset ratatui can scroll to.
-    fn compute_max_scroll(&mut self) -> usize {
+    pub(crate) fn compute_max_scroll(&mut self) -> usize {
         let width = self.output_area_width;
         crate::ui::dashboard::output_line_count(self, width)
             .saturating_sub(self.view.output_visible_lines)
@@ -2210,7 +2216,7 @@ checks:
         );
     }
 
-    fn output_event(check_id: &str, stdout: &str, stderr: &str) -> RunnerEvent {
+    pub(crate) fn output_event(check_id: &str, stdout: &str, stderr: &str) -> RunnerEvent {
         RunnerEvent::CheckOutput {
             check_id: check_id.to_string(),
             stdout: stdout.to_string(),
@@ -2258,6 +2264,28 @@ checks:
         let result = &app.results["php-lint"];
         assert_eq!(result.output, "… 1 lines truncated\n2\n3\n");
         assert_eq!(result.error_output, "… 1 lines truncated\ne2\ne3\n");
+    }
+
+    #[test]
+    fn test_check_output_redraws_only_for_selected_check() {
+        let mut app = make_app();
+        assert_eq!(app.selected_check().unwrap().id(), "php-lint");
+        for id in ["php-lint", "phpunit"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Running;
+        }
+
+        app.needs_redraw = false;
+        app.handle_runner_event(output_event("phpunit", "x\n", ""));
+        assert!(!app.needs_redraw, "hidden check's chunk: no redraw");
+        assert_eq!(app.results["phpunit"].output, "x\n", "still appended");
+
+        app.handle_runner_event(output_event("php-lint", "y\n", ""));
+        assert!(app.needs_redraw, "selected check's chunk redraws");
+
+        app.needs_redraw = false;
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.handle_runner_event(output_event("php-lint", "late\n", ""));
+        assert!(!app.needs_redraw, "ignored late chunk: no redraw");
     }
 
     /// App with php-lint selected, running, and 50 lines of output in a
