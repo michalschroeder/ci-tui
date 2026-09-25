@@ -114,7 +114,8 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | Key | Action |
 |-----|--------|
 | `q` / `Ctrl-C` | Quit |
-| `j`/`k`, `↓`/`↑` | Select check |
+| `j`/`k`, `↓`/`↑` | Select check or group header |
+| `Space` / `Enter` | Fold / unfold selected group (fully passed groups fold automatically) |
 | `PgUp`/`PgDn` | Scroll output |
 | `f` | Toggle failed-only filter |
 | `a` | Show all checks |

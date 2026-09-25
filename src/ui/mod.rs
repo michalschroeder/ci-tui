@@ -705,6 +705,12 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
             app.show_all();
             Action::Continue
         }
+        // Fold/unfold on a group header; no-op on checks and pre-commands.
+        // Enter while typing a search never reaches here (confirms search).
+        (KeyCode::Char(' ') | KeyCode::Enter, _) => {
+            app.toggle_selected_group();
+            Action::Continue
+        }
         (KeyCode::Char('r'), KeyModifiers::NONE) => handle_retry_selected(app, tasks),
         (KeyCode::Char('t'), KeyModifiers::NONE) => handle_trigger_on_demand(app, tasks),
         (KeyCode::Char('s'), KeyModifiers::NONE) => handle_cancel_selected(app, tasks),
@@ -728,7 +734,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
 }
 
 /// Handle a mouse event: wheel scroll over the output panel, left-click to
-/// select a check in the checks list. Anything else (clicks/scroll outside
+/// select a row (check, pre-command or group header) in the checks list. Anything else (clicks/scroll outside
 /// those panels, other buttons) is ignored.
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
     if app.view.help_visible {
@@ -1361,7 +1367,8 @@ checks:
             "non-quit key clears the message"
         );
         assert_eq!(
-            app.view.selected_check, 1,
+            app.selected_check().map(|c| c.id()),
+            Some("phpstan"),
             "key still acts while dismissing the message"
         );
     }
@@ -1696,7 +1703,7 @@ checks:
         // set_checks_list_layout takes the inner content rect (no border rows)
         let area = ratatui::layout::Rect::new(0, 0, 40, 8);
         // Single group "fast": header at content row 0, php-lint row 1, phpstan row 2
-        app.set_checks_list_layout(area, vec![None, Some(0), Some(1)]);
+        app.set_checks_list_layout(area);
 
         let action = handle_message(
             &mut app,
@@ -1770,7 +1777,11 @@ checks:
             crate::runner::CheckStatus::Failed,
             "no retry/fix/cancel dispatched while help is shown"
         );
-        assert_eq!(app.view.selected_check, 0, "list nav swallowed too");
+        assert_eq!(
+            app.selected_check().map(|c| c.id()),
+            Some("php-lint"),
+            "list nav swallowed too"
+        );
 
         // '?' closes it again
         handle_key_event(
@@ -1800,14 +1811,14 @@ checks:
             press(KeyCode::Char('G'), KeyModifiers::SHIFT),
             &mut tasks,
         );
-        assert_eq!(app.view.selected_check, 2);
+        assert_eq!(app.view.selected_check, 3, "header + 3 checks");
 
         handle_key_event(
             &mut app,
             press(KeyCode::Char('g'), KeyModifiers::NONE),
             &mut tasks,
         );
-        assert_eq!(app.view.selected_check, 0);
+        assert_eq!(app.view.selected_check, 0, "g lands on the group header");
     }
 
     #[test]
@@ -1858,7 +1869,7 @@ checks:
             &mut tasks,
         );
         assert_eq!(app.view.output_scroll, 0);
-        assert_eq!(app.view.selected_check, 0, "only one check in this fixture");
+        assert_eq!(app.view.selected_check, 1, "only one check in this fixture");
     }
 
     #[test]
@@ -1901,14 +1912,14 @@ checks:
             press(KeyCode::Char('n'), KeyModifiers::NONE),
             &mut tasks,
         );
-        assert_eq!(app.view.selected_check, 1, "jumps to the only failed check");
+        assert_eq!(app.view.selected_check, 2, "jumps to the only failed check");
 
         handle_key_event(
             &mut app,
             press(KeyCode::Char('N'), KeyModifiers::SHIFT),
             &mut tasks,
         );
-        assert_eq!(app.view.selected_check, 1, "wraps back to itself");
+        assert_eq!(app.view.selected_check, 2, "wraps back to itself");
     }
 
     #[test]
@@ -2024,7 +2035,7 @@ checks:
         );
         let (mut tasks, _rx) = make_test_tasks(&config);
         let area = ratatui::layout::Rect::new(0, 0, 40, 10);
-        app.set_checks_list_layout(area, vec![None, Some(0), Some(1)]);
+        app.set_checks_list_layout(area);
 
         handle_message(
             &mut app,
@@ -2037,5 +2048,133 @@ checks:
             Some("php-lint"),
             "click outside the checks list must not change selection"
         );
+    }
+
+    /// Two checks in group "fast" (rows: header, php-lint, phpstan)
+    fn make_fold_app(config: &CiConfig) -> App {
+        make_test_app_with_checks(
+            config,
+            vec![
+                make_test_check("php-lint", "fast"),
+                make_test_check("phpstan", "fast"),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_space_and_enter_toggle_fold_on_header() {
+        let config = test_config();
+        let mut app = make_fold_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.select_first(); // fast header
+
+        for code in [KeyCode::Char(' '), KeyCode::Enter] {
+            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+            assert!(app.is_group_collapsed("fast"), "{:?} folds", code);
+            assert_eq!(app.selectable_items().count(), 1, "only the header");
+
+            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+            assert!(!app.is_group_collapsed("fast"), "{:?} unfolds", code);
+            assert_eq!(app.selectable_items().count(), 3);
+        }
+    }
+
+    #[test]
+    fn test_space_and_enter_on_check_do_nothing() {
+        let config = test_config();
+        let mut app = make_fold_app(&config); // php-lint selected
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        for code in [KeyCode::Char(' '), KeyCode::Enter] {
+            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+        }
+
+        assert!(!app.is_group_collapsed("fast"));
+        assert_eq!(app.selected_check().map(|c| c.id()), Some("php-lint"));
+        assert!(tasks.set.is_empty());
+    }
+
+    #[test]
+    fn test_enter_in_search_confirms_instead_of_folding() {
+        let config = test_config();
+        let mut app = make_fold_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.select_first(); // fast header
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            &mut tasks,
+        );
+
+        let search = app.view.search.as_ref().expect("search confirmed");
+        assert!(!search.typing);
+        assert_eq!(search.query, " ", "space typed into the query");
+        assert!(!app.is_group_collapsed("fast"));
+    }
+
+    #[test]
+    fn test_check_actions_on_header_are_noops() {
+        let config = test_config();
+        let mut app = make_fold_app(&config);
+        for id in ["php-lint", "phpstan"] {
+            app.results.get_mut(id).unwrap().status = crate::runner::CheckStatus::Failed;
+        }
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.select_first(); // fast header
+
+        for (c, m) in [
+            ('r', KeyModifiers::NONE),
+            ('s', KeyModifiers::NONE),
+            ('c', KeyModifiers::NONE),
+            ('x', KeyModifiers::NONE),
+            ('e', KeyModifiers::NONE),
+            ('t', KeyModifiers::NONE),
+            ('A', KeyModifiers::SHIFT),
+        ] {
+            let action = handle_key_event(&mut app, press(KeyCode::Char(c), m), &mut tasks);
+            assert!(matches!(action, Action::Continue));
+        }
+
+        assert!(tasks.set.is_empty(), "nothing spawned");
+        assert!(app.view.status_message.is_none(), "c copied nothing");
+        assert!(!app.view.show_full_command);
+        assert!(!app.fix.running);
+        for id in ["php-lint", "phpstan"] {
+            assert_eq!(
+                app.results[id].status,
+                crate::runner::CheckStatus::Failed,
+                "{id} untouched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mouse_click_selects_group_header() {
+        let config = test_config();
+        let mut app = make_fold_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.set_checks_list_layout(ratatui::layout::Rect::new(0, 0, 40, 8));
+
+        handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 0)),
+            &mut tasks,
+        );
+
+        assert!(matches!(
+            app.selected_item(),
+            Some(app::SelectableItem::Group("fast"))
+        ));
     }
 }

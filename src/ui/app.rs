@@ -15,7 +15,7 @@ use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
 use ratatui::layout::{Position, Rect};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// True when `(col, row)` falls inside `area`. Shared by every mouse
@@ -193,9 +193,10 @@ pub struct ViewState {
     /// Rendered area of the checks list panel (updated during render, used
     /// for mapping mouse clicks back to a selectable item)
     pub checks_list_area: Rect,
-    /// Maps each rendered row of the checks list to a [`App::selectable_items`]
-    /// index; `None` for group header rows (updated during render)
-    pub checks_list_row_to_item: Vec<Option<usize>>,
+    /// Folded groups (keys): their header shows, their children don't
+    pub collapsed_groups: HashSet<String>,
+    /// Groups the user folded/unfolded by hand; auto-collapse skips them
+    pub manual_folds: HashSet<String>,
     /// Rendered area of the output panel (updated during render, used for
     /// mapping mouse wheel scroll events)
     pub output_area: Rect,
@@ -220,7 +221,8 @@ impl Default for ViewState {
             status_message: None,
             checks_list_offset: 0,
             checks_list_area: Rect::default(),
-            checks_list_row_to_item: Vec::new(),
+            collapsed_groups: HashSet::new(),
+            manual_folds: HashSet::new(),
             output_area: Rect::default(),
             help_visible: false,
             search: None,
@@ -263,8 +265,67 @@ impl RunState {
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
 pub enum SelectableItem<'a> {
+    /// Group header row (group key); Space/Enter folds it
+    Group(&'a str),
     PreCommand(&'a PreCommandState),
     Check(&'a CheckToRun),
+}
+
+impl<'a> SelectableItem<'a> {
+    /// Key of the group this row belongs to (a header's own group)
+    pub fn group(&self) -> &'a str {
+        match self {
+            Self::Group(group) => group,
+            Self::PreCommand(pc) => &pc.group,
+            Self::Check(check) => check.group(),
+        }
+    }
+}
+
+/// Owned identity of a list row, so a fold that shifts row indices can put
+/// the selection back on the same row (borrowed [`SelectableItem`]s cannot
+/// outlive the mutation)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemKey {
+    Group(String),
+    PreCommand { group: String, name: String },
+    Check { group: String, id: String },
+}
+
+impl ItemKey {
+    fn of(item: &SelectableItem<'_>) -> Self {
+        match item {
+            SelectableItem::Group(group) => Self::Group(group.to_string()),
+            SelectableItem::PreCommand(pc) => Self::PreCommand {
+                group: pc.group.clone(),
+                name: pc.name.clone(),
+            },
+            SelectableItem::Check(check) => Self::Check {
+                group: check.group().to_string(),
+                id: check.id().to_string(),
+            },
+        }
+    }
+
+    fn group(&self) -> &str {
+        match self {
+            Self::Group(group) | Self::PreCommand { group, .. } | Self::Check { group, .. } => {
+                group
+            }
+        }
+    }
+
+    /// Compare against a borrowed row without allocating a key for it
+    fn matches(&self, item: &SelectableItem<'_>) -> bool {
+        match (self, item) {
+            (Self::Group(group), SelectableItem::Group(g)) => group == g,
+            (Self::PreCommand { group, name }, SelectableItem::PreCommand(pc)) => {
+                *group == pc.group && *name == pc.name
+            }
+            (Self::Check { id, .. }, SelectableItem::Check(check)) => id == check.id(),
+            _ => false,
+        }
+    }
 }
 
 /// Build initial CheckResult for a check based on its state
@@ -397,7 +458,7 @@ impl App {
             checks.iter().map(|c| c.group()).collect();
         let pre_commands = build_pre_commands(&config, &active_groups);
 
-        Self {
+        let mut app = Self {
             config,
             changed_files,
             checks,
@@ -411,7 +472,18 @@ impl App {
             fix: FixState::default(),
             sys: SysStats::default(),
             needs_redraw: true, // Initial render needed
-        }
+        };
+        app.select_initial_item();
+        app
+    }
+
+    /// Start on the first check / pre-command rather than the first group
+    /// header, so the output panel shows something useful right away
+    fn select_initial_item(&mut self) {
+        let first = self
+            .selectable_items()
+            .position(|item| !matches!(item, SelectableItem::Group(_)));
+        self.view.selected_check = first.unwrap_or(0);
     }
 
     /// Reset for retry - update changed files and checks, reset results
@@ -437,6 +509,7 @@ impl App {
             output_visible_lines: self.view.output_visible_lines,
             ..ViewState::default()
         };
+        self.select_initial_item();
         self.run = RunState::started_now();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
@@ -616,8 +689,14 @@ impl App {
 
     /// Store a finished result. A timeout or cancel result carries no
     /// output (the command was killed), so a running check's streamed
-    /// output is kept with the result's message appended.
-    fn insert_result(&mut self, mut result: CheckResult) {
+    /// output is kept with the result's message appended. A group that is
+    /// now fully passed auto-collapses.
+    fn insert_result(&mut self, result: CheckResult) {
+        self.store_result(result);
+        self.auto_collapse_passed_groups();
+    }
+
+    fn store_result(&mut self, mut result: CheckResult) {
         let killed = matches!(
             result.status,
             CheckStatus::TimedOut | CheckStatus::Cancelled
@@ -912,7 +991,7 @@ impl App {
                     .get(check.id())
                     .filter(|r| r.status.is_failure())
                     .map(|_| i),
-                SelectableItem::PreCommand(_) => None,
+                SelectableItem::Group(_) | SelectableItem::PreCommand(_) => None,
             })
             .collect()
     }
@@ -954,12 +1033,11 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Store the checks list's inner (border-excluded) content rect and its
-    /// row->item mapping (called during render), so mouse clicks can be
-    /// mapped back to a check.
-    pub fn set_checks_list_layout(&mut self, content_area: Rect, row_to_item: Vec<Option<usize>>) {
+    /// Store the checks list's inner (border-excluded) content rect (called
+    /// during render), so mouse clicks can be mapped back to a row. Every
+    /// row is a [`Self::selectable_items`] entry, so row == item index.
+    pub fn set_checks_list_layout(&mut self, content_area: Rect) {
         self.view.checks_list_area = content_area;
-        self.view.checks_list_row_to_item = row_to_item;
     }
 
     /// Store the output panel's render-time layout in one call so its
@@ -979,16 +1057,16 @@ impl App {
         contains_point(self.view.output_area, col, row)
     }
 
-    /// Select the check under a left-click at `(col, row)`. No-op when the
-    /// click lands outside the checks list's content area or on a group
-    /// header row.
+    /// Select the row (check, pre-command or group header) under a
+    /// left-click at `(col, row)`. No-op when the click lands outside the
+    /// checks list's content area or below the last row.
     pub fn select_check_at_position(&mut self, col: u16, row: u16) {
         let content_area = self.view.checks_list_area;
         if !contains_point(content_area, col, row) {
             return;
         }
-        let item_row = (row - content_area.y) as usize + self.view.checks_list_offset;
-        if let Some(Some(idx)) = self.view.checks_list_row_to_item.get(item_row).copied() {
+        let idx = (row - content_area.y) as usize + self.view.checks_list_offset;
+        if idx < self.selectable_items().count() {
             self.select_item_index(idx);
         }
     }
@@ -1087,8 +1165,12 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Toggle full vs truncated command (and file list) in the output panel
+    /// Toggle full vs truncated command (and file list) in the output panel.
+    /// No-op on a group header (nothing to expand).
     pub fn toggle_full_command(&mut self) {
+        if matches!(self.selected_item(), Some(SelectableItem::Group(_))) {
+            return;
+        }
         self.view.show_full_command = !self.view.show_full_command;
         self.needs_redraw = true;
     }
@@ -1193,22 +1275,128 @@ impl App {
         self.selectable_items().collect()
     }
 
-    /// Lazy iterator over selectable items in display order. The checks
-    /// list is built from this, so list rows and selection always agree.
+    /// Lazy iterator over selectable items in display order: per group a
+    /// header, then its pre-commands and checks unless the group is folded.
+    /// A group with no filter-visible children has no header either. The
+    /// checks list is built from this, so list rows and selection always
+    /// agree (one row per item).
     pub(crate) fn selectable_items(&self) -> impl Iterator<Item = SelectableItem<'_>> {
         self.groups().into_iter().flat_map(move |group| {
-            let pre_commands = self
-                .pre_commands
-                .iter()
-                .filter(move |p| p.group == group && self.should_show_pre_command(p))
-                .map(SelectableItem::PreCommand);
-            let checks = self
-                .checks
-                .iter()
-                .filter(move |c| c.group() == group && self.should_show_check(c))
-                .map(SelectableItem::Check);
-            pre_commands.chain(checks)
+            let mut children = self.group_children(group).peekable();
+            let header = children
+                .peek()
+                .is_some()
+                .then_some(SelectableItem::Group(group));
+            let expanded = !self.is_group_collapsed(group);
+            header.into_iter().chain(children.filter(move |_| expanded))
         })
+    }
+
+    /// Filter-visible pre-commands and checks of `group`, ignoring folding
+    fn group_children<'a>(
+        &'a self,
+        group: &'a str,
+    ) -> impl Iterator<Item = SelectableItem<'a>> + 'a {
+        let pre_commands = self
+            .pre_commands
+            .iter()
+            .filter(move |p| p.group == group && self.should_show_pre_command(p))
+            .map(SelectableItem::PreCommand);
+        let checks = self
+            .checks
+            .iter()
+            .filter(move |c| c.group() == group && self.should_show_check(c))
+            .map(SelectableItem::Check);
+        pre_commands.chain(checks)
+    }
+
+    /// Number of rows a folded `group` hides (shown on its header)
+    pub fn group_child_count(&self, group: &str) -> usize {
+        self.group_children(group).count()
+    }
+
+    /// True when `group` is folded
+    pub fn is_group_collapsed(&self, group: &str) -> bool {
+        self.view.collapsed_groups.contains(group)
+    }
+
+    /// Fold or unfold the selected group (Space/Enter on its header); no-op
+    /// on a check or pre-command. A manual toggle opts the group out of
+    /// auto-collapse for the rest of the run.
+    pub fn toggle_selected_group(&mut self) {
+        let Some(SelectableItem::Group(group)) = self.selected_item() else {
+            return;
+        };
+        let group = group.to_string();
+        let collapsed = !self.is_group_collapsed(&group);
+        self.view.manual_folds.insert(group.clone());
+        self.set_group_collapsed(&group, collapsed);
+    }
+
+    /// Fold/unfold `group`, keeping the selection on the same row. Rows
+    /// above it may appear/disappear, shifting its index; a selected row
+    /// hidden by the fold hands the selection to its group header.
+    fn set_group_collapsed(&mut self, group: &str, collapsed: bool) {
+        let selected = self.selected_item().map(|item| ItemKey::of(&item));
+        if collapsed {
+            self.view.collapsed_groups.insert(group.to_string());
+        } else {
+            self.view.collapsed_groups.remove(group);
+        }
+        if let Some(key) = selected {
+            self.reselect(&key);
+        }
+        self.clamp_selection();
+        self.needs_redraw = true;
+    }
+
+    /// Select the row identified by `key`, or its group header when the row
+    /// is hidden (a selection change, so the output view resets)
+    fn reselect(&mut self, key: &ItemKey) {
+        let same_row = self.selectable_items().position(|i| key.matches(&i));
+        if let Some(idx) = same_row {
+            self.view.selected_check = idx;
+            return;
+        }
+        let header = self
+            .selectable_items()
+            .position(|i| matches!(i, SelectableItem::Group(g) if g == key.group()));
+        if let Some(idx) = header {
+            self.select_item_index(idx);
+        }
+    }
+
+    /// Fold every group whose checks all finished Passed or Skipped (at
+    /// least one Passed; a skipped-only group stays open), unless the user
+    /// already folded/unfolded it by hand. Only folds: a later retry-all
+    /// resets fold state anyway.
+    fn auto_collapse_passed_groups(&mut self) {
+        let passed: Vec<String> = self
+            .groups()
+            .into_iter()
+            .filter(|g| {
+                !self.view.manual_folds.contains(*g)
+                    && !self.is_group_collapsed(g)
+                    && self.group_passed(g)
+            })
+            .map(str::to_string)
+            .collect();
+        for group in passed {
+            self.set_group_collapsed(&group, true);
+        }
+    }
+
+    /// Every check in `group` is Passed or Skipped, and at least one Passed
+    fn group_passed(&self, group: &str) -> bool {
+        let statuses: Vec<Option<&CheckStatus>> = self
+            .checks_in_group(group)
+            .into_iter()
+            .map(|c| self.results.get(c.id()).map(|r| &r.status))
+            .collect();
+        statuses
+            .iter()
+            .all(|s| matches!(s, Some(CheckStatus::Passed | CheckStatus::Skipped)))
+            && statuses.contains(&Some(&CheckStatus::Passed))
     }
 
     fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
@@ -1375,7 +1563,9 @@ checks:
     fn test_new_initial_state() {
         let app = make_app();
 
-        assert_eq!(app.view.selected_check, 0);
+        // Rows: fast header, php-lint, tests header, phpunit, behat;
+        // starts on the first check, not the header
+        assert_eq!(app.view.selected_check, 1);
         assert_eq!(app.view.output_scroll, 0);
         assert_eq!(app.view.status_filter, StatusFilter::All);
         assert!(!app.run.all_finished);
@@ -1387,15 +1577,16 @@ checks:
     fn test_navigation_next() {
         let mut app = make_app();
 
-        assert_eq!(app.view.selected_check, 0);
-        app.next_check();
         assert_eq!(app.view.selected_check, 1);
         app.next_check();
-        assert_eq!(app.view.selected_check, 2);
+        assert_eq!(app.view.selected_check, 2, "lands on the tests header");
+        app.next_check();
+        app.next_check();
+        assert_eq!(app.view.selected_check, 4);
 
         // Should not go past last item
         app.next_check();
-        assert_eq!(app.view.selected_check, 2);
+        assert_eq!(app.view.selected_check, 4);
     }
 
     #[test]
@@ -1406,7 +1597,7 @@ checks:
         app.previous_check();
         assert_eq!(app.view.selected_check, 1);
         app.previous_check();
-        assert_eq!(app.view.selected_check, 0);
+        assert_eq!(app.view.selected_check, 0, "lands on the fast header");
 
         // Should not go below 0
         app.previous_check();
@@ -1439,7 +1630,7 @@ checks:
             .any(|i| matches!(i, SelectableItem::Check(c) if c.id() == "phpunit")));
 
         app.view.status_filter = StatusFilter::All;
-        app.view.selected_check = 1; // phpunit
+        app.view.selected_check = 3; // phpunit
         let caps = app.selected_capabilities();
         assert!(caps.can_retry && caps.can_run_all_files);
     }
@@ -1560,7 +1751,7 @@ checks:
         let mut app = make_app();
 
         // Check phpunit which has fix command
-        app.view.selected_check = 1; // phpunit
+        app.view.selected_check = 3; // phpunit
 
         // Not failed yet - can't fix
         assert!(!app.selected_capabilities().can_fix);
@@ -1577,7 +1768,7 @@ checks:
         let mut app = make_app();
 
         // Select php-lint which has no fix command
-        app.view.selected_check = 0; // php-lint
+        app.view.selected_check = 1; // php-lint
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
 
         // Can't fix because no fix command
@@ -1587,7 +1778,7 @@ checks:
     #[test]
     fn test_can_fix_selected_disabled_during_fix() {
         let mut app = make_app();
-        app.view.selected_check = 1; // phpunit
+        app.view.selected_check = 3; // phpunit
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
         app.fix.running = true;
@@ -1600,19 +1791,19 @@ checks:
         let mut app = make_app();
 
         // Select behat which is on-demand
-        app.view.selected_check = 2;
+        app.view.selected_check = 4;
 
         assert!(app.selected_capabilities().can_trigger);
 
         // Select php-lint which is pending
-        app.view.selected_check = 0;
+        app.view.selected_check = 1;
         assert!(!app.selected_capabilities().can_trigger);
     }
 
     #[test]
     fn test_can_retry_selected() {
         let mut app = make_app();
-        app.view.selected_check = 0; // php-lint
+        app.view.selected_check = 1; // php-lint
 
         // Can't retry pending
         assert!(!app.selected_capabilities().can_retry);
@@ -1841,14 +2032,9 @@ checks:
         assert_eq!(app.view.output_scroll, 0);
     }
 
-    /// row_to_item for `make_app()`'s three checks (fast: php-lint; tests:
-    /// phpunit, behat): a header row before each group change.
-    fn app_row_to_item() -> Vec<Option<usize>> {
-        vec![None, Some(0), None, Some(1), Some(2)]
-    }
-
     /// `set_checks_list_layout` takes the list's inner content rect (borders
     /// already excluded), so tests click directly against content rows.
+    /// `make_app()` rows: fast header, php-lint, tests header, phpunit, behat.
     fn content_area() -> Rect {
         Rect::new(0, 0, 40, 8)
     }
@@ -1856,42 +2042,52 @@ checks:
     #[test]
     fn test_click_selects_check_in_list() {
         let mut app = make_app();
-        app.set_checks_list_layout(content_area(), app_row_to_item());
+        app.set_checks_list_layout(content_area());
 
-        // Content row 3 (after the "tests" header) maps to phpunit (idx 1)
+        // Content row 3 (after the "tests" header) is phpunit
         app.select_check_at_position(5, 3);
 
-        assert_eq!(app.view.selected_check, 1);
+        assert_eq!(app.view.selected_check, 3);
         assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
         assert!(app.needs_redraw);
     }
 
     #[test]
-    fn test_click_on_group_header_row_is_noop() {
+    fn test_click_on_group_header_row_selects_header() {
         let mut app = make_app();
-        app.set_checks_list_layout(content_area(), app_row_to_item());
-        app.view.selected_check = 1;
+        app.set_checks_list_layout(content_area());
 
-        // Content row 0 is the "fast" group header (row_to_item[0] = None)
+        // Content row 0 is the "fast" group header
         app.select_check_at_position(5, 0);
 
-        assert_eq!(
-            app.view.selected_check, 1,
-            "header row must not change selection"
-        );
+        assert_eq!(app.view.selected_check, 0);
+        assert!(matches!(
+            app.selected_item(),
+            Some(SelectableItem::Group("fast"))
+        ));
+    }
+
+    #[test]
+    fn test_click_below_last_row_is_noop() {
+        let mut app = make_app();
+        app.set_checks_list_layout(content_area());
+
+        // Row 6 is inside the area but past the 5 list rows
+        app.select_check_at_position(5, 6);
+
+        assert_eq!(app.view.selected_check, 1, "selection unchanged");
     }
 
     #[test]
     fn test_click_outside_checks_list_is_noop() {
         let mut app = make_app();
-        app.set_checks_list_layout(content_area(), app_row_to_item());
-        app.view.selected_check = 0;
+        app.set_checks_list_layout(content_area());
 
         // Well outside the list area
         app.select_check_at_position(100, 100);
 
         assert_eq!(
-            app.view.selected_check, 0,
+            app.view.selected_check, 1,
             "click outside list must not change selection"
         );
     }
@@ -1899,19 +2095,13 @@ checks:
     #[test]
     fn test_click_respects_list_scroll_offset() {
         let mut app = make_app();
-        app.set_checks_list_layout(content_area(), app_row_to_item());
+        app.set_checks_list_layout(content_area());
         app.view.checks_list_offset = 2; // scrolled past the first header + php-lint
 
-        // Content row 0 now shows row_to_item[2 + 0] = None (tests header)
-        app.select_check_at_position(5, 0);
-        assert_eq!(
-            app.view.selected_check, 0,
-            "header row after scroll must not select"
-        );
-
-        // Content row 1 shows row_to_item[2 + 1] = Some(1) (phpunit)
+        // Content row 1 now shows row 2 + 1 = phpunit
         app.select_check_at_position(5, 1);
-        assert_eq!(app.view.selected_check, 1);
+        assert_eq!(app.view.selected_check, 3);
+        assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
     }
 
     #[test]
@@ -2011,7 +2201,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
         app.view.status_filter = StatusFilter::Failed;
-        app.view.selected_check = 1; // phpunit, second item in the filtered list
+        app.view.selected_check = 3; // phpunit, last row of the filtered list
 
         // phpunit passes on retry - the filtered list shrinks to 1 item
         let result = CheckResult {
@@ -2026,7 +2216,7 @@ checks:
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
         assert_eq!(
-            app.view.selected_check, 0,
+            app.view.selected_check, 1,
             "selection must be clamped to list length"
         );
         assert!(
@@ -2041,7 +2231,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
         app.view.status_filter = StatusFilter::Failed;
-        app.view.selected_check = 1; // phpunit, second item in the filtered list
+        app.view.selected_check = 3; // phpunit, last row of the filtered list
 
         // phpunit passes via set_retry_result - the filtered list shrinks to 1 item
         let result = CheckResult {
@@ -2056,7 +2246,7 @@ checks:
         app.set_retry_result(result);
 
         assert_eq!(
-            app.view.selected_check, 0,
+            app.view.selected_check, 1,
             "selection must be clamped to list length"
         );
         assert!(
@@ -2103,7 +2293,7 @@ checks:
     #[test]
     fn test_can_fix_selected_disabled_during_fix_all() {
         let mut app = make_app();
-        app.view.selected_check = 1; // phpunit
+        app.view.selected_check = 3; // phpunit
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
         app.start_fix_all(1);
@@ -2637,7 +2827,7 @@ checks:
             app.view.selected_check = 1;
 
             app.select_last();
-            assert_eq!(app.view.selected_check, 2);
+            assert_eq!(app.view.selected_check, 4);
 
             app.select_first();
             assert_eq!(app.view.selected_check, 0);
@@ -2670,31 +2860,31 @@ checks:
             let mut app = make_app();
             app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
             app.results.get_mut("phpunit").unwrap().status = CheckStatus::TimedOut;
-            // behat (index 2) stays on_demand, not failed
+            // behat (index 4) stays on_demand, not failed
 
-            app.view.selected_check = 0; // on php-lint (failed)
+            app.view.selected_check = 1; // on php-lint (failed)
             app.select_next_failed();
-            assert_eq!(app.view.selected_check, 1, "moves to next failed (phpunit)");
+            assert_eq!(app.view.selected_check, 3, "moves to next failed (phpunit)");
 
             app.select_next_failed();
             assert_eq!(
-                app.view.selected_check, 0,
+                app.view.selected_check, 1,
                 "wraps back to first failed (php-lint)"
             );
 
             app.select_prev_failed();
-            assert_eq!(app.view.selected_check, 1, "wraps to last failed (phpunit)");
+            assert_eq!(app.view.selected_check, 3, "wraps to last failed (phpunit)");
         }
 
         #[test]
         fn test_select_next_failed_noop_when_none_failed() {
             let mut app = make_app();
-            app.view.selected_check = 0;
+            app.view.selected_check = 1;
 
             app.select_next_failed();
             app.select_prev_failed();
 
-            assert_eq!(app.view.selected_check, 0, "no-op when nothing failed");
+            assert_eq!(app.view.selected_check, 1, "no-op when nothing failed");
         }
 
         #[test]
@@ -2757,6 +2947,212 @@ checks:
             app.start_refresh();
             app.finish_progress("phpunit");
             assert!(app.view.status_message.is_some(), "refresh not check-owned");
+        }
+    }
+
+    mod fold_tests {
+        use super::*;
+
+        /// Result with `status` for `check_id`
+        fn finished(check_id: &str, status: CheckStatus) -> CheckResult {
+            CheckResult {
+                status,
+                ..CheckResult::pending(check_id)
+            }
+        }
+
+        fn finish(app: &mut App, check_id: &str, status: CheckStatus) {
+            app.handle_runner_event(RunnerEvent::CheckFinished {
+                result: finished(check_id, status),
+            });
+        }
+
+        /// Group key of each row, `^` prefixed for headers
+        fn rows(app: &App) -> Vec<String> {
+            app.selectable_items()
+                .map(|item| match item {
+                    SelectableItem::Group(g) => format!("^{g}"),
+                    SelectableItem::PreCommand(pc) => pc.name.clone(),
+                    SelectableItem::Check(c) => c.id().to_string(),
+                })
+                .collect()
+        }
+
+        fn selected_header(app: &App) -> Option<&str> {
+            match app.selected_item() {
+                Some(SelectableItem::Group(g)) => Some(g),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn test_group_headers_are_selectable_rows() {
+            let mut app = make_app();
+            assert_eq!(
+                rows(&app),
+                ["^fast", "php-lint", "^tests", "phpunit", "behat"]
+            );
+
+            app.select_first();
+            assert_eq!(selected_header(&app), Some("fast"));
+            assert!(app.selected_check().is_none());
+
+            app.next_check(); // php-lint
+            app.next_check();
+            assert_eq!(selected_header(&app), Some("tests"), "j lands on header");
+
+            app.select_last();
+            app.previous_check();
+            app.previous_check();
+            assert_eq!(selected_header(&app), Some("tests"), "k lands on header");
+        }
+
+        #[test]
+        fn test_toggle_selected_group_folds_and_unfolds() {
+            let mut app = make_app();
+            app.view.selected_check = 2; // tests header
+
+            app.toggle_selected_group();
+            assert!(app.is_group_collapsed("tests"));
+            assert_eq!(rows(&app), ["^fast", "php-lint", "^tests"]);
+            assert_eq!(app.group_child_count("tests"), 2, "count for (n) marker");
+            assert_eq!(selected_header(&app), Some("tests"), "stays on header");
+
+            app.toggle_selected_group();
+            assert!(!app.is_group_collapsed("tests"));
+            assert_eq!(rows(&app).len(), 5);
+        }
+
+        #[test]
+        fn test_fold_hides_pre_commands_too() {
+            let mut app = make_app();
+            app.pre_commands.push(PreCommandState {
+                group: "tests".to_string(),
+                name: "init-db".to_string(),
+                status: PreCommandStatus::Passed,
+                output: String::new(),
+                duration_ms: 0,
+            });
+            app.view.selected_check = 2; // tests header
+
+            app.toggle_selected_group();
+
+            assert_eq!(rows(&app), ["^fast", "php-lint", "^tests"]);
+            assert_eq!(app.group_child_count("tests"), 3);
+        }
+
+        #[test]
+        fn test_toggle_on_check_is_noop() {
+            let mut app = make_app(); // php-lint selected
+            app.toggle_selected_group();
+
+            assert!(app.view.collapsed_groups.is_empty());
+            assert!(app.view.manual_folds.is_empty());
+            assert_eq!(rows(&app).len(), 5);
+        }
+
+        #[test]
+        fn test_auto_collapse_when_group_passed() {
+            let mut app = make_app();
+            finish(&mut app, "php-lint", CheckStatus::Passed);
+            assert!(app.is_group_collapsed("fast"));
+
+            // behat on-demand: tests group not finished
+            finish(&mut app, "phpunit", CheckStatus::Passed);
+            assert!(!app.is_group_collapsed("tests"));
+        }
+
+        #[test]
+        fn test_auto_collapse_counts_skipped_as_passed() {
+            let mut app = make_app();
+            app.results.get_mut("behat").unwrap().status = CheckStatus::Skipped;
+
+            app.set_retry_result(finished("phpunit", CheckStatus::Passed));
+
+            assert!(app.is_group_collapsed("tests"), "retry result too");
+        }
+
+        #[test]
+        fn test_no_auto_collapse_for_failed_or_skipped_only_group() {
+            let mut app = make_app();
+            finish(&mut app, "php-lint", CheckStatus::Failed);
+            assert!(!app.is_group_collapsed("fast"));
+
+            let mut app = make_app();
+            finish(&mut app, "php-lint", CheckStatus::Skipped);
+            assert!(!app.is_group_collapsed("fast"), "needs one Passed");
+        }
+
+        #[test]
+        fn test_manual_toggle_wins_over_auto_collapse() {
+            let mut app = make_app();
+            app.view.selected_check = 0; // fast header
+            app.toggle_selected_group();
+            app.toggle_selected_group(); // back open, by hand
+
+            finish(&mut app, "php-lint", CheckStatus::Passed);
+
+            assert!(!app.is_group_collapsed("fast"));
+        }
+
+        #[test]
+        fn test_auto_collapse_moves_hidden_selection_to_header() {
+            let mut app = make_app(); // php-lint selected
+            app.fix.result = Some(CheckResult::pending("php-lint"));
+
+            finish(&mut app, "php-lint", CheckStatus::Passed);
+
+            assert_eq!(app.view.selected_check, 0);
+            assert_eq!(selected_header(&app), Some("fast"));
+            assert!(app.fix.result.is_none(), "selection change resets view");
+        }
+
+        #[test]
+        fn test_fold_above_keeps_selection_on_same_row() {
+            let mut app = make_app();
+            app.view.selected_check = 3; // phpunit
+
+            finish(&mut app, "php-lint", CheckStatus::Passed); // fast folds
+
+            assert_eq!(app.view.selected_check, 2, "index shifts up by one");
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
+        }
+
+        #[test]
+        fn test_header_selected_disables_check_actions() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+            app.view.selected_check = 0; // fast header
+
+            let caps = app.selected_capabilities();
+            assert!(!caps.can_fix && !caps.can_retry && !caps.can_trigger);
+            assert!(!caps.can_run_all_files && !caps.can_cancel);
+            assert!(app.get_selected_fix_command().is_none());
+
+            app.toggle_full_command();
+            assert!(!app.view.show_full_command, "e is a no-op on a header");
+        }
+
+        #[test]
+        fn test_next_failed_skips_folded_group() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+            app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+            app.view.selected_check = 2; // tests header
+            app.toggle_selected_group();
+
+            app.select_first();
+            app.select_next_failed();
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("php-lint"));
+            app.select_next_failed();
+            assert_eq!(
+                app.selected_check().map(|c| c.id()),
+                Some("php-lint"),
+                "hidden phpunit is skipped"
+            );
+            app.select_prev_failed();
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("php-lint"));
+            assert!(app.is_group_collapsed("tests"), "stays folded");
         }
     }
 }

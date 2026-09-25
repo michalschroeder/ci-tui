@@ -193,6 +193,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  ↑/k  ↓/j       previous / next check"),
         Line::from("  g  /  G        first / last check"),
         Line::from("  n  /  N        next / previous failed check"),
+        Line::from("  Space / Enter  fold / unfold selected group"),
         Line::from(""),
         Line::from(Span::styled(
             "Output",
@@ -475,7 +476,8 @@ fn render_check_item(
 }
 
 fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
-    let (items, selected_row, row_to_item) = build_checks_list_items(app, area);
+    let items = build_checks_list_items(app, area);
+    let selected_row = (!items.is_empty()).then_some(app.view.selected_check);
 
     let filter_info = match app.view.status_filter {
         super::app::StatusFilter::All => "",
@@ -487,7 +489,7 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
         .title(format!(" Checks{} ", filter_info));
     // Store the block's inner (border-excluded) rect so mouse click
     // hit-testing maps 1:1 onto the rows the list actually draws into.
-    app.set_checks_list_layout(block.inner(area), row_to_item);
+    app.set_checks_list_layout(block.inner(area));
 
     // scroll_padding keeps the neighbor rows (e.g. group headers) in view
     let list = List::new(items).scroll_padding(1).block(block);
@@ -501,58 +503,44 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
     app.view.checks_list_offset = state.offset();
 }
 
-/// Build the checks list rows, the row index of the selected item, and a
-/// row -> [`App::selectable_items`] index mapping (`None` for group headers).
-///
-/// Rows come from [`App::selectable_items`] (plus a header whenever the group
-/// changes), so the list and the selection can never disagree.
-fn build_checks_list_items(
-    app: &App,
-    area: Rect,
-) -> (Vec<ListItem<'static>>, Option<usize>, Vec<Option<usize>>) {
-    // Each row is pushed as a (widget, row_to_item entry) pair, so the two
-    // can't drift out of index alignment the way two parallel Vecs could.
-    let mut rows: Vec<(ListItem<'static>, Option<usize>)> = Vec::new();
-    let mut selected_row = None;
-    let mut current_group = None;
-
-    for (idx, item) in app.selectable_items().enumerate() {
-        let group = match item {
-            SelectableItem::PreCommand(pc) => pc.group.as_str(),
-            SelectableItem::Check(check) => check.group(),
-        };
-        if current_group != Some(group) {
-            current_group = Some(group);
-            rows.push((group_header_item(app, group), None));
-        }
-
-        let is_selected = idx == app.view.selected_check;
-        if is_selected {
-            selected_row = Some(rows.len());
-        }
-        let item_widget = match item {
-            SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
-            SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
-        };
-        rows.push((item_widget, Some(idx)));
-    }
-
-    let (items, row_to_item) = rows.into_iter().unzip();
-    (items, selected_row, row_to_item)
+/// Build the checks list rows, one per [`App::selectable_items`] entry
+/// (group headers included), so row index == item index and the list and
+/// the selection can never disagree.
+fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
+    app.selectable_items()
+        .enumerate()
+        .map(|(idx, item)| {
+            let is_selected = idx == app.view.selected_check;
+            match item {
+                SelectableItem::Group(group) => group_header_item(app, group, is_selected),
+                SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
+                SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
+            }
+        })
+        .collect()
 }
 
-/// Group header row; highlighted while the group runs
-fn group_header_item(app: &App, group: &str) -> ListItem<'static> {
+/// Group header row: fold marker (`▾` open, `▸ NAME (n)` folded with its
+/// hidden row count); highlighted while the group runs
+fn group_header_item(app: &App, group: &str, is_selected: bool) -> ListItem<'static> {
     let color = if app.run.current_group.as_deref() == Some(group) {
         Color::Yellow
     } else {
         Color::Cyan
     };
-    let group_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-    let display_name = app.group_display_name(group);
+    let mut group_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    if is_selected {
+        group_style = group_style.add_modifier(Modifier::REVERSED);
+    }
+    let display_name = app.group_display_name(group).to_uppercase();
+    let label = if app.is_group_collapsed(group) {
+        format!("▸ {} ({})", display_name, app.group_child_count(group))
+    } else {
+        format!("▾ {}", display_name)
+    };
     ListItem::new(Line::from(vec![
-        Span::styled(format!("─ {} ", display_name.to_uppercase()), group_style),
-        Span::styled("───────────", Style::default().fg(Color::DarkGray)),
+        Span::styled(label, group_style),
+        Span::styled(" ───────────", Style::default().fg(Color::DarkGray)),
     ]))
 }
 
@@ -727,7 +715,8 @@ fn output_view(app: &App) -> OutputView<'_> {
         match app.selected_item() {
             Some(SelectableItem::PreCommand(pc)) => OutputView::PreCommand(pc),
             Some(SelectableItem::Check(check)) => OutputView::Check(Some(check)),
-            None => OutputView::Check(None),
+            // Group header: no output of its own (placeholder text)
+            Some(SelectableItem::Group(_)) | None => OutputView::Check(None),
         }
     }
 }
