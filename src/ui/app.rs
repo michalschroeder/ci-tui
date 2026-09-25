@@ -271,17 +271,6 @@ pub enum SelectableItem<'a> {
     Check(&'a CheckToRun),
 }
 
-impl<'a> SelectableItem<'a> {
-    /// Key of the group this row belongs to (a header's own group)
-    pub fn group(&self) -> &'a str {
-        match self {
-            Self::Group(group) => group,
-            Self::PreCommand(pc) => &pc.group,
-            Self::Check(check) => check.group(),
-        }
-    }
-}
-
 /// Owned identity of a list row, so a fold that shifts row indices can put
 /// the selection back on the same row (borrowed [`SelectableItem`]s cannot
 /// outlive the mutation)
@@ -312,18 +301,6 @@ impl ItemKey {
             Self::Group(group) | Self::PreCommand { group, .. } | Self::Check { group, .. } => {
                 group
             }
-        }
-    }
-
-    /// Compare against a borrowed row without allocating a key for it
-    fn matches(&self, item: &SelectableItem<'_>) -> bool {
-        match (self, item) {
-            (Self::Group(group), SelectableItem::Group(g)) => group == g,
-            (Self::PreCommand { group, name }, SelectableItem::PreCommand(pc)) => {
-                *group == pc.group && *name == pc.name
-            }
-            (Self::Check { id, .. }, SelectableItem::Check(check)) => id == check.id(),
-            _ => false,
         }
     }
 }
@@ -691,12 +668,7 @@ impl App {
     /// output (the command was killed), so a running check's streamed
     /// output is kept with the result's message appended. A group that is
     /// now fully passed auto-collapses.
-    fn insert_result(&mut self, result: CheckResult) {
-        self.store_result(result);
-        self.auto_collapse_passed_groups();
-    }
-
-    fn store_result(&mut self, mut result: CheckResult) {
+    fn insert_result(&mut self, mut result: CheckResult) {
         let killed = matches!(
             result.status,
             CheckStatus::TimedOut | CheckStatus::Cancelled
@@ -710,6 +682,7 @@ impl App {
             result.error_output = join_output(&streamed.error_output, &result.error_output);
         }
         self.results.insert(result.check_id.clone(), result);
+        self.auto_collapse_passed_groups();
     }
 
     /// Show a status message in the footer
@@ -1153,7 +1126,7 @@ impl App {
             StatusFilter::Failed => StatusFilter::All,
         };
         self.reset_selection_view();
-        self.view.selected_check = 0;
+        self.select_initial_item();
         self.needs_redraw = true;
     }
 
@@ -1161,7 +1134,7 @@ impl App {
     pub fn show_all(&mut self) {
         self.view.status_filter = StatusFilter::All;
         self.reset_selection_view();
-        self.view.selected_check = 0;
+        self.select_initial_item();
         self.needs_redraw = true;
     }
 
@@ -1353,7 +1326,9 @@ impl App {
     /// Select the row identified by `key`, or its group header when the row
     /// is hidden (a selection change, so the output view resets)
     fn reselect(&mut self, key: &ItemKey) {
-        let same_row = self.selectable_items().position(|i| key.matches(&i));
+        let same_row = self
+            .selectable_items()
+            .position(|i| ItemKey::of(&i) == *key);
         if let Some(idx) = same_row {
             self.view.selected_check = idx;
             return;
@@ -1388,15 +1363,14 @@ impl App {
 
     /// Every check in `group` is Passed or Skipped, and at least one Passed
     fn group_passed(&self, group: &str) -> bool {
-        let statuses: Vec<Option<&CheckStatus>> = self
-            .checks_in_group(group)
-            .into_iter()
-            .map(|c| self.results.get(c.id()).map(|r| &r.status))
-            .collect();
-        statuses
+        let checks = self.checks_in_group(group);
+        let status = |c: &&CheckToRun| self.results.get(c.id()).map(|r| &r.status);
+        checks
             .iter()
-            .all(|s| matches!(s, Some(CheckStatus::Passed | CheckStatus::Skipped)))
-            && statuses.contains(&Some(&CheckStatus::Passed))
+            .all(|c| matches!(status(c), Some(CheckStatus::Passed | CheckStatus::Skipped)))
+            && checks
+                .iter()
+                .any(|c| status(c) == Some(&CheckStatus::Passed))
     }
 
     fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
@@ -1677,7 +1651,7 @@ checks:
         app.show_all();
 
         assert_eq!(app.view.status_filter, StatusFilter::All);
-        assert_eq!(app.view.selected_check, 0);
+        assert_eq!(app.view.selected_check, 1, "first check, not the header");
     }
 
     #[test]

@@ -2101,21 +2101,9 @@ checks:
         let (mut tasks, _rx) = make_test_tasks(&config);
         app.select_first(); // fast header
 
-        handle_key_event(
-            &mut app,
-            press(KeyCode::Char('/'), KeyModifiers::NONE),
-            &mut tasks,
-        );
-        handle_key_event(
-            &mut app,
-            press(KeyCode::Char(' '), KeyModifiers::NONE),
-            &mut tasks,
-        );
-        handle_key_event(
-            &mut app,
-            press(KeyCode::Enter, KeyModifiers::NONE),
-            &mut tasks,
-        );
+        for code in [KeyCode::Char('/'), KeyCode::Char(' '), KeyCode::Enter] {
+            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+        }
 
         let search = app.view.search.as_ref().expect("search confirmed");
         assert!(!search.typing);
