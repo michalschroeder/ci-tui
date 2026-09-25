@@ -1555,6 +1555,8 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     let mut spans = vec![
         Span::styled(" q", Style::default().fg(Color::Yellow)),
         Span::raw(" quit  "),
+        Span::styled("?", Style::default().fg(Color::Yellow)),
+        Span::raw(" help  "),
         Span::styled("↑↓", Style::default().fg(Color::Yellow)),
         Span::raw(" select  "),
     ];

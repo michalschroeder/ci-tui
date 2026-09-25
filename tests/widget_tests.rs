@@ -472,6 +472,19 @@ fn test_footer_shows_quit_shortcut() {
 }
 
 #[test]
+fn test_footer_shows_help_shortcut() {
+    let mut app = make_test_app();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(
+        buffer_contains(buffer, "? help"),
+        "Footer should show help shortcut"
+    );
+}
+
+#[test]
 fn test_footer_shows_navigation_shortcuts() {
     let mut app = make_test_app();
     let mut terminal = create_terminal();
@@ -513,7 +526,8 @@ fn test_footer_shows_expand_shortcut() {
 #[test]
 fn test_footer_shows_version_info() {
     let mut app = make_test_app();
-    let mut terminal = create_terminal();
+    // Version info is the footer's last span; it is truncated first on 80 cols
+    let mut terminal = Terminal::new(TestBackend::new(120, HEIGHT)).unwrap();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
