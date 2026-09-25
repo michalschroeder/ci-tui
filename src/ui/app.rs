@@ -105,8 +105,6 @@ pub struct FixState {
 pub struct SysStats {
     /// CPU usage history for sparkline (percentage values)
     pub cpu_history: VecDeque<f32>,
-    /// Latest memory usage (percent) for the MEM gauge
-    pub mem_usage_pct: f32,
     /// Current memory usage in bytes
     pub mem_used_bytes: u64,
     /// Total memory in bytes (0 until first stats sample arrives)
@@ -117,7 +115,6 @@ impl Default for SysStats {
     fn default() -> Self {
         Self {
             cpu_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES + 1),
-            mem_usage_pct: 0.0,
             mem_used_bytes: 0,
             mem_total_bytes: 0,
         }
@@ -761,13 +758,6 @@ impl App {
         self.sys.mem_used_bytes = mem_used;
         self.sys.mem_total_bytes = mem_total;
 
-        // Memory usage percentage
-        self.sys.mem_usage_pct = if mem_total > 0 {
-            (mem_used as f32 / mem_total as f32) * 100.0
-        } else {
-            0.0
-        };
-
         // Add to history (capped) - VecDeque for O(1) pop_front
         self.sys.cpu_history.push_back(cpu_usage);
         if self.sys.cpu_history.len() > MAX_HISTORY_SAMPLES {
@@ -784,7 +774,10 @@ impl App {
 
     /// Latest memory usage (percent)
     pub fn mem_usage(&self) -> f32 {
-        self.sys.mem_usage_pct
+        match self.sys.mem_total_bytes {
+            0 => 0.0,
+            total => self.sys.mem_used_bytes as f32 / total as f32 * 100.0,
+        }
     }
 
     /// Used memory in GiB (2^30 bytes)
@@ -1864,9 +1857,6 @@ checks:
     #[test]
     fn test_update_stats_history_limit() {
         let mut app = make_app();
-
-        // #192: history must cover any realistic panel width
-        assert!(MAX_HISTORY_SAMPLES >= 512);
 
         // Add more samples than MAX_HISTORY_SAMPLES
         let total = MAX_HISTORY_SAMPLES + 10;

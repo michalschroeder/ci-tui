@@ -1,7 +1,7 @@
 //! Widget tests using ratatui TestBackend
 //!
 //! These tests verify dashboard rendering by checking terminal buffer contents
-//! at fixed 80x24 dimensions.
+//! at 80x24 by default (`create_terminal`); some tests use a wider backend.
 
 use ci_tui::ui::app::StatusKind;
 use ci_tui::ui::dashboard;
@@ -48,16 +48,7 @@ fn find_all_symbol_colors(buffer: &Buffer, symbol: char) -> Vec<Color> {
 
 /// Helper to check if text appears anywhere in the buffer
 fn buffer_contains(buffer: &Buffer, text: &str) -> bool {
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        for x in 0..buffer.area.width {
-            line.push_str(&buffer[(x, y)].symbol());
-        }
-        if line.contains(text) {
-            return true;
-        }
-    }
-    false
+    (0..buffer.area.height).any(|y| row_text(buffer, y, 0, buffer.area.width).contains(text))
 }
 
 /// Helper to count occurrences of a symbol in the buffer

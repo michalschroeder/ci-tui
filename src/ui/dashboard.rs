@@ -71,7 +71,7 @@ fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
 
 /// CPU y-axis labels, one right-aligned row per graph row: `100` on top,
 /// `0` at bottom, `50` on the row where a half-height bar tops out
-fn cpu_scale_lines(height: usize) -> Vec<String> {
+fn cpu_scale_lines(height: usize) -> Vec<Line<'static>> {
     let mut labels = vec![""; height];
     if height > 0 {
         labels[height / 2] = "50";
@@ -80,25 +80,21 @@ fn cpu_scale_lines(height: usize) -> Vec<String> {
     }
     labels
         .into_iter()
-        .map(|l| format!("{:>width$} ", l, width = CPU_SCALE_COLS as usize - 1))
+        .map(|l| {
+            Line::from(format!(
+                "{:>width$} ",
+                l,
+                width = CPU_SCALE_COLS as usize - 1
+            ))
+        })
         .collect()
 }
 
-/// MEM gauge ratio and label (`14.7/30.7 GiB (48%)`). Ratio is clamped to
-/// `0.0..=1.0` (`Gauge::ratio` panics outside it) and NaN maps to 0.
+/// MEM gauge ratio and label (`14.7/30.7 GiB (48%)`) from one usage percent.
+/// Ratio is clamped to `0.0..=1.0` (`Gauge::ratio` panics outside it).
 fn mem_gauge_parts(used_gib: f64, total_gib: f64, usage_pct: f32) -> (f64, String) {
-    let ratio = f64::from(usage_pct) / 100.0;
-    let ratio = if ratio.is_nan() {
-        0.0
-    } else {
-        ratio.clamp(0.0, 1.0)
-    };
-    let label = format!(
-        "{:.1}/{:.1} GiB ({:.0}%)",
-        used_gib,
-        total_gib,
-        ratio * 100.0
-    );
+    let ratio = (f64::from(usage_pct) / 100.0).clamp(0.0, 1.0);
+    let label = format!("{:.1}/{:.1} GiB ({:.0}%)", used_gib, total_gib, usage_pct);
     (ratio, label)
 }
 
@@ -349,11 +345,8 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
         .constraints([Constraint::Length(CPU_SCALE_COLS), Constraint::Min(0)])
         .split(cpu_inner);
 
-    let scale: Vec<Line> = cpu_scale_lines(cpu_parts[0].height as usize)
-        .into_iter()
-        .map(Line::from)
-        .collect();
-    let scale = Paragraph::new(scale).style(Style::default().fg(Color::DarkGray));
+    let scale = Paragraph::new(cpu_scale_lines(cpu_parts[0].height as usize))
+        .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(scale, cpu_parts[0]);
 
     let cpu_data = prepare_sparkline_data(&app.sys.cpu_history, cpu_parts[1].width as usize);
@@ -365,13 +358,13 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(cpu_sparkline, cpu_parts[1]);
 
     // MEM: gauge of current usage (history adds little for memory)
-    let (mem_ratio, mem_label) =
-        mem_gauge_parts(app.mem_used_gib(), app.mem_total_gib(), app.mem_usage());
+    let mem_pct = app.mem_usage();
+    let (mem_ratio, mem_label) = mem_gauge_parts(app.mem_used_gib(), app.mem_total_gib(), mem_pct);
     let mem_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(" MEM "))
         .gauge_style(
             Style::default()
-                .fg(get_usage_color(app.mem_usage()))
+                .fg(get_usage_color(mem_pct))
                 .bg(Color::DarkGray),
         )
         .ratio(mem_ratio)
@@ -1759,13 +1752,10 @@ mod tests {
     fn test_cpu_scale_lines_place_100_50_0() {
         assert_eq!(
             cpu_scale_lines(4),
-            ["100 ", "    ", " 50 ", "  0 "].map(String::from)
+            ["100 ", "    ", " 50 ", "  0 "].map(Line::from)
         );
-        assert_eq!(
-            cpu_scale_lines(3),
-            ["100 ", " 50 ", "  0 "].map(String::from)
-        );
-        assert_eq!(cpu_scale_lines(1), ["100 "].map(String::from));
+        assert_eq!(cpu_scale_lines(3), ["100 ", " 50 ", "  0 "].map(Line::from));
+        assert_eq!(cpu_scale_lines(1), ["100 "].map(Line::from));
         assert!(cpu_scale_lines(0).is_empty());
     }
 
@@ -1777,10 +1767,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mem_gauge_parts_clamps_and_handles_nan() {
-        assert_eq!(mem_gauge_parts(1.0, 1.0, 150.0).0, 1.0);
+    fn test_mem_gauge_parts_clamps_ratio() {
+        assert_eq!(mem_gauge_parts(2.0, 1.0, 200.0).0, 1.0);
         assert_eq!(mem_gauge_parts(0.0, 1.0, -5.0).0, 0.0);
-        let (ratio, label) = mem_gauge_parts(0.0, 0.0, f32::NAN);
+        let (ratio, label) = mem_gauge_parts(0.0, 0.0, 0.0);
         assert_eq!(ratio, 0.0);
         assert_eq!(label, "0.0/0.0 GiB (0%)");
     }
