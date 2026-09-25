@@ -62,6 +62,8 @@ ci-tui init          # writes a commented ci-tui.yaml (never overwrites)
 ci-tui validate      # checks it without running anything
 ```
 
+Or let an AI agent generate it from your existing CI tools: copy [skills/ci-tui-setup](skills/ci-tui-setup/SKILL.md) into your project's `.claude/skills/` and run `/ci-tui-setup` (other agents: paste the file as a prompt).
+
 The starter's placeholder check fails on purpose until you replace its `command`. A real config looks like this:
 
 ```yaml
