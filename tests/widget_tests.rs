@@ -686,3 +686,22 @@ fn test_cancelled_check_shows_label() {
     assert!(buffer_contains(buffer, "CANCELLED"));
     assert!(buffer_contains(buffer, "cancelled by user"));
 }
+
+#[test]
+fn test_output_panel_shows_streamed_stdout_and_stderr_while_running() {
+    // clippy is selected and running
+    let mut app = make_test_app_running();
+    app.handle_runner_event(ci_tui::runner::RunnerEvent::CheckOutput {
+        check_id: "clippy".to_string(),
+        stdout: "Checking ci-tui\n".to_string(),
+        stderr: "warning: unused variable\n".to_string(),
+    });
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(buffer_contains(buffer, "RUNNING"));
+    assert!(buffer_contains(buffer, "Checking ci-tui"));
+    assert!(buffer_contains(buffer, "stderr"));
+    assert!(buffer_contains(buffer, "warning: unused variable"));
+}

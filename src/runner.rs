@@ -2,8 +2,11 @@
 //!
 //! This module handles the actual execution of CI checks. [`ExecTarget`] picks
 //! the mode: Docker (`docker exec` for running containers, `docker run` for
-//! standalone execution) or local host (`shell -c`). Output is captured when a command completes and delivered as
-//! lifecycle events ([`RunnerEvent`]) through async channels.
+//! standalone execution) or local host (`shell -c`). Lifecycle events
+//! ([`RunnerEvent`]) go through async channels; while a check runs its output
+//! is streamed as batched [`RunnerEvent::CheckOutput`] chunks (see
+//! [`OutputSink`]). The final [`RunnerEvent::CheckFinished`] result stays
+//! authoritative (truncated, Docker warnings filtered).
 //!
 //! # Key Types
 //!
@@ -48,12 +51,63 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+/// Max delay between streamed [`RunnerEvent::CheckOutput`] chunks: output is
+/// batched per interval (and flushed on exit), not sent per line
+pub const OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Where a running command's live output chunks go: a
+/// [`RunnerEvent::CheckOutput`] for one check, or nowhere ([`Self::none`]:
+/// pre-commands, fixes, simple mode).
+#[derive(Clone, Default, Debug)]
+pub struct OutputSink(Option<(String, mpsc::Sender<RunnerEvent>)>);
+
+impl OutputSink {
+    /// Discard live output
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    /// Stream live output of `check_id` to `tx`
+    pub fn new(check_id: impl Into<String>, tx: mpsc::Sender<RunnerEvent>) -> Self {
+        Self(Some((check_id.into(), tx)))
+    }
+
+    /// True if live output goes somewhere
+    pub fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Send one chunk (Docker warning lines dropped from `stderr`). Skipped
+    /// when empty; send errors (receiver gone) are ignored.
+    pub async fn send(&self, stdout: String, stderr: String) {
+        let Some((check_id, tx)) = &self.0 else {
+            return;
+        };
+        let stderr: String = stderr
+            .split_inclusive('\n')
+            .filter(|line| !is_docker_warning(line))
+            .collect();
+        if stdout.is_empty() && stderr.is_empty() {
+            return;
+        }
+        let _ = tx
+            .send(RunnerEvent::CheckOutput {
+                check_id: check_id.clone(),
+                stdout,
+                stderr,
+            })
+            .await;
+    }
+}
+
 /// Trait for executing commands, allowing mock implementations in tests
 #[cfg_attr(any(test, feature = "test"), mockall::automock)]
 #[async_trait]
 pub trait CommandExecutor: Send + Sync {
-    /// Execute a shell command and return the output
-    async fn execute(&self, command: &str, working_dir: &Path) -> CommandOutput;
+    /// Execute a shell command and return the output. Implementations may
+    /// stream output chunks to `sink` while it runs; the returned output is
+    /// complete either way.
+    async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput;
 
     /// Check if a Docker container is running
     fn is_container_running(&self, container_name: &str) -> bool;
@@ -68,7 +122,7 @@ pub struct RealCommandExecutor;
 
 #[async_trait]
 impl CommandExecutor for RealCommandExecutor {
-    async fn execute(&self, command: &str, working_dir: &Path) -> CommandOutput {
+    async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
             .arg(command)
@@ -85,9 +139,9 @@ impl CommandExecutor for RealCommandExecutor {
         cmd.process_group(0);
 
         let output = match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
                 let mut group = ProcessGroupGuard(child.id());
-                let output = child.wait_with_output().await;
+                let output = read_streaming(&mut child, sink).await;
                 // Finished normally: leave anything it backgrounded alone
                 group.0 = None;
                 output
@@ -96,10 +150,10 @@ impl CommandExecutor for RealCommandExecutor {
         };
 
         match output {
-            Ok(output) => CommandOutput {
-                success: output.status.success(),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            Ok((status, stdout, stderr)) => CommandOutput {
+                success: status.success(),
+                stdout: bytes_to_string(stdout),
+                stderr: bytes_to_string(stderr),
             },
             Err(e) => CommandOutput {
                 success: false,
@@ -116,6 +170,89 @@ impl CommandExecutor for RealCommandExecutor {
     fn kill_container(&self, name: &str) {
         crate::utils::docker::kill(name);
     }
+}
+
+/// Read `child`'s piped stdout/stderr to EOF, streaming complete lines to
+/// `sink` every [`OUTPUT_FLUSH_INTERVAL`] (rest flushed at EOF), then wait
+/// for it. Returns the exit status and the full raw output.
+///
+/// Raw bytes are buffered and decoded only per chunk, so the returned
+/// output is byte-identical to `wait_with_output`. Chunks end on `\n`, so
+/// they never split a UTF-8 character.
+async fn read_streaming(
+    child: &mut tokio::process::Child,
+    sink: &OutputSink,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let (mut out_sent, mut err_sent) = (0, 0);
+    let mut flush = tokio::time::interval(OUTPUT_FLUSH_INTERVAL);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    while out_pipe.is_some() || err_pipe.is_some() {
+        stdout.reserve(READ_CHUNK_BYTES);
+        stderr.reserve(READ_CHUNK_BYTES);
+        // `read_buf` is cancel safe: a losing branch loses no bytes
+        tokio::select! {
+            n = read_some(&mut out_pipe, &mut stdout) => {
+                if n? == 0 {
+                    out_pipe = None;
+                }
+            }
+            n = read_some(&mut err_pipe, &mut stderr) => {
+                if n? == 0 {
+                    err_pipe = None;
+                }
+            }
+            _ = flush.tick(), if sink.is_some() => {
+                let out = unsent(&stdout, &mut out_sent, false);
+                let err = unsent(&stderr, &mut err_sent, false);
+                sink.send(out, err).await;
+            }
+        }
+    }
+    let out = unsent(&stdout, &mut out_sent, true);
+    let err = unsent(&stderr, &mut err_sent, true);
+    sink.send(out, err).await;
+
+    let status = child.wait().await?;
+    Ok((status, stdout, stderr))
+}
+
+/// Decode owned bytes, reusing the buffer when valid UTF-8 (lossy copy only
+/// otherwise)
+fn bytes_to_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// Buffer growth step for [`read_streaming`]
+const READ_CHUNK_BYTES: usize = 8 * 1024;
+
+/// Read available bytes of `pipe` into `buf`; 0 on EOF. Pending forever
+/// once `pipe` is closed (`None`), so `select!` skips it.
+async fn read_some<R: tokio::io::AsyncRead + Unpin>(
+    pipe: &mut Option<R>,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    use tokio::io::AsyncReadExt;
+    match pipe {
+        Some(pipe) => pipe.read_buf(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Decoded bytes of `buf` after `*sent`, up to the last complete line (or
+/// everything when `all`); advances `*sent`
+fn unsent(buf: &[u8], sent: &mut usize, all: bool) -> String {
+    let rest = &buf[*sent..];
+    let len = if all {
+        rest.len()
+    } else {
+        rest.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
+    };
+    *sent += len;
+    String::from_utf8_lossy(&rest[..len]).into_owned()
 }
 
 /// SIGKILLs process group `.0` on drop, i.e. when [`RealCommandExecutor`]'s
@@ -164,12 +301,13 @@ pub async fn execute_built(
     executor: &dyn CommandExecutor,
     command: &BuiltCommand,
     working_dir: &Path,
+    sink: &OutputSink,
 ) -> CommandOutput {
     let mut container = ContainerGuard {
         executor,
         name: command.container.as_deref(),
     };
-    let output = executor.execute(&command.command, working_dir).await;
+    let output = executor.execute(&command.command, working_dir, sink).await;
     container.name = None; // finished: `--rm` already removed it
     output
 }
@@ -185,8 +323,9 @@ pub async fn execute_with_timeout(
     command: &BuiltCommand,
     working_dir: &Path,
     timeout: Option<Duration>,
+    sink: &OutputSink,
 ) -> std::result::Result<CommandOutput, String> {
-    let run = execute_built(executor, command, working_dir);
+    let run = execute_built(executor, command, working_dir, sink);
     match timeout {
         Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| {
             format!(
@@ -198,16 +337,27 @@ pub async fn execute_with_timeout(
     }
 }
 
+/// True for a common Docker Compose warning line that is noise
+fn is_docker_warning(line: &str) -> bool {
+    line.contains("variable is not set. Defaulting to a blank string")
+}
+
 /// Filter out Docker Compose warning messages from stderr
 pub fn filter_docker_warnings(stderr: &str) -> String {
     stderr
         .lines()
-        .filter(|line| {
-            // Filter out common Docker Compose warnings that are noise
-            !line.contains("variable is not set. Defaulting to a blank string")
-        })
+        .filter(|line| !is_docker_warning(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Truncation marker line is `TRUNCATED_PREFIX` + count + `TRUNCATED_SUFFIX`
+const TRUNCATED_PREFIX: &str = "… ";
+const TRUNCATED_SUFFIX: &str = " lines truncated";
+
+/// Marker line for `n` dropped lines (`"… N lines truncated"`)
+fn truncation_marker(n: usize) -> String {
+    format!("{TRUNCATED_PREFIX}{n}{TRUNCATED_SUFFIX}")
 }
 
 /// Cap `text` at `max_lines` lines, keeping the *last* `max_lines` (a runaway
@@ -220,11 +370,45 @@ pub fn truncate_output(text: String, max_lines: usize) -> String {
         return text;
     }
     let truncated = total - max_lines;
-    let marker = format!("… {truncated} lines truncated");
+    let marker = truncation_marker(truncated);
     std::iter::once(marker.as_str())
         .chain(text.lines().skip(truncated))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Line count of a [`truncate_output`] marker line (`"… N lines truncated"`)
+fn truncated_marker_count(line: &str) -> Option<usize> {
+    line.strip_prefix(TRUNCATED_PREFIX)?
+        .strip_suffix(TRUNCATED_SUFFIX)?
+        .parse()
+        .ok()
+}
+
+/// Append streamed `chunk` to `buf`, keeping only the last `max_lines` lines
+/// (rolling tail, like [`truncate_output`]). The `"… N lines truncated"`
+/// marker is kept as the first line, its count accumulating across calls.
+pub fn append_output(buf: &mut String, chunk: &str, max_lines: usize) {
+    if chunk.is_empty() {
+        return;
+    }
+    buf.push_str(chunk);
+    let first = buf.lines().next().unwrap_or_default();
+    let (dropped, body_start) = match truncated_marker_count(first) {
+        Some(n) => (n, (first.len() + 1).min(buf.len())),
+        None => (0, 0),
+    };
+    let body = &buf[body_start..];
+    let total = body.lines().count();
+    if total <= max_lines {
+        return;
+    }
+    let drop = total - max_lines;
+    let cut = body
+        .match_indices('\n')
+        .nth(drop - 1)
+        .map_or(body.len(), |(i, _)| i + 1);
+    *buf = format!("{}\n{}", truncation_marker(dropped + drop), &body[cut..]);
 }
 
 /// True if `key` is a valid environment variable identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -567,6 +751,14 @@ pub async fn run_check_cancellable<T: From<CheckResult>>(
 pub enum RunnerEvent {
     /// A check has started executing
     CheckStarted { check_id: String },
+    /// Live output chunk of a running check (batched, see
+    /// [`OUTPUT_FLUSH_INTERVAL`]); Docker warnings already dropped from
+    /// `stderr`. The final [`Self::CheckFinished`] result supersedes it.
+    CheckOutput {
+        check_id: String,
+        stdout: String,
+        stderr: String,
+    },
     /// A check has finished executing
     CheckFinished { result: CheckResult },
     /// A group of checks has started
@@ -769,6 +961,7 @@ impl CheckRunner {
             &cmd,
             &self.project_root,
             pre_cmd.timeout,
+            &OutputSink::none(),
         )
         .await;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -898,7 +1091,6 @@ async fn run_all_pre_commands(
 
 /// Run `check`, cancellable via `cancels`. `CheckStarted` is sent once
 /// registered, so a check shown as running can always be cancelled.
-#[allow(clippy::too_many_arguments)]
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
@@ -914,8 +1106,17 @@ async fn run_check_with_target(
                 check_id: check.id().to_string(),
             })
             .await;
-        run_single_check_with_executor(check, project_root, target, executor, max_output_lines)
-            .await
+        let sink = OutputSink::new(check.id(), event_tx.clone());
+        run_check_with_command_with_executor(
+            check,
+            &check.resolved_command,
+            project_root,
+            target,
+            executor,
+            max_output_lines,
+            &sink,
+        )
+        .await
     };
     run_check_cancellable(cancels, check.id(), run).await
 }
@@ -930,6 +1131,7 @@ async fn run_check_with_target(
 /// (see [`truncate_output`]), bounding *retained* memory for a runaway
 /// command. Peak memory during capture is unbounded until the command exits
 /// or times out — output is buffered in full before truncation.
+/// Live output chunks stream to `sink` while the command runs.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command_with_executor(
     check_id: String,
@@ -941,13 +1143,14 @@ pub async fn execute_command_with_executor(
     executor: &dyn CommandExecutor,
     timeout: Option<Duration>,
     max_output_lines: usize,
+    sink: &OutputSink,
 ) -> CheckResult {
     let started_at = chrono::Local::now();
     let start = std::time::Instant::now();
 
     let env = merged_env(target, check_env);
     let full_cmd = target.build_command(container, &env, command, executor);
-    let output = execute_with_timeout(executor, &full_cmd, project_root, timeout).await;
+    let output = execute_with_timeout(executor, &full_cmd, project_root, timeout, sink).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let finished_at = chrono::Local::now();
@@ -1003,6 +1206,7 @@ pub async fn run_single_check_with_executor(
         target,
         executor,
         max_output_lines,
+        &OutputSink::none(),
     )
     .await
 }
@@ -1028,7 +1232,6 @@ pub async fn run_fix_command(
 }
 
 /// Run a fix command with a custom executor (test-facing).
-#[allow(clippy::too_many_arguments)]
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
@@ -1047,34 +1250,16 @@ pub async fn run_fix_command_with_executor(
         executor,
         None,
         max_output_lines,
+        &OutputSink::none(),
     )
     .await
 }
 
-/// Run a check with a custom command (e.g., for running without file filtering).
+/// Run a check with a custom command, streaming live output to `sink` as
+/// [`RunnerEvent::CheckOutput`] chunks while the command runs.
 ///
-/// This is used when running a check for "all files" by removing the {files}
+/// Used e.g. when running a check for "all files" by removing the {files}
 /// placeholder from the command. Check container override and env apply.
-pub async fn run_check_with_command(
-    check: &CheckToRun,
-    command: &str,
-    project_root: &std::path::Path,
-    target: &ExecTarget,
-    max_output_lines: usize,
-) -> CheckResult {
-    run_check_with_command_with_executor(
-        check,
-        command,
-        project_root,
-        target,
-        &RealCommandExecutor,
-        max_output_lines,
-    )
-    .await
-}
-
-/// Run a check with a custom command and custom executor (test-facing).
-#[allow(clippy::too_many_arguments)]
 pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
@@ -1082,6 +1267,7 @@ pub async fn run_check_with_command_with_executor(
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
     max_output_lines: usize,
+    sink: &OutputSink,
 ) -> CheckResult {
     execute_command_with_executor(
         check.id().to_string(),
@@ -1093,6 +1279,7 @@ pub async fn run_check_with_command_with_executor(
         executor,
         check.definition.timeout,
         max_output_lines,
+        sink,
     )
     .await
 }
@@ -1118,6 +1305,18 @@ fn build_local_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_read_some_propagates_pipe_error() {
+        let pipe = tokio_test::io::Builder::new()
+            .read_error(std::io::Error::other("pipe broke"))
+            .build();
+        let mut buf = Vec::new();
+
+        let err = read_some(&mut Some(pipe), &mut buf).await.unwrap_err();
+
+        assert_eq!(err.to_string(), "pipe broke");
+    }
 
     #[test]
     fn test_build_local_command_no_env() {
@@ -1164,6 +1363,34 @@ mod tests {
     #[test]
     fn test_truncate_output_empty_text_is_unchanged() {
         assert_eq!(truncate_output(String::new(), 5), "");
+    }
+
+    #[test]
+    fn test_append_output_under_cap_appends() {
+        let mut buf = "a\n".to_string();
+        append_output(&mut buf, "b\nc\n", 3);
+        assert_eq!(buf, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_append_output_over_cap_keeps_rolling_tail() {
+        let mut buf = "1\n2\n".to_string();
+        append_output(&mut buf, "3\n4\n5\n", 2);
+        assert_eq!(buf, "… 3 lines truncated\n4\n5\n");
+    }
+
+    #[test]
+    fn test_append_output_marker_count_accumulates() {
+        let mut buf = String::new();
+        append_output(&mut buf, "1\n2\n3\n", 2);
+        append_output(&mut buf, "4\n5\n", 2);
+        assert_eq!(buf, "… 3 lines truncated\n4\n5\n");
+    }
+
+    #[test]
+    fn test_filter_docker_warnings_unchanged() {
+        let stderr = "WARN: X variable is not set. Defaulting to a blank string.\nreal\n";
+        assert_eq!(filter_docker_warnings(stderr), "real");
     }
 
     #[test]

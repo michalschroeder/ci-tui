@@ -13,7 +13,7 @@
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::runner::{CheckResult, CheckStatus, RunnerEvent};
+use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
 use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -23,6 +23,15 @@ use std::time::{Duration, Instant};
 /// same point-in-rect convention.
 fn contains_point(area: Rect, col: u16, row: u16) -> bool {
     area.contains(Position { x: col, y: row })
+}
+
+/// `first` then `second`, on a new line if `first` does not end with one
+fn join_output(first: &str, second: &str) -> String {
+    if first.is_empty() || second.is_empty() || first.ends_with('\n') {
+        format!("{first}{second}")
+    } else {
+        format!("{first}\n{second}")
+    }
 }
 
 /// Maximum number of samples to keep in history for sparklines
@@ -194,6 +203,10 @@ pub struct ViewState {
     pub help_visible: bool,
     /// Output search state (`/` key); `None` when not searching
     pub search: Option<SearchState>,
+    /// Keep the output panel pinned to the bottom while the selected check
+    /// is running (streamed output). Off after scrolling up / Home / search
+    /// jump; on again at the bottom (End) or on selection change.
+    pub follow_output: bool,
 }
 
 impl Default for ViewState {
@@ -211,6 +224,7 @@ impl Default for ViewState {
             output_area: Rect::default(),
             help_visible: false,
             search: None,
+            follow_output: true,
         }
     }
 }
@@ -595,9 +609,28 @@ impl App {
 
     /// Store a finished check result (runner, retry or run-all-files)
     pub fn set_retry_result(&mut self, result: CheckResult) {
-        self.results.insert(result.check_id.clone(), result);
+        self.insert_result(result);
         self.clamp_selection();
         self.needs_redraw = true;
+    }
+
+    /// Store a finished result. A timeout or cancel result carries no
+    /// output (the command was killed), so a running check's streamed
+    /// output is kept with the result's message appended.
+    fn insert_result(&mut self, mut result: CheckResult) {
+        let killed = matches!(
+            result.status,
+            CheckStatus::TimedOut | CheckStatus::Cancelled
+        );
+        if let Some(streamed) = self
+            .results
+            .get(&result.check_id)
+            .filter(|r| killed && r.status == CheckStatus::Running)
+        {
+            result.output = join_output(&streamed.output, &result.output);
+            result.error_output = join_output(&streamed.error_output, &result.error_output);
+        }
+        self.results.insert(result.check_id.clone(), result);
     }
 
     /// Show a status message in the footer
@@ -705,12 +738,16 @@ impl App {
 
     /// Apply a lifecycle event from the check runner
     pub fn handle_runner_event(&mut self, event: RunnerEvent) {
-        self.needs_redraw = true;
+        // Every event but an invisible output chunk changes what's drawn
+        let mut redraw = true;
         match event {
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
-            RunnerEvent::CheckFinished { result } => {
-                self.results.insert(result.check_id.clone(), result);
-            }
+            RunnerEvent::CheckOutput {
+                check_id,
+                stdout,
+                stderr,
+            } => redraw = self.on_check_output(&check_id, &stdout, &stderr),
+            RunnerEvent::CheckFinished { result } => self.insert_result(result),
             RunnerEvent::GroupStarted { group } => {
                 self.run.current_group = Some(group);
             }
@@ -733,6 +770,7 @@ impl App {
                 self.run.finished_at = Some(Instant::now());
             }
         }
+        self.needs_redraw |= redraw;
         self.clamp_selection();
     }
 
@@ -741,6 +779,32 @@ impl App {
             result.status = CheckStatus::Running;
             result.started_at = Some(chrono::Local::now());
         }
+    }
+
+    /// Append a streamed chunk to a running check's result, capped at
+    /// `max_output_lines` (rolling tail). Late chunks for a check that is no
+    /// longer running (finished, or a fix run) are ignored.
+    ///
+    /// Returns true if the chunk was appended to the selected check, i.e. the
+    /// output panel changed and needs a redraw.
+    fn on_check_output(&mut self, check_id: &str, stdout: &str, stderr: &str) -> bool {
+        let max_lines = self.config.max_output_lines;
+        let Some(result) = self
+            .results
+            .get_mut(check_id)
+            .filter(|r| r.status == CheckStatus::Running)
+        else {
+            return false;
+        };
+        append_output(&mut result.output, stdout, max_lines);
+        append_output(&mut result.error_output, stderr, max_lines);
+        let selected = self.selected_check().is_some_and(|c| c.id() == check_id);
+        if selected {
+            // A rolling-capped append can keep the buffer's length, which the
+            // output cache key would miss: drop the cache explicitly
+            self.output_cache = None;
+        }
+        selected
     }
 
     fn on_pre_command_started(&mut self, group: &str, name: &str) {
@@ -798,6 +862,7 @@ impl App {
         self.view.output_scroll = 0;
         self.view.show_full_command = false;
         self.view.search = None;
+        self.view.follow_output = true;
     }
 
     /// Select the next item (stops at the last one)
@@ -928,35 +993,62 @@ impl App {
         }
     }
 
-    /// Scroll the output panel up by `n` rows
+    /// Scroll the output panel up by `n` rows; turns follow off if the
+    /// output is scrollable at all
     pub fn scroll_up(&mut self, n: usize) {
         self.view.output_scroll = self.view.output_scroll.saturating_sub(n);
+        self.unfollow_if_scrollable();
         self.needs_redraw = true;
     }
 
-    /// Scroll the output panel down by `n` rows (clamped to the content)
+    /// Turn follow off, unless the output fits the panel (a stray scroll
+    /// key must not stop following output that is about to grow)
+    fn unfollow_if_scrollable(&mut self) {
+        if self.compute_max_scroll() > 0 {
+            self.view.follow_output = false;
+        }
+    }
+
+    /// Scroll the output panel down by `n` rows (clamped to the content).
+    /// Reaching the bottom turns output follow on.
     pub fn scroll_down(&mut self, n: usize) {
         let max_scroll = self.compute_max_scroll();
         self.view.output_scroll = (self.view.output_scroll + n).min(max_scroll);
+        self.view.follow_output = self.view.output_scroll == max_scroll;
         self.needs_redraw = true;
     }
 
-    /// Scroll the output panel to the top (offset 0)
+    /// Scroll the output panel to the top (offset 0); turns follow off if
+    /// the output is scrollable at all
     pub fn scroll_to_top(&mut self) {
         self.view.output_scroll = 0;
+        self.unfollow_if_scrollable();
         self.needs_redraw = true;
     }
 
     /// Scroll the output panel to the bottom (max scroll, same clamping as
-    /// [`Self::scroll_down`])
+    /// [`Self::scroll_down`]); turns follow on
     pub fn scroll_to_bottom(&mut self) {
         self.view.output_scroll = self.compute_max_scroll();
+        self.view.follow_output = true;
         self.needs_redraw = true;
+    }
+
+    /// Pin the output panel to the bottom while following a running check's
+    /// streamed output (called each render, after the scroll clamp)
+    pub(crate) fn follow_output_tail(&mut self) {
+        let running = self
+            .selected_check()
+            .and_then(|check| self.results.get(check.id()))
+            .is_some_and(|r| r.status == CheckStatus::Running);
+        if self.view.follow_output && running {
+            self.view.output_scroll = self.compute_max_scroll();
+        }
     }
 
     /// Compute maximum scroll offset for whatever the output panel shows.
     /// Capped at `u16::MAX`, the largest offset ratatui can scroll to.
-    fn compute_max_scroll(&mut self) -> usize {
+    pub(crate) fn compute_max_scroll(&mut self) -> usize {
         let width = self.output_area_width;
         crate::ui::dashboard::output_line_count(self, width)
             .saturating_sub(self.view.output_visible_lines)
@@ -2158,6 +2250,246 @@ checks:
             "narrower width must rewrap into more lines, not reuse the wide-width cached count \
              (wide={wide}, narrow={narrow})"
         );
+    }
+
+    pub(crate) fn output_event(check_id: &str, stdout: &str, stderr: &str) -> RunnerEvent {
+        RunnerEvent::CheckOutput {
+            check_id: check_id.to_string(),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_check_output_appends_to_running_result() {
+        let mut app = make_app();
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
+
+        app.handle_runner_event(output_event("php-lint", "a\n", ""));
+        app.handle_runner_event(output_event("php-lint", "b\n", "warn\n"));
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.output, "a\nb\n");
+        assert_eq!(result.error_output, "warn\n");
+    }
+
+    #[test]
+    fn test_check_output_ignored_for_non_running_check() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("php-lint").unwrap().output = "final".to_string();
+
+        app.handle_runner_event(output_event("php-lint", "late\n", "late\n"));
+        app.handle_runner_event(output_event("unknown", "x\n", ""));
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.output, "final");
+        assert_eq!(result.error_output, "");
+    }
+
+    #[test]
+    fn test_check_output_capped_by_max_output_lines() {
+        let mut app = make_app();
+        app.config.max_output_lines = 2;
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Running;
+
+        app.handle_runner_event(output_event("php-lint", "1\n2\n3\n", "e1\ne2\ne3\n"));
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.output, "… 1 lines truncated\n2\n3\n");
+        assert_eq!(result.error_output, "… 1 lines truncated\ne2\ne3\n");
+    }
+
+    #[test]
+    fn test_check_output_redraws_only_for_selected_check() {
+        let mut app = make_app();
+        assert_eq!(app.selected_check().unwrap().id(), "php-lint");
+        for id in ["php-lint", "phpunit"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Running;
+        }
+
+        app.needs_redraw = false;
+        app.handle_runner_event(output_event("phpunit", "x\n", ""));
+        assert!(!app.needs_redraw, "hidden check's chunk: no redraw");
+        assert_eq!(app.results["phpunit"].output, "x\n", "still appended");
+
+        app.handle_runner_event(output_event("php-lint", "y\n", ""));
+        assert!(app.needs_redraw, "selected check's chunk redraws");
+
+        app.needs_redraw = false;
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.handle_runner_event(output_event("php-lint", "late\n", ""));
+        assert!(!app.needs_redraw, "ignored late chunk: no redraw");
+    }
+
+    /// App with php-lint selected, running, and 50 lines of output in a
+    /// 5-line panel (scrollable)
+    fn make_following_app() -> App {
+        let mut app = make_app();
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
+        app.handle_runner_event(output_event("php-lint", &"line\n".repeat(50), ""));
+        app
+    }
+
+    #[test]
+    fn test_follow_output_pins_running_check_to_bottom() {
+        let mut app = make_following_app();
+        assert!(app.view.follow_output, "follow is on by default");
+
+        app.follow_output_tail();
+        let bottom = app.view.output_scroll;
+        assert!(bottom > 0);
+
+        app.handle_runner_event(output_event("php-lint", &"more\n".repeat(10), ""));
+        app.follow_output_tail();
+        assert_eq!(app.view.output_scroll, bottom + 10, "stays at new bottom");
+    }
+
+    #[test]
+    fn test_follow_output_not_applied_when_check_finished() {
+        let mut app = make_following_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+
+        app.follow_output_tail();
+
+        assert_eq!(app.view.output_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_up_and_top_turn_follow_off() {
+        let mut app = make_following_app();
+        app.follow_output_tail();
+        let bottom = app.view.output_scroll;
+
+        app.scroll_up(1);
+        assert!(!app.view.follow_output);
+        app.handle_runner_event(output_event("php-lint", "more\n", ""));
+        app.follow_output_tail();
+        assert_eq!(app.view.output_scroll, bottom - 1, "not pinned once off");
+
+        app.scroll_to_bottom();
+        assert!(app.view.follow_output, "End turns follow back on");
+        app.scroll_to_top();
+        assert!(!app.view.follow_output, "Home turns follow off");
+    }
+
+    #[test]
+    fn test_scroll_up_keeps_follow_when_output_fits() {
+        let mut app = make_app();
+        app.set_output_visible_lines(50);
+        app.output_area_width = 80;
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
+        app.handle_runner_event(output_event("php-lint", "short\n", ""));
+
+        app.scroll_up(1);
+        assert!(app.view.follow_output, "nothing to scroll: follow stays on");
+        app.scroll_to_top();
+        assert!(app.view.follow_output, "nothing to scroll: follow stays on");
+    }
+
+    /// Running php-lint with streamed stdout and stderr
+    fn make_streamed_app() -> App {
+        let mut app = make_app();
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
+        app.handle_runner_event(output_event("php-lint", "partial\n", "warn\n"));
+        app
+    }
+
+    fn timed_out_result() -> CheckResult {
+        CheckResult {
+            status: CheckStatus::TimedOut,
+            output: String::new(),
+            error_output: "timed out after 1s".to_string(),
+            ..CheckResult::pending("php-lint")
+        }
+    }
+
+    #[test]
+    fn test_timeout_keeps_streamed_output() {
+        let mut app = make_streamed_app();
+
+        app.handle_runner_event(RunnerEvent::CheckFinished {
+            result: timed_out_result(),
+        });
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.status, CheckStatus::TimedOut);
+        assert_eq!(result.output, "partial\n");
+        assert_eq!(result.error_output, "warn\ntimed out after 1s");
+    }
+
+    #[test]
+    fn test_cancel_keeps_streamed_output() {
+        let mut app = make_streamed_app();
+
+        app.handle_runner_event(RunnerEvent::CheckFinished {
+            result: CheckResult::cancelled("php-lint", chrono::Local::now()),
+        });
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.status, CheckStatus::Cancelled);
+        assert_eq!(result.output, "partial\ncancelled by user");
+        assert_eq!(result.error_output, "warn\n");
+    }
+
+    #[test]
+    fn test_retry_timeout_and_cancel_keep_streamed_output() {
+        let mut app = make_streamed_app();
+        app.set_retry_result(timed_out_result());
+        assert_eq!(app.results["php-lint"].output, "partial\n");
+
+        let mut app = make_streamed_app();
+        app.set_retry_result(CheckResult::cancelled("php-lint", chrono::Local::now()));
+        assert_eq!(app.results["php-lint"].output, "partial\ncancelled by user");
+    }
+
+    #[test]
+    fn test_finished_result_replaces_streamed_output() {
+        let mut app = make_streamed_app();
+
+        app.handle_runner_event(RunnerEvent::CheckFinished {
+            result: CheckResult {
+                status: CheckStatus::Failed,
+                output: "final\n".to_string(),
+                ..CheckResult::pending("php-lint")
+            },
+        });
+
+        assert_eq!(app.results["php-lint"].output, "final\n");
+        assert_eq!(app.results["php-lint"].error_output, "");
+    }
+
+    #[test]
+    fn test_scroll_down_to_bottom_turns_follow_on() {
+        let mut app = make_following_app();
+        app.scroll_to_top();
+
+        app.scroll_down(1);
+        assert!(!app.view.follow_output, "not at bottom yet");
+
+        app.scroll_down(1000);
+        assert!(app.view.follow_output, "reaching bottom turns follow on");
+    }
+
+    #[test]
+    fn test_selection_change_turns_follow_on() {
+        let mut app = make_following_app();
+        app.scroll_up(1);
+        assert!(!app.view.follow_output);
+
+        app.next_check();
+
+        assert!(app.view.follow_output);
     }
 
     #[test]

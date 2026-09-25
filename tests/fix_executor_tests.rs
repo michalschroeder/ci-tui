@@ -11,7 +11,7 @@ use std::path::Path;
 async fn returns_ok_on_success() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
         stderr: String::new(),
@@ -27,7 +27,7 @@ async fn returns_ok_on_success() {
 async fn reports_stderr_when_present() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-noise".into(),
         stderr: "stderr-wins".into(),
@@ -44,7 +44,7 @@ async fn reports_stderr_when_present() {
 async fn falls_back_to_stdout_when_stderr_empty() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-only".into(),
         stderr: String::new(),
@@ -61,7 +61,7 @@ async fn falls_back_to_stdout_when_stderr_empty() {
 async fn falls_back_to_formatted_message_when_both_empty() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
         stderr: String::new(),
@@ -81,8 +81,8 @@ async fn uses_docker_run_when_container_not_running() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| false);
     mock.expect_execute()
-        .withf(|cmd, _| cmd.starts_with("docker run"))
-        .returning(|_, _| CommandOutput {
+        .withf(|cmd, _, _| cmd.starts_with("docker run"))
+        .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -114,7 +114,7 @@ fn rust_fmt_with_fix_config() -> ci_tui::config::CiConfig {
 async fn all_fixes_pass_summary_is_clean() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
         stderr: String::new(),
@@ -141,7 +141,7 @@ async fn all_fixes_pass_summary_is_clean() {
 async fn failing_fix_recorded_in_summary() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
         stderr: "diff found, rejecting".into(),

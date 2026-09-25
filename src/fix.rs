@@ -278,7 +278,13 @@ pub async fn run_fix_command_with_executor(
     let start = Instant::now();
 
     let full_cmd = target.build_command(check_container, target.env(), command, executor);
-    let output = crate::runner::execute_built(executor, &full_cmd, project_root).await;
+    let output = crate::runner::execute_built(
+        executor,
+        &full_cmd,
+        project_root,
+        &crate::runner::OutputSink::none(),
+    )
+    .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if !output.success {
@@ -486,9 +492,9 @@ mod tests {
             let mut mock = MockCommandExecutor::new();
             mock.expect_is_container_running().returning(|_| true);
             mock.expect_execute()
-                .withf(|cmd, _| cmd.contains("-e APP_ENV='ci'"))
+                .withf(|cmd, _, _| cmd.contains("-e APP_ENV='ci'"))
                 .times(1)
-                .returning(|_, _| CommandOutput {
+                .returning(|_, _, _| CommandOutput {
                     success: true,
                     stdout: String::new(),
                     stderr: String::new(),

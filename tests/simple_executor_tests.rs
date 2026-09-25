@@ -12,7 +12,7 @@ use std::path::Path;
 async fn passes_when_executor_succeeds() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: "output".into(),
         stderr: String::new(),
@@ -34,7 +34,7 @@ async fn passes_when_executor_succeeds() {
 async fn fails_with_stderr_when_executor_reports_failure() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
         stderr: "boom".into(),
@@ -57,8 +57,8 @@ async fn uses_docker_run_when_container_not_running() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| false);
     mock.expect_execute()
-        .withf(|cmd, _| cmd.starts_with("docker run"))
-        .returning(|_, _| CommandOutput {
+        .withf(|cmd, _, _| cmd.starts_with("docker run"))
+        .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -81,8 +81,8 @@ async fn per_check_container_overrides_default() {
         .withf(|name| name == "override")
         .returning(|_| true);
     mock.expect_execute()
-        .withf(|cmd, _| cmd.contains("override"))
-        .returning(|_, _| CommandOutput {
+        .withf(|cmd, _, _| cmd.contains("override"))
+        .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -100,7 +100,7 @@ use std::sync::Arc;
 async fn sequential_group_runs_checks_in_order() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
         stderr: String::new(),
@@ -128,7 +128,7 @@ async fn sequential_group_runs_checks_in_order() {
 async fn parallel_group_runs_all_checks() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
         stderr: String::new(),
@@ -161,7 +161,7 @@ async fn on_demand_checks_skipped_in_both_modes() {
     mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute()
         .times(1)
-        .returning(|_, _| CommandOutput {
+        .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -188,7 +188,7 @@ async fn on_demand_checks_skipped_in_both_modes() {
 async fn failure_recorded_in_results() {
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(|_, _| CommandOutput {
+    mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
         stderr: "failed".into(),

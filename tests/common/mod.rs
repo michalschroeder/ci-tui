@@ -40,7 +40,7 @@ pub fn mock_executor_success(stdout: &str) -> ci_tui::runner::MockCommandExecuto
     use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stdout = stdout.to_string();
     let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().returning(move |_, _| {
+    mock.expect_execute().returning(move |_, _, _| {
         let out = stdout.clone();
         CommandOutput {
             success: true,
@@ -58,7 +58,7 @@ pub fn mock_executor_failure(stderr: &str) -> ci_tui::runner::MockCommandExecuto
     use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stderr = stderr.to_string();
     let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().returning(move |_, _| {
+    mock.expect_execute().returning(move |_, _, _| {
         let err = stderr.clone();
         CommandOutput {
             success: false,
@@ -150,6 +150,15 @@ pub fn test_docker_config(image: &str) -> DockerConfig {
 #[allow(dead_code)]
 pub fn test_docker_target(image: &str) -> ci_tui::runner::ExecTarget {
     ci_tui::runner::ExecTarget::Docker(test_docker_config(image))
+}
+
+/// `ExecTarget::Local` running commands via host `sh`
+#[allow(dead_code)]
+pub fn local_sh() -> ci_tui::runner::ExecTarget {
+    ci_tui::runner::ExecTarget::Local(ci_tui::config::LocalConfig {
+        shell: "sh".to_string(),
+        ..Default::default()
+    })
 }
 
 /// CheckToRun whose resolved_command equals `command`, for executor tests.
