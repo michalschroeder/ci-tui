@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
-use ci_tui::runner::ExecTarget;
-use ci_tui::{checks, commands, config, fix, git, list, simple, ui};
+use ci_tui::runner::{ExecTarget, RealCommandExecutor};
+use ci_tui::{checks, commands, config, fix, git, list, preflight, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -160,6 +160,19 @@ async fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    // Docker: warn (non-fatal) when changed files won't resolve in the container.
+    // Console modes print it now; the TUI shows it in-app (alternate screen).
+    let docker_warning = preflight::docker_warning(
+        &config.runner,
+        &changed_files.files,
+        &exec_root,
+        &RealCommandExecutor,
+    )
+    .await;
+    if let Some(warning) = docker_warning.as_ref().filter(|_| cli.fix || simple_mode) {
+        eprintln!("Warning: {warning}");
+    }
+
     // Run fix mode if requested
     if cli.fix {
         return interruptible(fix::run(config, changed_files, exec_root)).await;
@@ -179,6 +192,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             project_root,
             exec_root,
+            docker_warning,
         )
         .await
     }

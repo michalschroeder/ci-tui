@@ -12,6 +12,7 @@
 //! - `fix`: Auto-fix mode (`--fix`) running fix commands for matched checks
 //! - `git`: Git operations for detecting changed files
 //! - `list`: `--list` / `--dry-run` report of which checks would run and why
+//! - `preflight`: Docker startup probe warning when changed files won't resolve in the container
 //! - `runner`: Check execution in Docker containers
 //! - `simple`: Simple console output mode (no TUI)
 //! - `test_discovery`: Finding related test files for source changes
@@ -24,6 +25,7 @@ pub mod config;
 pub mod fix;
 pub mod git;
 pub mod list;
+pub mod preflight;
 pub mod runner;
 pub mod simple;
 pub mod test_discovery;
