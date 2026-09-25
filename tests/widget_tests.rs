@@ -384,7 +384,8 @@ fn test_output_panel_shows_error_for_failed_check() {
     let mut app = make_test_app();
     // Select the failed check (unit tests)
     app.next_check(); // Move from clippy to fmt
-    app.next_check(); // Move from fmt to unit
+    app.next_check(); // Move from fmt to the test group header
+    app.next_check(); // Move from header to unit
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -718,4 +719,54 @@ fn test_output_panel_shows_streamed_stdout_and_stderr_while_running() {
     assert!(buffer_contains(buffer, "Checking ci-tui"));
     assert!(buffer_contains(buffer, "stderr"));
     assert!(buffer_contains(buffer, "warning: unused variable"));
+}
+
+// ============================================================================
+// Collapsible Groups
+// ============================================================================
+
+#[test]
+fn test_group_header_shows_fold_marker_and_child_count() {
+    let mut app = make_test_app();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(left_column_contains(terminal.backend().buffer(), "▾ LINT"));
+
+    app.select_first(); // lint header
+    app.toggle_selected_group();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(left_column_contains(buffer, "▸ LINT (2)"));
+    assert!(!left_column_contains(buffer, "Clippy"), "children hidden");
+    assert!(
+        left_column_contains(buffer, "Unit Tests"),
+        "other group open"
+    );
+}
+
+#[test]
+fn test_output_panel_empty_when_header_selected() {
+    let mut app = make_test_app();
+    app.select_first(); // lint header
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+
+    assert!(buffer_contains(
+        terminal.backend().buffer(),
+        "Select a check to view details"
+    ));
+}
+
+#[test]
+fn test_help_overlay_lists_fold_key() {
+    let mut app = make_test_app();
+    app.toggle_help();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+
+    assert!(buffer_contains(
+        terminal.backend().buffer(),
+        "Space / Enter  fold / unfold"
+    ));
 }
