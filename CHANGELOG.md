@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/michalschroeder/ci-tui/compare/v0.2.0...v0.3.0) (2026-09-25)
+
+
+### Features
+
+* stream check output live ([#184](https://github.com/michalschroeder/ci-tui/issues/184)) ([1608976](https://github.com/michalschroeder/ci-tui/commit/16089769f4f9317110607cef5edcdaea07890705))
+* **ui:** help overlay and navigation keys ([#183](https://github.com/michalschroeder/ci-tui/issues/183)) ([e4ffa0a](https://github.com/michalschroeder/ci-tui/commit/e4ffa0a2110f8fa7d3321300b99f98e7c352fbb8))
+
+
+### Bug Fixes
+
+* honor compose file name: key for project name ([#182](https://github.com/michalschroeder/ci-tui/issues/182)) ([1de4c23](https://github.com/michalschroeder/ci-tui/commit/1de4c23e15cd60292aaeb24e29f2fc48fc189a20))
+
+
+### Performance Improvements
+
+* bound stored output size ([#180](https://github.com/michalschroeder/ci-tui/issues/180)) ([fb67e64](https://github.com/michalschroeder/ci-tui/commit/fb67e6485fca2d39c3a19771b21d2a989214c477))
+* cache parsed output text instead of re-parsing every frame ([#177](https://github.com/michalschroeder/ci-tui/issues/177)) ([0b9f604](https://github.com/michalschroeder/ci-tui/commit/0b9f6048305baffa7e0ce23f8ea973a8aa1abb90))
+
+
+### Documentation
+
+* fix path_mapping rule matching description ([#181](https://github.com/michalschroeder/ci-tui/issues/181)) ([8d60d92](https://github.com/michalschroeder/ci-tui/commit/8d60d921b21e2dd1758da9cd61fd9f774455c716))
+
 ## [0.2.0](https://github.com/michalschroeder/ci-tui/compare/v0.1.19...v0.2.0) (2026-09-24)
 
 
