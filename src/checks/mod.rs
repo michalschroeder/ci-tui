@@ -19,7 +19,7 @@ use std::path::Path;
 
 mod determine;
 use determine::*;
-pub(crate) use determine::{match_file_pattern, run_test_discovery, DiscoveryOutcome};
+pub(crate) use determine::{DiscoveryOutcome, Selection};
 
 /// File context for a check — concrete paths or an explicit no-files state.
 ///
@@ -51,6 +51,39 @@ impl CheckFiles {
     /// True for states that wait for a manual trigger ('t' key) instead of auto-running.
     pub fn is_on_demand(&self) -> bool {
         matches!(self, CheckFiles::SkippedNoMatch | CheckFiles::OnDemand)
+    }
+
+    /// Initial decision for `check` in this files state.
+    pub fn decision(&self, check: &CheckDefinition) -> Decision {
+        if *self == CheckFiles::SkippedNoMatch && check.command.contains("{files}") {
+            Decision::Skipped
+        } else if self.is_on_demand() {
+            Decision::OnDemand
+        } else {
+            Decision::Run
+        }
+    }
+}
+
+/// What happens to a determined check before anything runs — shared by the
+/// TUI's initial status and `--list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Runs automatically
+    Run,
+    /// Waits for a manual trigger ('t' in the TUI); never runs in `--simple`
+    OnDemand,
+    /// Nothing to run: command needs `{files}` but none matched
+    Skipped,
+}
+
+impl std::fmt::Display for Decision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(match self {
+            Decision::Run => "run",
+            Decision::OnDemand => "on-demand",
+            Decision::Skipped => "skipped",
+        })
     }
 }
 
@@ -101,7 +134,12 @@ impl CheckToRun {
 
     /// True when the check was skipped because it needs `{files}` but has none
     pub fn is_skipped_no_files(&self) -> bool {
-        self.files == CheckFiles::SkippedNoMatch && self.definition.command.contains("{files}")
+        self.decision() == Decision::Skipped
+    }
+
+    /// Initial decision: run, on-demand, or skipped
+    pub fn decision(&self) -> Decision {
+        self.files.decision(&self.definition)
     }
 
     /// Get command with {files} placeholder removed (for running against all files)

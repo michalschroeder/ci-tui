@@ -1,13 +1,15 @@
 //! Tests for `--list` / `--dry-run`: per-check decision + reason, rendered
 //! report, and an end-to-end binary run proving nothing executes.
 
-use ci_tui::config::{CheckTriggers, PathMappingRule, TestDiscoveryConfig, TestDiscoveryStrategy};
+use ci_tui::config::CheckTriggers;
 use ci_tui::git::{ChangedFiles, CLI_FILES_BASE_REF};
 use ci_tui::list::{explain_checks, render, CheckExplanation, Decision};
 use std::path::Path;
 
 mod common;
-use common::configs::{checks_test_config, CheckBuilder, ConfigBuilder};
+use common::configs::{
+    checks_test_config, rust_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder,
+};
 
 fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
     ChangedFiles {
@@ -21,48 +23,6 @@ fn find<'a>(explained: &'a [CheckExplanation], id: &str) -> &'a CheckExplanation
         .iter()
         .find(|e| e.id == id)
         .unwrap_or_else(|| panic!("check `{id}` missing"))
-}
-
-/// Discovery config mapping `src/{path}.rs` -> `tests/{path}_test.rs`
-fn rust_discovery() -> TestDiscoveryConfig {
-    TestDiscoveryConfig {
-        source_pattern: "rust_src".to_string(),
-        strategies: vec![TestDiscoveryStrategy::PathMapping {
-            rules: vec![PathMappingRule {
-                source: "src/{path}.rs".to_string(),
-                tests: vec!["tests/{path}_test.rs".to_string()],
-            }],
-        }],
-    }
-}
-
-/// Config with test-discovery checks: on-demand, full-suite and `{files}` variants
-fn discovery_config() -> ci_tui::config::CiConfig {
-    ConfigBuilder::new()
-        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
-        .with_check(
-            "tests",
-            "unit",
-            CheckBuilder::new("Unit", "cargo test {files}")
-                .with_test_discovery(rust_discovery())
-                .build(),
-        )
-        .with_check(
-            "tests",
-            "slow",
-            CheckBuilder::new("Slow", "slow {files}")
-                .with_test_discovery(rust_discovery())
-                .on_demand()
-                .build(),
-        )
-        .with_check(
-            "tests",
-            "suite",
-            CheckBuilder::new("Suite", "cargo test")
-                .with_test_discovery(rust_discovery())
-                .build(),
-        )
-        .build()
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +54,7 @@ fn always_run_check_reason() {
     let config = checks_test_config();
     let explained = explain_checks(&config, &changed(&[], "main"), Path::new("."));
     let e = find(&explained, "cache-warmup");
-    assert_eq!(e.decision, Decision::Run);
+    assert_eq!(e.decision, Some(Decision::Run));
     assert_eq!(e.reasons, vec!["no triggers: always runs"]);
 }
 
@@ -104,7 +64,7 @@ fn file_pattern_match_reason_lists_pattern_and_files() {
     let cf = changed(&["src/A.php", "README.txt", "src/B.php"], "main");
     let explained = explain_checks(&config, &cf, Path::new("."));
     let e = find(&explained, "php-lint");
-    assert_eq!(e.decision, Decision::Run);
+    assert_eq!(e.decision, Some(Decision::Run));
     assert_eq!(
         e.reasons,
         vec!["file_pattern `php` matched: src/A.php, src/B.php"]
@@ -116,7 +76,7 @@ fn file_pattern_no_match_with_files_placeholder_is_skipped() {
     let config = checks_test_config();
     let explained = explain_checks(&config, &changed(&["src/A.php"], "main"), Path::new("."));
     let e = find(&explained, "yaml-lint");
-    assert_eq!(e.decision, Decision::Skipped);
+    assert_eq!(e.decision, Some(Decision::Skipped));
     assert_eq!(
         e.reasons,
         vec!["file_pattern `yaml`: no changed file matched"]
@@ -125,20 +85,11 @@ fn file_pattern_no_match_with_files_placeholder_is_skipped() {
 
 #[test]
 fn file_pattern_no_match_without_placeholder_is_on_demand() {
-    // Edge case: `{files}`-less command — UI offers a manual 't' trigger
-    let config = ConfigBuilder::new()
-        .with_file_pattern("rust", r"\.rs$", None)
-        .with_check(
-            "lint",
-            "clippy",
-            CheckBuilder::new("Clippy", "cargo clippy")
-                .with_file_pattern_trigger("rust")
-                .build(),
-        )
-        .build();
+    // `cargo clippy` has no `{files}` — UI offers a manual 't' trigger
+    let config = rust_project_config();
     let explained = explain_checks(&config, &changed(&[], "main"), Path::new("."));
     let e = find(&explained, "clippy");
-    assert_eq!(e.decision, Decision::OnDemand);
+    assert_eq!(e.decision, Some(Decision::OnDemand));
     assert_eq!(
         e.reasons,
         vec![
@@ -149,17 +100,25 @@ fn file_pattern_no_match_without_placeholder_is_on_demand() {
 }
 
 #[test]
-fn empty_triggers_block_is_listed_as_skipped() {
-    // Edge case: `triggers: {}` — determine_checks omits it, --list must not
+fn empty_triggers_block_is_listed_as_excluded() {
+    // Edge case: `triggers: {}` — determine_checks drops it; --list shows it
+    // as excluded, outside the run / on-demand / skipped counts
     let mut check = CheckBuilder::new("Never", "never").build();
     check.triggers = Some(CheckTriggers::default());
     let config = ConfigBuilder::new().with_check("g", "never", check).build();
-    let explained = explain_checks(&config, &changed(&["a.rs"], "main"), Path::new("."));
+    let cf = changed(&["a.rs"], "main");
+    let explained = explain_checks(&config, &cf, Path::new("."));
     let e = find(&explained, "never");
-    assert_eq!(e.decision, Decision::Skipped);
+    assert_eq!(e.decision, None);
     assert_eq!(
         e.reasons,
         vec!["empty triggers block (no file_pattern / test_discovery): never runs"]
+    );
+    let out = render(&config, &cf, None, &explained);
+    assert!(out.contains("excluded   never  Never\n"), "{out}");
+    assert!(
+        out.contains("0 run, 0 on-demand, 0 skipped (nothing executed)"),
+        "{out}"
     );
 }
 
@@ -169,12 +128,12 @@ fn test_discovery_found_tests_reason() {
     std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
     std::fs::write(tmp.path().join("tests/foo_test.rs"), "").unwrap();
     let explained = explain_checks(
-        &discovery_config(),
+        &rust_discovery_config(),
         &changed(&["src/foo.rs"], "main"),
         tmp.path(),
     );
     let e = find(&explained, "unit");
-    assert_eq!(e.decision, Decision::Run);
+    assert_eq!(e.decision, Some(Decision::Run));
     assert_eq!(
         e.reasons,
         vec!["test_discovery `rust_src` (src/foo.rs): discovered tests: tests/foo_test.rs"]
@@ -185,20 +144,20 @@ fn test_discovery_found_tests_reason() {
 fn test_discovery_no_tests_reasons() {
     let tmp = tempfile::TempDir::new().unwrap();
     let explained = explain_checks(
-        &discovery_config(),
+        &rust_discovery_config(),
         &changed(&["src/foo.rs"], "main"),
         tmp.path(),
     );
 
     let unit = find(&explained, "unit");
-    assert_eq!(unit.decision, Decision::Skipped);
+    assert_eq!(unit.decision, Some(Decision::Skipped));
     assert_eq!(
         unit.reasons,
         vec!["test_discovery `rust_src` (src/foo.rs): no tests found; command needs {files}"]
     );
 
     let slow = find(&explained, "slow");
-    assert_eq!(slow.decision, Decision::OnDemand);
+    assert_eq!(slow.decision, Some(Decision::OnDemand));
     assert_eq!(
         slow.reasons,
         vec![
@@ -208,7 +167,7 @@ fn test_discovery_no_tests_reasons() {
     );
 
     let suite = find(&explained, "suite");
-    assert_eq!(suite.decision, Decision::Run);
+    assert_eq!(suite.decision, Some(Decision::Run));
     assert_eq!(
         suite.reasons,
         vec!["test_discovery `rust_src` (src/foo.rs): no tests found; runs full command (no {files})"]
@@ -216,15 +175,35 @@ fn test_discovery_no_tests_reasons() {
 }
 
 #[test]
+fn test_discovery_no_tests_with_file_pattern_match_runs() {
+    // file_pattern match decides the run; no-tests fallback (on_demand) doesn't apply
+    let tmp = tempfile::TempDir::new().unwrap();
+    let explained = explain_checks(
+        &rust_discovery_config(),
+        &changed(&["src/foo.rs"], "main"),
+        tmp.path(),
+    );
+    let e = find(&explained, "mixed");
+    assert_eq!(e.decision, Some(Decision::Run));
+    assert_eq!(
+        e.reasons,
+        vec![
+            "file_pattern `rust_src` matched: src/foo.rs",
+            "test_discovery `rust_src` (src/foo.rs): no tests found",
+        ]
+    );
+}
+
+#[test]
 fn test_discovery_no_sources_reason() {
     let tmp = tempfile::TempDir::new().unwrap();
     let explained = explain_checks(
-        &discovery_config(),
+        &rust_discovery_config(),
         &changed(&["README.txt"], "main"),
         tmp.path(),
     );
     let e = find(&explained, "unit");
-    assert_eq!(e.decision, Decision::Skipped);
+    assert_eq!(e.decision, Some(Decision::Skipped));
     assert_eq!(
         e.reasons,
         vec!["test_discovery `rust_src`: no changed file matched"]
@@ -274,43 +253,34 @@ fn render_no_changed_files() {
     assert!(out.contains("Changed files (0): none\n"), "{out}");
 }
 
-#[test]
-fn render_base_ref_resolved_from_config() {
-    let out = render_for(&changed(&[], "origin/development"), None);
-    assert!(
-        out.starts_with("Base ref: origin/development (git.base_branch `development`)\n"),
-        "{out}"
-    );
-}
-
-#[test]
-fn render_base_ref_fallback() {
-    let out = render_for(&changed(&[], "HEAD~1"), None);
-    assert!(
-        out.starts_with("Base ref: HEAD~1 (fallback: git.base_branch `development` not found)\n"),
-        "{out}"
-    );
-}
-
-#[test]
-fn render_base_ref_override() {
-    let out = render_for(&changed(&[], "v1.0"), Some("v1.0"));
-    assert!(out.starts_with("Base ref: v1.0 (--base)\n"), "{out}");
-}
-
-#[test]
-fn render_files_bypass_git() {
-    let out = render_for(&changed(&["a.php"], CLI_FILES_BASE_REF), None);
-    assert!(
-        out.starts_with("Base ref: none (git bypassed: --files)\n"),
-        "{out}"
-    );
+#[rstest::rstest]
+#[case::config(
+    "origin/development",
+    None,
+    "origin/development (git.base_branch `development`)"
+)]
+#[case::fallback(
+    "HEAD~1",
+    None,
+    "HEAD~1 (fallback: git.base_branch `development` not found)"
+)]
+#[case::override_("v1.0", Some("v1.0"), "v1.0 (--base)")]
+#[case::files_bypass(CLI_FILES_BASE_REF, None, "none (git bypassed: --files)")]
+fn render_base_ref_line(
+    #[case] base_ref: &str,
+    #[case] base_override: Option<&str>,
+    #[case] expected: &str,
+) {
+    let out = render_for(&changed(&[], base_ref), base_override);
+    assert!(out.starts_with(&format!("Base ref: {expected}\n")), "{out}");
 }
 
 // ---------------------------------------------------------------------------
 // Binary: nothing executes, exit 0 (criteria 1, 6, 7)
 // ---------------------------------------------------------------------------
 
+// Edge case: the binary reads a YAML file from disk, so this config stays raw
+// YAML (builder fixtures produce `CiConfig` only).
 /// Local-mode config whose pre_command and check would each create a marker file
 const MARKER_CONFIG: &str = r#"version: 2
 runner: local

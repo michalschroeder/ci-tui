@@ -10,7 +10,7 @@
 //! - [`StatusFilter`]: Filter for displaying checks by status
 //! - [`PreCommandState`]: State tracking for pre-commands
 
-use crate::checks::CheckToRun;
+use crate::checks::{CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
@@ -319,12 +319,10 @@ impl ItemKey {
 
 /// Build initial CheckResult for a check based on its state
 fn initial_result_for_check(check: &CheckToRun) -> CheckResult {
-    if check.is_skipped_no_files() {
-        CheckResult::skipped(check.id())
-    } else if check.is_on_demand() {
-        CheckResult::on_demand(check.id())
-    } else {
-        CheckResult::pending(check.id())
+    match check.decision() {
+        Decision::Skipped => CheckResult::skipped(check.id()),
+        Decision::OnDemand => CheckResult::on_demand(check.id()),
+        Decision::Run => CheckResult::pending(check.id()),
     }
 }
 

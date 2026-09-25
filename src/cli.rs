@@ -185,6 +185,10 @@ mod tests {
     fn test_list_flag_parsed(#[case] args: &[&str]) {
         let cli = Cli::try_parse_checked(args).unwrap();
         assert!(cli.list);
+    }
+
+    #[test]
+    fn test_list_flag_default_off() {
         assert!(!Cli::try_parse_checked(["ci-tui"]).unwrap().list);
     }
 
