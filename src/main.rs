@@ -160,26 +160,30 @@ async fn run() -> Result<i32> {
         return Ok(0);
     }
 
-    // Docker: warn (non-fatal) when changed files won't resolve in the container.
-    // Console modes print it now; the TUI shows it in-app (alternate screen).
-    let docker_warning = preflight::docker_warning(
+    // Determine which checks to run (fix mode reuses it only for the probe)
+    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
+
+    // Docker: warn (non-fatal) when changed files won't resolve in the
+    // containers the checks use. Console modes print now; the TUI shows them
+    // in-app (alternate screen).
+    let docker_warnings = preflight::docker_warnings(
         &config.runner,
+        &checks_to_run,
         &changed_files.files,
         &exec_root,
         &RealCommandExecutor,
     )
     .await;
-    if let Some(warning) = docker_warning.as_ref().filter(|_| cli.fix || simple_mode) {
-        eprintln!("Warning: {warning}");
+    if cli.fix || simple_mode {
+        for warning in &docker_warnings {
+            eprintln!("Warning: {warning}");
+        }
     }
 
     // Run fix mode if requested
     if cli.fix {
         return interruptible(fix::run(config, changed_files, exec_root)).await;
     }
-
-    // Determine which checks to run
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
 
     if simple_mode {
         // Run in simple console mode
@@ -192,7 +196,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             project_root,
             exec_root,
-            docker_warning,
+            (!docker_warnings.is_empty()).then(|| docker_warnings.join("; ")),
         )
         .await
     }
