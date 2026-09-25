@@ -196,12 +196,12 @@ async fn read_streaming(
         // `read_buf` is cancel safe: a losing branch loses no bytes
         tokio::select! {
             n = read_some(&mut out_pipe, &mut stdout) => {
-                if n == 0 {
+                if n? == 0 {
                     out_pipe = None;
                 }
             }
             n = read_some(&mut err_pipe, &mut stderr) => {
-                if n == 0 {
+                if n? == 0 {
                     err_pipe = None;
                 }
             }
@@ -229,15 +229,15 @@ fn bytes_to_string(bytes: Vec<u8>) -> String {
 /// Buffer growth step for [`read_streaming`]
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
-/// Read available bytes of `pipe` into `buf`; 0 on EOF or error. Pending
-/// forever once `pipe` is closed (`None`), so `select!` skips it.
+/// Read available bytes of `pipe` into `buf`; 0 on EOF. Pending forever
+/// once `pipe` is closed (`None`), so `select!` skips it.
 async fn read_some<R: tokio::io::AsyncRead + Unpin>(
     pipe: &mut Option<R>,
     buf: &mut Vec<u8>,
-) -> usize {
+) -> std::io::Result<usize> {
     use tokio::io::AsyncReadExt;
     match pipe {
-        Some(pipe) => pipe.read_buf(buf).await.unwrap_or(0),
+        Some(pipe) => pipe.read_buf(buf).await,
         None => std::future::pending().await,
     }
 }
@@ -1305,6 +1305,18 @@ fn build_local_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_read_some_propagates_pipe_error() {
+        let pipe = tokio_test::io::Builder::new()
+            .read_error(std::io::Error::other("pipe broke"))
+            .build();
+        let mut buf = Vec::new();
+
+        let err = read_some(&mut Some(pipe), &mut buf).await.unwrap_err();
+
+        assert_eq!(err.to_string(), "pipe broke");
+    }
 
     #[test]
     fn test_build_local_command_no_env() {

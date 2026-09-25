@@ -1372,14 +1372,22 @@ fn build_check_output_text(
     // Files
     append_files_section(&mut raw_output, app, check);
 
+    // While running, streamed stderr goes above stdout: follow pins the panel
+    // to the bottom, where long stderr (compose/cargo progress) would
+    // otherwise push the latest stdout off-screen
+    if result.status == CheckStatus::Running && !result.error_output.is_empty() {
+        raw_output.push_str("\x1b[31m── stderr ──\x1b[0m\n");
+        raw_output.push_str(result.error_output.trim_end());
+        raw_output.push_str("\n\n");
+    }
+
     // Command output
     if !result.output.is_empty() {
         raw_output.push_str(&result.output);
     }
 
-    // Stderr for failed checks, and streamed live while running
-    let show_stderr = result.status.is_failure() || result.status == CheckStatus::Running;
-    if show_stderr && !result.error_output.is_empty() {
+    // Stderr for failed checks
+    if result.status.is_failure() && !result.error_output.is_empty() {
         raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
         raw_output.push_str(result.error_output.trim_end());
     }
@@ -1868,6 +1876,41 @@ mod tests {
         let text = app.output_cache.as_ref().unwrap().text.clone();
         let plain: String = text.lines.iter().map(line_plain_text).collect();
         assert!(plain.contains("b2"), "got: {plain}");
+    }
+
+    /// Stderr above stdout while running, so a following panel's bottom
+    /// shows the latest stdout even when stderr is long
+    #[test]
+    fn test_running_output_puts_stderr_above_stdout() {
+        let mut app = make_test_app();
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = CheckStatus::Running;
+        result.output = "out1\nout2\n".to_string();
+        result.error_output = "Compiling a\nCompiling b\n".to_string();
+        let check = app.checks[0].clone();
+        let result = app.results["php-lint"].clone();
+
+        let text = build_check_output_text(&app, &check, &result, 80);
+
+        let stderr_at = text.find("── stderr ──").expect("stderr section");
+        assert!(stderr_at < text.find("out1").unwrap(), "got: {text}");
+        assert!(text.find("Compiling b").unwrap() < text.find("out1").unwrap());
+        assert!(text.trim_end().ends_with("out2"), "got: {text}");
+    }
+
+    #[test]
+    fn test_failed_output_keeps_stderr_below_stdout() {
+        let mut app = make_test_app();
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = CheckStatus::Failed;
+        result.output = "out1\n".to_string();
+        result.error_output = "err1\n".to_string();
+        let check = app.checks[0].clone();
+        let result = app.results["php-lint"].clone();
+
+        let text = build_check_output_text(&app, &check, &result, 80);
+
+        assert!(text.find("out1").unwrap() < text.find("── stderr ──").unwrap());
     }
 
     #[test]

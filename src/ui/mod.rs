@@ -336,18 +336,25 @@ impl Tasks {
         self.set.spawn(f(self.ctx.clone(), self.tx.clone()));
     }
 
-    /// Spawn a task running `command` as `check`, cancellable with 's';
-    /// `wrap` builds the event. Fix runs are cancellable too, but 's' only
-    /// acts on a `Running` check, which a fixed (failed) check is not.
-    fn spawn_check(
-        &mut self,
-        check: CheckToRun,
-        command: String,
-        wrap: fn(CheckResult) -> TaskEvent,
-    ) {
+    /// Spawn a fix run of `command` for `check`. Output is not streamed
+    /// (the fix result shows once done). Cancellable like
+    /// [`Self::spawn_check`], but 's' only acts on a `Running` check, which
+    /// a fixed (failed) check is not.
+    fn spawn_fix(&mut self, check: CheckToRun, command: String) {
+        self.spawn(|ctx, tx| async move {
+            let sink = OutputSink::none();
+            let run = ctx.run(&check, &command, &sink);
+            let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
+            let _ = tx.send(TaskEvent::FixResult(result)).await;
+        });
+    }
+
+    /// Spawn a task running `command` as `check`, streaming its output,
+    /// cancellable with 's'; reports [`TaskEvent::RetryResult`].
+    fn spawn_check(&mut self, check: CheckToRun, command: String) {
         self.spawn(|ctx, tx| async move {
             let result = ctx.run_cancellable(&check, &command, &tx).await;
-            let _ = tx.send(wrap(result)).await;
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
         });
     }
 }
@@ -500,7 +507,7 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
     let check = check.clone();
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_check(check, command, TaskEvent::RetryResult);
+    tasks.spawn_check(check, command);
     Action::Continue
 }
 
@@ -519,7 +526,7 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_check(check, all_files_cmd, TaskEvent::RetryResult);
+    tasks.spawn_check(check, all_files_cmd);
     Action::Continue
 }
 
@@ -575,7 +582,7 @@ fn handle_fix_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     };
     app.start_fix();
-    tasks.spawn_check(job.check, job.command, TaskEvent::FixResult);
+    tasks.spawn_fix(job.check, job.command);
     Action::Continue
 }
 
@@ -1536,6 +1543,33 @@ checks:
             app.results["php-lint"].status,
             crate::runner::CheckStatus::Passed
         );
+    }
+
+    #[tokio::test]
+    async fn test_fix_selected_does_not_stream_output() {
+        let mut config = test_config();
+        config.runner = crate::config::ExecTarget::Local(crate::config::LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        });
+        let mut check = make_test_check("php-lint", "fast");
+        check.resolved_fix_command = Some("echo fixed".to_string());
+        let mut app = make_test_app_with_checks(&config, vec![check]);
+        app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Failed;
+        let (mut tasks, mut rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(PathBuf::from("/tmp")),
+            exec_root: Arc::new(PathBuf::from("/tmp")),
+            config: Arc::new(config.clone()),
+            cancels: CancelRegistry::default(),
+        });
+
+        handle_fix_selected(&mut app, &mut tasks);
+
+        match rx.recv().await.expect("task event") {
+            TaskEvent::FixResult(result) => assert_eq!(result.output, "fixed\n"),
+            TaskEvent::Output(_) => panic!("fix output must not stream"),
+            _ => panic!("unexpected event"),
+        }
     }
 
     #[tokio::test]
