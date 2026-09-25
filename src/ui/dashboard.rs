@@ -46,8 +46,8 @@ const CHECK_NAME_LEAD_COLS: u16 = 4;
 const CHECK_NAME_RESERVED_COLS: u16 = 15;
 /// Minimum columns granted to a check name before truncation
 const CHECK_NAME_MIN_COLS: usize = 20;
-/// Max files listed inline in the output header before truncating
-const FILES_PREVIEW_COUNT: usize = 3;
+/// Max files listed by name in the collapsed output header; more show a count
+const FILES_INLINE_MAX: usize = 3;
 /// Max stderr lines shown per failed fix in fix-all results
 const FIX_ERROR_PREVIEW_LINES: usize = 5;
 
@@ -215,7 +215,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  s              cancel running check"),
         Line::from("  x / X          fix selected / fix all"),
         Line::from("  A              run selected check for all files"),
-        Line::from("  c / e          copy command / expand command"),
+        Line::from("  c / e          copy / expand command+files"),
         Line::from("  q / Ctrl-c     quit"),
         Line::from(""),
         Line::from(Span::styled(
@@ -1409,18 +1409,14 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
             raw_output.push_str(&format!("\x1b[90m  - {}\x1b[0m\n", file));
         }
         raw_output.push('\n');
+    } else if files.len() <= FILES_INLINE_MAX {
+        raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", files.join(", ")));
     } else {
-        let display_files = if files.len() <= FILES_PREVIEW_COUNT {
-            files.join(", ")
-        } else {
-            files
-                .iter()
-                .take(FILES_PREVIEW_COUNT)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
+        // Count only: a partial name preview hid the rest without saying so (#145)
+        raw_output.push_str(&format!(
+            "\x1b[90mFiles: {} [e=expand]\x1b[0m\n\n",
+            files.len()
+        ));
     }
 }
 
@@ -1767,6 +1763,67 @@ mod tests {
         result.status = CheckStatus::Passed;
         result.output = "\x1b[32mok\x1b[0m line\n".repeat(2000);
         app
+    }
+
+    /// App with one check matching `files`; `expanded` toggles `e` view
+    fn files_section_for(files: CheckFiles, expanded: bool) -> String {
+        let mut app = make_test_app();
+        app.checks[0].files = files;
+        app.view.show_full_command = expanded;
+        let check = app.checks[0].clone();
+        let mut out = String::new();
+        append_files_section(&mut out, &app, &check);
+        out
+    }
+
+    fn five_files() -> CheckFiles {
+        CheckFiles::Files((1..=5).map(|i| format!("src/f{}.php", i)).collect())
+    }
+
+    /// #145: collapsed view shows a count once names no longer fit inline
+    #[test]
+    fn test_files_section_collapsed_shows_count_past_inline_max() {
+        assert_eq!(
+            files_section_for(five_files(), false),
+            "\x1b[90mFiles: 5 [e=expand]\x1b[0m\n\n"
+        );
+    }
+
+    #[test]
+    fn test_files_section_collapsed_lists_names_up_to_inline_max() {
+        let files = vec!["a.php".into(), "b.php".into(), "c.php".into()];
+        assert_eq!(
+            files_section_for(CheckFiles::Files(files), false),
+            "\x1b[90mFiles: a.php, b.php, c.php\x1b[0m\n\n"
+        );
+    }
+
+    #[test]
+    fn test_files_section_expanded_lists_all_files() {
+        assert_eq!(
+            files_section_for(five_files(), true),
+            "\x1b[90mFiles:\x1b[0m\n\
+             \x1b[90m  - src/f1.php\x1b[0m\n\
+             \x1b[90m  - src/f2.php\x1b[0m\n\
+             \x1b[90m  - src/f3.php\x1b[0m\n\
+             \x1b[90m  - src/f4.php\x1b[0m\n\
+             \x1b[90m  - src/f5.php\x1b[0m\n\
+             \n"
+        );
+    }
+
+    #[test]
+    fn test_files_section_empty_or_non_files_renders_nothing() {
+        for expanded in [false, true] {
+            for files in [
+                CheckFiles::Files(vec![]),
+                CheckFiles::RunAll,
+                CheckFiles::OnDemand,
+                CheckFiles::SkippedNoMatch,
+            ] {
+                assert_eq!(files_section_for(files, expanded), "");
+            }
+        }
     }
 
     /// #126: rendering a frame calls into the cache from two places
