@@ -114,6 +114,16 @@ impl ChangedFiles {
     }
 }
 
+/// Base refs tried by [`detect_changes`], in order: `origin/{base_branch}`,
+/// `{base_branch}`, `{fallback_branch}`.
+pub fn base_ref_candidates(git_config: &GitConfig) -> [String; 3] {
+    [
+        format!("origin/{}", git_config.base_branch),
+        git_config.base_branch.clone(),
+        git_config.fallback_branch.clone(),
+    ]
+}
+
 /// Detect changed files by trying multiple base references in order of preference.
 ///
 /// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`.
@@ -134,11 +144,7 @@ pub fn detect_changes_with_executor(
     git_config: &GitConfig,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let base_refs = [
-        format!("origin/{}", git_config.base_branch),
-        git_config.base_branch.clone(),
-        git_config.fallback_branch.clone(),
-    ];
+    let base_refs = base_ref_candidates(git_config);
 
     // Find the first base ref whose committed diff resolves.
     let mut resolved: Option<(String, String)> = None;

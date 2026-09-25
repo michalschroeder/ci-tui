@@ -30,7 +30,7 @@
 
 use ci_tui::config::{
     CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig,
-    PreCommand, TestDiscoveryConfig,
+    PathMappingRule, PreCommand, TestDiscoveryConfig, TestDiscoveryStrategy,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -434,6 +434,63 @@ pub fn widget_test_config() -> CiConfig {
         .build()
 }
 
+/// Test discovery mapping `src/{path}.rs` -> `tests/{path}_test.rs` (source pattern `rust_src`)
+#[allow(dead_code)]
+pub fn rust_discovery() -> TestDiscoveryConfig {
+    TestDiscoveryConfig {
+        source_pattern: "rust_src".to_string(),
+        strategies: vec![TestDiscoveryStrategy::PathMapping {
+            rules: vec![PathMappingRule {
+                source: "src/{path}.rs".to_string(),
+                tests: vec!["tests/{path}_test.rs".to_string()],
+            }],
+        }],
+    }
+}
+
+/// Config with test-discovery checks in group `tests`:
+/// - unit: `{files}` command
+/// - slow: `{files}` command, on_demand
+/// - suite: full command (no `{files}`)
+/// - mixed: `{files}` command, on_demand, plus `file_pattern: rust_src`
+#[allow(dead_code)]
+pub fn rust_discovery_config() -> CiConfig {
+    ConfigBuilder::new()
+        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
+        .with_check(
+            "tests",
+            "unit",
+            CheckBuilder::new("Unit", "cargo test {files}")
+                .with_test_discovery(rust_discovery())
+                .build(),
+        )
+        .with_check(
+            "tests",
+            "slow",
+            CheckBuilder::new("Slow", "slow {files}")
+                .with_test_discovery(rust_discovery())
+                .on_demand()
+                .build(),
+        )
+        .with_check(
+            "tests",
+            "suite",
+            CheckBuilder::new("Suite", "cargo test")
+                .with_test_discovery(rust_discovery())
+                .build(),
+        )
+        .with_check(
+            "tests",
+            "mixed",
+            CheckBuilder::new("Mixed", "mixed {files}")
+                .with_file_pattern_trigger("rust_src")
+                .with_test_discovery(rust_discovery())
+                .on_demand()
+                .build(),
+        )
+        .build()
+}
+
 /// Config for checks.rs tests with warmup, fast, analysis, and test groups
 ///
 /// Provides a PHP project config matching the original test_config_yaml() structure:
@@ -443,8 +500,9 @@ pub fn widget_test_config() -> CiConfig {
 /// - tests group: phpunit (with tests pattern trigger)
 ///
 /// Kept `#[allow(dead_code)]`: `common` is compiled into every integration test
-/// binary, but this fixture is consumed only by `characterization_tests.rs`, so
-/// the other binaries would otherwise flag it as unused under `-D warnings`.
+/// binary, but this fixture is consumed only by `characterization_tests.rs` and
+/// `list_tests.rs`, so the other binaries would otherwise flag it as unused
+/// under `-D warnings`.
 #[allow(dead_code)]
 pub fn checks_test_config() -> CiConfig {
     ConfigBuilder::new()

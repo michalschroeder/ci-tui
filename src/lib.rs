@@ -11,6 +11,7 @@
 //! - `config`: Configuration loading and parsing from YAML
 //! - `fix`: Auto-fix mode (`--fix`) running fix commands for matched checks
 //! - `git`: Git operations for detecting changed files
+//! - `list`: `--list` / `--dry-run` report of which checks would run and why
 //! - `runner`: Check execution in Docker containers
 //! - `simple`: Simple console output mode (no TUI)
 //! - `test_discovery`: Finding related test files for source changes
@@ -22,6 +23,7 @@ pub mod commands;
 pub mod config;
 pub mod fix;
 pub mod git;
+pub mod list;
 pub mod runner;
 pub mod simple;
 pub mod test_discovery;

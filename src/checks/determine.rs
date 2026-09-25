@@ -5,7 +5,7 @@
 //! - Handling test discovery
 //! - Building CheckToRun instances via new_check_to_run
 
-use crate::config::{CheckDefinition, CiConfig};
+use crate::config::{CheckDefinition, CheckTriggers, CiConfig, TestDiscoveryConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
 use std::collections::HashSet;
@@ -50,48 +50,28 @@ pub(super) fn process_check(
     default_service: Option<&str>,
 ) -> Option<CheckToRun> {
     let service = check.service_or_default(default_service).map(str::to_owned);
-
-    if check.always_run() {
-        return Some(new_check_to_run(
-            check_id,
-            check,
-            group_name,
-            service,
-            CheckFiles::Files(vec![]),
-        ));
-    }
-
-    process_triggered_check(
-        config,
-        changed_files,
-        project_root,
-        group_name,
-        check_id,
-        check,
-        service.as_deref(),
-    )
+    let files =
+        Selection::evaluate(config, changed_files, project_root, check).into_check_files()?;
+    Some(new_check_to_run(
+        check_id, check, group_name, service, files,
+    ))
 }
 
 /// Match changed files against a file pattern trigger
-pub(super) fn match_file_pattern(
+pub(super) fn match_file_pattern<'a>(
     config: &CiConfig,
-    changed_files: &ChangedFiles,
+    changed_files: &'a ChangedFiles,
     pattern_key: &str,
-) -> Vec<String> {
-    if let Some(re) = config.get_compiled_file_pattern(pattern_key) {
-        changed_files
-            .filter_by_pattern(re)
-            .into_iter()
-            .map(String::from)
-            .collect()
-    } else {
-        vec![]
-    }
+) -> Vec<&'a str> {
+    config
+        .get_compiled_file_pattern(pattern_key)
+        .map(|re| changed_files.filter_by_pattern(re))
+        .unwrap_or_default()
 }
 
 /// Outcome of evaluating a test_discovery trigger.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum DiscoveryOutcome {
+pub(crate) enum DiscoveryOutcome {
     /// source_pattern unknown, or no changed files matched it
     NoSources,
     /// Related test files were discovered
@@ -104,112 +84,140 @@ pub(super) enum DiscoveryOutcome {
     NoTestsSkip,
 }
 
-/// Evaluate a test_discovery trigger against the changed files.
-pub(super) fn run_test_discovery(
+/// Evaluate a test_discovery trigger: matched source files plus outcome.
+pub(super) fn run_test_discovery<'a>(
     config: &CiConfig,
-    changed_files: &ChangedFiles,
+    changed_files: &'a ChangedFiles,
     project_root: &Path,
-    discovery: &crate::config::TestDiscoveryConfig,
+    discovery: &TestDiscoveryConfig,
     check: &CheckDefinition,
-) -> DiscoveryOutcome {
-    let Some(re) = config.get_compiled_file_pattern(&discovery.source_pattern) else {
-        return DiscoveryOutcome::NoSources;
-    };
-    let source_files = changed_files.filter_by_pattern(re);
-    if source_files.is_empty() {
-        return DiscoveryOutcome::NoSources;
+) -> (Vec<&'a str>, DiscoveryOutcome) {
+    let sources = match_file_pattern(config, changed_files, &discovery.source_pattern);
+    if sources.is_empty() {
+        return (sources, DiscoveryOutcome::NoSources);
     }
 
     let related_tests =
-        test_discovery::find_related_tests(&discovery.strategies, &source_files, project_root);
-    if !related_tests.is_empty() {
-        return DiscoveryOutcome::TestsFound(related_tests);
-    }
-
-    if check.on_demand {
-        return DiscoveryOutcome::NoTestsOnDemand;
-    }
-    if check.command.contains("{files}") {
+        test_discovery::find_related_tests(&discovery.strategies, &sources, project_root);
+    let outcome = if !related_tests.is_empty() {
+        DiscoveryOutcome::TestsFound(related_tests)
+    } else if check.on_demand {
+        DiscoveryOutcome::NoTestsOnDemand
+    } else if check.command.contains("{files}") {
         DiscoveryOutcome::NoTestsSkip
     } else {
         DiscoveryOutcome::NoTestsRunAll
+    };
+    (sources, outcome)
+}
+
+/// How a check is selected. Single evaluation shared by `determine_checks`
+/// and `--list`, so both always agree.
+#[derive(Debug)]
+pub(crate) enum Selection<'a> {
+    /// No `triggers`: runs unconditionally
+    AlwaysRun,
+    /// Result of evaluating the check's triggers
+    Triggered(TriggerEval<'a>),
+}
+
+impl<'a> Selection<'a> {
+    pub(crate) fn evaluate(
+        config: &CiConfig,
+        changed_files: &'a ChangedFiles,
+        project_root: &Path,
+        check: &'a CheckDefinition,
+    ) -> Self {
+        match &check.triggers {
+            None => Self::AlwaysRun,
+            Some(triggers) => Self::Triggered(TriggerEval::evaluate(
+                config,
+                changed_files,
+                project_root,
+                triggers,
+                check,
+            )),
+        }
+    }
+
+    /// Files state for the check; `None` drops it (empty `triggers` block).
+    pub(crate) fn into_check_files(self) -> Option<CheckFiles> {
+        match self {
+            Self::AlwaysRun => Some(CheckFiles::Files(vec![])),
+            Self::Triggered(eval) => eval.into_check_files(),
+        }
     }
 }
 
-/// Process a triggered check (has triggers defined)
-pub(super) fn process_triggered_check(
-    config: &CiConfig,
-    changed_files: &ChangedFiles,
-    project_root: &Path,
-    group_name: &str,
-    check_id: &str,
-    check: &CheckDefinition,
-    service: Option<&str>,
-) -> Option<CheckToRun> {
-    let triggers = check.triggers.as_ref()?;
-    let mut matched_files = Vec::new();
-    let mut has_source_trigger = false;
+/// Per-trigger evaluation of a triggered check, each trigger paired with its config.
+#[derive(Debug)]
+pub(crate) struct TriggerEval<'a> {
+    /// `file_pattern` key + changed files it matched, if configured
+    pub file_pattern: Option<(&'a str, Vec<&'a str>)>,
+    /// `test_discovery` config + matched source files + outcome, if configured
+    pub discovery: Option<(&'a TestDiscoveryConfig, Vec<&'a str>, DiscoveryOutcome)>,
+}
 
-    // Check file pattern trigger
-    if let Some(pattern_key) = &triggers.file_pattern {
-        let files = match_file_pattern(config, changed_files, pattern_key);
-        matched_files.extend(files);
-    }
-
-    // Check test_discovery trigger
-    if let Some(discovery) = &triggers.test_discovery {
-        has_source_trigger = true;
-        match run_test_discovery(config, changed_files, project_root, discovery, check) {
-            DiscoveryOutcome::TestsFound(tests) => matched_files.extend(tests),
-            DiscoveryOutcome::NoSources | DiscoveryOutcome::NoTestsSkip => {}
-            DiscoveryOutcome::NoTestsOnDemand if matched_files.is_empty() => {
-                return Some(new_check_to_run(
-                    check_id,
-                    check,
-                    group_name,
-                    service.map(str::to_owned),
-                    CheckFiles::OnDemand,
-                ));
-            }
-            DiscoveryOutcome::NoTestsRunAll if matched_files.is_empty() => {
-                return Some(new_check_to_run(
-                    check_id,
-                    check,
-                    group_name,
-                    service.map(str::to_owned),
-                    CheckFiles::RunAll,
-                ));
-            }
-            DiscoveryOutcome::NoTestsOnDemand | DiscoveryOutcome::NoTestsRunAll => {}
+impl<'a> TriggerEval<'a> {
+    fn evaluate(
+        config: &CiConfig,
+        changed_files: &'a ChangedFiles,
+        project_root: &Path,
+        triggers: &'a CheckTriggers,
+        check: &CheckDefinition,
+    ) -> Self {
+        Self {
+            file_pattern: triggers
+                .file_pattern
+                .as_deref()
+                .map(|key| (key, match_file_pattern(config, changed_files, key))),
+            discovery: triggers.test_discovery.as_ref().map(|discovery| {
+                let (sources, outcome) =
+                    run_test_discovery(config, changed_files, project_root, discovery, check);
+                (discovery, sources, outcome)
+            }),
         }
     }
 
-    // Deduplicate while preserving insertion order — output feeds {files} expansion + UI
-    let mut seen = HashSet::new();
-    matched_files.retain(|f| seen.insert(f.clone()));
+    /// True when the `file_pattern` trigger matched at least one file.
+    pub(crate) fn file_pattern_matched(&self) -> bool {
+        self.file_pattern
+            .as_ref()
+            .is_some_and(|(_, matched)| !matched.is_empty())
+    }
 
-    // Build appropriate CheckToRun based on whether files matched
-    if !matched_files.is_empty() {
-        Some(new_check_to_run(
-            check_id,
-            check,
-            group_name,
-            service.map(str::to_owned),
-            CheckFiles::Files(matched_files),
-        ))
-    } else {
-        let has_file_trigger = triggers.file_pattern.is_some();
-        if has_file_trigger || has_source_trigger {
-            Some(new_check_to_run(
-                check_id,
-                check,
-                group_name,
-                service.map(str::to_owned),
-                CheckFiles::SkippedNoMatch,
-            ))
+    /// Files state implied by the evaluation; `None` for an empty `triggers`
+    /// block (no `file_pattern`, no `test_discovery`).
+    fn into_check_files(self) -> Option<CheckFiles> {
+        if self.file_pattern.is_none() && self.discovery.is_none() {
+            return None;
+        }
+        let mut matched_files: Vec<String> = self
+            .file_pattern
+            .into_iter()
+            .flat_map(|(_, matched)| matched)
+            .map(String::from)
+            .collect();
+
+        match (
+            self.discovery.map(|(_, _, outcome)| outcome),
+            matched_files.is_empty(),
+        ) {
+            (Some(DiscoveryOutcome::TestsFound(tests)), _) => matched_files.extend(tests),
+            (Some(DiscoveryOutcome::NoTestsOnDemand), true) => return Some(CheckFiles::OnDemand),
+            (Some(DiscoveryOutcome::NoTestsRunAll), true) => return Some(CheckFiles::RunAll),
+            _ => {}
+        }
+
+        // Deduplicate while preserving insertion order — output feeds {files} expansion + UI
+        let mut seen = HashSet::new();
+        matched_files.retain(|f| seen.insert(f.clone()));
+
+        Some(if matched_files.is_empty() {
+            CheckFiles::SkippedNoMatch
         } else {
-            None
-        }
+            CheckFiles::Files(matched_files)
+        })
     }
 }
 
@@ -299,10 +307,7 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/main.rs", "README.md", "lib/foo.rs"]);
             let out = match_file_pattern(&cfg, &cf, "rust");
-            assert_eq!(
-                out,
-                vec!["src/main.rs".to_string(), "lib/foo.rs".to_string()]
-            );
+            assert_eq!(out, vec!["src/main.rs", "lib/foo.rs"]);
         }
 
         #[test]
@@ -351,7 +356,7 @@ mod tests {
             let cf = changed(&["README.md"]);
             let check = mk_check("cmd {files}", None, None, false);
             let out =
-                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &discovery_cfg(), &check);
+                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &discovery_cfg(), &check).1;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -364,7 +369,7 @@ mod tests {
                 source_pattern: "nonexistent".to_string(),
                 strategies: vec![],
             };
-            let out = run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check);
+            let out = run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check).1;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -374,7 +379,7 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
             assert_eq!(out, DiscoveryOutcome::NoTestsOnDemand);
         }
 
@@ -384,7 +389,7 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("run-all-tests", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
             assert_eq!(out, DiscoveryOutcome::NoTestsRunAll);
         }
 
@@ -394,7 +399,7 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("test {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
             assert_eq!(out, DiscoveryOutcome::NoTestsSkip);
         }
 
@@ -408,7 +413,7 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check);
+            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
             assert_eq!(
                 out,
                 DiscoveryOutcome::TestsFound(vec!["tests/foo_test.rs".to_string()])
@@ -585,7 +590,7 @@ mod tests {
         }
     }
 
-    mod process_triggered_check_tests {
+    mod process_check_triggered_tests {
         use super::*;
 
         fn triggers_file_pattern(key: &str) -> CheckTriggers {
@@ -600,7 +605,7 @@ mod tests {
             let cfg = base_config();
             let def = mk_check("cmd", None, Some(CheckTriggers::default()), false);
             let cf = changed(&["src/main.rs"]);
-            let out = process_triggered_check(
+            let out = process_check(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -622,7 +627,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/main.rs", "README.md"]);
-            let out = process_triggered_check(
+            let out = process_check(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -650,7 +655,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let out = process_triggered_check(
+            let out = process_check(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -675,7 +680,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let run = process_triggered_check(
+            let run = process_check(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -700,7 +705,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/a.rs", "src/b.rs", "src/a.rs"]);
-            let out = process_triggered_check(
+            let out = process_check(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -739,8 +744,7 @@ mod tests {
                 /*on_demand=*/ true,
             );
             let cf = changed(&["src/foo.rs"]);
-            let out = process_triggered_check(&cfg, &cf, tmp.path(), "g", "id", &def, Some("svc"))
-                .unwrap();
+            let out = process_check(&cfg, &cf, tmp.path(), "g", "id", &def, Some("svc")).unwrap();
             assert!(out.is_on_demand());
             assert_eq!(out.files, CheckFiles::OnDemand);
         }
