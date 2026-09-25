@@ -571,6 +571,77 @@ fn test_system_stats_memory_appears() {
     assert!(buffer_contains(buffer, "MEM"), "Memory stats should appear");
 }
 
+/// Text of buffer row `y` between columns `x0..x1`
+fn row_text(buffer: &Buffer, y: u16, x0: u16, x1: u16) -> String {
+    (x0..x1)
+        .map(|x| buffer[(x, y)].symbol().to_string())
+        .collect()
+}
+
+/// Stats panels: top border at row 3, four inner rows 4..=7 (header is 3 rows)
+const STATS_INNER_TOP: u16 = 4;
+const STATS_INNER_BOTTOM: u16 = 7;
+
+/// #192: CPU graph spans the whole panel on a wide terminal once enough
+/// samples arrived (history no longer capped below panel width)
+#[test]
+fn test_cpu_graph_fills_full_width_on_wide_terminal() {
+    let mut app = make_test_app();
+    for _ in 0..600 {
+        app.update_stats(100.0, 8_000_000_000, 16_000_000_000);
+    }
+    // CPU panel = left half (0..150): border at 0 and 149, scale in 1..5
+    let mut terminal = Terminal::new(TestBackend::new(300, HEIGHT)).unwrap();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let graph = row_text(buffer, STATS_INNER_BOTTOM, 5, 149);
+    assert_eq!(graph, "█".repeat(144), "graph must fill full width");
+}
+
+/// #192: CPU panel shows a 100/50/0 y-axis scale left of the graph
+#[test]
+fn test_cpu_panel_shows_scale_labels() {
+    let mut app = make_test_app();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let scale: Vec<String> = (STATS_INNER_TOP..=STATS_INNER_BOTTOM)
+        .map(|y| row_text(buffer, y, 1, 5))
+        .collect();
+    assert_eq!(scale, ["100 ", "    ", " 50 ", "  0 "]);
+}
+
+/// #192: MEM panel is a gauge with a readable used/total label
+#[test]
+fn test_mem_panel_gauge_label() {
+    let mut app = make_test_app();
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // 8e9 / 16e9 bytes = 7.5 / 14.9 GiB
+    assert!(
+        buffer_contains(buffer, "7.5/14.9 GiB (50%)"),
+        "MEM gauge label missing"
+    );
+}
+
+/// #192: zero total memory (no sample yet / broken sysinfo) renders, no panic
+#[test]
+fn test_mem_panel_zero_total_renders() {
+    let mut app = make_test_app();
+    app.update_stats(10.0, 0, 0);
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+
+    assert!(buffer_contains(
+        terminal.backend().buffer(),
+        "0.0/0.0 GiB (0%)"
+    ));
+}
+
 // ============================================================================
 // Files List Tests
 // ============================================================================

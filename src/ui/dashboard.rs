@@ -1,14 +1,14 @@
 //! Rendering logic for the TUI dashboard using ratatui widgets.
 //!
 //! This module contains all the rendering functions that draw the UI
-//! components: header with progress, system stats sparklines, check list,
+//! components: header with progress, system stats (CPU sparkline, MEM gauge), check list,
 //! file list, output panel, and footer with keyboard shortcuts.
 //!
 //! # Layout
 //!
 //! The UI is divided into four horizontal sections:
 //! 1. **Header**: Progress gauge with branch info and elapsed time
-//! 2. **System stats**: CPU and memory sparklines
+//! 2. **System stats**: CPU sparkline with 0/50/100 scale, memory gauge
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
 
@@ -50,6 +50,8 @@ const CHECK_NAME_MIN_COLS: usize = 20;
 const FILES_INLINE_MAX: usize = 3;
 /// Max stderr lines shown per failed fix in fix-all results
 const FIX_ERROR_PREVIEW_LINES: usize = 5;
+/// Columns of the CPU y-axis scale: widest label ("100") + 1 gap
+const CPU_SCALE_COLS: u16 = 4;
 
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
@@ -65,6 +67,39 @@ fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
         data.extend(history.iter().map(|&v| v.max(1.0) as u64));
         data
     }
+}
+
+/// CPU y-axis labels, one right-aligned row per graph row: `100` on top,
+/// `0` at bottom, `50` on the row where a half-height bar tops out
+fn cpu_scale_lines(height: usize) -> Vec<String> {
+    let mut labels = vec![""; height];
+    if height > 0 {
+        labels[height / 2] = "50";
+        labels[height - 1] = "0";
+        labels[0] = "100";
+    }
+    labels
+        .into_iter()
+        .map(|l| format!("{:>width$} ", l, width = CPU_SCALE_COLS as usize - 1))
+        .collect()
+}
+
+/// MEM gauge ratio and label (`14.7/30.7 GiB (48%)`). Ratio is clamped to
+/// `0.0..=1.0` (`Gauge::ratio` panics outside it) and NaN maps to 0.
+fn mem_gauge_parts(used_gib: f64, total_gib: f64, usage_pct: f32) -> (f64, String) {
+    let ratio = f64::from(usage_pct) / 100.0;
+    let ratio = if ratio.is_nan() {
+        0.0
+    } else {
+        ratio.clamp(0.0, 1.0)
+    };
+    let label = format!(
+        "{:.1}/{:.1} GiB ({:.0}%)",
+        used_gib,
+        total_gib,
+        ratio * 100.0
+    );
+    (ratio, label)
 }
 
 /// Get color based on usage percentage thresholds
@@ -303,40 +338,45 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Create blocks first to calculate inner width
+    // CPU: bordered block split into y-axis scale + sparkline
     let cpu_block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" CPU {:.0}% ", app.cpu_usage()));
-    let mem_block = Block::default().borders(Borders::ALL).title(format!(
-        " MEM {:.1}/{:.1}GiB ({:.0}%) ",
-        app.mem_used_gib(),
-        app.mem_total_gib(),
-        app.mem_usage()
-    ));
-
-    // Get actual inner width (after borders)
     let cpu_inner = cpu_block.inner(chunks[0]);
-    let mem_inner = mem_block.inner(chunks[1]);
+    frame.render_widget(cpu_block, chunks[0]);
+    let cpu_parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(CPU_SCALE_COLS), Constraint::Min(0)])
+        .split(cpu_inner);
 
-    // CPU sparkline
-    let cpu_data = prepare_sparkline_data(&app.sys.cpu_history, cpu_inner.width as usize);
+    let scale: Vec<Line> = cpu_scale_lines(cpu_parts[0].height as usize)
+        .into_iter()
+        .map(Line::from)
+        .collect();
+    let scale = Paragraph::new(scale).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(scale, cpu_parts[0]);
+
+    let cpu_data = prepare_sparkline_data(&app.sys.cpu_history, cpu_parts[1].width as usize);
     let cpu_sparkline = Sparkline::default()
-        .block(cpu_block)
         .data(&cpu_data)
         .max(100)
         .style(Style::default().fg(get_usage_color(app.cpu_usage())))
         .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(cpu_sparkline, chunks[0]);
+    frame.render_widget(cpu_sparkline, cpu_parts[1]);
 
-    // Memory sparkline
-    let mem_data = prepare_sparkline_data(&app.sys.mem_history, mem_inner.width as usize);
-    let mem_sparkline = Sparkline::default()
-        .block(mem_block)
-        .data(&mem_data)
-        .max(100)
-        .style(Style::default().fg(get_usage_color(app.mem_usage())))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(mem_sparkline, chunks[1]);
+    // MEM: gauge of current usage (history adds little for memory)
+    let (mem_ratio, mem_label) =
+        mem_gauge_parts(app.mem_used_gib(), app.mem_total_gib(), app.mem_usage());
+    let mem_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(" MEM "))
+        .gauge_style(
+            Style::default()
+                .fg(get_usage_color(app.mem_usage()))
+                .bg(Color::DarkGray),
+        )
+        .ratio(mem_ratio)
+        .label(mem_label);
+    frame.render_widget(mem_gauge, chunks[1]);
 }
 
 fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -1699,6 +1739,51 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prepare_sparkline_data_trims_to_width_keeping_newest() {
+        let history: VecDeque<f32> = (0..600).map(|i| (i % 100) as f32).collect();
+        let data = prepare_sparkline_data(&history, 200);
+        assert_eq!(data.len(), 200);
+        // newest sample (599 % 100) is rightmost
+        assert_eq!(data.last(), Some(&99));
+    }
+
+    #[test]
+    fn test_prepare_sparkline_data_pads_left_when_short() {
+        let history: VecDeque<f32> = VecDeque::from(vec![40.0, 60.0]);
+        assert_eq!(prepare_sparkline_data(&history, 5), vec![1, 1, 1, 40, 60]);
+    }
+
+    #[test]
+    fn test_cpu_scale_lines_place_100_50_0() {
+        assert_eq!(
+            cpu_scale_lines(4),
+            ["100 ", "    ", " 50 ", "  0 "].map(String::from)
+        );
+        assert_eq!(
+            cpu_scale_lines(3),
+            ["100 ", " 50 ", "  0 "].map(String::from)
+        );
+        assert_eq!(cpu_scale_lines(1), ["100 "].map(String::from));
+        assert!(cpu_scale_lines(0).is_empty());
+    }
+
+    #[test]
+    fn test_mem_gauge_parts_ratio_and_label() {
+        let (ratio, label) = mem_gauge_parts(14.7, 30.7, 48.0);
+        assert!((ratio - 0.48).abs() < 1e-6);
+        assert_eq!(label, "14.7/30.7 GiB (48%)");
+    }
+
+    #[test]
+    fn test_mem_gauge_parts_clamps_and_handles_nan() {
+        assert_eq!(mem_gauge_parts(1.0, 1.0, 150.0).0, 1.0);
+        assert_eq!(mem_gauge_parts(0.0, 1.0, -5.0).0, 0.0);
+        let (ratio, label) = mem_gauge_parts(0.0, 0.0, f32::NAN);
+        assert_eq!(ratio, 0.0);
+        assert_eq!(label, "0.0/0.0 GiB (0%)");
+    }
 
     #[test]
     fn test_prefix_width_respects_char_boundaries() {
