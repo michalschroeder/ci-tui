@@ -139,6 +139,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`)
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
 - **list.rs**: `--list` / `--dry-run` — per-check run/on-demand/skipped decision plus reason, from the same `Selection` evaluation `determine_checks` uses; executes nothing
+- **preflight.rs**: Docker startup probe — non-fatal warnings when changed files won't resolve in the containers selected checks use (exec: repo-relative path vs container WORKDIR; `docker run` fallback without `volume_mount` or mounted away from `docker.work_dir`)
 - **simple.rs**: Non-TUI console output mode for CI pipelines
 - **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)
 

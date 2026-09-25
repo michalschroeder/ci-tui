@@ -44,6 +44,8 @@ pub struct ConfigBuilder {
     docker_service: String,
     docker_shell: String,
     docker_env: HashMap<String, String>,
+    docker_work_dir: Option<String>,
+    docker_volume_mount: Option<String>,
     git_base: String,
     git_fallback: String,
     file_patterns: HashMap<String, FilePattern>,
@@ -60,6 +62,8 @@ impl ConfigBuilder {
             docker_service: "app".to_string(),
             docker_shell: "bash".to_string(),
             docker_env: HashMap::new(),
+            docker_work_dir: None,
+            docker_volume_mount: None,
             git_base: "main".to_string(),
             git_fallback: "HEAD~1".to_string(),
             file_patterns: HashMap::new(),
@@ -72,6 +76,20 @@ impl ConfigBuilder {
     pub fn with_docker(mut self, project_dir: &str, service: &str) -> Self {
         self.docker_project_dir = project_dir.to_string();
         self.docker_service = service.to_string();
+        self
+    }
+
+    /// Set `docker.work_dir` (container path the repo is mounted at)
+    #[allow(dead_code)]
+    pub fn with_work_dir(mut self, work_dir: &str) -> Self {
+        self.docker_work_dir = Some(work_dir.to_string());
+        self
+    }
+
+    /// Set `docker.volume_mount` (repo mount for the `docker run` fallback)
+    #[allow(dead_code)]
+    pub fn with_volume_mount(mut self, mount: &str) -> Self {
+        self.docker_volume_mount = Some(mount.to_string());
         self
     }
 
@@ -209,8 +227,8 @@ impl ConfigBuilder {
                 service: self.docker_service,
                 container: None,
                 image: None,
-                volume_mount: None,
-                work_dir: None,
+                volume_mount: self.docker_volume_mount,
+                work_dir: self.docker_work_dir,
                 shell: self.docker_shell,
                 env: self.docker_env,
             },

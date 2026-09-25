@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
-use ci_tui::runner::ExecTarget;
-use ci_tui::{checks, commands, config, fix, git, list, simple, ui};
+use ci_tui::runner::{ExecTarget, RealCommandExecutor};
+use ci_tui::{checks, commands, config, fix, git, list, preflight, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -160,13 +160,30 @@ async fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    // Determine which checks to run (fix mode reuses it only for the probe)
+    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
+
+    // Docker: warn (non-fatal) when changed files won't resolve in the
+    // containers the checks use. Console modes print now; the TUI shows them
+    // in-app (alternate screen).
+    let docker_warnings = preflight::docker_warnings(
+        &config.runner,
+        &checks_to_run,
+        &changed_files.files,
+        &exec_root,
+        &RealCommandExecutor,
+    )
+    .await;
+    if cli.fix || simple_mode {
+        for warning in &docker_warnings {
+            eprintln!("Warning: {warning}");
+        }
+    }
+
     // Run fix mode if requested
     if cli.fix {
         return interruptible(fix::run(config, changed_files, exec_root)).await;
     }
-
-    // Determine which checks to run
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
 
     if simple_mode {
         // Run in simple console mode
@@ -179,6 +196,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             project_root,
             exec_root,
+            (!docker_warnings.is_empty()).then(|| docker_warnings.join("; ")),
         )
         .await
     }
