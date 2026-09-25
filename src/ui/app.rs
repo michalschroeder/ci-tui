@@ -274,7 +274,7 @@ pub enum SelectableItem<'a> {
 /// Owned identity of a list row, so a fold that shifts row indices can put
 /// the selection back on the same row (borrowed [`SelectableItem`]s cannot
 /// outlive the mutation)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ItemKey {
     Group(String),
     PreCommand { group: String, name: String },
@@ -301,6 +301,18 @@ impl ItemKey {
             Self::Group(group) | Self::PreCommand { group, .. } | Self::Check { group, .. } => {
                 group
             }
+        }
+    }
+
+    /// Compare against a borrowed row without allocating a key for it
+    fn matches(&self, item: &SelectableItem<'_>) -> bool {
+        match (self, item) {
+            (Self::Group(group), SelectableItem::Group(g)) => group == g,
+            (Self::PreCommand { group, name }, SelectableItem::PreCommand(pc)) => {
+                *group == pc.group && *name == pc.name
+            }
+            (Self::Check { id, .. }, SelectableItem::Check(check)) => id == check.id(),
+            _ => false,
         }
     }
 }
@@ -480,10 +492,20 @@ impl App {
         self.pre_commands = build_pre_commands(&self.config, &active_groups);
         self.checks = checks;
 
-        // Reset state
+        // Reset state; manual folds survive, auto-collapsed groups reopen
+        let manual_folds = std::mem::take(&mut self.view.manual_folds);
+        let collapsed_groups = self
+            .view
+            .collapsed_groups
+            .iter()
+            .filter(|g| manual_folds.contains(*g))
+            .cloned()
+            .collect();
         self.view = ViewState {
             status_filter: self.view.status_filter,
             output_visible_lines: self.view.output_visible_lines,
+            collapsed_groups,
+            manual_folds,
             ..ViewState::default()
         };
         self.select_initial_item();
@@ -685,10 +707,7 @@ impl App {
             result.error_output = join_output(&streamed.error_output, &result.error_output);
         }
         self.results.insert(result.check_id.clone(), result);
-        self.auto_collapse_passed_groups(selected.as_ref().map(ItemKey::group));
-        if let Some(key) = selected {
-            self.reselect(&key);
-        }
+        self.auto_collapse_keeping_selection(selected);
     }
 
     /// Show a status message in the footer
@@ -925,37 +944,23 @@ impl App {
 
     /// Select the next item (stops at the last one)
     pub fn next_check(&mut self) {
-        self.reset_selection_view();
-
         let max = self.selectable_items().count().saturating_sub(1);
-        if self.view.selected_check < max {
-            self.view.selected_check += 1;
-        }
-        self.needs_redraw = true;
+        self.select_item_index((self.view.selected_check + 1).min(max));
     }
 
     /// Select the previous item (stops at the first one)
     pub fn previous_check(&mut self) {
-        self.reset_selection_view();
-
-        if self.view.selected_check > 0 {
-            self.view.selected_check -= 1;
-        }
-        self.needs_redraw = true;
+        self.select_item_index(self.view.selected_check.saturating_sub(1));
     }
 
     /// Select the first item in the (filtered) list
     pub fn select_first(&mut self) {
-        self.reset_selection_view();
-        self.view.selected_check = 0;
-        self.needs_redraw = true;
+        self.select_item_index(0);
     }
 
     /// Select the last item in the (filtered) list
     pub fn select_last(&mut self) {
-        self.reset_selection_view();
-        self.view.selected_check = self.selectable_items().count().saturating_sub(1);
-        self.needs_redraw = true;
+        self.select_item_index(self.selectable_items().count().saturating_sub(1));
     }
 
     /// Indices (in the filtered list) of checks whose result is a failure,
@@ -1004,12 +1009,15 @@ impl App {
         self.select_item_index(prev);
     }
 
-    /// Select item `idx` directly (mouse click). Same reset-on-navigate
-    /// behavior as [`Self::next_check`]/[`Self::previous_check`].
+    /// Select item `idx`; every navigation goes through here. Resets the
+    /// output view, and folds passed groups the selection just left
+    /// (auto-collapse skips the selected group).
     fn select_item_index(&mut self, idx: usize) {
         self.reset_selection_view();
         self.view.selected_check = idx;
         self.needs_redraw = true;
+        let selected = self.selected_item().map(|item| ItemKey::of(&item));
+        self.auto_collapse_keeping_selection(selected);
     }
 
     /// Store the checks list's inner (border-excluded) content rect (called
@@ -1306,35 +1314,28 @@ impl App {
         let Some(SelectableItem::Group(group)) = self.selected_item() else {
             return;
         };
+        // The selected header stays put: folding only changes rows below it
         let group = group.to_string();
-        let collapsed = !self.is_group_collapsed(&group);
-        self.view.manual_folds.insert(group.clone());
-        self.set_group_collapsed(&group, collapsed);
+        if !self.view.collapsed_groups.remove(&group) {
+            self.view.collapsed_groups.insert(group.clone());
+        }
+        self.view.manual_folds.insert(group);
+        self.needs_redraw = true;
     }
 
-    /// Fold/unfold `group`, keeping the selection on the same row. Rows
-    /// above it may appear/disappear, shifting its index; a selected row
-    /// hidden by the fold hands the selection to its group header.
-    fn set_group_collapsed(&mut self, group: &str, collapsed: bool) {
-        let selected = self.selected_item().map(|item| ItemKey::of(&item));
-        if collapsed {
-            self.view.collapsed_groups.insert(group.to_string());
-        } else {
-            self.view.collapsed_groups.remove(group);
-        }
+    /// Auto-collapse passed groups outside the `selected` row's group, then
+    /// put the selection back on that row (row indices may have shifted)
+    fn auto_collapse_keeping_selection(&mut self, selected: Option<ItemKey>) {
+        self.auto_collapse_passed_groups(selected.as_ref().map(ItemKey::group));
         if let Some(key) = selected {
             self.reselect(&key);
         }
-        self.clamp_selection();
-        self.needs_redraw = true;
     }
 
     /// Select the row identified by `key`, or its group header when the row
     /// is hidden (a selection change, so the output view resets)
     fn reselect(&mut self, key: &ItemKey) {
-        let same_row = self
-            .selectable_items()
-            .position(|i| ItemKey::of(&i) == *key);
+        let same_row = self.selectable_items().position(|i| key.matches(&i));
         if let Some(idx) = same_row {
             self.view.selected_check = idx;
             return;
@@ -1343,15 +1344,16 @@ impl App {
             .selectable_items()
             .position(|i| matches!(i, SelectableItem::Group(g) if g == key.group()));
         if let Some(idx) = header {
-            self.select_item_index(idx);
+            self.reset_selection_view();
+            self.view.selected_check = idx;
         }
     }
 
     /// Fold every group whose checks all finished Passed or Skipped (at
     /// least one Passed; a skipped-only group stays open), unless the user
     /// already folded/unfolded it by hand or the selection is inside it
-    /// (never hide the row being watched; a later result re-checks it).
-    /// Only folds: a later retry-all resets fold state anyway.
+    /// (never hide the row being watched; the next result or navigation
+    /// re-checks it). Only folds: retry-all reopens auto-collapsed groups.
     fn auto_collapse_passed_groups(&mut self, selected_group: Option<&str>) {
         let passed: Vec<String> = self
             .groups()
@@ -3146,6 +3148,34 @@ checks:
 
             assert_eq!(app.view.selected_check, 2, "index shifts up by one");
             assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
+        }
+
+        #[test]
+        fn test_navigating_out_folds_passed_group() {
+            let mut app = make_app(); // php-lint selected
+            finish(&mut app, "php-lint", CheckStatus::Passed);
+            assert!(!app.is_group_collapsed("fast"), "still watched");
+
+            app.next_check(); // tests header
+            app.next_check(); // phpunit
+
+            assert!(app.is_group_collapsed("fast"), "folds once left");
+            assert_eq!(rows(&app), ["^fast", "^tests", "phpunit", "behat"]);
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
+        }
+
+        #[test]
+        fn test_retry_all_keeps_manual_folds_only() {
+            let mut app = make_app();
+            app.view.selected_check = 2; // tests header
+            app.toggle_selected_group(); // tests folded by hand
+            app.view.collapsed_groups.insert("fast".to_string()); // auto
+
+            app.reset_for_retry(app.changed_files.clone(), app.checks.clone());
+
+            assert!(app.is_group_collapsed("tests"));
+            assert!(app.view.manual_folds.contains("tests"));
+            assert!(!app.is_group_collapsed("fast"), "auto fold reopens");
         }
 
         #[test]
