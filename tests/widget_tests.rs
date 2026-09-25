@@ -518,9 +518,18 @@ fn test_footer_shows_expand_shortcut() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
+    // Footer row only (the one with "quit"): the output panel can also print an expand hint
+    let footer = (0..HEIGHT)
+        .map(|y| {
+            (0..WIDTH)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .find(|row| row.contains(" quit "))
+        .expect("footer row with quit shortcut");
     assert!(
-        buffer_contains(buffer, "expand") || buffer_contains(buffer, "collapse"),
-        "Footer should show expand shortcut"
+        footer.contains(" expand "),
+        "Footer should show expand shortcut, got: {footer}"
     );
 }
 
