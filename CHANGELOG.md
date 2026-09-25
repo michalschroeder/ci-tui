@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/michalschroeder/ci-tui/compare/v0.3.0...v0.4.0) (2026-09-25)
+
+
+### Features
+
+* add --list / --dry-run to explain check selection ([#193](https://github.com/michalschroeder/ci-tui/issues/193)) ([0563d2e](https://github.com/michalschroeder/ci-tui/commit/0563d2e1cde8c20b21c1e26c49e95ed7c173992e))
+* **ui:** collapsible groups ([#185](https://github.com/michalschroeder/ci-tui/issues/185)) ([41a77f2](https://github.com/michalschroeder/ci-tui/commit/41a77f2df5dc96b6a472629fe176c2ace6ec986d))
+* warn when docker container can't see changed files ([#195](https://github.com/michalschroeder/ci-tui/issues/195)) ([ff06711](https://github.com/michalschroeder/ci-tui/commit/ff067115a89416eb2d43043a1002983a8b29aec1))
+
+
+### Bug Fixes
+
+* **ui:** full-width CPU graph with scale, MEM as gauge ([#194](https://github.com/michalschroeder/ci-tui/issues/194)) ([f96c7be](https://github.com/michalschroeder/ci-tui/commit/f96c7be1f4c6083f8ca18dad48442a6603d0dbc7))
+* **ui:** show '? help' shortcut in footer ([#187](https://github.com/michalschroeder/ci-tui/issues/187)) ([167cc5c](https://github.com/michalschroeder/ci-tui/commit/167cc5cf19f6f4bf0ae86404c48fa22e014e167e))
+
+
+### Documentation
+
+* add ci-tui-setup AI agent skill ([#190](https://github.com/michalschroeder/ci-tui/issues/190)) ([b935db3](https://github.com/michalschroeder/ci-tui/commit/b935db38054ce8285690af13af65bfbc49e99875))
+
 ## [0.3.0](https://github.com/michalschroeder/ci-tui/compare/v0.2.0...v0.3.0) (2026-09-25)
 
 
