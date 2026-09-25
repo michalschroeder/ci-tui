@@ -138,6 +138,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`)
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
+- **list.rs**: `--list` / `--dry-run` — per-check run/on-demand/skipped decision (from `determine_checks`) plus reason; executes nothing
 - **simple.rs**: Non-TUI console output mode for CI pipelines
 - **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)
 

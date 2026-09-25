@@ -656,7 +656,15 @@ ci-tui --config ci-tui.yaml --files src/foo.rs src/bar.rs
 Bypass git change detection and run checks on specific files:
 - Useful when you want to check files regardless of git state
 - Ignore patterns still apply
-- Can be combined with `--simple` or `--fix`
+- Can be combined with `--simple`, `--fix` or `--list`
+
+### List / Dry Run
+
+```bash
+ci-tui --config ci-tui.yaml --list      # alias: --dry-run
+```
+
+Prints the base ref used (or that `--files` bypassed git), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files` and `--base`; cannot be combined with `--simple`, `--fix`, or a subcommand.
 
 ## Best Practices
 

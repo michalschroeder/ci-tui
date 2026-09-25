@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
 use ci_tui::runner::ExecTarget;
-use ci_tui::{checks, commands, config, fix, git, simple, ui};
+use ci_tui::{checks, commands, config, fix, git, list, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -149,6 +149,16 @@ async fn run() -> Result<i32> {
         }
     };
     changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
+
+    // Dry run: explain check selection, execute nothing
+    if cli.list {
+        let explained = list::explain_checks(&config, &changed_files, &exec_root);
+        print!(
+            "{}",
+            list::render(&config, &changed_files, cli.base.as_deref(), &explained)
+        );
+        return Ok(0);
+    }
 
     // Run fix mode if requested
     if cli.fix {

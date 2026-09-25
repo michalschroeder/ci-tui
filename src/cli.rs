@@ -35,6 +35,10 @@ pub struct Cli {
     /// Compare against this git ref instead of `git.base_branch` (exact ref, no fallback)
     #[arg(long, value_name = "REF", conflicts_with = "files", value_parser = parse_base_arg)]
     pub base: Option<String>,
+
+    /// Print changed files, base ref and which checks would run and why; execute nothing
+    #[arg(long, visible_alias = "dry-run", conflicts_with_all = ["simple", "fix"])]
+    pub list: bool,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -72,11 +76,11 @@ impl Cli {
     {
         let cli = Self::try_parse_from(args)?;
         if cli.command.is_some()
-            && (cli.simple || cli.fix || !cli.files.is_empty() || cli.base.is_some())
+            && (cli.simple || cli.fix || cli.list || !cli.files.is_empty() || cli.base.is_some())
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --files and --base cannot be used with a subcommand",
+                "--simple, --fix, --list, --files and --base cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -154,6 +158,11 @@ mod tests {
     #[case::base_before_validate(&["ci-tui", "--base", "v1.0", "validate"])]
     #[case::base_then_files(&["ci-tui", "--base", "main", "--files", "a.rs"])]
     #[case::files_then_base(&["ci-tui", "-f", "a.rs", "--base", "main"])]
+    #[case::list_with_fix(&["ci-tui", "--list", "--fix"])]
+    #[case::list_with_simple(&["ci-tui", "--list", "-s"])]
+    #[case::dry_run_with_fix(&["ci-tui", "--fix", "--dry-run"])]
+    #[case::list_before_validate(&["ci-tui", "--list", "validate"])]
+    #[case::dry_run_before_init(&["ci-tui", "--dry-run", "init"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -166,6 +175,17 @@ mod tests {
         let cli = Cli::try_parse_checked(["ci-tui", "--base", "v1.0"]).unwrap();
         assert_eq!(cli.base.as_deref(), Some("v1.0"));
         assert!(Cli::try_parse_checked(["ci-tui"]).unwrap().base.is_none());
+    }
+
+    #[rstest::rstest]
+    #[case::list(&["ci-tui", "--list"])]
+    #[case::dry_run_alias(&["ci-tui", "--dry-run"])]
+    #[case::with_files(&["ci-tui", "--list", "-f", "a.rs", "b.rs"])]
+    #[case::with_base(&["ci-tui", "--dry-run", "--base", "v1.0"])]
+    fn test_list_flag_parsed(#[case] args: &[&str]) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert!(cli.list);
+        assert!(!Cli::try_parse_checked(["ci-tui"]).unwrap().list);
     }
 
     #[rstest::rstest]

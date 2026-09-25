@@ -73,7 +73,7 @@ pub(super) fn process_check(
 }
 
 /// Match changed files against a file pattern trigger
-pub(super) fn match_file_pattern(
+pub(crate) fn match_file_pattern(
     config: &CiConfig,
     changed_files: &ChangedFiles,
     pattern_key: &str,
@@ -91,7 +91,7 @@ pub(super) fn match_file_pattern(
 
 /// Outcome of evaluating a test_discovery trigger.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum DiscoveryOutcome {
+pub(crate) enum DiscoveryOutcome {
     /// source_pattern unknown, or no changed files matched it
     NoSources,
     /// Related test files were discovered
@@ -105,7 +105,7 @@ pub(super) enum DiscoveryOutcome {
 }
 
 /// Evaluate a test_discovery trigger against the changed files.
-pub(super) fn run_test_discovery(
+pub(crate) fn run_test_discovery(
     config: &CiConfig,
     changed_files: &ChangedFiles,
     project_root: &Path,

@@ -19,6 +19,7 @@ use std::path::Path;
 
 mod determine;
 use determine::*;
+pub(crate) use determine::{match_file_pattern, run_test_discovery, DiscoveryOutcome};
 
 /// File context for a check — concrete paths or an explicit no-files state.
 ///
