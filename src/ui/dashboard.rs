@@ -46,8 +46,6 @@ const CHECK_NAME_LEAD_COLS: u16 = 4;
 const CHECK_NAME_RESERVED_COLS: u16 = 15;
 /// Minimum columns granted to a check name before truncation
 const CHECK_NAME_MIN_COLS: usize = 20;
-/// Max files listed inline in the output header before truncating
-const FILES_PREVIEW_COUNT: usize = 3;
 /// Max stderr lines shown per failed fix in fix-all results
 const FIX_ERROR_PREVIEW_LINES: usize = 5;
 
@@ -1410,17 +1408,12 @@ fn append_files_section(raw_output: &mut String, app: &App, check: &crate::check
         }
         raw_output.push('\n');
     } else {
-        let display_files = if files.len() <= FILES_PREVIEW_COUNT {
-            files.join(", ")
-        } else {
-            files
-                .iter()
-                .take(FILES_PREVIEW_COUNT)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        raw_output.push_str(&format!("\x1b[90mFiles: {}\x1b[0m\n\n", display_files));
+        // Count only: a partial name preview hid the rest without saying so,
+        // and `e` already shows the full list (#145)
+        raw_output.push_str(&format!(
+            "\x1b[90mFiles: {} (e to expand)\x1b[0m\n\n",
+            files.len()
+        ));
     }
 }
 
@@ -1767,6 +1760,58 @@ mod tests {
         result.status = CheckStatus::Passed;
         result.output = "\x1b[32mok\x1b[0m line\n".repeat(2000);
         app
+    }
+
+    /// App with one check matching `files`; `expanded` toggles `e` view
+    fn files_section_for(files: CheckFiles, expanded: bool) -> String {
+        let mut app = make_test_app();
+        app.checks[0].files = files;
+        app.view.show_full_command = expanded;
+        let check = app.checks[0].clone();
+        let mut out = String::new();
+        append_files_section(&mut out, &app, &check);
+        out
+    }
+
+    fn five_files() -> CheckFiles {
+        CheckFiles::Files((1..=5).map(|i| format!("src/f{}.php", i)).collect())
+    }
+
+    /// #145: collapsed view shows only a count, no file names
+    #[test]
+    fn test_files_section_collapsed_shows_count_only() {
+        assert_eq!(
+            files_section_for(five_files(), false),
+            "\x1b[90mFiles: 5 (e to expand)\x1b[0m\n\n"
+        );
+        assert_eq!(
+            files_section_for(CheckFiles::Files(vec!["a.php".into()]), false),
+            "\x1b[90mFiles: 1 (e to expand)\x1b[0m\n\n"
+        );
+    }
+
+    #[test]
+    fn test_files_section_expanded_lists_all_files() {
+        let out = files_section_for(five_files(), true);
+        let expected: String = std::iter::once("\x1b[90mFiles:\x1b[0m\n".to_string())
+            .chain((1..=5).map(|i| format!("\x1b[90m  - src/f{}.php\x1b[0m\n", i)))
+            .chain(std::iter::once("\n".to_string()))
+            .collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_files_section_empty_or_non_files_renders_nothing() {
+        for expanded in [false, true] {
+            for files in [
+                CheckFiles::Files(vec![]),
+                CheckFiles::RunAll,
+                CheckFiles::OnDemand,
+                CheckFiles::SkippedNoMatch,
+            ] {
+                assert_eq!(files_section_for(files, expanded), "");
+            }
+        }
     }
 
     /// #126: rendering a frame calls into the cache from two places

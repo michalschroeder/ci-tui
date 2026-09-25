@@ -2124,7 +2124,7 @@ checks:
         app.scroll_down(1000);
 
         // Rendered text prepends 6 lines before the 20 output lines:
-        // "$ php-lint test.php", blank, "PASSED", blank, "Files: test.php", blank.
+        // "$ php-lint test.php", blank, "PASSED", blank, "Files: 1 (e to expand)", blank.
         // max scroll = 26 total - 5 visible = 21. The old clamp
         // (stdout-only count) allowed only 20 - 5 = 15.
         assert_eq!(app.view.output_scroll, 21);
