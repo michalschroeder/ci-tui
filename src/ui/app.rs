@@ -667,8 +667,11 @@ impl App {
     /// Store a finished result. A timeout or cancel result carries no
     /// output (the command was killed), so a running check's streamed
     /// output is kept with the result's message appended. A group that is
-    /// now fully passed auto-collapses.
+    /// now fully passed auto-collapses; the selection stays on its row.
     fn insert_result(&mut self, mut result: CheckResult) {
+        // Captured before the insert: under the Failed filter a status
+        // change adds/removes rows, shifting the selected index
+        let selected = self.selected_item().map(|item| ItemKey::of(&item));
         let killed = matches!(
             result.status,
             CheckStatus::TimedOut | CheckStatus::Cancelled
@@ -682,7 +685,10 @@ impl App {
             result.error_output = join_output(&streamed.error_output, &result.error_output);
         }
         self.results.insert(result.check_id.clone(), result);
-        self.auto_collapse_passed_groups();
+        self.auto_collapse_passed_groups(selected.as_ref().map(ItemKey::group));
+        if let Some(key) = selected {
+            self.reselect(&key);
+        }
     }
 
     /// Show a status message in the footer
@@ -1343,26 +1349,37 @@ impl App {
 
     /// Fold every group whose checks all finished Passed or Skipped (at
     /// least one Passed; a skipped-only group stays open), unless the user
-    /// already folded/unfolded it by hand. Only folds: a later retry-all
-    /// resets fold state anyway.
-    fn auto_collapse_passed_groups(&mut self) {
+    /// already folded/unfolded it by hand or the selection is inside it
+    /// (never hide the row being watched; a later result re-checks it).
+    /// Only folds: a later retry-all resets fold state anyway.
+    fn auto_collapse_passed_groups(&mut self, selected_group: Option<&str>) {
         let passed: Vec<String> = self
             .groups()
             .into_iter()
             .filter(|g| {
-                !self.view.manual_folds.contains(*g)
+                selected_group != Some(*g)
+                    && !self.view.manual_folds.contains(*g)
                     && !self.is_group_collapsed(g)
                     && self.group_passed(g)
             })
             .map(str::to_string)
             .collect();
-        for group in passed {
-            self.set_group_collapsed(&group, true);
+        if !passed.is_empty() {
+            self.view.collapsed_groups.extend(passed);
+            self.needs_redraw = true;
         }
     }
 
-    /// Every check in `group` is Passed or Skipped, and at least one Passed
+    /// Every check in `group` is Passed or Skipped, at least one Passed, and
+    /// no pre-command failed (a folded group would hide the failure)
     fn group_passed(&self, group: &str) -> bool {
+        let pre_command_failed = self
+            .pre_commands
+            .iter()
+            .any(|p| p.group == group && p.status == PreCommandStatus::Failed);
+        if pre_command_failed {
+            return false;
+        }
         let checks = self.checks_in_group(group);
         let status = |c: &&CheckToRun| self.results.get(c.id()).map(|r| &r.status);
         checks
@@ -3028,6 +3045,7 @@ checks:
         #[test]
         fn test_auto_collapse_when_group_passed() {
             let mut app = make_app();
+            app.view.selected_check = 3; // phpunit, outside fast
             finish(&mut app, "php-lint", CheckStatus::Passed);
             assert!(app.is_group_collapsed("fast"));
 
@@ -3070,15 +3088,53 @@ checks:
         }
 
         #[test]
-        fn test_auto_collapse_moves_hidden_selection_to_header() {
+        fn test_auto_collapse_skips_group_of_selection() {
             let mut app = make_app(); // php-lint selected
             app.fix.result = Some(CheckResult::pending("php-lint"));
 
+            app.set_retry_result(finished("php-lint", CheckStatus::Passed));
+
+            assert!(!app.is_group_collapsed("fast"), "watched row stays visible");
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("php-lint"));
+            assert!(app.fix.result.is_some(), "view state untouched");
+
+            // Selection moved away: the next result folds it
+            app.view.selected_check = 3; // phpunit
+            finish(&mut app, "phpunit", CheckStatus::Failed);
+            assert!(app.is_group_collapsed("fast"));
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
+        }
+
+        #[test]
+        fn test_no_auto_collapse_when_pre_command_failed() {
+            let mut app = make_app();
+            app.pre_commands.push(PreCommandState {
+                group: "fast".to_string(),
+                name: "init".to_string(),
+                status: PreCommandStatus::Failed,
+                output: String::new(),
+                duration_ms: 0,
+            });
+            app.view.selected_check = 4; // phpunit, outside fast
+
             finish(&mut app, "php-lint", CheckStatus::Passed);
 
-            assert_eq!(app.view.selected_check, 0);
-            assert_eq!(selected_header(&app), Some("fast"));
-            assert!(app.fix.result.is_none(), "selection change resets view");
+            assert!(!app.is_group_collapsed("fast"));
+        }
+
+        #[test]
+        fn test_failed_filter_result_keeps_selection_on_same_row() {
+            let mut app = make_app();
+            app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+            app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+            app.toggle_failed_filter();
+            assert_eq!(rows(&app), ["^fast", "php-lint", "^tests", "phpunit"]);
+            app.view.selected_check = 3; // phpunit
+
+            // php-lint row and its header vanish: phpunit shifts to index 1
+            app.set_retry_result(finished("php-lint", CheckStatus::Passed));
+
+            assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
         }
 
         #[test]

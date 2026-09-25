@@ -707,7 +707,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
         }
         // Fold/unfold on a group header; no-op on checks and pre-commands.
         // Enter while typing a search never reaches here (confirms search).
-        (KeyCode::Char(' ') | KeyCode::Enter, _) => {
+        (KeyCode::Char(' ') | KeyCode::Enter, KeyModifiers::NONE) => {
             app.toggle_selected_group();
             Action::Continue
         }
@@ -2077,6 +2077,26 @@ checks:
             assert!(!app.is_group_collapsed("fast"), "{:?} unfolds", code);
             assert_eq!(app.selectable_items().count(), 3);
         }
+    }
+
+    #[test]
+    fn test_modified_space_and_enter_do_not_fold() {
+        let config = test_config();
+        let mut app = make_fold_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.select_first(); // fast header
+
+        for code in [KeyCode::Char(' '), KeyCode::Enter] {
+            for mods in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT,
+            ] {
+                handle_key_event(&mut app, press(code, mods), &mut tasks);
+            }
+        }
+
+        assert!(!app.is_group_collapsed("fast"));
     }
 
     #[test]
