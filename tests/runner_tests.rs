@@ -317,8 +317,8 @@ mod execute_docker_command_tests {
             .with(eq("test-container"))
             .returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.contains("cargo test"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.contains("cargo test"))
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: "test result: ok. 5 passed\n".to_string(),
                 stderr: String::new(),
@@ -351,8 +351,8 @@ mod execute_docker_command_tests {
             .with(eq("test-container"))
             .returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.contains("cargo test"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.contains("cargo test"))
+            .returning(|_, _, _| CommandOutput {
                 success: false,
                 stdout: String::new(),
                 stderr: "error: test failed\n".to_string(),
@@ -384,11 +384,11 @@ mod execute_docker_command_tests {
             .with(eq("test-container"))
             .returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| {
+            .withf(|cmd: &str, _, _| {
                 // Should use docker exec when container is running
                 cmd.starts_with("docker exec")
             })
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -417,11 +417,11 @@ mod execute_docker_command_tests {
             .with(eq("test-container"))
             .returning(|_| false);
         mock.expect_execute()
-            .withf(|cmd: &str, _| {
+            .withf(|cmd: &str, _, _| {
                 // Should use docker run when container is not running
                 cmd.starts_with("docker run")
             })
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -471,7 +471,7 @@ mod execute_docker_command_tests {
     async fn filters_docker_warnings_in_stderr() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: "WARN[0000] variable is not set. Defaulting to a blank string\nActual error\n"
@@ -502,7 +502,7 @@ mod execute_docker_command_tests {
     async fn caps_stdout_and_stderr_to_max_output_lines() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "1\n2\n3\n4\n5".to_string(),
             stderr: "e1\ne2\ne3".to_string(),
@@ -668,7 +668,7 @@ mod check_runner_tests {
         // Create mock that returns success for any command
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "ok".to_string(),
             stderr: String::new(),
@@ -784,7 +784,7 @@ mod check_runner_tests {
     async fn run_checks_handles_pre_commands_success() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "ok".to_string(),
             stderr: String::new(),
@@ -830,7 +830,7 @@ mod check_runner_tests {
     async fn run_checks_truncates_pre_command_output() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "1\n2\n3\n4\n5".to_string(),
             stderr: String::new(),
@@ -871,16 +871,16 @@ mod check_runner_tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().times(0);
         mock.expect_execute()
-            .withf(|cmd, _| cmd == "bash -c 'echo warmup'")
+            .withf(|cmd, _, _| cmd == "bash -c 'echo warmup'")
             .times(1)
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: "ok".to_string(),
                 stderr: String::new(),
             });
         mock.expect_execute()
-            .withf(|cmd, _| cmd != "bash -c 'echo warmup'")
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd, _, _| cmd != "bash -c 'echo warmup'")
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: "ok".to_string(),
                 stderr: String::new(),
@@ -912,7 +912,7 @@ mod check_runner_tests {
     async fn run_checks_pre_command_failure_stops_execution() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: false, // Pre-command fails
             stdout: String::new(),
             stderr: "pre-command failed".to_string(),
@@ -970,9 +970,9 @@ mod check_runner_tests {
         // Executor must receive the raw command, NOT a docker exec/run wrapped version.
         // Make it fail so the check never runs and we only need one execute expectation.
         mock.expect_execute()
-            .withf(|cmd, _| cmd == "echo hello")
+            .withf(|cmd, _, _| cmd == "echo hello")
             .times(1)
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: false,
                 stdout: "hello".to_string(),
                 stderr: String::new(),
@@ -1079,8 +1079,8 @@ mod run_single_check_with_executor_tests {
             .with(eq("default-container"))
             .returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.contains("default-container") && cmd.contains("echo hi"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.contains("default-container") && cmd.contains("echo hi"))
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: "hi".into(),
                 stderr: String::new(),
@@ -1111,8 +1111,8 @@ mod run_single_check_with_executor_tests {
             .with(eq("override-container"))
             .returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.contains("override-container"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.contains("override-container"))
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1137,11 +1137,11 @@ mod run_single_check_with_executor_tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| {
+            .withf(|cmd: &str, _, _| {
                 // global FOO=global overridden to FOO=check
                 cmd.contains("-e FOO='check'") && cmd.contains("-e BAR='global'")
             })
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1169,7 +1169,7 @@ mod run_single_check_with_executor_tests {
     async fn reports_failure_when_exec_fails() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: false,
             stdout: String::new(),
             stderr: "oops".into(),
@@ -1201,8 +1201,8 @@ mod run_check_with_command_with_executor_tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.contains("phpunit-all") && !cmd.contains("phpunit a.rs"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.contains("phpunit-all") && !cmd.contains("phpunit a.rs"))
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1231,7 +1231,7 @@ mod run_fix_command_with_executor_tests {
     async fn check_id_is_literal_fix() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -1256,8 +1256,8 @@ mod run_fix_command_with_executor_tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| false);
         mock.expect_execute()
-            .withf(|cmd: &str, _| cmd.starts_with("docker run") && cmd.contains("cargo fmt"))
-            .returning(|_, _| CommandOutput {
+            .withf(|cmd: &str, _, _| cmd.starts_with("docker run") && cmd.contains("cargo fmt"))
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1376,7 +1376,7 @@ mod cancel_tests {
     use async_trait::async_trait;
     use ci_tui::config::{ExecTarget, LocalConfig};
     use ci_tui::runner::{
-        run_single_check_with_executor, CancelRegistry, CheckRunner, CommandExecutor,
+        run_single_check_with_executor, CancelRegistry, CheckRunner, CommandExecutor, OutputSink,
         RealCommandExecutor, RunnerEvent,
     };
     use ci_tui::CheckToRun;
@@ -1401,7 +1401,12 @@ mod cancel_tests {
 
     #[async_trait]
     impl CommandExecutor for HangingExecutor {
-        async fn execute(&self, command: &str, _working_dir: &Path) -> CommandOutput {
+        async fn execute(
+            &self,
+            command: &str,
+            _working_dir: &Path,
+            _sink: &OutputSink,
+        ) -> CommandOutput {
             self.executed.lock().unwrap().push(command.to_string());
             std::future::pending().await
         }
@@ -1619,7 +1624,7 @@ mod cancel_tests {
         let command = orphan_command(&pidfile);
         let handle = tokio::spawn(async move {
             RealCommandExecutor
-                .execute(&command, Path::new("/tmp"))
+                .execute(&command, Path::new("/tmp"), &OutputSink::none())
                 .await
         });
         let pid = wait_for_pid(&pidfile).await;
@@ -1685,7 +1690,7 @@ mod cancel_tests {
     async fn finished_docker_run_check_does_not_kill_container() {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| false);
-        mock.expect_execute().returning(|_, _| CommandOutput {
+        mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
@@ -1706,5 +1711,111 @@ mod cancel_tests {
         .await;
 
         assert_eq!(result.status, CheckStatus::Passed);
+    }
+}
+
+mod streaming_tests {
+    use super::*;
+    use ci_tui::config::{ExecTarget, LocalConfig};
+    use ci_tui::runner::{CheckRunner, RealCommandExecutor, RunnerEvent};
+    use common::configs::{CheckBuilder, ConfigBuilder};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Run one local `sh` check through [`CheckRunner`]; all events in order
+    async fn run_local(command: &str) -> Vec<RunnerEvent> {
+        let mut config = ConfigBuilder::new()
+            .with_check("g", "live", CheckBuilder::new("Live", command).build())
+            .build();
+        config.runner = ExecTarget::Local(LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        });
+        let runner =
+            CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(RealCommandExecutor));
+        let checks = vec![common::make_exec_check("live", command, None)];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let run = tokio::spawn(async move { runner.run_checks(checks, tx).await });
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        run.await.unwrap().unwrap();
+        events
+    }
+
+    /// Streamed (stdout, stderr) chunks of check `live`, in arrival order
+    fn chunks(events: &[RunnerEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                RunnerEvent::CheckOutput {
+                    check_id,
+                    stdout,
+                    stderr,
+                } if check_id == "live" => Some((stdout.clone(), stderr.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn finished(events: &[RunnerEvent]) -> (usize, &CheckResult) {
+        events
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| match e {
+                RunnerEvent::CheckFinished { result } => Some((i, result)),
+                _ => None,
+            })
+            .expect("CheckFinished")
+    }
+
+    #[tokio::test]
+    async fn real_executor_streams_chunk_before_exit() {
+        let events = run_local("echo a; sleep 1; echo b").await;
+
+        let chunks = chunks(&events);
+        assert!(chunks.len() >= 2, "a and b arrive separately: {chunks:?}");
+        assert_eq!(chunks[0].0, "a\n", "first chunk arrives before exit");
+        assert_eq!(chunks.last().unwrap().0, "b\n");
+
+        let (finished_at, result) = finished(&events);
+        let last_chunk = events
+            .iter()
+            .rposition(|e| matches!(e, RunnerEvent::CheckOutput { .. }))
+            .unwrap();
+        assert!(last_chunk < finished_at, "chunks precede CheckFinished");
+        assert_eq!(result.status, CheckStatus::Passed);
+        assert_eq!(result.output, "a\nb\n", "final result stays authoritative");
+    }
+
+    #[tokio::test]
+    async fn real_executor_batches_fast_output() {
+        let events = run_local("seq 1 1000; echo oops >&2").await;
+
+        let chunks = chunks(&events);
+        assert!(
+            !chunks.is_empty() && chunks.len() < 100,
+            "batched, not per line: {} events",
+            chunks.len()
+        );
+        let expected: String = (1..=1000).map(|i| format!("{i}\n")).collect();
+        let stdout: String = chunks.iter().map(|(out, _)| out.as_str()).collect();
+        let stderr: String = chunks.iter().map(|(_, err)| err.as_str()).collect();
+        assert_eq!(stdout, expected, "all content delivered in order");
+        assert_eq!(stderr, "oops\n");
+        assert_eq!(finished(&events).1.output, expected);
+    }
+
+    #[tokio::test]
+    async fn streamed_stderr_drops_docker_warnings() {
+        let events = run_local(
+            "echo 'WARN: FOO variable is not set. Defaulting to a blank string.' >&2; echo real >&2",
+        )
+        .await;
+
+        let stderr: String = chunks(&events).iter().map(|(_, e)| e.as_str()).collect();
+        assert_eq!(stderr, "real\n");
+        assert_eq!(finished(&events).1.error_output, "real");
     }
 }

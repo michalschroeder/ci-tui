@@ -737,8 +737,9 @@ fn output_view(app: &App) -> OutputView<'_> {
 /// whether the cached [`Text`] is still valid, without needing to rebuild
 /// the raw output string (the expensive part) just to check for staleness.
 ///
-/// Streaming output only ever appends, so `output_len`/`error_len` catch
-/// content growth; `status` catches transitions (e.g. Running -> Passed)
+/// `output_len`/`error_len` catch content growth; `generation`
+/// ([`App::output_generation`]) catches a streamed append to a rolling-capped
+/// buffer that keeps its length; `status` catches transitions (e.g. Running -> Passed)
 /// that don't change length; `width` catches resize; `resolved_command`
 /// catches a retried check's command line changing without status/output
 /// changing yet.
@@ -749,6 +750,7 @@ enum OutputCacheKey {
         status: CheckStatus,
         output_len: usize,
         error_len: usize,
+        generation: u64,
         show_full_command: bool,
         resolved_command: String,
     },
@@ -829,6 +831,7 @@ fn output_cache_key(app: &App) -> Option<OutputCacheKey> {
                 status: result.status.clone(),
                 output_len: result.output.len(),
                 error_len: result.error_output.len(),
+                generation: app.output_generation,
                 show_full_command: app.view.show_full_command,
                 resolved_command: check.resolved_command.clone(),
             })
@@ -881,6 +884,7 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
                 status,
                 output_len,
                 error_len,
+                generation,
                 show_full_command,
                 resolved_command,
             },
@@ -892,6 +896,7 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
                 && *status == result.status
                 && *output_len == result.output.len()
                 && *error_len == result.error_output.len()
+                && *generation == app.output_generation
                 && *show_full_command == app.view.show_full_command
                 && *resolved_command == check.resolved_command
         }
@@ -984,7 +989,8 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
 /// Count the screen rows the output panel currently draws (after wrapping
 /// at the panel's inner width).
 ///
-/// Used by [`App`] scroll clamping. Running panels do not scroll (0).
+/// Used by [`App`] scroll clamping. Views without text (fix spinners, no
+/// selection) count 0.
 pub fn output_line_count(app: &mut App, width: u16) -> usize {
     if !ensure_output_cache(app, width) {
         return 0;
@@ -1189,6 +1195,8 @@ pub(crate) fn confirm_search(app: &mut App) {
     if let Some(scroll) = first_scroll {
         app.view.output_scroll = 0;
         app.scroll_down(scroll);
+        // Stay at the match rather than following streamed output
+        app.view.follow_output = false;
     }
     app.needs_redraw = true;
 }
@@ -1373,8 +1381,9 @@ fn build_check_output_text(
         raw_output.push_str(&result.output);
     }
 
-    // Stderr for failed checks
-    if result.status.is_failure() && !result.error_output.is_empty() {
+    // Stderr for failed checks, and streamed live while running
+    let show_stderr = result.status.is_failure() || result.status == CheckStatus::Running;
+    if show_stderr && !result.error_output.is_empty() {
         raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
         raw_output.push_str(result.error_output.trim_end());
     }
@@ -1505,6 +1514,7 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // alone to populate it (e.g. the very first frame, scroll == 0).
     ensure_output_cache(app, area.width);
     app.clamp_output_scroll();
+    app.follow_output_tail();
 
     // Dispatch to appropriate sub-renderer based on state
     match output_view(app) {
@@ -1744,7 +1754,7 @@ mod tests {
 
     use super::super::app::tests::{make_check, minimal_config_yaml};
     use crate::git::ChangedFiles;
-    use crate::runner::CheckStatus;
+    use crate::runner::{CheckStatus, RunnerEvent};
     use ratatui::{backend::TestBackend, Terminal};
 
     /// App with one check whose output is large enough to make re-parsing
@@ -1821,6 +1831,52 @@ mod tests {
             app.view.output_scroll > 0,
             "scrolled to bring match into view"
         );
+    }
+
+    #[test]
+    fn test_confirm_search_jump_turns_follow_off() {
+        let mut app = make_test_app();
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = CheckStatus::Running;
+        result.output = (1..=20).map(|i| format!("line {i}\n")).collect();
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.open_search();
+        for c in "line 3".chars() {
+            app.search_push(c);
+        }
+
+        confirm_search(&mut app);
+        app.follow_output_tail();
+
+        assert!(!app.view.follow_output, "search jump turns follow off");
+        let search = app.view.search.as_ref().expect("search stays open");
+        assert_eq!(search.matches.len(), 1);
+        assert!(app.view.output_scroll < 10, "stays at the match");
+    }
+
+    /// Streamed output content changes without changing length once the
+    /// rolling cap is reached; the cache must still rebuild.
+    #[test]
+    fn test_output_cache_rebuilds_on_same_length_streamed_chunk() {
+        let mut app = make_test_app();
+        app.config.max_output_lines = 2;
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = CheckStatus::Running;
+        result.output.clear();
+        let chunk = |s: &str| RunnerEvent::CheckOutput {
+            check_id: "php-lint".to_string(),
+            stdout: s.to_string(),
+            stderr: String::new(),
+        };
+        app.handle_runner_event(chunk("a1\na2\na3\n"));
+        ensure_output_cache(&mut app, 80);
+        app.handle_runner_event(chunk("b1\nb2\n"));
+        ensure_output_cache(&mut app, 80);
+
+        let text = app.output_cache.as_ref().unwrap().text.clone();
+        let plain: String = text.lines.iter().map(line_plain_text).collect();
+        assert!(plain.contains("b2"), "got: {plain}");
     }
 
     #[test]

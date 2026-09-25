@@ -375,9 +375,9 @@ mod tests {
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().times(0);
         mock.expect_execute()
-            .withf(|cmd, _| cmd == "env APP_ENV='ci' bash -c 'ls'")
+            .withf(|cmd, _, _| cmd == "env APP_ENV='ci' bash -c 'ls'")
             .times(1)
-            .returning(|_, _| CommandOutput {
+            .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),

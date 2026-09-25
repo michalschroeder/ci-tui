@@ -2,8 +2,9 @@
 //!
 //! This module implements the main TUI event loop and coordinates between
 //! user input, check execution, and rendering. It provides lifecycle-event
-//! feedback during check execution with keyboard-driven navigation (output
-//! is captured and shown on completion, not streamed live).
+//! feedback during check execution with keyboard-driven navigation; check
+//! output is streamed live while a check runs (runner and retry /
+//! on-demand / run-all-files tasks), auto-following the tail.
 //!
 //! # Architecture
 //!
@@ -24,8 +25,8 @@ use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, ChangedFiles};
 use crate::runner::{
-    run_check_cancellable, run_check_with_command, CancelRegistry, CheckResult, CheckRunner,
-    RunnerEvent,
+    run_check_cancellable, run_check_streaming, run_check_with_command, CancelRegistry,
+    CheckResult, CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
 };
 use anyhow::Result;
 use app::{App, StatusKind};
@@ -107,6 +108,8 @@ enum TaskEvent {
     GitRefreshFailed,
     /// Retry / on-demand / run-all-files result
     RetryResult(CheckResult),
+    /// Live output chunk ([`RunnerEvent::CheckOutput`]) of a task-run check
+    Output(RunnerEvent),
     /// Git refresh for retry-all finished; restart the runner
     RetryAllReady {
         changed_files: ChangedFiles,
@@ -237,9 +240,42 @@ impl TaskCtx {
         .await
     }
 
-    /// [`Self::run`], cancellable with 's' (then reports `Cancelled`)
-    async fn run_cancellable(&self, check: &CheckToRun, command: &str) -> CheckResult {
-        run_check_cancellable(&self.cancels, check.id(), self.run(check, command)).await
+    /// [`Self::run`], streaming live output to `tx` as [`TaskEvent::Output`]
+    /// (all chunks are sent before this returns, so before the result)
+    async fn run_streaming(
+        &self,
+        check: &CheckToRun,
+        command: &str,
+        tx: &mpsc::Sender<TaskEvent>,
+    ) -> CheckResult {
+        let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
+        let run = async move {
+            // Sink dropped at the end of this block, ending `forward`
+            let sink = OutputSink::new(check.id(), out_tx);
+            run_check_streaming(
+                check,
+                command,
+                &self.exec_root,
+                &self.config.runner,
+                &RealCommandExecutor,
+                self.config.max_output_lines,
+                &sink,
+            )
+            .await
+        };
+        let (result, ()) = tokio::join!(run, forward_output(&mut out_rx, tx));
+        result
+    }
+
+    /// [`Self::run_streaming`], cancellable with 's' (then reports `Cancelled`)
+    async fn run_cancellable(
+        &self,
+        check: &CheckToRun,
+        command: &str,
+        tx: &mpsc::Sender<TaskEvent>,
+    ) -> CheckResult {
+        let run = self.run_streaming(check, command, tx);
+        run_check_cancellable(&self.cancels, check.id(), run).await
     }
 
     /// Re-detect changed files and matching checks. Blocking (git + file
@@ -264,6 +300,14 @@ impl TaskCtx {
     ) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
         let ctx = self.clone();
         tokio::task::spawn_blocking(move || ctx.refresh(previous)).await?
+    }
+}
+
+/// Forward runner output events to `tx` as [`TaskEvent::Output`] until all
+/// senders are dropped
+async fn forward_output(rx: &mut mpsc::Receiver<RunnerEvent>, tx: &mpsc::Sender<TaskEvent>) {
+    while let Some(event) = rx.recv().await {
+        let _ = tx.send(TaskEvent::Output(event)).await;
     }
 }
 
@@ -308,7 +352,7 @@ impl Tasks {
         wrap: fn(CheckResult) -> TaskEvent,
     ) {
         self.spawn(|ctx, tx| async move {
-            let result = ctx.run_cancellable(&check, &command).await;
+            let result = ctx.run_cancellable(&check, &command, &tx).await;
             let _ = tx.send(wrap(result)).await;
         });
     }
@@ -360,7 +404,7 @@ async fn refresh_and_run(
             check
         }
     };
-    Some(ctx.run(&check, &check.resolved_command).await)
+    Some(ctx.run_streaming(&check, &check.resolved_command, tx).await)
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -725,6 +769,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
             StatusKind::Error,
             "Git refresh failed - retrying with previous file list",
         ),
+        TaskEvent::Output(event) => app.handle_runner_event(event),
         TaskEvent::RetryResult(result) => {
             let check_id = result.check_id.clone();
             app.set_retry_result(result);
@@ -1451,6 +1496,51 @@ checks:
         assert_eq!(
             app.results.get("php-lint").map(|r| r.status.clone()),
             Some(crate::runner::CheckStatus::Passed)
+        );
+    }
+
+    /// 't' runs through the task channel; output streams as
+    /// `TaskEvent::Output` before the final result
+    #[tokio::test]
+    async fn test_trigger_on_demand_streams_output() {
+        let mut config = test_config();
+        config.runner = crate::config::ExecTarget::Local(crate::config::LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        });
+        let mut check = make_test_check("php-lint", "fast");
+        check.files = crate::checks::CheckFiles::OnDemand;
+        check.resolved_command = "echo streamed".to_string();
+        let mut app = make_test_app_with_checks(&config, vec![check]);
+        let (mut tasks, mut rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(PathBuf::from("/tmp")),
+            exec_root: Arc::new(PathBuf::from("/tmp")),
+            config: Arc::new(config.clone()),
+            cancels: CancelRegistry::default(),
+        });
+
+        handle_trigger_on_demand(&mut app, &mut tasks);
+
+        let mut saw_output = false;
+        loop {
+            let event = rx.recv().await.expect("task event");
+            let done = matches!(event, TaskEvent::RetryResult(_));
+            if matches!(&event, TaskEvent::Output(RunnerEvent::CheckOutput { stdout, .. }) if stdout == "streamed\n")
+            {
+                handle_task_event(&mut app, event);
+                assert_eq!(app.results["php-lint"].output, "streamed\n");
+                saw_output = true;
+                continue;
+            }
+            handle_task_event(&mut app, event);
+            if done {
+                break;
+            }
+        }
+        assert!(saw_output, "output streamed before RetryResult");
+        assert_eq!(
+            app.results["php-lint"].status,
+            crate::runner::CheckStatus::Passed
         );
     }
 

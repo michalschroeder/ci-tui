@@ -40,7 +40,7 @@ pub fn mock_executor_success(stdout: &str) -> ci_tui::runner::MockCommandExecuto
     use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stdout = stdout.to_string();
     let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().returning(move |_, _| {
+    mock.expect_execute().returning(move |_, _, _| {
         let out = stdout.clone();
         CommandOutput {
             success: true,
@@ -58,7 +58,7 @@ pub fn mock_executor_failure(stderr: &str) -> ci_tui::runner::MockCommandExecuto
     use ci_tui::runner::{CommandOutput, MockCommandExecutor};
     let stderr = stderr.to_string();
     let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().returning(move |_, _| {
+    mock.expect_execute().returning(move |_, _, _| {
         let err = stderr.clone();
         CommandOutput {
             success: false,
