@@ -6,6 +6,7 @@
 //! skipped / on-demand.
 
 use crate::config::CiConfig;
+use indexmap::IndexSet;
 
 /// Keep checks whose id is in `only` and whose group is in `groups`; an empty
 /// list does not restrict. Groups left without checks are dropped, so their
@@ -18,14 +19,14 @@ pub fn apply(config: &mut CiConfig, only: &[String], groups: &[String]) -> Resul
         return Ok(());
     }
 
-    let mut check_ids: Vec<&str> = Vec::new();
-    let all_ids = config.checks.values().flat_map(|g| g.checks.keys());
-    for id in all_ids {
-        if !check_ids.contains(&id.as_str()) {
-            check_ids.push(id);
-        }
-    }
-    let group_ids: Vec<&str> = config.checks.keys().map(String::as_str).collect();
+    // IndexSet: dedup ids shared across groups, keep config order.
+    let check_ids: Vec<&str> = config
+        .groups()
+        .flat_map(|(_, g)| g.checks.keys().map(String::as_str))
+        .collect::<IndexSet<_>>()
+        .into_iter()
+        .collect();
+    let group_ids: Vec<&str> = config.groups().map(|(id, _)| id).collect();
     check_known("check", "--only", only, &check_ids)?;
     check_known("group", "--group", groups, &group_ids)?;
 
