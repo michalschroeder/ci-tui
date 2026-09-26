@@ -13,7 +13,7 @@ fn git_detect_changes_or_exit(
     let (result, hint) = match (staged, base_override) {
         (true, _) => (
             git::get_staged_files(project_root),
-            "--staged reads the git index: run it inside a git repository.".to_string(),
+            "--staged reads the git index; see the git error above.".to_string(),
         ),
         (false, Some(base_ref)) => (
             git::get_changed_files(project_root, base_ref),

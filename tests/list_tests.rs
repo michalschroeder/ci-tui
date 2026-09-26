@@ -10,7 +10,7 @@ mod common;
 use common::configs::{
     checks_test_config, rust_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder,
 };
-use common::git;
+use common::{git, isolated_git_command};
 
 fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
     ChangedFiles {
@@ -345,12 +345,13 @@ fn binary_staged_lists_only_index_files_minus_ignored() {
     git(root, &["init", "-q"]);
     std::fs::write(root.join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
     std::fs::create_dir(root.join("src")).unwrap();
-    for file in ["src/a.rs", "src/unstaged.rs", "notes.md"] {
+    for file in ["src/a.rs", "src/unstaged.rs", "src/gone.rs", "notes.md"] {
         std::fs::write(root.join(file), "").unwrap();
     }
-    git(root, &["add", "src/a.rs", "notes.md"]);
+    git(root, &["add", "src/a.rs", "src/gone.rs", "notes.md"]);
+    std::fs::remove_file(root.join("src/gone.rs")).unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
+    let out = isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
         .current_dir(root)
         .args(["--staged", "--list"])
         .output()
@@ -365,7 +366,8 @@ fn binary_staged_lists_only_index_files_minus_ignored() {
         stdout.contains("Base ref: none (git index: --staged)"),
         "{stdout}"
     );
-    // Untracked src/unstaged.rs and ci-tui.yaml excluded; notes.md ignored
+    // Untracked src/unstaged.rs and ci-tui.yaml excluded; src/gone.rs deleted
+    // on disk after staging; notes.md ignored
     assert!(
         stdout.contains("Changed files (1):\n  src/a.rs\n"),
         "{stdout}"
@@ -376,7 +378,7 @@ fn binary_staged_lists_only_index_files_minus_ignored() {
 fn binary_staged_outside_git_repo_exits_with_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
+    let out = isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
         .current_dir(tmp.path())
         .env("GIT_CEILING_DIRECTORIES", tmp.path().parent().unwrap())
         .args(["--staged", "--list"])

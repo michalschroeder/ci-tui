@@ -12,10 +12,25 @@ use ci_tui::ui::app::App;
 #[allow(unused_imports)]
 pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
 
+/// Git env vars set by hooks (e.g. pre-commit) that would redirect a nested
+/// git to the outer repo's index / dir instead of the test's tempdir repo.
+#[allow(dead_code)]
+pub const OUTER_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"];
+
+/// `Command` for `program` with [`OUTER_GIT_ENV`] cleared.
+#[allow(dead_code)]
+pub fn isolated_git_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    for var in OUTER_GIT_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 /// Run `git args` in `dir` against the real git binary, panicking on failure.
 #[allow(dead_code)]
 pub fn git(dir: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+    let status = isolated_git_command("git")
         .args(args)
         .current_dir(dir)
         .status()

@@ -37,8 +37,9 @@ pub struct Cli {
     pub base: Option<String>,
 
     /// Check only files staged in the git index (pre-commit hook); checks still
-    /// read the working tree, so unstaged edits in staged files are included
-    #[arg(long, conflicts_with_all = ["files", "base"])]
+    /// read the working tree, so unstaged edits in staged files are included.
+    /// Not with --fix: fixes edit the working tree but are never re-staged
+    #[arg(long, conflicts_with_all = ["files", "base", "fix"])]
     pub staged: bool,
 
     /// Print changed files, base ref and which checks would run and why; execute nothing
@@ -184,6 +185,8 @@ mod tests {
     #[case::staged_with_files(&["ci-tui", "--staged", "-f", "a.rs"])]
     #[case::files_then_staged(&["ci-tui", "-f", "a.rs", "--staged"])]
     #[case::staged_with_base(&["ci-tui", "--staged", "--base", "main"])]
+    #[case::staged_with_fix(&["ci-tui", "--staged", "--fix"])]
+    #[case::fix_then_staged(&["ci-tui", "--fix", "--staged"])]
     #[case::staged_before_validate(&["ci-tui", "--staged", "validate"])]
     #[case::staged_before_schema(&["ci-tui", "--staged", "schema"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
@@ -221,7 +224,6 @@ mod tests {
     #[case::simple(&["ci-tui", "--staged", "-s"])]
     #[case::list(&["ci-tui", "--staged", "--list"])]
     #[case::dry_run(&["ci-tui", "--dry-run", "--staged"])]
-    #[case::fix(&["ci-tui", "--staged", "--fix"])]
     #[case::with_config(&["ci-tui", "-c", "x.yaml", "--staged"])]
     fn test_staged_flag_parsed(#[case] args: &[&str]) {
         let cli = Cli::try_parse_checked(args).unwrap();
