@@ -165,6 +165,34 @@ where
         .transpose()
 }
 
+/// Deserialize an optional `error_pattern:` regex, compiled at load so a bad
+/// pattern fails startup (serde_yaml prefixes the check's path, as for `timeout`).
+fn deserialize_error_pattern<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Regex>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| {
+            Regex::new(&raw).map_err(|e| {
+                serde::de::Error::custom(format!("`error_pattern`: invalid regex '{raw}': {e}"))
+            })
+        })
+        .transpose()
+}
+
+/// Built-in error-line regex for checks without `error_pattern`. Case-sensitive
+/// whole words so `0 errors`, `error_reporting` or `stderr` stay unmarked.
+const DEFAULT_ERROR_PATTERN: &str =
+    r"\b(?:[Ee]rror|ERROR|FAIL|FAILED|panicked|Traceback)\b|\w*Exception\b";
+
+/// Compiled [`DEFAULT_ERROR_PATTERN`] (built once)
+pub fn default_error_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(DEFAULT_ERROR_PATTERN).expect("valid default error pattern"))
+}
+
 /// Schema description shared by every `timeout:` field.
 const TIMEOUT_DESCRIPTION: &str =
     "Max runtime: <n>s, <n>m or <n>h (e.g. 30s, 10m); expired commands are killed. \
@@ -507,6 +535,12 @@ pub struct CheckDefinition {
     #[serde(default, deserialize_with = "deserialize_timeout")]
     #[schemars(schema_with = "timeout_schema", description = TIMEOUT_DESCRIPTION)]
     pub timeout: Option<Duration>,
+    /// Regex marking error lines in a failed check's output (TUI highlights
+    /// them and opens the check scrolled to the first). Unset = built-in
+    /// default (error, ERROR, FAIL, FAILED, panicked, *Exception, Traceback).
+    #[serde(default, deserialize_with = "deserialize_error_pattern")]
+    #[schemars(with = "Option<String>")]
+    pub error_pattern: Option<Regex>,
 }
 
 /// Triggers that determine when a check should run.
@@ -852,6 +886,13 @@ impl CheckDefinition {
     pub fn always_run(&self) -> bool {
         self.triggers.is_none()
     }
+
+    /// Regex marking error lines: `error_pattern` or the built-in default
+    pub fn error_regex(&self) -> &Regex {
+        self.error_pattern
+            .as_ref()
+            .unwrap_or_else(|| default_error_regex())
+    }
 }
 
 #[cfg(test)]
@@ -1038,6 +1079,7 @@ mod tests {
                 on_demand: false,
                 env: HashMap::new(),
                 timeout: None,
+                error_pattern: None,
             }
         }
     }
@@ -2517,6 +2559,78 @@ checks:
             let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
             assert!(msg.contains(path), "error should name `{path}`: {msg}");
             assert!(msg.contains("duration"), "error should explain: {msg}");
+        }
+    }
+
+    mod test_error_pattern {
+        use super::*;
+        use std::io::Write;
+
+        /// Local-mode config with one check `c` in group `g`; `pattern` is an
+        /// optional raw YAML `error_pattern:` scalar.
+        fn yaml(pattern: Option<&str>) -> String {
+            let extra = pattern
+                .map(|p| format!("        error_pattern: {p}\n"))
+                .unwrap_or_default();
+            format!(
+                "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks:\n  g:\n    checks:\n      c:\n        name: C\n        command: 'true'\n{extra}"
+            )
+        }
+
+        fn check(yaml: &str) -> CheckDefinition {
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            config.get_group("g").unwrap().checks["c"].clone()
+        }
+
+        #[rstest]
+        #[case("error: mismatched types")]
+        #[case("Error: cannot open file")]
+        #[case("ERROR in ./src/app.ts")]
+        #[case("FAIL src/app.test.ts")]
+        #[case("test foo ... FAILED")]
+        #[case("thread 'main' panicked at src/main.rs:3:5")]
+        #[case("PHP Fatal: Uncaught Exception in Foo.php")]
+        #[case("Traceback (most recent call last):")]
+        #[case("RuntimeException: boom")]
+        fn default_pattern_matches_error_lines(#[case] line: &str) {
+            assert!(default_error_regex().is_match(line), "{line}");
+        }
+
+        #[rstest]
+        #[case("test result: ok. 12 passed")]
+        #[case("Compiling ci-tui v0.4.0")]
+        #[case("error_reporting(E_ALL);")]
+        #[case("── stderr ──")]
+        #[case("terrorism")]
+        #[case("failures: none")]
+        fn default_pattern_skips_normal_lines(#[case] line: &str) {
+            assert!(!default_error_regex().is_match(line), "{line}");
+        }
+
+        #[test]
+        fn omitted_uses_default() {
+            let c = check(&yaml(None));
+            assert!(c.error_pattern.is_none());
+            assert_eq!(c.error_regex().as_str(), default_error_regex().as_str());
+        }
+
+        #[test]
+        fn custom_pattern_overrides_default() {
+            let c = check(&yaml(Some("'^E\\d+'")));
+            assert!(c.error_regex().is_match("E0308 mismatched"));
+            assert!(!c.error_regex().is_match("error: mismatched"));
+        }
+
+        #[test]
+        fn invalid_pattern_rejected_at_load() {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml(Some("'[invalid'")).as_bytes()).unwrap();
+            let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
+            assert!(msg.contains("checks.g.checks.c"), "names the check: {msg}");
+            assert!(
+                msg.contains("`error_pattern`") && msg.contains("[invalid"),
+                "names field + pattern: {msg}"
+            );
         }
     }
 

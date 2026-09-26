@@ -153,6 +153,7 @@ pub fn make_check_with_options(
             on_demand,
             env: std::collections::HashMap::new(),
             timeout: None,
+            error_pattern: None,
         },
         service: Some("app".to_string()),
         files: if on_demand {
@@ -217,6 +218,7 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
             on_demand: false,
             env: std::collections::HashMap::new(),
             timeout: None,
+            error_pattern: None,
         },
         service: Some("app".to_string()),
         files: CheckFiles::Files(vec![]),

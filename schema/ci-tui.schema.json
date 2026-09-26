@@ -123,6 +123,13 @@
           },
           "default": {}
         },
+        "error_pattern": {
+          "description": "Regex marking error lines in a failed check's output (TUI highlights\nthem and opens the check scrolled to the first). Unset = built-in\ndefault (error, ERROR, FAIL, FAILED, panicked, *Exception, Traceback).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "fix_command": {
           "type": [
             "string",

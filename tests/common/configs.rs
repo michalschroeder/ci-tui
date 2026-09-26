@@ -321,6 +321,7 @@ impl CheckBuilder {
             on_demand: self.on_demand,
             env: self.env,
             timeout: None,
+            error_pattern: None,
         }
     }
 }

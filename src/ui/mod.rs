@@ -1117,6 +1117,7 @@ checks:
                 on_demand: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
+                error_pattern: None,
             },
             service: Some("php".to_string()),
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),

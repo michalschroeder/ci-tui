@@ -17,6 +17,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 ## Features
 
 - Live TUI (ratatui) with per-check status, output shown on completion, and timing
+- Jump to failure: when the run ends the first failed check is selected and opened at its first error line; error lines are highlighted (per-check `error_pattern` regex overrides the default)
 - Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init)
 - Test discovery via `path_mapping` and `grep_search` strategies
 - On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests

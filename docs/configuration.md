@@ -320,6 +320,12 @@ checks:
 - The command's whole local process tree is killed (it runs in its own process group), and a `docker run` fallback container (started with a unique `--name ci-tui-<pid>-<n>`) gets `docker kill`. The same cleanup applies to cancel (`s`), quit, Ctrl-C and rerun
 - Limitation: with `docker exec` (container already running) only the local client is killed; the command keeps running inside the container until it exits
 
+**`error_pattern`** (optional)
+- Regex marking error lines in this check's output (e.g. `'^E\d+|FAILED'`)
+- In the TUI, a failed check's matching lines are highlighted and selecting it scrolls to the first match (follow off); no match keeps the default bottom view
+- Default: whole-word, case-sensitive `error`, `Error`, `ERROR`, `FAIL`, `FAILED`, `panicked`, `Traceback`, `*Exception`
+- Invalid regex is rejected at config load
+
 ### The `{files}` Placeholder
 
 Commands can use `{files}` placeholder, which expands to space-separated list of changed files:
