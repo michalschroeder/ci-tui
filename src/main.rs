@@ -143,10 +143,13 @@ async fn run() -> Result<i32> {
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
         filter_error(e).exit();
     }
-    // Console modes: say checks were excluded (stderr keeps --list stdout clean).
-    // The TUI only shows the subset.
-    let console = cli.list || cli.fix || simple_mode;
-    if let Some(notice) = filter::describe(&cli.only, &cli.groups).filter(|_| console) {
+    // Say checks were excluded: console modes on stderr (keeps --list stdout
+    // clean), the TUI in its header.
+    let filter_notice = filter::describe(&cli.only, &cli.groups);
+    if let Some(notice) = filter_notice
+        .as_ref()
+        .filter(|_| cli.list || cli.fix || simple_mode)
+    {
         eprintln!("{notice}");
     }
 
@@ -222,6 +225,7 @@ async fn run() -> Result<i32> {
             project_root,
             exec_root,
             (!docker_warnings.is_empty()).then(|| docker_warnings.join("; ")),
+            filter_notice,
         )
         .await
     }

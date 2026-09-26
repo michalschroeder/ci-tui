@@ -264,6 +264,24 @@ fn render_help_overlay(frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
+/// Header title: branch, changed files vs base, elapsed, and the active
+/// `--only` / `--group` filter (persistent, unlike the dismissable footer).
+fn header_title(app: &App, elapsed: &str) -> String {
+    let filter = app
+        .filter_notice
+        .as_deref()
+        .map(|notice| format!(" │ {notice}"))
+        .unwrap_or_default();
+    format!(
+        " {} │ {} files vs {} │ {}{} ",
+        app.current_branch,
+        app.changed_files.len(),
+        app.changed_files.base_ref,
+        elapsed,
+        filter
+    )
+}
+
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let counts = app.count_by_status();
     let on_demand = counts.on_demand;
@@ -280,13 +298,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let elapsed = app.elapsed_time();
     let elapsed_str = format_elapsed(elapsed);
 
-    let branch_info = format!(
-        " {} │ {} files vs {} │ {} ",
-        app.current_branch,
-        app.changed_files.len(),
-        app.changed_files.base_ref,
-        elapsed_str
-    );
+    let branch_info = header_title(app, &elapsed_str);
 
     let on_demand_text = if on_demand > 0 {
         format!(" +{} on-demand", on_demand)
@@ -1929,6 +1941,14 @@ mod tests {
             1,
             "second frame with unchanged content/width must hit the cache, not reparse"
         );
+    }
+
+    #[test]
+    fn test_header_title_shows_filter_notice() {
+        let mut app = make_test_app();
+        assert!(!header_title(&app, "1s").contains("Filtered"));
+        app.filter_notice = Some("Filtered: --only php-lint".to_string());
+        assert!(header_title(&app, "1s").ends_with(" │ 1s │ Filtered: --only php-lint "));
     }
 
     #[test]

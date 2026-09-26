@@ -853,6 +853,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
 /// Run the TUI; returns the process exit code (1 if any check failed).
 /// `startup_warning` (e.g. docker preflight) is shown in the footer until a
 /// keypress, since stderr is hidden behind the alternate screen.
+/// `filter_notice` (`--only` / `--group`) stays in the header.
 ///
 /// The caller must drop the tokio runtime before exiting: that drops the
 /// aborted runner/task futures, whose guards kill still-running commands.
@@ -863,6 +864,7 @@ pub async fn run(
     project_root: PathBuf,
     exec_root: PathBuf,
     startup_warning: Option<String>,
+    filter_notice: Option<String>,
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -881,6 +883,7 @@ pub async fn run(
 
     // Create app state
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
+    app.filter_notice = filter_notice;
     if let Some(warning) = startup_warning {
         app.set_status_message(StatusKind::Error, warning);
     }
