@@ -181,7 +181,7 @@ fn render_check(out: &mut String, e: &CheckExplanation) {
     }
 }
 
-/// Base ref plus where it came from: `--files`, `--base`, or config resolution.
+/// Base ref plus where it came from: `--files`, `--staged`, `--base`, or config resolution.
 fn base_ref_line(
     config: &CiConfig,
     changed_files: &ChangedFiles,
@@ -189,6 +189,9 @@ fn base_ref_line(
 ) -> String {
     if changed_files.is_cli_files() {
         return "none (git bypassed: --files)".to_string();
+    }
+    if changed_files.is_staged() {
+        return "none (git index: --staged)".to_string();
     }
     let base_ref = &changed_files.base_ref;
     if base_override.is_some() {

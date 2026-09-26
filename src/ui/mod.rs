@@ -23,7 +23,7 @@ pub mod dashboard;
 
 use crate::checks::{determine_checks, CheckToRun};
 use crate::config::CiConfig;
-use crate::git::{current_branch, get_changed_files, ChangedFiles};
+use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
     run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
     CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
@@ -275,16 +275,27 @@ impl TaskCtx {
     /// Re-detect changed files and matching checks. Blocking (git + file
     /// system): call from `spawn_blocking`. `--files` lists are kept as-is
     /// (no git base to diff against); only the checks are re-determined.
+    /// `--staged` re-reads the git index.
     fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
         let changed_files = if previous.is_cli_files() {
             previous
         } else {
-            let mut changed = get_changed_files(&self.project_root, &previous.base_ref)?;
+            let mut changed = self.redetect(&previous)?;
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
         let checks = determine_checks(&self.config, &changed_files, &self.exec_root);
         Ok((changed_files, checks))
+    }
+
+    /// Git re-detection for [`Self::refresh`]: the index for `--staged`,
+    /// else a diff against the previous base ref.
+    fn redetect(&self, previous: &ChangedFiles) -> Result<ChangedFiles> {
+        if previous.is_staged() {
+            get_staged_files(&self.project_root)
+        } else {
+            get_changed_files(&self.project_root, &previous.base_ref)
+        }
     }
 
     /// [`Self::refresh`] on the blocking pool
@@ -1175,6 +1186,36 @@ checks:
         assert_eq!(changed_files.files, vec!["src/Foo.php".to_string()]);
         assert_eq!(changed_files.base_ref, crate::git::CLI_FILES_BASE_REF);
         assert_eq!(checks.len(), 1, "php-lint must still match the file");
+    }
+
+    /// Run `git args` in `dir`, panicking on failure.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git must be installed");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn test_refresh_in_staged_mode_rereads_index() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        std::fs::write(repo.path().join("Staged.php"), "<?php").unwrap();
+        std::fs::write(repo.path().join("Unstaged.php"), "<?php").unwrap();
+        git(repo.path(), &["add", "Staged.php"]);
+        let (mut tasks, _rx) = make_test_tasks(&test_config());
+        tasks.ctx.project_root = Arc::new(repo.path().to_path_buf());
+        let previous = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: crate::git::STAGED_BASE_REF.to_string(),
+        };
+
+        let (changed_files, _) = tasks.ctx.refresh(previous).unwrap();
+
+        assert_eq!(changed_files.files, vec!["Staged.php".to_string()]);
+        assert!(changed_files.is_staged());
     }
 
     #[tokio::test]

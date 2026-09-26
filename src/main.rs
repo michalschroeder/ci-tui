@@ -8,20 +8,25 @@ fn git_detect_changes_or_exit(
     project_root: &std::path::Path,
     git_config: &ci_tui::config::GitConfig,
     base_override: Option<&str>,
+    staged: bool,
 ) -> git::ChangedFiles {
-    let result = match base_override {
-        Some(base_ref) => git::get_changed_files(project_root, base_ref),
-        None => git::detect_changes(project_root, git_config),
+    let result = match (staged, base_override) {
+        (true, _) => git::get_staged_files(project_root),
+        (false, Some(base_ref)) => git::get_changed_files(project_root, base_ref),
+        (false, None) => git::detect_changes(project_root, git_config),
     };
     match result {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e:#}");
-            match base_override {
-                Some(base_ref) => eprintln!(
+            match (staged, base_override) {
+                (true, _) => eprintln!(
+                    "\n--staged reads the git index: run it inside a git repository."
+                ),
+                (false, Some(base_ref)) => eprintln!(
                     "\nCheck that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."
                 ),
-                None => eprintln!(
+                (false, None) => eprintln!(
                     "\nNo base ref could be resolved against the current repository. \
                     If this is intentional, bypass git with --files <paths...>."
                 ),
@@ -145,10 +150,11 @@ async fn run() -> Result<i32> {
     };
     let exec_root = repo_root.clone().unwrap_or_else(|| project_root.clone());
 
-    // Get changed files: from --files arg or git detection. In local mode
-    // `--files` (cwd-relative) are rewritten repo-relative to match git paths.
+    // Get changed files: from --files arg, the git index (--staged) or git
+    // detection. In local mode `--files` (cwd-relative) are rewritten
+    // repo-relative to match git paths.
     let mut changed_files = if cli.files.is_empty() {
-        git_detect_changes_or_exit(&project_root, &config.git, cli.base.as_deref())
+        git_detect_changes_or_exit(&project_root, &config.git, cli.base.as_deref(), cli.staged)
     } else {
         git::ChangedFiles {
             files: cli
