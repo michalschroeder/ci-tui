@@ -689,8 +689,6 @@ fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> bool {
 
 /// Handle a key event and return the action for the main loop
 fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
-    // Any user input during the run cancels the run-end auto-select
-    app.run.user_interacted = true;
     if app.view.help_visible {
         return handle_help_key_event(app, key);
     }
@@ -750,8 +748,6 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
 /// select a row (check, pre-command or group header) in the checks list. Anything else (clicks/scroll outside
 /// those panels, other buttons) is ignored.
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
-    // Only click/scroll reach here (input thread filters): user input
-    app.run.user_interacted = true;
     if app.view.help_visible {
         return Action::Continue;
     }
@@ -813,6 +809,11 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
 /// Handle a message from the event loop and update app state
 /// All state changes go through this function via &mut App
 fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
+    // Any user input during the run cancels the run-end auto-select (only
+    // click/scroll mouse events get here: the input thread filters the rest)
+    if matches!(msg, Message::KeyPress(_) | Message::Mouse(_)) {
+        app.run.user_interacted = true;
+    }
     match msg {
         Message::KeyPress(key) => {
             // Keyboard response timing instrumentation
@@ -2134,18 +2135,21 @@ checks:
         let config = test_config();
         let (mut tasks, _rx) = make_test_tasks(&config);
 
-        let mut app = app_with_scrollable_output(&config);
-        assert!(!app.run.user_interacted);
-        handle_key_event(
-            &mut app,
-            press(KeyCode::Char('j'), KeyModifiers::NONE),
-            &mut tasks,
-        );
-        assert!(app.run.user_interacted, "key press");
+        let messages = [
+            Message::KeyPress(press(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Message::Mouse(mouse(MouseEventKind::ScrollDown, 20, 3)),
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0)),
+        ];
+        for msg in messages {
+            let mut app = app_with_scrollable_output(&config);
+            assert!(!app.run.user_interacted);
+            handle_message(&mut app, msg, &mut tasks);
+            assert!(app.run.user_interacted);
+        }
 
         let mut app = app_with_scrollable_output(&config);
-        handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown, 20, 3));
-        assert!(app.run.user_interacted, "mouse scroll");
+        handle_message(&mut app, Message::Resize, &mut tasks);
+        assert!(!app.run.user_interacted, "resize is not user input");
     }
 
     #[test]

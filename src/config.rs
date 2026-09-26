@@ -182,10 +182,13 @@ where
         .transpose()
 }
 
-/// Built-in error-line regex for checks without `error_pattern`. Case-sensitive
-/// whole words so `0 errors`, `error_reporting` or `stderr` stay unmarked.
+/// Built-in error-line regex for checks without `error_pattern`. Matches error
+/// indicators, not paths or counts: `error:` / `Error[E0308]:` (so `src/Error.php`
+/// and `0 error(s)` stay unmarked), whole-word `ERROR` / `FAIL` / `FAILED` /
+/// `panicked` / `Traceback`, and `*Exception` followed by `:`, space or end of
+/// line (not `FooException.php`). Case-sensitive.
 const DEFAULT_ERROR_PATTERN: &str =
-    r"\b(?:[Ee]rror|ERROR|FAIL|FAILED|panicked|Traceback)\b|\w*Exception\b";
+    r"\b[Ee]rror(?:\[\w+\])?:|\b(?:ERROR|FAIL|FAILED|panicked|Traceback)\b|\w*Exception(?::|\s|$)";
 
 /// Compiled [`DEFAULT_ERROR_PATTERN`] (built once)
 pub fn default_error_regex() -> &'static Regex {
@@ -537,7 +540,8 @@ pub struct CheckDefinition {
     pub timeout: Option<Duration>,
     /// Regex marking error lines in a failed check's output (TUI highlights
     /// them and opens the check scrolled to the first). Unset = built-in
-    /// default (error, ERROR, FAIL, FAILED, panicked, *Exception, Traceback).
+    /// default (error:, Error[code]:, ERROR, FAIL, FAILED, panicked,
+    /// Traceback, *Exception followed by `:`/space/end of line).
     #[serde(default, deserialize_with = "deserialize_error_pattern")]
     #[schemars(with = "Option<String>")]
     pub error_pattern: Option<Regex>,
@@ -2592,6 +2596,9 @@ checks:
         #[case("PHP Fatal: Uncaught Exception in Foo.php")]
         #[case("Traceback (most recent call last):")]
         #[case("RuntimeException: boom")]
+        #[case("error[E0308]: mismatched types")]
+        #[case("PHP Fatal error:  Uncaught Error: Call to undefined function")]
+        #[case("Unhandled Exception")]
         fn default_pattern_matches_error_lines(#[case] line: &str) {
             assert!(default_error_regex().is_match(line), "{line}");
         }
@@ -2603,6 +2610,9 @@ checks:
         #[case("── stderr ──")]
         #[case("terrorism")]
         #[case("failures: none")]
+        #[case("M src/Error.php")]
+        #[case("Found 0 error(s)")]
+        #[case("src/FooException.php")]
         fn default_pattern_skips_normal_lines(#[case] line: &str) {
             assert!(!default_error_regex().is_match(line), "{line}");
         }

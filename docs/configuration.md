@@ -322,8 +322,9 @@ checks:
 
 **`error_pattern`** (optional)
 - Regex marking error lines in this check's output (e.g. `'^E\d+|FAILED'`)
-- In the TUI, a failed check's matching lines are highlighted and selecting it scrolls to the first match (follow off); no match keeps the default bottom view
-- Default: whole-word, case-sensitive `error`, `Error`, `ERROR`, `FAIL`, `FAILED`, `panicked`, `Traceback`, `*Exception`
+- In the TUI, a failed check's matching lines are highlighted and selecting it (or it failing while selected) scrolls to the first match (follow off); with no match it opens as usual, at the top of its output
+- Only the command's output (stdout + stderr) is scanned, not ci-tui's header or `── stderr ──` separator
+- Default (case-sensitive): `error:` / `Error:` / `error[E0308]:`, whole-word `ERROR`, `FAIL`, `FAILED`, `panicked`, `Traceback`, and `*Exception` followed by `:`, a space or end of line — paths like `src/Error.php` or counts like `0 error(s)` don't match
 - Invalid regex is rejected at config load
 
 ### The `{files}` Placeholder

@@ -124,7 +124,7 @@
           "default": {}
         },
         "error_pattern": {
-          "description": "Regex marking error lines in a failed check's output (TUI highlights\nthem and opens the check scrolled to the first). Unset = built-in\ndefault (error, ERROR, FAIL, FAILED, panicked, *Exception, Traceback).",
+          "description": "Regex marking error lines in a failed check's output (TUI highlights\nthem and opens the check scrolled to the first). Unset = built-in\ndefault (error:, Error[code]:, ERROR, FAIL, FAILED, panicked,\nTraceback, *Exception followed by `:`/space/end of line).",
           "type": [
             "string",
             "null"

@@ -207,8 +207,9 @@ pub struct ViewState {
     /// is running (streamed output). Off after scrolling up / Home / search
     /// jump; on again at the bottom (End) or on selection change.
     pub follow_output: bool,
-    /// Selection changed: on the next render, scroll a failed check to its
-    /// first error line (see [`App::apply_pending_error_jump`])
+    /// Selection changed or the selected check failed: on the next render,
+    /// scroll a failed check to its first error line (see
+    /// [`App::apply_pending_error_jump`])
     pub pending_error_jump: bool,
 }
 
@@ -697,7 +698,8 @@ impl App {
     /// Store a finished result. A timeout or cancel result carries no
     /// output (the command was killed), so a running check's streamed
     /// output is kept with the result's message appended. A group that is
-    /// now fully passed auto-collapses; the selection stays on its row.
+    /// now fully passed auto-collapses; the selection stays on its row. A
+    /// failure of the selected check arms the jump to its first error line.
     fn insert_result(&mut self, mut result: CheckResult) {
         // Captured before the insert: under the Failed filter a status
         // change adds/removes rows, shifting the selected index
@@ -714,8 +716,13 @@ impl App {
             result.output = join_output(&streamed.output, &result.output);
             result.error_output = join_output(&streamed.error_output, &result.error_output);
         }
+        let selected_failed = result.status.is_failure()
+            && matches!(&selected, Some(ItemKey::Check { id, .. }) if *id == result.check_id);
         self.results.insert(result.check_id.clone(), result);
         self.auto_collapse_keeping_selection(selected);
+        if selected_failed {
+            self.view.pending_error_jump = true;
+        }
     }
 
     /// Show a status message in the footer
@@ -981,14 +988,42 @@ impl App {
             .collect()
     }
 
-    /// Run end: select the first failed check (display order), unless the
-    /// user interacted during the run
+    /// Run end: select the first failed pre-command or check (display
+    /// order), unfolding its group if folded, unless the user interacted
+    /// during the run
     fn auto_select_first_failed(&mut self) {
         if self.run.user_interacted {
             return;
         }
-        if let Some(&first) = self.failed_indices().first() {
-            self.select_item_index(first);
+        let Some(key) = self.first_failed_key() else {
+            return;
+        };
+        self.view.collapsed_groups.remove(key.group());
+        let idx = self.selectable_items().position(|i| key.matches(&i));
+        if let Some(idx) = idx {
+            self.select_item_index(idx);
+        }
+    }
+
+    /// First failed pre-command or check in display order, including rows
+    /// hidden by a folded group
+    fn first_failed_key(&self) -> Option<ItemKey> {
+        self.groups().into_iter().find_map(|group| {
+            self.group_children(group)
+                .find(|item| self.is_failed_item(item))
+                .map(|item| ItemKey::of(&item))
+        })
+    }
+
+    /// Failed pre-command, or check whose result is a failure
+    fn is_failed_item(&self, item: &SelectableItem<'_>) -> bool {
+        match item {
+            SelectableItem::PreCommand(pc) => pc.status == PreCommandStatus::Failed,
+            SelectableItem::Check(check) => self
+                .results
+                .get(check.id())
+                .is_some_and(|r| r.status.is_failure()),
+            SelectableItem::Group(_) => false,
         }
     }
 
@@ -1119,10 +1154,11 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// After a selection change, scroll a failed check to its first error
-    /// line (follow off). Called each render once the output cache is built
-    /// at the current width; consumes the pending flag. No error line keeps
-    /// the default bottom/follow view.
+    /// After a selection change (or the selected check failing), scroll a
+    /// failed check to its first error line (follow off). Called each render
+    /// once the output cache is built at the current width; consumes the
+    /// pending flag. With no error line the view is left as is (a finished
+    /// check opens at the top).
     pub(crate) fn apply_pending_error_jump(&mut self) {
         if !std::mem::take(&mut self.view.pending_error_jump) {
             return;
@@ -2059,6 +2095,73 @@ checks:
         app.handle_runner_event(RunnerEvent::AllFinished);
 
         assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+    }
+
+    #[test]
+    fn test_all_finished_selects_failed_pre_command_first() {
+        let mut app = make_app();
+        app.pre_commands.push(PreCommandState {
+            group: "tests".to_string(),
+            name: "init-db".to_string(),
+            status: PreCommandStatus::Failed,
+            output: String::new(),
+            duration_ms: 0,
+        });
+        finish(&mut app, "phpunit", CheckStatus::Failed, "");
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert_eq!(app.selected_pre_command().unwrap().name, "init-db");
+    }
+
+    #[test]
+    fn test_all_finished_unfolds_group_holding_first_failure() {
+        let mut app = make_app();
+        app.view.collapsed_groups.insert("tests".to_string());
+        app.view.manual_folds.insert("tests".to_string());
+        finish(&mut app, "phpunit", CheckStatus::Failed, "");
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert!(!app.is_group_collapsed("tests"));
+        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+    }
+
+    /// The selected check failing (runner result or `r` retry result) opens
+    /// it at its first error, even when it was selected while still running
+    #[rstest::rstest]
+    #[case::runner(|app: &mut App, result: CheckResult| {
+        app.handle_runner_event(RunnerEvent::CheckFinished { result })
+    })]
+    #[case::retry(|app: &mut App, result: CheckResult| app.set_retry_result(result))]
+    fn test_selected_check_failing_jumps_to_first_error(
+        #[case] deliver: fn(&mut App, CheckResult),
+    ) {
+        let mut app = make_app();
+        app.next_check();
+        app.next_check(); // phpunit, still pending
+        app.reset_check_for_retry("phpunit"); // running
+        render(&mut app);
+        assert_eq!(app.view.output_scroll, 0);
+
+        let mut result = CheckResult::pending("phpunit");
+        result.status = CheckStatus::Failed;
+        result.output = error_output();
+        deliver(&mut app, result);
+        render(&mut app);
+
+        assert_eq!(app.view.output_scroll, ERROR_LINE);
+        assert!(!app.view.follow_output);
+    }
+
+    #[test]
+    fn test_other_check_failing_does_not_move_view() {
+        let mut app = make_failed_app(&error_output()); // php-lint selected
+        app.view.pending_error_jump = false;
+
+        finish(&mut app, "behat", CheckStatus::Failed, &error_output());
+
+        assert!(!app.view.pending_error_jump);
     }
 
     /// Every way of landing on the failed check opens it at its first error
