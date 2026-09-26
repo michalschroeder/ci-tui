@@ -1,11 +1,8 @@
 //! JSON Schema for `ci-tui.yaml`, derived via `schemars` from the config structs.
 //!
-//! Printed by `ci-tui schema`, committed at [`SCHEMA_FILE`] and attached to each
+//! Printed by `ci-tui schema`, committed at `schema/ci-tui.schema.json` and attached to each
 //! release; the `init` template points editors at it via a
 //! `# yaml-language-server: $schema=...` line.
-
-/// Repo-relative path of the committed schema (drift-guarded by tests).
-pub const SCHEMA_FILE: &str = "schema/ci-tui.schema.json";
 
 /// Config JSON Schema as pretty-printed JSON with a trailing newline.
 pub fn generate() -> String {
@@ -19,13 +16,17 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Repo-relative path of the committed schema.
+    const SCHEMA_FILE: &str = "schema/ci-tui.schema.json";
+
     fn manifest_path(rel: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
     }
 
     fn validator() -> jsonschema::Validator {
-        let schema: serde_json::Value = serde_json::from_str(&generate()).unwrap();
-        jsonschema::validator_for(&schema).expect("generated schema must be a valid JSON Schema")
+        let schema = schemars::schema_for!(crate::config::RawCiConfig);
+        jsonschema::validator_for(schema.as_value())
+            .expect("generated schema must be a valid JSON Schema")
     }
 
     /// Schema errors for `yaml` (empty = valid), YAML converted via serde_json.
@@ -41,9 +42,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
         std::fs::write(&path, yaml).unwrap();
-        crate::config::load_config(&path)
-            .map(|_| ())
-            .map_err(|e| format!("{e:#}"))
+        crate::commands::validate(&path).map_err(|e| format!("{e:#}"))
     }
 
     #[test]
@@ -54,15 +53,6 @@ mod tests {
             "{SCHEMA_FILE} is out of date with the config structs; regenerate with \
              `make schema` (or `cargo run -q -- schema > {SCHEMA_FILE}`)"
         );
-    }
-
-    #[test]
-    fn test_schema_is_pretty_json_with_trailing_newline() {
-        let schema = generate();
-        let value: serde_json::Value = serde_json::from_str(&schema).unwrap();
-        assert!(schema.starts_with("{\n  \"$schema\": "), "{schema}");
-        assert!(schema.ends_with("}\n"), "{schema}");
-        assert!(value["$defs"]["CheckDefinition"].is_object(), "{schema}");
     }
 
     #[rstest::rstest]

@@ -26,7 +26,7 @@ clippy: ## Run clippy lints
 	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo clippy -- -D warnings
 
 schema: ## Regenerate schema/ci-tui.schema.json from the config structs
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) sh -c "cargo run -q -- schema > schema/ci-tui.schema.json"
+	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) sh -c "cargo run -q -- schema > schema/ci-tui.schema.json.tmp && mv schema/ci-tui.schema.json.tmp schema/ci-tui.schema.json"
 
 coverage: ## Generate LCOV coverage report
 	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"

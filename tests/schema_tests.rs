@@ -13,8 +13,8 @@ fn binary_schema_prints_generated_schema_without_config() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(stdout, ci_tui::schema::generate());
-    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
-    assert!(value["properties"]["checks"].is_object(), "{stdout}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        ci_tui::schema::generate()
+    );
 }

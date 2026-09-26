@@ -56,10 +56,10 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
 
 /// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
-    let path = command.config_path(config);
-    match command {
+    match &command {
         Command::Schema => print!("{}", schema::generate()),
         Command::Init { .. } => {
+            let path = command.config_path(config);
             commands::init(&path)?;
             println!("Wrote {}", path.display());
             println!(
@@ -68,6 +68,7 @@ fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Resul
             );
         }
         Command::Validate { .. } => {
+            let path = command.config_path(config);
             commands::validate(&path)?;
             println!("OK: {} is valid", path.display());
         }

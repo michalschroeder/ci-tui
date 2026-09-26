@@ -113,7 +113,7 @@ pub fn missing_config_error() -> clap::Error {
 
 impl Command {
     /// Config path for `init` / `validate`: positional arg, then `--config`,
-    /// then `ci-tui.yaml`. `schema` reads no config; it gets the fallback.
+    /// then `ci-tui.yaml`. `schema` reads no config (never called for it).
     pub fn config_path(&self, config: Option<PathBuf>) -> PathBuf {
         let path = match self {
             Self::Init { path } | Self::Validate { path } => path.clone(),

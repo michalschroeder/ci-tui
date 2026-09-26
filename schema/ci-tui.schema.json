@@ -439,7 +439,7 @@
       ]
     },
     "RunnerMode": {
-      "description": "Where checks run: `docker` (default) or `local` (on the host)",
+      "description": "Raw `runner:` value; resolved into [`ExecTarget`] during parsing.",
       "type": "string",
       "enum": [
         "docker",

@@ -27,6 +27,15 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # Asset name ci-tui.schema.json: the `init` template links
+      # releases/download/v{version}/ci-tui.schema.json
+      - name: Upload config schema
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release upload "$TAG" schema/ci-tui.schema.json --clobber
+
   build-release:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
@@ -34,5 +43,5 @@ jobs:
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
     permissions:
-      contents: write # release.yml `schema` job uploads the release asset
+      contents: read
       packages: write

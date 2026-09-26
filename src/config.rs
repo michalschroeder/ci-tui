@@ -225,7 +225,6 @@ impl Clone for CiConfig {
 /// Raw `runner:` value; resolved into [`ExecTarget`] during parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-#[schemars(description = "Where checks run: `docker` (default) or `local` (on the host)")]
 enum RunnerMode {
     #[default]
     Docker,
