@@ -70,6 +70,10 @@ impl GitExecutor for RealGitExecutor {
 /// instead of git change detection. Rendered in headers as "vs --files (manual)".
 pub const CLI_FILES_BASE_REF: &str = "--files (manual)";
 
+/// Sentinel `base_ref` used with the `--staged` CLI flag: files come from the
+/// git index only. Rendered in headers as "vs --staged (git index)".
+pub const STAGED_BASE_REF: &str = "--staged (git index)";
+
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
 pub struct ChangedFiles {
@@ -83,6 +87,11 @@ impl ChangedFiles {
     /// True when files came from `--files` (no git base to refresh against)
     pub fn is_cli_files(&self) -> bool {
         self.base_ref == CLI_FILES_BASE_REF
+    }
+
+    /// True when files came from `--staged` (refresh re-reads the git index)
+    pub fn is_staged(&self) -> bool {
+        self.base_ref == STAGED_BASE_REF
     }
 
     /// Check if there are no changed files
@@ -196,6 +205,39 @@ pub fn get_changed_files_with_executor(
     Ok(ChangedFiles {
         files: union_lines(&[&committed, &uncommitted, &untracked]),
         base_ref: base_ref.to_string(),
+    })
+}
+
+/// Get files staged in the git index (`git diff --cached`), for `--staged`.
+///
+/// Only the index is read: no base ref, unstaged changes or untracked files.
+///
+/// # Errors
+///
+/// Returns an error if the git command fails (e.g. not a git repository).
+pub fn get_staged_files(project_root: &Path) -> Result<ChangedFiles> {
+    get_staged_files_with_executor(project_root, &RealGitExecutor)
+}
+
+/// Get staged files using a custom executor (testable version).
+///
+/// See [`get_staged_files`] for details.
+pub fn get_staged_files_with_executor(
+    project_root: &Path,
+    executor: &impl GitExecutor,
+) -> Result<ChangedFiles> {
+    let args = vec![
+        "diff".to_string(),
+        "--cached".to_string(),
+        "--name-only".to_string(),
+        "--diff-filter=ACMR".to_string(),
+    ];
+    let staged = executor
+        .run_command(project_root, &args)
+        .context("could not read staged files from the git index")?;
+    Ok(ChangedFiles {
+        files: union_lines(&[&staged]),
+        base_ref: STAGED_BASE_REF.to_string(),
     })
 }
 
@@ -645,6 +687,49 @@ mod tests {
         let result = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock);
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("ls-files refused"), "got: {msg}");
+    }
+
+    #[test]
+    fn get_staged_files_reads_only_the_index() {
+        let mut mock = MockGitExecutor::new();
+        // Exactly one git call: no base ref, no unstaged diff, no untracked list
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args == ["diff", "--cached", "--name-only", "--diff-filter=ACMR"]
+            })
+            .times(1)
+            .returning(|_, _| Ok("a.rs\nsrc/b.rs\n".to_string()));
+
+        let result = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap();
+
+        assert_eq!(result.files, vec!["a.rs", "src/b.rs"]);
+        assert_eq!(result.base_ref, STAGED_BASE_REF);
+        assert!(result.is_staged());
+        assert!(!result.is_cli_files());
+    }
+
+    #[test]
+    fn get_staged_files_propagates_git_error() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Err(anyhow::anyhow!("not a git repository")));
+
+        let err = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a git repository"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn is_staged_false_for_base_ref_and_cli_files() {
+        assert!(!make_changed_files(vec![]).is_staged());
+        let cli = ChangedFiles {
+            files: vec![],
+            base_ref: CLI_FILES_BASE_REF.to_string(),
+        };
+        assert!(!cli.is_staged());
     }
 
     #[test]

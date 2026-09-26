@@ -36,6 +36,11 @@ pub struct Cli {
     #[arg(long, value_name = "REF", conflicts_with = "files", value_parser = parse_base_arg)]
     pub base: Option<String>,
 
+    /// Check only files staged in the git index (pre-commit hook); checks still
+    /// read the working tree, so unstaged edits in staged files are included
+    #[arg(long, conflicts_with_all = ["files", "base"])]
+    pub staged: bool,
+
     /// Print changed files, base ref and which checks would run and why; execute nothing
     #[arg(long, visible_alias = "dry-run", conflicts_with_all = ["simple", "fix"])]
     pub list: bool,
@@ -76,11 +81,16 @@ impl Cli {
     {
         let cli = Self::try_parse_from(args)?;
         if cli.command.is_some()
-            && (cli.simple || cli.fix || cli.list || !cli.files.is_empty() || cli.base.is_some())
+            && (cli.simple
+                || cli.fix
+                || cli.list
+                || cli.staged
+                || !cli.files.is_empty()
+                || cli.base.is_some())
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --files and --base cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files and --base cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -171,6 +181,11 @@ mod tests {
     #[case::list_before_validate(&["ci-tui", "--list", "validate"])]
     #[case::dry_run_before_init(&["ci-tui", "--dry-run", "init"])]
     #[case::simple_before_schema(&["ci-tui", "-s", "schema"])]
+    #[case::staged_with_files(&["ci-tui", "--staged", "-f", "a.rs"])]
+    #[case::files_then_staged(&["ci-tui", "-f", "a.rs", "--staged"])]
+    #[case::staged_with_base(&["ci-tui", "--staged", "--base", "main"])]
+    #[case::staged_before_validate(&["ci-tui", "--staged", "validate"])]
+    #[case::staged_before_schema(&["ci-tui", "--staged", "schema"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -199,6 +214,24 @@ mod tests {
     fn test_list_flag_parsed(#[case] args: &[&str]) {
         let cli = Cli::try_parse_checked(args).unwrap();
         assert!(cli.list);
+    }
+
+    #[rstest::rstest]
+    #[case::alone(&["ci-tui", "--staged"])]
+    #[case::simple(&["ci-tui", "--staged", "-s"])]
+    #[case::list(&["ci-tui", "--staged", "--list"])]
+    #[case::dry_run(&["ci-tui", "--dry-run", "--staged"])]
+    #[case::fix(&["ci-tui", "--staged", "--fix"])]
+    #[case::with_config(&["ci-tui", "-c", "x.yaml", "--staged"])]
+    fn test_staged_flag_parsed(#[case] args: &[&str]) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert!(cli.staged);
+        assert!(cli.command.is_none() && cli.files.is_empty() && cli.base.is_none());
+    }
+
+    #[test]
+    fn test_staged_flag_default_off() {
+        assert!(!Cli::try_parse_checked(["ci-tui"]).unwrap().staged);
     }
 
     #[test]

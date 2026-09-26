@@ -658,13 +658,26 @@ Bypass git change detection and run checks on specific files:
 - Ignore patterns still apply
 - Can be combined with `--simple`, `--fix` or `--list`
 
+### Staged Files Only
+
+```bash
+ci-tui --config ci-tui.yaml --staged --simple   # e.g. in .git/hooks/pre-commit
+```
+
+Checks only files staged in the git index (`git diff --cached --name-only --diff-filter=ACMR`):
+- No base-branch diff, unstaged changes, or untracked files
+- Ignore patterns still apply
+- Headers show `vs --staged (git index)`; TUI refresh (`r` / `R`) re-reads the index
+- Can be combined with `--simple`, `--fix` or `--list`; not with `--files` or `--base`
+- Checks run against the working tree, so unstaged edits in a partially staged file are still seen
+
 ### List / Dry Run
 
 ```bash
 ci-tui --config ci-tui.yaml --list      # alias: --dry-run
 ```
 
-Prints the base ref used (or that `--files` bypassed git), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files` and `--base`; cannot be combined with `--simple`, `--fix`, or a subcommand.
+Prints the base ref used (or that `--files` bypassed git / `--staged` read the git index), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files`, `--base` and `--staged`; cannot be combined with `--simple`, `--fix`, or a subcommand.
 
 ## Best Practices
 

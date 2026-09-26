@@ -24,6 +24,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
 - `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
+- `--staged` checks only files staged in the git index (`git diff --cached`) — for pre-commit hooks; checks still read the working tree, so unstaged edits in staged files are included
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
@@ -146,6 +147,7 @@ ci-tui --simple            # plain console output, exit code reflects results
 ci-tui --fix               # run fix commands only
 ci-tui --files src/a.rs    # bypass git detection
 ci-tui --base v1.2.0       # diff against a ref instead of git.base_branch
+ci-tui --staged -s         # staged files only (pre-commit hook)
 ci-tui --list              # explain check selection, run nothing (alias --dry-run)
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```

@@ -2,7 +2,7 @@
 //! report, and an end-to-end binary run proving nothing executes.
 
 use ci_tui::config::CheckTriggers;
-use ci_tui::git::{ChangedFiles, CLI_FILES_BASE_REF};
+use ci_tui::git::{ChangedFiles, CLI_FILES_BASE_REF, STAGED_BASE_REF};
 use ci_tui::list::{explain_checks, render, CheckExplanation, Decision};
 use std::path::Path;
 
@@ -266,6 +266,7 @@ fn render_no_changed_files() {
 )]
 #[case::override_("v1.0", Some("v1.0"), "v1.0 (--base)")]
 #[case::files_bypass(CLI_FILES_BASE_REF, None, "none (git bypassed: --files)")]
+#[case::staged(STAGED_BASE_REF, None, "none (git index: --staged)")]
 fn render_base_ref_line(
     #[case] base_ref: &str,
     #[case] base_override: Option<&str>,
@@ -334,4 +335,65 @@ fn binary_list_executes_nothing(#[case] flag: &str) {
     assert!(stdout.contains("run        marker  Marker"), "{stdout}");
     assert!(!tmp.path().join("pre_ran").exists(), "pre_command executed");
     assert!(!tmp.path().join("check_ran").exists(), "check executed");
+}
+
+/// Run `git args` in `dir`, panicking on failure.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("git must be installed");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+#[test]
+fn binary_staged_lists_only_index_files_minus_ignored() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q"]);
+    std::fs::write(root.join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    for file in ["src/a.rs", "src/unstaged.rs", "notes.md"] {
+        std::fs::write(root.join(file), "").unwrap();
+    }
+    git(root, &["add", "src/a.rs", "notes.md"]);
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
+        .current_dir(root)
+        .args(["--staged", "--list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("Base ref: none (git index: --staged)"),
+        "{stdout}"
+    );
+    // Untracked src/unstaged.rs and ci-tui.yaml excluded; notes.md ignored
+    assert!(
+        stdout.contains("Changed files (1):\n  src/a.rs\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn binary_staged_outside_git_repo_exits_with_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
+        .current_dir(tmp.path())
+        .env("GIT_CEILING_DIRECTORIES", tmp.path().parent().unwrap())
+        .args(["--staged", "--list"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("could not read staged files"), "{stderr}");
+    assert!(stderr.contains("--staged reads the git index"), "{stderr}");
+    assert!(out.stdout.is_empty(), "nothing listed on git failure");
 }
