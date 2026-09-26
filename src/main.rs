@@ -10,30 +10,26 @@ fn git_detect_changes_or_exit(
     base_override: Option<&str>,
     staged: bool,
 ) -> git::ChangedFiles {
-    let result = match (staged, base_override) {
-        (true, _) => git::get_staged_files(project_root),
-        (false, Some(base_ref)) => git::get_changed_files(project_root, base_ref),
-        (false, None) => git::detect_changes(project_root, git_config),
+    let (result, hint) = match (staged, base_override) {
+        (true, _) => (
+            git::get_staged_files(project_root),
+            "--staged reads the git index: run it inside a git repository.".to_string(),
+        ),
+        (false, Some(base_ref)) => (
+            git::get_changed_files(project_root, base_ref),
+            format!("Check that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."),
+        ),
+        (false, None) => (
+            git::detect_changes(project_root, git_config),
+            "No base ref could be resolved against the current repository. \
+            If this is intentional, bypass git with --files <paths...>."
+                .to_string(),
+        ),
     };
-    match result {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {e:#}");
-            match (staged, base_override) {
-                (true, _) => eprintln!(
-                    "\n--staged reads the git index: run it inside a git repository."
-                ),
-                (false, Some(base_ref)) => eprintln!(
-                    "\nCheck that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."
-                ),
-                (false, None) => eprintln!(
-                    "\nNo base ref could be resolved against the current repository. \
-                    If this is intentional, bypass git with --files <paths...>."
-                ),
-            }
-            std::process::exit(1);
-        }
-    }
+    result.unwrap_or_else(|e| {
+        eprintln!("Error: {e:#}\n\n{hint}");
+        std::process::exit(1);
+    })
 }
 
 /// `--files` entry as a changed-file path. With `repo_root` (local mode only),

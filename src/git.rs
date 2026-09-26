@@ -74,6 +74,9 @@ pub const CLI_FILES_BASE_REF: &str = "--files (manual)";
 /// git index only. Rendered in headers as "vs --staged (git index)".
 pub const STAGED_BASE_REF: &str = "--staged (git index)";
 
+/// Change types every `git diff` path reports: added, copied, modified, renamed.
+const DIFF_FILTER: &str = "--diff-filter=ACMR";
+
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
 pub struct ChangedFiles {
@@ -230,7 +233,7 @@ pub fn get_staged_files_with_executor(
         "diff".to_string(),
         "--cached".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
     ];
     let staged = executor
         .run_command(project_root, &args)
@@ -249,7 +252,7 @@ fn run_committed_diff(
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
         "--merge-base".to_string(),
         // Refs come from config / `--base`: a leading `-` must not parse as an
         // option, and `--` keeps a ref that is also a path unambiguous.
@@ -265,7 +268,7 @@ fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Res
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
         "HEAD".to_string(),
     ];
     executor.run_command(project_root, &args)

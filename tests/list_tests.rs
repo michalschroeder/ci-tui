@@ -10,6 +10,7 @@ mod common;
 use common::configs::{
     checks_test_config, rust_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder,
 };
+use common::git;
 
 fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
     ChangedFiles {
@@ -335,16 +336,6 @@ fn binary_list_executes_nothing(#[case] flag: &str) {
     assert!(stdout.contains("run        marker  Marker"), "{stdout}");
     assert!(!tmp.path().join("pre_ran").exists(), "pre_command executed");
     assert!(!tmp.path().join("check_ran").exists(), "check executed");
-}
-
-/// Run `git args` in `dir`, panicking on failure.
-fn git(dir: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .expect("git must be installed");
-    assert!(status.success(), "git {args:?} failed");
 }
 
 #[test]

@@ -12,6 +12,17 @@ use ci_tui::ui::app::App;
 #[allow(unused_imports)]
 pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
 
+/// Run `git args` in `dir` against the real git binary, panicking on failure.
+#[allow(dead_code)]
+pub fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("git must be installed");
+    assert!(status.success(), "git {args:?} failed");
+}
+
 /// Create a mock that returns the given output for any command
 #[allow(dead_code)]
 pub fn mock_git_with_output(output: &str) -> ci_tui::git::MockGitExecutor {
