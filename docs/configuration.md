@@ -320,6 +320,13 @@ checks:
 - The command's whole local process tree is killed (it runs in its own process group), and a `docker run` fallback container (started with a unique `--name ci-tui-<pid>-<n>`) gets `docker kill`. The same cleanup applies to cancel (`s`), quit, Ctrl-C and rerun
 - Limitation: with `docker exec` (container already running) only the local client is killed; the command keeps running inside the container until it exits
 
+**`error_pattern`** (optional)
+- Regex marking error lines in this check's output (e.g. `'^E\d+|FAILED'`)
+- In the TUI, a failed check's matching lines are highlighted and selecting it (or it failing while selected) scrolls to the first match (follow off); with no match it opens as usual, at the top of its output
+- Only the command's output (stdout + stderr) is scanned, not ci-tui's header or `── stderr ──` separator
+- Default (case-sensitive): `error:` / `Error:` / `error[E0308]:`, whole-word `ERROR`, `FAIL`, `FAILED`, `panicked`, `Traceback`, and `*Exception` followed by `:`, a space or end of line — paths like `src/Error.php` or counts like `0 error(s)` don't match
+- Invalid regex is rejected at config load
+
 ### The `{files}` Placeholder
 
 Commands can use `{files}` placeholder, which expands to space-separated list of changed files:

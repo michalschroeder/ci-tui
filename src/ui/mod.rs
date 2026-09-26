@@ -809,6 +809,11 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
 /// Handle a message from the event loop and update app state
 /// All state changes go through this function via &mut App
 fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
+    // Any user input during the run cancels the run-end auto-select (only
+    // click/scroll mouse events get here: the input thread filters the rest)
+    if matches!(msg, Message::KeyPress(_) | Message::Mouse(_)) {
+        app.run.user_interacted = true;
+    }
     match msg {
         Message::KeyPress(key) => {
             // Keyboard response timing instrumentation
@@ -1117,6 +1122,7 @@ checks:
                 on_demand: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
+                error_pattern: None,
             },
             service: Some("php".to_string()),
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
@@ -2122,6 +2128,28 @@ checks:
                 make_test_check("phpstan", "fast"),
             ],
         )
+    }
+
+    #[test]
+    fn test_key_and_mouse_input_mark_user_interacted() {
+        let config = test_config();
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let messages = [
+            Message::KeyPress(press(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Message::Mouse(mouse(MouseEventKind::ScrollDown, 20, 3)),
+            Message::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0)),
+        ];
+        for msg in messages {
+            let mut app = app_with_scrollable_output(&config);
+            assert!(!app.run.user_interacted);
+            handle_message(&mut app, msg, &mut tasks);
+            assert!(app.run.user_interacted);
+        }
+
+        let mut app = app_with_scrollable_output(&config);
+        handle_message(&mut app, Message::Resize, &mut tasks);
+        assert!(!app.run.user_interacted, "resize is not user input");
     }
 
     #[test]

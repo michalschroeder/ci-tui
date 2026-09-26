@@ -289,6 +289,7 @@ mod tests {
             on_demand,
             env: HashMap::new(),
             timeout: None,
+            error_pattern: None,
         }
     }
 

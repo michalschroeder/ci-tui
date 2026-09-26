@@ -50,6 +50,8 @@ const CHECK_NAME_MIN_COLS: usize = 20;
 const FILES_INLINE_MAX: usize = 3;
 /// Max stderr lines shown per failed fix in fix-all results
 const FIX_ERROR_PREVIEW_LINES: usize = 5;
+/// Style patched onto a failed check's error-pattern lines
+const ERROR_LINE_STYLE: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 /// Columns of the CPU y-axis scale: widest label ("100") + 1 gap
 const CPU_SCALE_COLS: u16 = 4;
 
@@ -819,6 +821,10 @@ pub(crate) struct OutputCache {
     /// by [`confirm_search`] rather than every frame — `None` when there is
     /// no confirmed search (or it had no matches).
     highlighted: Option<Text<'static>>,
+    /// Scroll offset putting a failed check's first `error_pattern` line at
+    /// the top (selection jump target); `None` when not failed / no match.
+    /// Error lines themselves are styled in place in `text`.
+    first_error_scroll: Option<usize>,
 }
 
 /// Count passed/failed among `fix.all_results` in a single pass.
@@ -935,13 +941,26 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
     }
 }
 
+/// Where to look for a failed check's error lines in its parsed output
+struct ErrorScan {
+    /// The check's `error_pattern` (or the built-in default)
+    re: regex::Regex,
+    /// First line of command output; lines before it are ci-tui's header
+    start: usize,
+    /// ci-tui's own `── stderr ──` separator line, never an error line
+    separator: Option<usize>,
+}
+
 /// Build the raw output string for the current view. Only called on a cache
 /// miss — this is the work the cache exists to avoid repeating every frame.
-fn build_raw_output(app: &App, width: u16) -> Option<String> {
+///
+/// Also returns, for a failed check's view only, where to look for its error
+/// lines.
+fn build_raw_output(app: &App, width: u16) -> Option<(String, Option<ErrorScan>)> {
     match output_view(app) {
-        OutputView::FixAllResults => Some(fix_all_results_text(app)),
-        OutputView::FixResult(result) => Some(fix_result_text(result)),
-        OutputView::PreCommand(pc) => Some(pre_command_output_text(pc)),
+        OutputView::FixAllResults => Some((fix_all_results_text(app), None)),
+        OutputView::FixResult(result) => Some((fix_result_text(result), None)),
+        OutputView::PreCommand(pc) => Some((pre_command_output_text(pc), None)),
         OutputView::Check(Some(check)) => {
             let result = app.results.get(check.id())?;
             Some(build_check_output_text(app, check, result, width))
@@ -971,17 +990,37 @@ fn parse_and_wrap(raw_output: &str, width: u16) -> (Text<'static>, usize) {
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let text = raw_output.into_text().unwrap_or_default();
-    let line_count = wrapped_line_count(&text, width);
+    let line_count = wrapped_line_count(&text.lines, width);
     (text, line_count)
 }
 
-/// Number of wrapped display rows `text` occupies at `width` — the wrapping
+/// Number of wrapped display rows `lines` occupy at `width` — the wrapping
 /// idiom shared by [`parse_and_wrap`] (whole output) and [`line_start_scroll`]
-/// (a prefix of it).
-fn wrapped_line_count(text: &Text<'static>, width: u16) -> usize {
-    Paragraph::new(text.clone())
+/// (a prefix of it). Spans borrow their content, so no line text is copied.
+fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> usize {
+    let borrowed: Vec<Line<'_>> = lines
+        .iter()
+        .map(|line| Line {
+            style: line.style,
+            alignment: line.alignment,
+            spans: line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.content.as_ref(), span.style))
+                .collect(),
+        })
+        .collect();
+    Paragraph::new(borrowed)
         .wrap(Wrap { trim: false })
         .line_count(width.saturating_sub(PANEL_BORDER_COLS))
+}
+
+/// Both keys show the same check (content may differ: width, `e` toggle)
+fn same_check(a: &OutputCacheKey, b: &OutputCacheKey) -> bool {
+    matches!(
+        (a, b),
+        (OutputCacheKey::Check { id: x, .. }, OutputCacheKey::Check { id: y, .. }) if x == y
+    )
 }
 
 /// Make sure `app.output_cache` holds the current output panel's parsed
@@ -1001,17 +1040,38 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
         app.output_cache = None;
         return false;
     };
-    let Some(raw_output) = build_raw_output(app, width) else {
+    let Some((raw_output, error_scan)) = build_raw_output(app, width) else {
         app.output_cache = None;
         return false;
     };
-    let (text, line_count) = parse_and_wrap(&raw_output, width);
+    let visible = app.view.output_visible_lines;
+    // Still sitting on this check's first error line (not scrolled away):
+    // a rebuild that moves it (`e` expand, resize) carries the view along
+    let parked_on_error = app.output_cache.as_ref().is_some_and(|old| {
+        !app.view.follow_output
+            && same_check(&old.key, &key)
+            && old.first_error_scroll.is_some_and(|row| {
+                row.min(old.line_count.saturating_sub(visible)) == app.view.output_scroll
+            })
+    });
+    let (mut text, line_count) = parse_and_wrap(&raw_output, width);
+    let error_lines = error_scan
+        .map(|scan| error_line_indices(&text, &scan))
+        .unwrap_or_default();
+    style_error_lines(&mut text, &error_lines);
+    let first_error_scroll = error_lines
+        .first()
+        .map(|&line| line_start_scroll(&text, line, width));
+    if let Some(row) = first_error_scroll.filter(|_| parked_on_error) {
+        app.view.output_scroll = row.min(line_count.saturating_sub(visible));
+    }
     app.output_cache = Some(OutputCache {
         key,
         width,
         text,
         line_count,
         highlighted: None,
+        first_error_scroll,
     });
     refresh_confirmed_search(app);
     true
@@ -1027,6 +1087,47 @@ pub fn output_line_count(app: &mut App, width: u16) -> usize {
         return 0;
     }
     app.output_cache.as_ref().map_or(0, |c| c.line_count)
+}
+
+/// Indices of command-output lines (from `scan.start`, minus ci-tui's
+/// separator) whose plain text matches `scan.re`
+fn error_line_indices(text: &Text<'static>, scan: &ErrorScan) -> Vec<usize> {
+    text.lines
+        .iter()
+        .enumerate()
+        .skip(scan.start)
+        .filter(|&(i, line)| Some(i) != scan.separator && scan.re.is_match(&line_plain_text(line)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Patch [`ERROR_LINE_STYLE`] onto every span of the `lines` indices (other
+/// styling, e.g. background, kept). Style-only: wrapping and search, which
+/// read plain text, are unaffected.
+fn style_error_lines(text: &mut Text<'static>, lines: &[usize]) {
+    for &i in lines {
+        for span in &mut text.lines[i].spans {
+            span.style = span.style.patch(ERROR_LINE_STYLE);
+        }
+    }
+}
+
+/// Cached scroll offset of the current view's first error line (see
+/// [`OutputCache::first_error_scroll`]); read on the render path, after
+/// [`ensure_output_cache`] ran for this frame
+pub(crate) fn first_error_scroll(app: &App) -> Option<usize> {
+    app.output_cache.as_ref()?.first_error_scroll
+}
+
+/// Text the output panel draws: confirmed search highlight, else the parsed
+/// output (error lines already styled)
+fn output_display_text(app: &App, cache: &OutputCache) -> Text<'static> {
+    let confirmed = app.view.search.as_ref().is_some_and(|s| !s.typing);
+    confirmed
+        .then_some(cache.highlighted.as_ref())
+        .flatten()
+        .unwrap_or(&cache.text)
+        .clone()
 }
 
 /// Render scrollable ANSI output from the cache populated by
@@ -1048,14 +1149,7 @@ fn render_scrollable(app: &App, frame: &mut Frame, area: Rect, title: &str) {
     };
     // ratatui scrolls by u16; larger offsets saturate instead of wrapping
     let scroll = u16::try_from(app.view.output_scroll).unwrap_or(u16::MAX);
-    let confirmed_highlight = app
-        .view
-        .search
-        .as_ref()
-        .is_some_and(|s| !s.typing)
-        .then(|| cache.highlighted.clone())
-        .flatten();
-    let text = confirmed_highlight.unwrap_or_else(|| cache.text.clone());
+    let text = output_display_text(app, cache);
     let paragraph = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -1073,8 +1167,7 @@ fn line_plain_text(line: &Line<'_>) -> String {
 /// of the output panel. Reuses [`Paragraph::line_count`], the same wrapping
 /// logic [`parse_and_wrap`] uses for the total count.
 fn line_start_scroll(text: &Text<'static>, target_line: usize, width: u16) -> usize {
-    let before = Text::from(text.lines[..target_line].to_vec());
-    wrapped_line_count(&before, width)
+    wrapped_line_count(&text.lines[..target_line], width)
 }
 
 /// Split `plain` into spans, styling every case-insensitive occurrence of
@@ -1224,9 +1317,8 @@ pub(crate) fn confirm_search(app: &mut App) {
         cache.highlighted = highlighted;
     }
     if let Some(scroll) = first_scroll {
-        app.view.output_scroll = scroll.min(app.compute_max_scroll());
         // Stay at the match rather than following streamed output
-        app.view.follow_output = false;
+        app.scroll_to_row(scroll);
     }
     app.needs_redraw = true;
 }
@@ -1356,13 +1448,17 @@ fn render_fix_running(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Build the output string for a check with results
+/// Build the output string for a check with results: header (command,
+/// status, files), then command output (stderr above stdout while running,
+/// below once failed). Also returns, for a failed check, where its error
+/// lines may be (command output only), so ci-tui's own `✗ FAILED` header and
+/// `── stderr ──` separator are never taken for error lines.
 fn build_check_output_text(
     app: &App,
     check: &crate::checks::CheckToRun,
     result: &crate::runner::CheckResult,
     width: u16,
-) -> String {
+) -> (String, Option<ErrorScan>) {
     let mut raw_output = String::with_capacity(1024);
 
     // Command at the top - truncated by default, full on 'e' toggle
@@ -1405,6 +1501,7 @@ fn build_check_output_text(
 
     // Files
     append_files_section(&mut raw_output, app, check);
+    let output_start = raw_output.matches('\n').count();
 
     // While running, streamed stderr goes above stdout: follow pins the panel
     // to the bottom, where long stderr (compose/cargo progress) would
@@ -1421,7 +1518,11 @@ fn build_check_output_text(
     }
 
     // Stderr for failed checks
+    let mut separator = None;
     if result.status.is_failure() && !result.error_output.is_empty() {
+        // The leading newline ends the output's last line; the separator is
+        // on the line after it
+        separator = Some(raw_output.matches('\n').count() + 1);
         raw_output.push_str("\n\x1b[31m── stderr ──\x1b[0m\n");
         raw_output.push_str(result.error_output.trim_end());
     }
@@ -1430,7 +1531,12 @@ fn build_check_output_text(
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
     }
 
-    raw_output
+    let error_scan = result.status.is_failure().then(|| ErrorScan {
+        re: check.definition.error_regex().clone(),
+        start: output_start,
+        separator,
+    });
+    (raw_output, error_scan)
 }
 
 /// Append the files section to the output string
@@ -1548,6 +1654,7 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // alone to populate it (e.g. the very first frame, scroll == 0).
     ensure_output_cache(app, area.width);
     app.clamp_output_scroll();
+    app.apply_pending_error_jump();
     app.follow_output_tail();
 
     // Dispatch to appropriate sub-renderer based on state
@@ -2033,7 +2140,7 @@ mod tests {
         let check = app.checks[0].clone();
         let result = app.results["php-lint"].clone();
 
-        let text = build_check_output_text(&app, &check, &result, 80);
+        let (text, _) = build_check_output_text(&app, &check, &result, 80);
 
         let stderr_at = text.find("── stderr ──").expect("stderr section");
         assert!(stderr_at < text.find("out1").unwrap(), "got: {text}");
@@ -2051,7 +2158,7 @@ mod tests {
         let check = app.checks[0].clone();
         let result = app.results["php-lint"].clone();
 
-        let text = build_check_output_text(&app, &check, &result, 80);
+        let (text, _) = build_check_output_text(&app, &check, &result, 80);
 
         assert!(text.find("out1").unwrap() < text.find("── stderr ──").unwrap());
     }
@@ -2072,6 +2179,140 @@ mod tests {
         assert!(!search.typing);
         assert!(search.matches.is_empty());
         assert_eq!(app.view.output_scroll, 0);
+    }
+
+    /// make_test_app with php-lint in `status` with stdout `output` and
+    /// stderr `stderr`, cache built
+    fn app_with_output(status: CheckStatus, output: &str, stderr: &str) -> App {
+        let mut app = make_test_app();
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = status;
+        result.output = output.to_string();
+        result.error_output = stderr.to_string();
+        app.output_area_width = 80;
+        ensure_output_cache(&mut app, 80);
+        app
+    }
+
+    /// Displayed line containing `needle` (panics if none)
+    fn shown_line(app: &App, needle: &str) -> Line<'static> {
+        output_display_text(app, app.output_cache.as_ref().unwrap())
+            .lines
+            .into_iter()
+            .find(|l| line_plain_text(l).contains(needle))
+            .unwrap_or_else(|| panic!("no line containing {needle}"))
+    }
+
+    fn is_error_styled(line: &Line<'_>) -> bool {
+        line.spans
+            .iter()
+            .all(|s| s.style == s.style.patch(ERROR_LINE_STYLE))
+    }
+
+    #[test]
+    fn test_failed_check_highlights_error_lines_only() {
+        let app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nstill ok\n", "");
+
+        assert!(is_error_styled(&shown_line(&app, "error: boom")));
+        assert!(!is_error_styled(&shown_line(&app, "still ok")));
+        // Header status line "✗ FAILED" is ours, not command output
+        assert!(!is_error_styled(&shown_line(&app, "FAILED")));
+    }
+
+    #[test]
+    fn test_passed_check_has_no_error_highlight() {
+        let app = app_with_output(CheckStatus::Passed, "ok\nerror: boom\n", "");
+        assert!(!is_error_styled(&shown_line(&app, "error: boom")));
+    }
+
+    #[test]
+    fn test_failed_check_error_highlight_includes_stderr() {
+        let app = app_with_output(
+            CheckStatus::Failed,
+            "ok\n",
+            "Traceback (most recent call last):\n",
+        );
+
+        assert!(is_error_styled(&shown_line(&app, "Traceback")));
+    }
+
+    #[test]
+    fn test_check_error_pattern_overrides_default_highlight() {
+        let mut app = app_with_output(CheckStatus::Failed, "E0308 bad\nerror: not matched\n", "");
+        app.checks[0].definition.error_pattern = Some(regex::Regex::new("^E\\d+").unwrap());
+        app.output_cache = None; // pattern is not part of the cache key
+        ensure_output_cache(&mut app, 80);
+
+        assert!(is_error_styled(&shown_line(&app, "E0308")));
+        assert!(!is_error_styled(&shown_line(&app, "not matched")));
+    }
+
+    #[test]
+    fn test_stderr_separator_is_never_an_error_line() {
+        // Edge case: a pattern that also matches ci-tui's own separator
+        let mut app = app_with_output(CheckStatus::Failed, "ok\n", "err1\n");
+        app.checks[0].definition.error_pattern = Some(regex::Regex::new("err").unwrap());
+        app.output_cache = None; // pattern is not part of the cache key
+        ensure_output_cache(&mut app, 80);
+
+        assert!(!is_error_styled(&shown_line(&app, "── stderr ──")));
+        assert!(is_error_styled(&shown_line(&app, "err1")));
+    }
+
+    /// App parked on its first error line; `e` then makes the long command
+    /// wrap onto more lines, moving the error line down
+    fn app_parked_on_error() -> App {
+        let output = format!("{}error: boom\n{}", "ok\n".repeat(10), "tail\n".repeat(60));
+        let mut app = app_with_output(CheckStatus::Failed, &output, "");
+        app.checks[0].resolved_command = "x".repeat(300);
+        app.output_cache = None;
+        ensure_output_cache(&mut app, 80);
+        let row = first_error_scroll(&app).expect("error line");
+        app.scroll_to_row(row);
+        app
+    }
+
+    #[test]
+    fn test_error_jump_follows_rebuild_while_parked() {
+        let mut app = app_parked_on_error();
+        let before = app.view.output_scroll;
+
+        app.view.show_full_command = true;
+        ensure_output_cache(&mut app, 80);
+
+        let after = first_error_scroll(&app).unwrap();
+        assert!(after > before, "expanded command pushes the error down");
+        assert_eq!(app.view.output_scroll, after);
+    }
+
+    #[test]
+    fn test_error_jump_rebuild_leaves_scrolled_away_view() {
+        let mut app = app_parked_on_error();
+        app.scroll_up(1);
+        let scrolled = app.view.output_scroll;
+
+        app.view.show_full_command = true;
+        ensure_output_cache(&mut app, 80);
+
+        assert_eq!(app.view.output_scroll, scrolled);
+    }
+
+    #[test]
+    fn test_search_highlight_wins_over_error_highlight() {
+        let mut app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nerror: other\n", "");
+        app.open_search();
+        for c in "boom".chars() {
+            app.search_push(c);
+        }
+        confirm_search(&mut app);
+
+        let searched = shown_line(&app, "boom");
+        assert!(searched
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == "boom" && s.style.bg == Some(Color::Yellow)));
+        // Unsearched error line keeps its error highlight
+        assert!(is_error_styled(&shown_line(&app, "error: other")));
     }
 
     #[test]
