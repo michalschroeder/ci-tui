@@ -668,7 +668,7 @@ Checks only files staged in the git index (`git diff --cached --name-only --diff
 - No base-branch diff, unstaged changes, or untracked files
 - Ignore patterns still apply
 - Headers show `vs --staged (git index)`; TUI refresh (`r` / `R`) re-reads the index
-- Can be combined with `--simple`, `--fix` or `--list`; not with `--files` or `--base`
+- Can be combined with `--simple` or `--list`; not with `--files`, `--base` or `--fix` (fixes edit the working tree but are never re-staged, so the commit would keep the unfixed content)
 - Checks run against the working tree, so unstaged edits in a partially staged file are still seen
 
 ### List / Dry Run

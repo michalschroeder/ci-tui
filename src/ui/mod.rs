@@ -1188,9 +1188,17 @@ checks:
         assert_eq!(checks.len(), 1, "php-lint must still match the file");
     }
 
-    /// Run `git args` in `dir`, panicking on failure.
+    /// Git env vars set by hooks (e.g. pre-commit) that redirect git to the
+    /// outer repo's index / dir instead of the test's tempdir repo.
+    const OUTER_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"];
+
+    /// Run `git args` in `dir` with [`OUTER_GIT_ENV`] cleared, panicking on failure.
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let mut cmd = std::process::Command::new("git");
+        for var in OUTER_GIT_ENV {
+            cmd.env_remove(var);
+        }
+        let status = cmd
             .args(args)
             .current_dir(dir)
             .status()
@@ -1200,6 +1208,11 @@ checks:
 
     #[test]
     fn test_refresh_in_staged_mode_rereads_index() {
+        // `refresh` runs git with the process env; skip when a hook redirects it
+        if OUTER_GIT_ENV.iter().any(|v| std::env::var_os(v).is_some()) {
+            eprintln!("skipped: outer git env set (running inside a git hook)");
+            return;
+        }
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "-q"]);
         std::fs::write(repo.path().join("Staged.php"), "<?php").unwrap();

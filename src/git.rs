@@ -74,6 +74,9 @@ pub const CLI_FILES_BASE_REF: &str = "--files (manual)";
 /// git index only. Rendered in headers as "vs --staged (git index)".
 pub const STAGED_BASE_REF: &str = "--staged (git index)";
 
+/// Change types every `git diff` path reports: added, copied, modified, renamed.
+const DIFF_FILTER: &str = "--diff-filter=ACMR";
+
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
 pub struct ChangedFiles {
@@ -230,13 +233,28 @@ pub fn get_staged_files_with_executor(
         "diff".to_string(),
         "--cached".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
     ];
     let staged = executor
         .run_command(project_root, &args)
         .context("could not read staged files from the git index")?;
+    // Checks read the working tree: drop staged paths since deleted on disk.
+    // `--full-name -- :/` keeps paths repo-relative like `git diff` from subdirs.
+    let args = vec![
+        "ls-files".to_string(),
+        "--deleted".to_string(),
+        "--full-name".to_string(),
+        "--".to_string(),
+        ":/".to_string(),
+    ];
+    let deleted = executor
+        .run_command(project_root, &args)
+        .context("could not list staged files deleted from the working tree")?;
+    let deleted: HashSet<&str> = deleted.lines().collect();
+    let mut files = union_lines(&[&staged]);
+    files.retain(|f| !deleted.contains(f.as_str()));
     Ok(ChangedFiles {
-        files: union_lines(&[&staged]),
+        files,
         base_ref: STAGED_BASE_REF.to_string(),
     })
 }
@@ -249,7 +267,7 @@ fn run_committed_diff(
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
         "--merge-base".to_string(),
         // Refs come from config / `--base`: a leading `-` must not parse as an
         // option, and `--` keeps a ref that is also a path unambiguous.
@@ -265,7 +283,7 @@ fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Res
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
-        "--diff-filter=ACMR".to_string(),
+        DIFF_FILTER.to_string(),
         "HEAD".to_string(),
     ];
     executor.run_command(project_root, &args)
@@ -692,16 +710,23 @@ mod tests {
     #[test]
     fn get_staged_files_reads_only_the_index() {
         let mut mock = MockGitExecutor::new();
-        // Exactly one git call: no base ref, no unstaged diff, no untracked list
+        // Index diff + deleted-on-disk list only: no base ref, unstaged diff or untracked
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 args == ["diff", "--cached", "--name-only", "--diff-filter=ACMR"]
             })
             .times(1)
-            .returning(|_, _| Ok("a.rs\nsrc/b.rs\n".to_string()));
+            .returning(|_, _| Ok("a.rs\nsrc/b.rs\ngone.rs\n".to_string()));
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args == ["ls-files", "--deleted", "--full-name", "--", ":/"]
+            })
+            .times(1)
+            .returning(|_, _| Ok("gone.rs\n".to_string()));
 
         let result = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap();
 
+        // gone.rs staged but deleted on disk: dropped
         assert_eq!(result.files, vec!["a.rs", "src/b.rs"]);
         assert_eq!(result.base_ref, STAGED_BASE_REF);
         assert!(result.is_staged());
