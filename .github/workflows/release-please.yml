@@ -34,5 +34,5 @@ jobs:
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
     permissions:
-      contents: read
+      contents: write # release.yml `schema` job uploads the release asset
       packages: write

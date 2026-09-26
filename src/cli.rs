@@ -99,6 +99,8 @@ pub enum Command {
         /// Config path [default: --config value, else ci-tui.yaml]
         path: Option<PathBuf>,
     },
+    /// Print the config JSON Schema (for editor autocomplete / validation)
+    Schema,
 }
 
 /// Clap-styled usage error for a missing `--config` (exit code 2).
@@ -111,11 +113,13 @@ pub fn missing_config_error() -> clap::Error {
 
 impl Command {
     /// Config path for `init` / `validate`: positional arg, then `--config`,
-    /// then `ci-tui.yaml`.
+    /// then `ci-tui.yaml`. `schema` reads no config; it gets the fallback.
     pub fn config_path(&self, config: Option<PathBuf>) -> PathBuf {
-        let (Self::Init { path } | Self::Validate { path }) = self;
-        path.clone()
-            .or(config)
+        let path = match self {
+            Self::Init { path } | Self::Validate { path } => path.clone(),
+            Self::Schema => None,
+        };
+        path.or(config)
             .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
     }
 }
@@ -163,11 +167,18 @@ mod tests {
     #[case::dry_run_with_fix(&["ci-tui", "--fix", "--dry-run"])]
     #[case::list_before_validate(&["ci-tui", "--list", "validate"])]
     #[case::dry_run_before_init(&["ci-tui", "--dry-run", "init"])]
+    #[case::simple_before_schema(&["ci-tui", "-s", "schema"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
             .expect("expected conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_schema_subcommand_parsed() {
+        let cli = Cli::try_parse_checked(["ci-tui", "schema"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Schema)));
     }
 
     #[test]

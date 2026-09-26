@@ -33,6 +33,8 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 indexmap = { version = "2", features = ["serde"] }  # Preserves YAML key order
+schemars = { version = "1", features = ["indexmap2"] }  # JSON Schema for ci-tui.yaml (`ci-tui schema`)
+serde_json = "1"
 
 # Error handling
 thiserror = "2"
@@ -66,6 +68,7 @@ mockall = "0.15"              # Trait-based mocking with #[automock]
 rstest = "0.27"               # Test fixtures and parameterized tests
 pretty_assertions = "1.4"     # Colorful assertion diffs
 tempfile = "3"                # Temporary directories for testing
+jsonschema = { version = "0.58", default-features = false }  # Validate configs against the generated schema
 
 # Async testing support (mockall needs this for async traits)
 tokio-test = "0.4"            # tokio testing utilities

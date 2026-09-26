@@ -21,6 +21,9 @@ docker:
   #       image: php:8.2-cli
   service: php
 
+  # Shell inside the container ("/bin/sh" for Alpine images)
+  shell: bash
+
   # Optional: Explicit container name if not using standard compose naming
   # container: myproject-php-1
 

@@ -7,7 +7,27 @@ use std::path::Path;
 /// Default config path for `init` / `validate` when none is given.
 pub const DEFAULT_CONFIG_FILE: &str = "ci-tui.yaml";
 
-pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
+/// Release asset URL of this version's config JSON Schema (see `ci-tui schema`).
+/// A macro so [`TEMPLATE`] can embed it at compile time via `concat!`.
+macro_rules! schema_url {
+    () => {
+        concat!(
+            "https://github.com/michalschroeder/ci-tui/releases/download/v",
+            env!("CARGO_PKG_VERSION"),
+            "/ci-tui.schema.json"
+        )
+    };
+}
+
+/// Schema URL for this build's version; each release uploads its schema there.
+pub const SCHEMA_URL: &str = schema_url!();
+
+/// Starter config. First line points yaml-language-server editors at the schema.
+pub(crate) const TEMPLATE: &str = concat!(
+    "# yaml-language-server: $schema=",
+    schema_url!(),
+    "\n",
+    r#"# ci-tui configuration
 # Full reference: https://github.com/michalschroeder/ci-tui/blob/master/docs/configuration.md
 version: 2
 
@@ -71,7 +91,8 @@ checks:
         # timeout: 5m                         # per-check limit, overrides top-level timeout
         triggers:
           file_pattern: source
-"#;
+"#
+);
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
 pub fn init(path: &Path) -> Result<()> {
@@ -163,6 +184,21 @@ mod tests {
         assert!(
             err.contains("checks.quality.checks.lint: `timeout`"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_template_first_line_is_versioned_schema_url() {
+        let first = TEMPLATE.lines().next().unwrap();
+        assert_eq!(
+            first,
+            format!("# yaml-language-server: $schema={SCHEMA_URL}")
+        );
+        let version_segment = format!("/v{}/", env!("CARGO_PKG_VERSION"));
+        assert!(SCHEMA_URL.contains(&version_segment), "got: {SCHEMA_URL}");
+        assert!(
+            SCHEMA_URL.ends_with("/ci-tui.schema.json"),
+            "got: {SCHEMA_URL}"
         );
     }
 

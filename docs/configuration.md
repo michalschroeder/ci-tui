@@ -804,6 +804,24 @@ Expected one of: base_branch, fallback_branch
 
 This catches configuration mistakes early before running checks.
 
+### Editor autocomplete (JSON Schema)
+
+A JSON Schema generated from the config structs gives editors autocomplete, hover docs and inline validation. Get it from:
+
+- `ci-tui schema` (prints it for the installed version)
+- [`schema/ci-tui.schema.json`](../schema/ci-tui.schema.json) in the repo
+- the `ci-tui.schema.json` asset on each GitHub release
+
+`ci-tui init` adds the reference as the first line; for an existing config, add it yourself (replace the version with yours):
+
+```yaml
+# yaml-language-server: $schema=https://github.com/michalschroeder/ci-tui/releases/download/v0.4.0/ci-tui.schema.json
+```
+
+Works with any editor using [yaml-language-server](https://github.com/redhat-developer/yaml-language-server) (VS Code YAML extension, Neovim, Helix, JetBrains). The schema covers structure, types, enums and `timeout` format; semantic checks (regex validity, undefined pattern references, version) still need `ci-tui validate`.
+
+After changing config structs, regenerate the committed file with `make schema` (a test fails while it is stale).
+
 ## Version History
 
 **Version 2** (current)

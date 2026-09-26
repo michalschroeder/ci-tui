@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
-use ci_tui::{checks, commands, config, fix, git, list, preflight, simple, ui};
+use ci_tui::{checks, commands, config, fix, git, list, preflight, schema, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -54,10 +54,11 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
     })
 }
 
-/// Run `init` / `validate` and print the outcome.
+/// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
     let path = command.config_path(config);
     match command {
+        Command::Schema => print!("{}", schema::generate()),
         Command::Init { .. } => {
             commands::init(&path)?;
             println!("Wrote {}", path.display());

@@ -23,6 +23,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,10 +64,22 @@ pub const DEFAULT_MAX_OUTPUT_LINES: usize = 10_000;
 
 /// On-disk YAML shape of [`CiConfig`]: flat `runner` flag + optional sections.
 /// Converted to [`CiConfig`] (with a typed [`ExecTarget`]) right after parsing.
-#[derive(Deserialize)]
+/// Also the root of the config JSON Schema (`ci-tui schema`); the `if`/`else`
+/// mirrors the parse-time "docker section required unless `runner: local`" rule.
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct RawCiConfig {
+#[schemars(
+    title = "ci-tui config",
+    description = "ci-tui.yaml: CI checks to run for changed files",
+    extend(
+        "if" = {"properties": {"runner": {"const": "local"}}, "required": ["runner"]},
+        "else" = {"required": ["docker"]}
+    )
+)]
+pub(crate) struct RawCiConfig {
+    /// Config format version (must be 2)
     version: u32,
+    /// Where checks run: `docker` (default) or `local` (on the host)
     #[serde(default)]
     runner: RunnerMode,
     /// Required when runner is docker (the default)
@@ -82,8 +95,9 @@ struct RawCiConfig {
     ignore_patterns: Vec<String>,
     /// Default timeout for checks and pre-commands that set none
     #[serde(default, deserialize_with = "deserialize_timeout")]
+    #[schemars(schema_with = "timeout_schema", description = TIMEOUT_DESCRIPTION)]
     timeout: Option<Duration>,
-    /// Max lines kept per stdout/stderr stream (see [`DEFAULT_MAX_OUTPUT_LINES`])
+    /// Max lines kept per stdout/stderr stream (default 10000)
     #[serde(default)]
     max_output_lines: Option<usize>,
 }
@@ -150,6 +164,20 @@ where
         .transpose()
 }
 
+/// Schema description shared by every `timeout:` field.
+const TIMEOUT_DESCRIPTION: &str =
+    "Max runtime: <n>s, <n>m or <n>h (e.g. 30s, 10m); expired commands are killed. \
+     Unset = no limit (top-level `timeout` is the default for checks and pre-commands)";
+
+/// Schema for `timeout:` fields: what [`deserialize_timeout`] accepts
+/// (`<n>s|m|h`, n > 0) or null.
+fn timeout_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "pattern": "^0*[1-9][0-9]*[smh]$"
+    })
+}
+
 /// Where check commands execute, resolved from `runner:` at parse time.
 ///
 /// Design: one enum instead of a `runner` flag + `Option<DockerConfig>` so
@@ -167,7 +195,7 @@ pub enum ExecTarget {
 }
 
 /// File pattern definition with optional color for UI display
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FilePattern {
     /// Regex pattern for matching files
@@ -195,8 +223,9 @@ impl Clone for CiConfig {
 }
 
 /// Raw `runner:` value; resolved into [`ExecTarget`] during parsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(description = "Where checks run: `docker` (default) or `local` (on the host)")]
 enum RunnerMode {
     #[default]
     Docker,
@@ -204,7 +233,7 @@ enum RunnerMode {
 }
 
 /// Configuration for local (host) execution when `runner: local`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
     /// Shell used to run check commands (default: "bash")
@@ -232,7 +261,7 @@ fn default_local_shell() -> String {
 ///
 /// Supports both `docker exec` (for running containers) and `docker run`
 /// (for standalone execution).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DockerConfig {
     pub project_dir: String,
@@ -421,7 +450,7 @@ fn expand_env_vars(input: &str) -> String {
 }
 
 /// Git configuration for change detection.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitConfig {
     pub base_branch: String,
@@ -429,7 +458,7 @@ pub struct GitConfig {
 }
 
 /// Configuration for an execution group
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GroupConfig {
     /// Optional display name for the group (uses key name if not set)
@@ -452,7 +481,7 @@ pub struct GroupConfig {
 ///
 /// Contains the command to run, optional fix command, triggers for when
 /// to run, and other configuration options.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckDefinition {
     pub name: String,
@@ -476,11 +505,12 @@ pub struct CheckDefinition {
     /// Max runtime (`30s`, `10m`, `1h`); on expiry the process is killed and the
     /// check reports `TimedOut`. `None` = unbounded. Top-level `timeout:` fills it.
     #[serde(default, deserialize_with = "deserialize_timeout")]
+    #[schemars(schema_with = "timeout_schema", description = TIMEOUT_DESCRIPTION)]
     pub timeout: Option<Duration>,
 }
 
 /// Triggers that determine when a check should run.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckTriggers {
     #[serde(default)]
@@ -490,7 +520,7 @@ pub struct CheckTriggers {
 }
 
 /// Inline test discovery configuration for a check
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestDiscoveryConfig {
     /// Source file pattern key that triggers discovery (references file_patterns)
@@ -500,7 +530,7 @@ pub struct TestDiscoveryConfig {
 }
 
 /// Strategy for discovering related test files
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum TestDiscoveryStrategy {
     /// Map source paths to test paths by pattern
@@ -517,7 +547,7 @@ pub enum TestDiscoveryStrategy {
 }
 
 /// Rule for mapping source paths to test paths
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PathMappingRule {
     /// Source file pattern with {path} placeholder (e.g., "src/{path}.php")
@@ -527,7 +557,7 @@ pub struct PathMappingRule {
 }
 
 /// A command to run before checks in a group (e.g., database initialization).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreCommand {
     /// Display name for the command
@@ -551,6 +581,7 @@ pub struct PreCommand {
     pub env: std::collections::HashMap<String, String>,
     /// Max runtime; expiry fails the pre-command (and so the group). `None` = unbounded.
     #[serde(default, deserialize_with = "deserialize_timeout")]
+    #[schemars(schema_with = "timeout_schema", description = TIMEOUT_DESCRIPTION)]
     pub timeout: Option<Duration>,
 }
 

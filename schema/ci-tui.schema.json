@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ci-tui config",
+  "description": "ci-tui.yaml: CI checks to run for changed files",
+  "type": "object",
+  "properties": {
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/GroupConfig"
+      }
+    },
+    "docker": {
+      "description": "Required when runner is docker (the default)",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DockerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "file_patterns": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FilePattern"
+      }
+    },
+    "git": {
+      "$ref": "#/$defs/GitConfig"
+    },
+    "ignore_patterns": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "local": {
+      "description": "Settings for runner: local",
+      "$ref": "#/$defs/LocalConfig"
+    },
+    "max_output_lines": {
+      "description": "Max lines kept per stdout/stderr stream (default 10000)",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "default": null,
+      "minimum": 0
+    },
+    "runner": {
+      "description": "Where checks run: `docker` (default) or `local` (on the host)",
+      "$ref": "#/$defs/RunnerMode"
+    },
+    "timeout": {
+      "description": "Max runtime: <n>s, <n>m or <n>h (e.g. 30s, 10m); expired commands are killed. Unset = no limit (top-level `timeout` is the default for checks and pre-commands)",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "pattern": "^0*[1-9][0-9]*[smh]$"
+    },
+    "version": {
+      "description": "Config format version (must be 2)",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "else": {
+    "required": [
+      "docker"
+    ]
+  },
+  "if": {
+    "properties": {
+      "runner": {
+        "const": "local"
+      }
+    },
+    "required": [
+      "runner"
+    ]
+  },
+  "required": [
+    "version",
+    "git",
+    "file_patterns",
+    "checks"
+  ],
+  "$defs": {
+    "CheckDefinition": {
+      "description": "Definition of a single CI check.\n\nContains the command to run, optional fix command, triggers for when\nto run, and other configuration options.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "container": {
+          "description": "Explicit container name (overrides service-based derivation)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "env": {
+          "description": "Additional environment variables for this check (merged with global env)",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "fix_command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_demand": {
+          "description": "If true, check requires manual trigger when source files change but no specific tests found",
+          "type": "boolean",
+          "default": false
+        },
+        "service": {
+          "description": "Docker service to run this check in (overrides group/global default)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "timeout": {
+          "description": "Max runtime: <n>s, <n>m or <n>h (e.g. 30s, 10m); expired commands are killed. Unset = no limit (top-level `timeout` is the default for checks and pre-commands)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "pattern": "^0*[1-9][0-9]*[smh]$"
+        },
+        "triggers": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckTriggers"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "command"
+      ]
+    },
+    "CheckTriggers": {
+      "description": "Triggers that determine when a check should run.",
+      "type": "object",
+      "properties": {
+        "file_pattern": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "test_discovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestDiscoveryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DockerConfig": {
+      "description": "Docker configuration for running checks in containers.\n\nSupports both `docker exec` (for running containers) and `docker run`\n(for standalone execution).",
+      "type": "object",
+      "properties": {
+        "container": {
+          "description": "Container name for docker exec (e.g., \"myproject-app-1\")\nIf not set, derived from project_dir + service using compose naming convention",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "env": {
+          "description": "Environment variables to pass to all docker exec commands",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "image": {
+          "description": "Docker image for standalone run (e.g., \"rust:latest\")\nIf set, use this image directly instead of deriving from container name",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "project_dir": {
+          "type": "string"
+        },
+        "service": {
+          "description": "Default Docker service name (defaults to \"app\" if not specified)",
+          "type": "string",
+          "default": "app"
+        },
+        "shell": {
+          "description": "Shell to use inside container (e.g., \"bash\" or \"/bin/sh\" for Alpine)",
+          "type": "string"
+        },
+        "volume_mount": {
+          "description": "Volume mount string for standalone run (e.g., \".:/build\")\nFull volume specification including source:dest",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "work_dir": {
+          "description": "Working directory inside container (e.g., \"/build\")\nOverrides the default /app workdir",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "project_dir",
+        "shell"
+      ]
+    },
+    "FilePattern": {
+      "description": "File pattern definition with optional color for UI display",
+      "type": "object",
+      "properties": {
+        "color": {
+          "description": "Optional color for files matching this pattern (e.g., \"blue\", \"green\")",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pattern": {
+          "description": "Regex pattern for matching files",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pattern"
+      ]
+    },
+    "GitConfig": {
+      "description": "Git configuration for change detection.",
+      "type": "object",
+      "properties": {
+        "base_branch": {
+          "type": "string"
+        },
+        "fallback_branch": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base_branch",
+        "fallback_branch"
+      ]
+    },
+    "GroupConfig": {
+      "description": "Configuration for an execution group",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "description": "Checks in this group (key is check ID)",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CheckDefinition"
+          }
+        },
+        "name": {
+          "description": "Optional display name for the group (uses key name if not set)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parallel": {
+          "description": "Run checks in this group in parallel",
+          "type": "boolean",
+          "default": false
+        },
+        "pre_commands": {
+          "description": "Commands to run before checks in this group (e.g., DB init)",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreCommand"
+          }
+        },
+        "stop_on_failure": {
+          "description": "Stop all execution if any check in this group fails",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "checks"
+      ]
+    },
+    "LocalConfig": {
+      "description": "Configuration for local (host) execution when `runner: local`.",
+      "type": "object",
+      "properties": {
+        "env": {
+          "description": "Environment variables for all local check commands",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "shell": {
+          "description": "Shell used to run check commands (default: \"bash\")",
+          "type": "string",
+          "default": "bash"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PathMappingRule": {
+      "description": "Rule for mapping source paths to test paths",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "Source file pattern with {path} placeholder (e.g., \"src/{path}.php\")",
+          "type": "string"
+        },
+        "tests": {
+          "description": "Test file patterns with {path} placeholder (e.g., \"tests/{path}Test.php\")",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "tests"
+      ]
+    },
+    "PreCommand": {
+      "description": "A command to run before checks in a group (e.g., database initialization).",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command to execute",
+          "type": "string"
+        },
+        "container": {
+          "description": "Explicit container name (overrides service-based derivation)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "env": {
+          "description": "Additional environment variables for this command (merged with global env)",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "exec": {
+          "description": "If true, use `docker compose exec` (existing container) instead of `run` (new container)",
+          "type": "boolean",
+          "default": false
+        },
+        "host": {
+          "description": "If true, run command directly on host instead of inside Docker",
+          "type": "boolean",
+          "default": false
+        },
+        "name": {
+          "description": "Display name for the command",
+          "type": "string"
+        },
+        "service": {
+          "description": "Docker service to run in (uses group/global default if not specified)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "timeout": {
+          "description": "Max runtime: <n>s, <n>m or <n>h (e.g. 30s, 10m); expired commands are killed. Unset = no limit (top-level `timeout` is the default for checks and pre-commands)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "pattern": "^0*[1-9][0-9]*[smh]$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "command"
+      ]
+    },
+    "RunnerMode": {
+      "description": "Where checks run: `docker` (default) or `local` (on the host)",
+      "type": "string",
+      "enum": [
+        "docker",
+        "local"
+      ]
+    },
+    "TestDiscoveryConfig": {
+      "description": "Inline test discovery configuration for a check",
+      "type": "object",
+      "properties": {
+        "source_pattern": {
+          "description": "Source file pattern key that triggers discovery (references file_patterns)",
+          "type": "string"
+        },
+        "strategies": {
+          "description": "Strategies to find related tests",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TestDiscoveryStrategy"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_pattern",
+        "strategies"
+      ]
+    },
+    "TestDiscoveryStrategy": {
+      "description": "Strategy for discovering related test files",
+      "oneOf": [
+        {
+          "description": "Map source paths to test paths by pattern",
+          "type": "object",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PathMappingRule"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "path_mapping"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "rules"
+          ]
+        },
+        {
+          "description": "Search test files for content matching a pattern",
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "description": "Regex pattern with placeholders: {basename}, {filename}, {extension}, {dirname}, {path}",
+              "type": "string"
+            },
+            "search_dirs": {
+              "description": "Directories to search in",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "grep_search"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "search_dirs",
+            "pattern"
+          ]
+        }
+      ]
+    }
+  }
+}

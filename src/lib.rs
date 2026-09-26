@@ -14,6 +14,7 @@
 //! - `list`: `--list` / `--dry-run` report of which checks would run and why
 //! - `preflight`: Docker startup probe warning when changed files won't resolve in the container
 //! - `runner`: Check execution in Docker containers
+//! - `schema`: JSON Schema for the config file (`ci-tui schema`)
 //! - `simple`: Simple console output mode (no TUI)
 //! - `test_discovery`: Finding related test files for source changes
 //! - `ui`: Terminal UI using ratatui
@@ -27,6 +28,7 @@ pub mod git;
 pub mod list;
 pub mod preflight;
 pub mod runner;
+pub mod schema;
 pub mod simple;
 pub mod test_discovery;
 pub mod ui;
