@@ -679,10 +679,11 @@ ci-tui --config ci-tui.yaml --group fast --simple    # group ids (keys under `ch
 ```
 
 Restricts the run to a subset of checks for fast iteration:
-- Both flags take a comma-separated list and can be repeated; together they intersect (a check must match both)
+- Both flags take a comma-separated list and can be repeated; together they intersect (a check must match both). Spaces around ids and empty items are ignored (`--only ""` = no filter)
 - Filters only: triggers still apply, so a selected check with no matching changed file stays skipped / on-demand
 - Groups left without checks are dropped, including their `pre_commands`
-- Unknown ids (or filters that select nothing) exit `2` with the valid ids listed
+- Unknown ids exit `2` with the valid ids listed (both flags reported at once); filters that select nothing exit `2` naming each `--only` check's groups
+- `--simple`, `--fix` and `--list` print `Filtered: --only … --group …` to stderr, so a green run can't hide excluded checks
 - Works in the TUI (incl. refresh), `--simple`, `--fix` and `--list`; cannot be combined with a subcommand
 
 ### List / Dry Run

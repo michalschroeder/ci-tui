@@ -143,6 +143,12 @@ async fn run() -> Result<i32> {
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
         filter_error(e).exit();
     }
+    // Console modes: say checks were excluded (stderr keeps --list stdout clean).
+    // The TUI only shows the subset.
+    let console = cli.list || cli.fix || simple_mode;
+    if let Some(notice) = filter::describe(&cli.only, &cli.groups).filter(|_| console) {
+        eprintln!("{notice}");
+    }
 
     // Local mode runs commands from the repo root so repo-relative {files}
     // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).

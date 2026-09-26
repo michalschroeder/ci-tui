@@ -63,6 +63,19 @@ fn parse_base_arg(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// `--only` / `--group` values after comma split: trimmed (`"a, b"`), empty
+/// items dropped (`a,` or an empty `"$VAR"` means no filter), deduped in order.
+fn normalize_ids(ids: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|o| o == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
 /// `--files` value parser. `--files` takes 1.. values, so a trailing subcommand
 /// (`-f a.rs validate`) would otherwise be swallowed as a file path.
 fn parse_file_arg(value: &str) -> Result<PathBuf, String> {
@@ -88,7 +101,9 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let cli = Self::try_parse_from(args)?;
+        let mut cli = Self::try_parse_from(args)?;
+        cli.only = normalize_ids(cli.only);
+        cli.groups = normalize_ids(cli.groups);
         if cli.command.is_some()
             && (cli.simple
                 || cli.fix
@@ -262,6 +277,10 @@ mod tests {
     #[case::with_list(&["ci-tui", "--list", "--only", "a"], &["a"], &[])]
     #[case::after_files(&["ci-tui", "-f", "x.rs", "--only", "a"], &["a"], &[])]
     #[case::none(&["ci-tui"], &[], &[])]
+    #[case::spaces_trimmed(&["ci-tui", "--only", "a, b", "--group", " g "], &["a", "b"], &["g"])]
+    #[case::trailing_comma(&["ci-tui", "--only", "a,"], &["a"], &[])]
+    #[case::empty_value_is_no_filter(&["ci-tui", "--only", "", "--group="], &[], &[])]
+    #[case::deduped(&["ci-tui", "--only", "a,b,a", "--only", "b"], &["a", "b"], &[])]
     fn test_only_group_flags_parsed(
         #[case] args: &[&str],
         #[case] only: &[&str],

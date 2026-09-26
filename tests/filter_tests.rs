@@ -8,6 +8,7 @@ use std::path::Path;
 
 mod common;
 use common::configs::checks_test_config;
+use common::run_ci_tui;
 
 fn ids(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -75,6 +76,14 @@ fn only_and_group_intersect() {
 fn empty_intersection_is_an_error() {
     let err = filter_err(&["phpstan"], &["fast"]);
     assert!(err.contains("no checks"), "{err}");
+    assert!(err.contains("`phpstan` is in group(s): analysis"), "{err}");
+}
+
+#[test]
+fn unknown_ids_in_both_flags_reported_together() {
+    let err = filter_err(&["nope"], &["bad"]);
+    assert!(err.contains("unknown check `nope` in --only"), "{err}");
+    assert!(err.contains("unknown group `bad` in --group"), "{err}");
 }
 
 #[test]
@@ -144,12 +153,7 @@ checks:
 fn run_binary(args: &[&str]) -> (tempfile::TempDir, std::process::Output) {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
-        .current_dir(tmp.path())
-        .args(["--files", "x.rs"])
-        .args(args)
-        .output()
-        .unwrap();
+    let out = run_ci_tui(tmp.path(), &[&["--files", "x.rs"], args].concat());
     (tmp, out)
 }
 
@@ -172,6 +176,24 @@ fn binary_simple_runs_only_selected_check() {
         !tmp.path().join("first_pre_ran").exists(),
         "pre_command of filtered-out group ran"
     );
+}
+
+#[rstest::rstest]
+#[case::simple(&["--simple", "--only", "b"], "Filtered: --only b\n")]
+#[case::list(&["--list", "--only", "a, b", "--group", "second"], "Filtered: --only a,b --group second\n")]
+#[case::fix(&["--fix", "--group", "first"], "Filtered: --group first\n")]
+fn binary_console_modes_announce_filter(#[case] args: &[&str], #[case] notice: &str) {
+    let (_tmp, out) = run_binary(args);
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(notice), "{stderr}");
+}
+
+#[test]
+fn binary_no_filter_no_notice() {
+    let (_tmp, out) = run_binary(&["--list"]);
+    assert_success(&out);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("Filtered"));
 }
 
 #[test]
