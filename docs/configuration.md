@@ -671,6 +671,20 @@ Checks only files staged in the git index (`git diff --cached --name-only --diff
 - Can be combined with `--simple` or `--list`; not with `--files`, `--base` or `--fix` (fixes edit the working tree but are never re-staged, so the commit would keep the unfixed content)
 - Checks run against the working tree, so unstaged edits in a partially staged file are still seen
 
+### Subset: `--only` / `--group`
+
+```bash
+ci-tui --config ci-tui.yaml --only phpstan,phpunit   # check ids (keys under a group's `checks`)
+ci-tui --config ci-tui.yaml --group fast --simple    # group ids (keys under `checks`)
+```
+
+Restricts the run to a subset of checks for fast iteration:
+- Both flags take a comma-separated list and can be repeated; together they intersect (a check must match both)
+- Filters only: triggers still apply, so a selected check with no matching changed file stays skipped / on-demand
+- Groups left without checks are dropped, including their `pre_commands`
+- Unknown ids (or filters that select nothing) exit `2` with the valid ids listed
+- Works in the TUI (incl. refresh), `--simple`, `--fix` and `--list`; cannot be combined with a subcommand
+
 ### List / Dry Run
 
 ```bash

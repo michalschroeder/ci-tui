@@ -1,7 +1,7 @@
 use anyhow::Result;
-use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
+use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
-use ci_tui::{checks, commands, config, fix, git, list, preflight, schema, simple, ui};
+use ci_tui::{checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -136,7 +136,13 @@ async fn run() -> Result<i32> {
     let simple_mode = cli.simple || !std::io::stdout().is_terminal();
 
     // Load configuration
-    let config = config::load_config(&config_path)?;
+    let mut config = config::load_config(&config_path)?;
+
+    // --only / --group: narrow the config so every mode sees the same subset.
+    // Unknown ids are a usage error (exit 2), like other bad flag values.
+    if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
+        filter_error(e).exit();
+    }
 
     // Local mode runs commands from the repo root so repo-relative {files}
     // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
