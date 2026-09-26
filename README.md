@@ -28,6 +28,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
+- JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
 
 ## Install
 
@@ -62,6 +63,8 @@ docker run --rm -it \
 ci-tui init          # writes a commented ci-tui.yaml (never overwrites)
 ci-tui validate      # checks it without running anything
 ```
+
+The generated file starts with a `# yaml-language-server: $schema=...` line pointing at this version's release schema, so editors using yaml-language-server (VS Code YAML extension, Neovim, Helix, JetBrains) autocomplete and validate it. For an existing config, add that line yourself (see [Schema Validation](docs/configuration.md#schema-validation)).
 
 Or let an AI agent generate it from your existing CI tools: copy [skills/ci-tui-setup](skills/ci-tui-setup/SKILL.md) into your project's `.claude/skills/` and run `/ci-tui-setup` (other agents: paste the file as a prompt).
 

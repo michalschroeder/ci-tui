@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{missing_config_error, run_config_path, Cli, Command};
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
-use ci_tui::{checks, commands, config, fix, git, list, preflight, simple, ui};
+use ci_tui::{checks, commands, config, fix, git, list, preflight, schema, simple, ui};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -54,22 +54,33 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
     })
 }
 
-/// Run `init` / `validate` and print the outcome.
+/// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
+fn print_schema() -> Result<()> {
+    use std::io::Write;
+    match std::io::stdout()
+        .lock()
+        .write_all(schema::generate().as_bytes())
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
-    let path = command.config_path(config);
-    match command {
-        Command::Init { .. } => {
-            commands::init(&path)?;
-            println!("Wrote {}", path.display());
-            println!(
-                "Edit the checks section, then run: ci-tui --config {}",
-                path.display()
-            );
-        }
-        Command::Validate { .. } => {
-            commands::validate(&path)?;
-            println!("OK: {} is valid", path.display());
-        }
+    let Some(path) = command.config_path(config) else {
+        return print_schema();
+    };
+    if let Command::Init { .. } = command {
+        commands::init(&path)?;
+        println!("Wrote {}", path.display());
+        println!(
+            "Edit the checks section, then run: ci-tui --config {}",
+            path.display()
+        );
+    } else {
+        commands::validate(&path)?;
+        println!("OK: {} is valid", path.display());
     }
     Ok(())
 }

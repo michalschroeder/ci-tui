@@ -7,7 +7,13 @@ use std::path::Path;
 /// Default config path for `init` / `validate` when none is given.
 pub const DEFAULT_CONFIG_FILE: &str = "ci-tui.yaml";
 
-pub(crate) const TEMPLATE: &str = r#"# ci-tui configuration
+/// Starter config. First line points yaml-language-server editors at this
+/// version's schema, uploaded to each release (see `ci-tui schema`).
+pub(crate) const TEMPLATE: &str = concat!(
+    "# yaml-language-server: $schema=https://github.com/michalschroeder/ci-tui/releases/download/v",
+    env!("CARGO_PKG_VERSION"),
+    "/ci-tui.schema.json\n",
+    r#"# ci-tui configuration
 # Full reference: https://github.com/michalschroeder/ci-tui/blob/master/docs/configuration.md
 version: 2
 
@@ -71,7 +77,8 @@ checks:
         # timeout: 5m                         # per-check limit, overrides top-level timeout
         triggers:
           file_pattern: source
-"#;
+"#
+);
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
 pub fn init(path: &Path) -> Result<()> {
@@ -163,6 +170,18 @@ mod tests {
         assert!(
             err.contains("checks.quality.checks.lint: `timeout`"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_template_first_line_is_versioned_schema_url() {
+        let first = TEMPLATE.lines().next().unwrap();
+        assert_eq!(
+            first,
+            format!(
+                "# yaml-language-server: $schema=https://github.com/michalschroeder/ci-tui/releases/download/v{}/ci-tui.schema.json",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 
