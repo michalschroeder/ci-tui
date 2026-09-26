@@ -207,6 +207,9 @@ pub struct ViewState {
     /// is running (streamed output). Off after scrolling up / Home / search
     /// jump; on again at the bottom (End) or on selection change.
     pub follow_output: bool,
+    /// Selection changed: on the next render, scroll a failed check to its
+    /// first error line (see [`App::apply_pending_error_jump`])
+    pub pending_error_jump: bool,
 }
 
 impl Default for ViewState {
@@ -226,6 +229,7 @@ impl Default for ViewState {
             help_visible: false,
             search: None,
             follow_output: true,
+            pending_error_jump: false,
         }
     }
 }
@@ -245,9 +249,9 @@ pub struct RunState {
     pub current_pre_command: Option<usize>,
     /// Retry-all git refresh in flight (blocks a second 'R')
     pub refresh_pending: bool,
-    /// User changed the selection during this run: skip the end-of-run
-    /// jump to the first failed check
-    pub selection_touched: bool,
+    /// User pressed a key / clicked / scrolled during this run: skip the
+    /// end-of-run auto-select of the first failed check
+    pub user_interacted: bool,
 }
 
 impl RunState {
@@ -260,7 +264,7 @@ impl RunState {
             finished_at: None,
             current_pre_command: None,
             refresh_pending: false,
-            selection_touched: false,
+            user_interacted: false,
         }
     }
 }
@@ -569,8 +573,6 @@ impl App {
     /// Mark fix as started
     pub fn start_fix(&mut self) {
         self.fix.running = true;
-        // Fix output is on screen: run-end auto-select must not clear it
-        self.run.selection_touched = true;
         self.fix.result = None;
         // Fix-all results take precedence in the output panel; clear them so
         // this fix's result is shown
@@ -625,7 +627,6 @@ impl App {
     /// Start fix-all operation
     pub fn start_fix_all(&mut self, total: usize) {
         self.fix.all_running = true;
-        self.run.selection_touched = true;
         self.fix.all_results = Vec::new();
         self.fix.all_total = total;
         self.fix.result = None;
@@ -939,6 +940,7 @@ impl App {
         self.view.show_full_command = false;
         self.view.search = None;
         self.view.follow_output = true;
+        self.view.pending_error_jump = true;
     }
 
     /// Select the next item (stops at the last one)
@@ -980,9 +982,9 @@ impl App {
     }
 
     /// Run end: select the first failed check (display order), unless the
-    /// user moved the selection during the run
+    /// user interacted during the run
     fn auto_select_first_failed(&mut self) {
-        if self.run.selection_touched {
+        if self.run.user_interacted {
             return;
         }
         if let Some(&first) = self.failed_indices().first() {
@@ -1020,27 +1022,14 @@ impl App {
     }
 
     /// Select item `idx`; every navigation goes through here. Resets the
-    /// output view (a failed check opens at its first error), and folds
-    /// passed groups the selection just left (auto-collapse skips the
-    /// selected group).
+    /// output view, and folds passed groups the selection just left
+    /// (auto-collapse skips the selected group).
     fn select_item_index(&mut self, idx: usize) {
         self.reset_selection_view();
         self.view.selected_check = idx;
-        self.run.selection_touched = true;
         self.needs_redraw = true;
         let selected = self.selected_item().map(|item| ItemKey::of(&item));
         self.auto_collapse_keeping_selection(selected);
-        self.scroll_to_first_error();
-    }
-
-    /// Scroll a failed check's output so its first error line is at the top
-    /// and stop following; no-op (bottom/follow kept) when nothing matches
-    fn scroll_to_first_error(&mut self) {
-        let width = self.output_area_width;
-        if let Some(scroll) = crate::ui::dashboard::first_error_scroll(self, width) {
-            self.view.output_scroll = scroll.min(self.compute_max_scroll());
-            self.view.follow_output = false;
-        }
     }
 
     /// Store the checks list's inner (border-excluded) content rect (called
@@ -1120,6 +1109,27 @@ impl App {
         self.view.output_scroll = self.compute_max_scroll();
         self.view.follow_output = true;
         self.needs_redraw = true;
+    }
+
+    /// Scroll the output panel so wrapped row `row` is at the top (clamped
+    /// to the content) and stop following, e.g. a search match or error line
+    pub fn scroll_to_row(&mut self, row: usize) {
+        self.view.output_scroll = row.min(self.compute_max_scroll());
+        self.view.follow_output = false;
+        self.needs_redraw = true;
+    }
+
+    /// After a selection change, scroll a failed check to its first error
+    /// line (follow off). Called each render once the output cache is built
+    /// at the current width; consumes the pending flag. No error line keeps
+    /// the default bottom/follow view.
+    pub(crate) fn apply_pending_error_jump(&mut self) {
+        if !std::mem::take(&mut self.view.pending_error_jump) {
+            return;
+        }
+        if let Some(row) = crate::ui::dashboard::first_error_scroll(self) {
+            self.scroll_to_row(row);
+        }
     }
 
     /// Pin the output panel to the bottom while following a running check's
@@ -1963,23 +1973,32 @@ checks:
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
     }
 
-    /// 30 ok lines, `error: boom` at output line 30, then 20 more lines
+    /// 30 ok lines, `error: boom` at output line 30, then 60 more lines
+    /// (enough that the error line is reachable as a scroll offset)
     fn error_output() -> String {
-        format!("{}error: boom\n{}", "ok\n".repeat(30), "tail\n".repeat(20))
+        format!("{}error: boom\n{}", "ok\n".repeat(30), "tail\n".repeat(60))
     }
 
     /// Text line of `error: boom`: 6 header lines (command, blank, status,
     /// blank, `Files: test.php`, blank) + its output line
     const ERROR_LINE: usize = 6 + 30;
 
-    /// App in a 5-line, 80-col panel; php-lint passed, phpunit failed with
-    /// `output`, run not finished yet
+    /// Draw one full frame (sets panel layout, applies a pending error jump)
+    fn render(app: &mut App) {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::dashboard::render(app, f))
+            .expect("draw");
+    }
+
+    /// php-lint passed, phpunit failed with `output`, run not finished,
+    /// one frame drawn
     fn make_failed_app(output: &str) -> App {
         let mut app = make_app();
-        app.set_output_visible_lines(5);
-        app.output_area_width = 80;
         finish(&mut app, "php-lint", CheckStatus::Passed, "ok\n");
         finish(&mut app, "phpunit", CheckStatus::Failed, output);
+        render(&mut app);
         app
     }
 
@@ -1989,6 +2008,7 @@ checks:
         assert_eq!(app.selected_check().unwrap().id(), "php-lint");
 
         app.handle_runner_event(RunnerEvent::AllFinished);
+        render(&mut app);
 
         assert_eq!(app.selected_check().unwrap().id(), "phpunit");
         assert_eq!(app.view.output_scroll, ERROR_LINE, "scrolled to error");
@@ -2008,24 +2028,13 @@ checks:
     }
 
     #[test]
-    fn test_all_finished_keeps_manual_selection() {
+    fn test_all_finished_skips_auto_select_after_user_input() {
         let mut app = make_failed_app(&error_output());
-        app.select_last(); // behat: user navigated during the run
-
-        app.handle_runner_event(RunnerEvent::AllFinished);
-
-        assert_eq!(app.selected_check().unwrap().id(), "behat");
-    }
-
-    #[test]
-    fn test_all_finished_keeps_fix_started_during_run() {
-        let mut app = make_failed_app(&error_output());
-        app.start_fix();
+        app.run.user_interacted = true; // set by the key/mouse handlers
 
         app.handle_runner_event(RunnerEvent::AllFinished);
 
         assert_eq!(app.selected_check().unwrap().id(), "php-lint");
-        assert!(app.fix.running);
     }
 
     #[test]
@@ -2042,7 +2051,7 @@ checks:
     #[test]
     fn test_retry_all_rearms_auto_select() {
         let mut app = make_failed_app(&error_output());
-        app.select_last();
+        app.run.user_interacted = true;
         let checks = app.checks.clone();
         app.reset_for_retry(app.changed_files.clone(), checks);
         finish(&mut app, "phpunit", CheckStatus::Failed, "");
@@ -2052,11 +2061,20 @@ checks:
         assert_eq!(app.selected_check().unwrap().id(), "phpunit");
     }
 
-    #[test]
-    fn test_navigating_to_failed_check_scrolls_to_first_error() {
+    /// Every way of landing on the failed check opens it at its first error
+    #[rstest::rstest]
+    #[case::jk(|app: &mut App| { app.next_check(); app.next_check(); })]
+    #[case::next_failed(|app: &mut App| app.select_next_failed())]
+    #[case::click(|app: &mut App| {
+        let area = app.view.checks_list_area;
+        app.select_check_at_position(area.x, area.y + 3); // row 3: phpunit
+    })]
+    #[case::failed_filter(|app: &mut App| app.toggle_failed_filter())]
+    fn test_selecting_failed_check_scrolls_to_first_error(#[case] select: fn(&mut App)) {
         let mut app = make_failed_app(&error_output());
-        app.next_check(); // tests header
-        app.next_check(); // phpunit
+
+        select(&mut app);
+        render(&mut app);
 
         assert_eq!(app.selected_check().unwrap().id(), "phpunit");
         assert_eq!(app.view.output_scroll, ERROR_LINE);
@@ -2064,31 +2082,11 @@ checks:
     }
 
     #[test]
-    fn test_next_failed_scrolls_to_first_error() {
-        let mut app = make_failed_app(&error_output());
-
-        app.select_next_failed();
-
-        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
-        assert_eq!(app.view.output_scroll, ERROR_LINE);
-    }
-
-    #[test]
-    fn test_click_on_failed_check_scrolls_to_first_error() {
-        let mut app = make_failed_app(&error_output());
-        app.set_checks_list_layout(Rect::new(0, 0, 40, 10));
-
-        app.select_check_at_position(1, 3); // row 3: phpunit
-
-        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
-        assert_eq!(app.view.output_scroll, ERROR_LINE);
-    }
-
-    #[test]
     fn test_failed_check_without_error_line_keeps_follow() {
         let mut app = make_failed_app(&"ok\n".repeat(50));
 
         app.select_next_failed();
+        render(&mut app);
 
         assert_eq!(app.view.output_scroll, 0);
         assert!(app.view.follow_output);
@@ -2097,11 +2095,11 @@ checks:
     #[test]
     fn test_passed_check_with_error_text_does_not_jump() {
         let mut app = make_app();
-        app.set_output_visible_lines(5);
         finish(&mut app, "phpunit", CheckStatus::Passed, &error_output());
 
         app.next_check();
         app.next_check();
+        render(&mut app);
 
         assert_eq!(app.view.output_scroll, 0);
         assert!(app.view.follow_output);
@@ -3130,12 +3128,6 @@ checks:
             }
         }
 
-        fn finish(app: &mut App, check_id: &str, status: CheckStatus) {
-            app.handle_runner_event(RunnerEvent::CheckFinished {
-                result: finished(check_id, status),
-            });
-        }
-
         /// Group key of each row, `^` prefixed for headers
         fn rows(app: &App) -> Vec<String> {
             app.selectable_items()
@@ -3224,11 +3216,11 @@ checks:
         fn test_auto_collapse_when_group_passed() {
             let mut app = make_app();
             app.view.selected_check = 3; // phpunit, outside fast
-            finish(&mut app, "php-lint", CheckStatus::Passed);
+            finish(&mut app, "php-lint", CheckStatus::Passed, "");
             assert!(app.is_group_collapsed("fast"));
 
             // behat on-demand: tests group not finished
-            finish(&mut app, "phpunit", CheckStatus::Passed);
+            finish(&mut app, "phpunit", CheckStatus::Passed, "");
             assert!(!app.is_group_collapsed("tests"));
         }
 
@@ -3245,11 +3237,11 @@ checks:
         #[test]
         fn test_no_auto_collapse_for_failed_or_skipped_only_group() {
             let mut app = make_app();
-            finish(&mut app, "php-lint", CheckStatus::Failed);
+            finish(&mut app, "php-lint", CheckStatus::Failed, "");
             assert!(!app.is_group_collapsed("fast"));
 
             let mut app = make_app();
-            finish(&mut app, "php-lint", CheckStatus::Skipped);
+            finish(&mut app, "php-lint", CheckStatus::Skipped, "");
             assert!(!app.is_group_collapsed("fast"), "needs one Passed");
         }
 
@@ -3260,7 +3252,7 @@ checks:
             app.toggle_selected_group();
             app.toggle_selected_group(); // back open, by hand
 
-            finish(&mut app, "php-lint", CheckStatus::Passed);
+            finish(&mut app, "php-lint", CheckStatus::Passed, "");
 
             assert!(!app.is_group_collapsed("fast"));
         }
@@ -3278,7 +3270,7 @@ checks:
 
             // Selection moved away: the next result folds it
             app.view.selected_check = 3; // phpunit
-            finish(&mut app, "phpunit", CheckStatus::Failed);
+            finish(&mut app, "phpunit", CheckStatus::Failed, "");
             assert!(app.is_group_collapsed("fast"));
             assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
         }
@@ -3295,7 +3287,7 @@ checks:
             });
             app.view.selected_check = 4; // phpunit, outside fast
 
-            finish(&mut app, "php-lint", CheckStatus::Passed);
+            finish(&mut app, "php-lint", CheckStatus::Passed, "");
 
             assert!(!app.is_group_collapsed("fast"));
         }
@@ -3320,7 +3312,7 @@ checks:
             let mut app = make_app();
             app.view.selected_check = 3; // phpunit
 
-            finish(&mut app, "php-lint", CheckStatus::Passed); // fast folds
+            finish(&mut app, "php-lint", CheckStatus::Passed, ""); // fast folds
 
             assert_eq!(app.view.selected_check, 2, "index shifts up by one");
             assert_eq!(app.selected_check().map(|c| c.id()), Some("phpunit"));
@@ -3329,7 +3321,7 @@ checks:
         #[test]
         fn test_navigating_out_folds_passed_group() {
             let mut app = make_app(); // php-lint selected
-            finish(&mut app, "php-lint", CheckStatus::Passed);
+            finish(&mut app, "php-lint", CheckStatus::Passed, "");
             assert!(!app.is_group_collapsed("fast"), "still watched");
 
             app.next_check(); // tests header

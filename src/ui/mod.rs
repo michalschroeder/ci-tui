@@ -689,6 +689,8 @@ fn handle_nav_key_event(app: &mut App, key: KeyEvent) -> bool {
 
 /// Handle a key event and return the action for the main loop
 fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
+    // Any user input during the run cancels the run-end auto-select
+    app.run.user_interacted = true;
     if app.view.help_visible {
         return handle_help_key_event(app, key);
     }
@@ -748,6 +750,8 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
 /// select a row (check, pre-command or group header) in the checks list. Anything else (clicks/scroll outside
 /// those panels, other buttons) is ignored.
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Action {
+    // Only click/scroll reach here (input thread filters): user input
+    app.run.user_interacted = true;
     if app.view.help_visible {
         return Action::Continue;
     }
@@ -2123,6 +2127,25 @@ checks:
                 make_test_check("phpstan", "fast"),
             ],
         )
+    }
+
+    #[test]
+    fn test_key_and_mouse_input_mark_user_interacted() {
+        let config = test_config();
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let mut app = app_with_scrollable_output(&config);
+        assert!(!app.run.user_interacted);
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+        assert!(app.run.user_interacted, "key press");
+
+        let mut app = app_with_scrollable_output(&config);
+        handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown, 20, 3));
+        assert!(app.run.user_interacted, "mouse scroll");
     }
 
     #[test]

@@ -821,12 +821,10 @@ pub(crate) struct OutputCache {
     /// by [`confirm_search`] rather than every frame — `None` when there is
     /// no confirmed search (or it had no matches).
     highlighted: Option<Text<'static>>,
-    /// First line of a failed check's command output matching its
-    /// `error_pattern` (scroll target on selection); `None` otherwise.
-    first_error: Option<usize>,
-    /// `text` with error-pattern lines styled ([`ERROR_LINE_STYLE`]); `None`
-    /// when not a failed check or nothing matched.
-    error_text: Option<Text<'static>>,
+    /// Scroll offset putting a failed check's first `error_pattern` line at
+    /// the top (selection jump target); `None` when not failed / no match.
+    /// Error lines themselves are styled in place in `text`.
+    first_error_scroll: Option<usize>,
 }
 
 /// Count passed/failed among `fix.all_results` in a single pass.
@@ -945,11 +943,14 @@ fn output_cache_key_matches(app: &App, cache: &OutputCache) -> bool {
 
 /// Build the raw output string for the current view. Only called on a cache
 /// miss — this is the work the cache exists to avoid repeating every frame.
-fn build_raw_output(app: &App, width: u16) -> Option<String> {
+///
+/// Also returns the line where a failed check's command output starts (error
+/// lines are searched from there); `None` for every other view.
+fn build_raw_output(app: &App, width: u16) -> Option<(String, Option<usize>)> {
     match output_view(app) {
-        OutputView::FixAllResults => Some(fix_all_results_text(app)),
-        OutputView::FixResult(result) => Some(fix_result_text(result)),
-        OutputView::PreCommand(pc) => Some(pre_command_output_text(pc)),
+        OutputView::FixAllResults => Some((fix_all_results_text(app), None)),
+        OutputView::FixResult(result) => Some((fix_result_text(result), None)),
+        OutputView::PreCommand(pc) => Some((pre_command_output_text(pc), None)),
         OutputView::Check(Some(check)) => {
             let result = app.results.get(check.id())?;
             Some(build_check_output_text(app, check, result, width))
@@ -1009,23 +1010,27 @@ fn ensure_output_cache(app: &mut App, width: u16) -> bool {
         app.output_cache = None;
         return false;
     };
-    let Some(raw_output) = build_raw_output(app, width) else {
+    let Some((raw_output, output_start)) = build_raw_output(app, width) else {
         app.output_cache = None;
         return false;
     };
-    let (text, line_count) = parse_and_wrap(&raw_output, width);
-    let error_lines = error_scan(app, width)
-        .map(|(re, start)| error_line_indices(&text, re, start))
+    let (mut text, line_count) = parse_and_wrap(&raw_output, width);
+    // `output_start` is only set for a failed check's view, i.e. the selection
+    let error_lines = output_start
+        .zip(app.selected_check())
+        .map(|(start, check)| error_line_indices(&text, check.definition.error_regex(), start))
         .unwrap_or_default();
-    let error_text = (!error_lines.is_empty()).then(|| style_error_lines(&text, &error_lines));
+    style_error_lines(&mut text, &error_lines);
+    let first_error_scroll = error_lines
+        .first()
+        .map(|&line| line_start_scroll(&text, line, width));
     app.output_cache = Some(OutputCache {
         key,
         width,
         text,
         line_count,
         highlighted: None,
-        first_error: error_lines.first().copied(),
-        error_text,
+        first_error_scroll,
     });
     refresh_confirmed_search(app);
     true
@@ -1043,20 +1048,6 @@ pub fn output_line_count(app: &mut App, width: u16) -> usize {
     app.output_cache.as_ref().map_or(0, |c| c.line_count)
 }
 
-/// For a failed check's output view: its error regex and the text line
-/// where command output starts (the header's own `✗ FAILED` is not an error)
-fn error_scan(app: &App, width: u16) -> Option<(&regex::Regex, usize)> {
-    let OutputView::Check(Some(check)) = output_view(app) else {
-        return None;
-    };
-    let result = app
-        .results
-        .get(check.id())
-        .filter(|r| r.status.is_failure())?;
-    let header = check_output_header(app, check, result, width);
-    Some((check.definition.error_regex(), header.matches('\n').count()))
-}
-
 /// Indices of lines from `start` on whose plain text matches `re`
 fn error_line_indices(text: &Text<'static>, re: &regex::Regex, start: usize) -> Vec<usize> {
     text.lines
@@ -1068,37 +1059,31 @@ fn error_line_indices(text: &Text<'static>, re: &regex::Regex, start: usize) -> 
         .collect()
 }
 
-/// `text` with every span on the `lines` indices patched with
-/// [`ERROR_LINE_STYLE`] (other styling, e.g. background, kept)
-fn style_error_lines(text: &Text<'static>, lines: &[usize]) -> Text<'static> {
-    let mut styled = text.clone();
+/// Patch [`ERROR_LINE_STYLE`] onto every span of the `lines` indices (other
+/// styling, e.g. background, kept). Style-only: wrapping and search, which
+/// read plain text, are unaffected.
+fn style_error_lines(text: &mut Text<'static>, lines: &[usize]) {
     for &i in lines {
-        for span in &mut styled.lines[i].spans {
+        for span in &mut text.lines[i].spans {
             span.style = span.style.patch(ERROR_LINE_STYLE);
         }
     }
-    styled
 }
 
-/// Scroll offset bringing the current view's first error line to the top,
-/// if the view is a failed check with a matching line
-pub(crate) fn first_error_scroll(app: &mut App, width: u16) -> Option<usize> {
-    if !ensure_output_cache(app, width) {
-        return None;
-    }
-    let cache = app.output_cache.as_ref()?;
-    let line = cache.first_error?;
-    Some(line_start_scroll(&cache.text, line, width))
+/// Cached scroll offset of the current view's first error line (see
+/// [`OutputCache::first_error_scroll`]); read on the render path, after
+/// [`ensure_output_cache`] ran for this frame
+pub(crate) fn first_error_scroll(app: &App) -> Option<usize> {
+    app.output_cache.as_ref()?.first_error_scroll
 }
 
-/// Text the output panel draws: confirmed search highlight, else the error
-/// highlight, else the plain parsed output
+/// Text the output panel draws: confirmed search highlight, else the parsed
+/// output (error lines already styled)
 fn output_display_text(app: &App, cache: &OutputCache) -> Text<'static> {
     let confirmed = app.view.search.as_ref().is_some_and(|s| !s.typing);
     confirmed
         .then_some(cache.highlighted.as_ref())
         .flatten()
-        .or(cache.error_text.as_ref())
         .unwrap_or(&cache.text)
         .clone()
 }
@@ -1224,9 +1209,7 @@ fn compute_search_matches(cache: &OutputCache, query: &str) -> (Vec<usize>, Opti
     if matches.is_empty() {
         return (matches, None);
     }
-    // Built on the error-styled text: unmatched error lines keep their style
-    let base = cache.error_text.as_ref().unwrap_or(&cache.text);
-    let highlighted = highlight_matches(base, &matches, query);
+    let highlighted = highlight_matches(&cache.text, &matches, query);
     (matches, Some(highlighted))
 }
 
@@ -1293,9 +1276,8 @@ pub(crate) fn confirm_search(app: &mut App) {
         cache.highlighted = highlighted;
     }
     if let Some(scroll) = first_scroll {
-        app.view.output_scroll = scroll.min(app.compute_max_scroll());
         // Stay at the match rather than following streamed output
-        app.view.follow_output = false;
+        app.scroll_to_row(scroll);
     }
     app.needs_redraw = true;
 }
@@ -1425,13 +1407,17 @@ fn render_fix_running(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Output panel header for a check: command, status + hint, files
-fn check_output_header(
+/// Build the output string for a check with results: header (command,
+/// status, files), then command output (stderr above stdout while running,
+/// below once failed). Also returns, for a failed check, the line where the
+/// command output starts, so the header's own `✗ FAILED` is never taken for
+/// an error line.
+fn build_check_output_text(
     app: &App,
     check: &crate::checks::CheckToRun,
     result: &crate::runner::CheckResult,
     width: u16,
-) -> String {
+) -> (String, Option<usize>) {
     let mut raw_output = String::with_capacity(1024);
 
     // Command at the top - truncated by default, full on 'e' toggle
@@ -1474,18 +1460,10 @@ fn check_output_header(
 
     // Files
     append_files_section(&mut raw_output, app, check);
-    raw_output
-}
-
-/// Build the output string for a check with results: header, then command
-/// output (stderr above stdout while running, below once failed)
-fn build_check_output_text(
-    app: &App,
-    check: &crate::checks::CheckToRun,
-    result: &crate::runner::CheckResult,
-    width: u16,
-) -> String {
-    let mut raw_output = check_output_header(app, check, result, width);
+    let output_start = result
+        .status
+        .is_failure()
+        .then(|| raw_output.matches('\n').count());
 
     // While running, streamed stderr goes above stdout: follow pins the panel
     // to the bottom, where long stderr (compose/cargo progress) would
@@ -1511,7 +1489,7 @@ fn build_check_output_text(
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
     }
 
-    raw_output
+    (raw_output, output_start)
 }
 
 /// Append the files section to the output string
@@ -1629,6 +1607,7 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     // alone to populate it (e.g. the very first frame, scroll == 0).
     ensure_output_cache(app, area.width);
     app.clamp_output_scroll();
+    app.apply_pending_error_jump();
     app.follow_output_tail();
 
     // Dispatch to appropriate sub-renderer based on state
@@ -2114,7 +2093,7 @@ mod tests {
         let check = app.checks[0].clone();
         let result = app.results["php-lint"].clone();
 
-        let text = build_check_output_text(&app, &check, &result, 80);
+        let (text, _) = build_check_output_text(&app, &check, &result, 80);
 
         let stderr_at = text.find("── stderr ──").expect("stderr section");
         assert!(stderr_at < text.find("out1").unwrap(), "got: {text}");
@@ -2132,7 +2111,7 @@ mod tests {
         let check = app.checks[0].clone();
         let result = app.results["php-lint"].clone();
 
-        let text = build_check_output_text(&app, &check, &result, 80);
+        let (text, _) = build_check_output_text(&app, &check, &result, 80);
 
         assert!(text.find("out1").unwrap() < text.find("── stderr ──").unwrap());
     }
@@ -2155,12 +2134,14 @@ mod tests {
         assert_eq!(app.view.output_scroll, 0);
     }
 
-    /// make_test_app with php-lint in `status` and `output`, cache built
-    fn app_with_output(status: CheckStatus, output: &str) -> App {
+    /// make_test_app with php-lint in `status` with stdout `output` and
+    /// stderr `stderr`, cache built
+    fn app_with_output(status: CheckStatus, output: &str, stderr: &str) -> App {
         let mut app = make_test_app();
         let result = app.results.get_mut("php-lint").unwrap();
         result.status = status;
         result.output = output.to_string();
+        result.error_output = stderr.to_string();
         app.output_area_width = 80;
         ensure_output_cache(&mut app, 80);
         app
@@ -2183,7 +2164,7 @@ mod tests {
 
     #[test]
     fn test_failed_check_highlights_error_lines_only() {
-        let app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nstill ok\n");
+        let app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nstill ok\n", "");
 
         assert!(is_error_styled(&shown_line(&app, "error: boom")));
         assert!(!is_error_styled(&shown_line(&app, "still ok")));
@@ -2193,29 +2174,26 @@ mod tests {
 
     #[test]
     fn test_passed_check_has_no_error_highlight() {
-        let app = app_with_output(CheckStatus::Passed, "ok\nerror: boom\n");
+        let app = app_with_output(CheckStatus::Passed, "ok\nerror: boom\n", "");
         assert!(!is_error_styled(&shown_line(&app, "error: boom")));
     }
 
     #[test]
     fn test_failed_check_error_highlight_includes_stderr() {
-        let mut app = make_test_app();
-        let result = app.results.get_mut("php-lint").unwrap();
-        result.status = CheckStatus::Failed;
-        result.output = "ok\n".to_string();
-        result.error_output = "Traceback (most recent call last):\n".to_string();
-        ensure_output_cache(&mut app, 80);
+        let app = app_with_output(
+            CheckStatus::Failed,
+            "ok\n",
+            "Traceback (most recent call last):\n",
+        );
 
         assert!(is_error_styled(&shown_line(&app, "Traceback")));
     }
 
     #[test]
     fn test_check_error_pattern_overrides_default_highlight() {
-        let mut app = make_test_app();
+        let mut app = app_with_output(CheckStatus::Failed, "E0308 bad\nerror: not matched\n", "");
         app.checks[0].definition.error_pattern = Some(regex::Regex::new("^E\\d+").unwrap());
-        let result = app.results.get_mut("php-lint").unwrap();
-        result.status = CheckStatus::Failed;
-        result.output = "E0308 bad\nerror: not matched\n".to_string();
+        app.output_cache = None; // pattern is not part of the cache key
         ensure_output_cache(&mut app, 80);
 
         assert!(is_error_styled(&shown_line(&app, "E0308")));
@@ -2224,7 +2202,7 @@ mod tests {
 
     #[test]
     fn test_search_highlight_wins_over_error_highlight() {
-        let mut app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nerror: other\n");
+        let mut app = app_with_output(CheckStatus::Failed, "ok\nerror: boom\nerror: other\n", "");
         app.open_search();
         for c in "boom".chars() {
             app.search_push(c);
