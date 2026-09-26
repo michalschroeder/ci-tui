@@ -4,10 +4,14 @@
 //! release; the `init` template points editors at it via a
 //! `# yaml-language-server: $schema=...` line.
 
+/// Config JSON Schema (root: the on-disk config shape).
+fn schema() -> schemars::Schema {
+    schemars::schema_for!(crate::config::RawCiConfig)
+}
+
 /// Config JSON Schema as pretty-printed JSON with a trailing newline.
 pub fn generate() -> String {
-    let schema = schemars::schema_for!(crate::config::RawCiConfig);
-    let json = serde_json::to_string_pretty(&schema).expect("schema serializes to JSON");
+    let json = serde_json::to_string_pretty(&schema()).expect("schema serializes to JSON");
     format!("{json}\n")
 }
 
@@ -23,10 +27,12 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
     }
 
-    fn validator() -> jsonschema::Validator {
-        let schema = schemars::schema_for!(crate::config::RawCiConfig);
-        jsonschema::validator_for(schema.as_value())
-            .expect("generated schema must be a valid JSON Schema")
+    fn validator() -> &'static jsonschema::Validator {
+        static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> = std::sync::OnceLock::new();
+        VALIDATOR.get_or_init(|| {
+            jsonschema::validator_for(schema().as_value())
+                .expect("generated schema must be a valid JSON Schema")
+        })
     }
 
     /// Schema errors for `yaml` (empty = valid), YAML converted via serde_json.
@@ -99,10 +105,16 @@ mod tests {
         assert!(!schema_errors(&yaml).is_empty(), "schema accepted:\n{yaml}");
     }
 
-    #[test]
-    fn test_docker_section_required_unless_local() {
-        let yaml = MINIMAL.replace("docker: {project_dir: ., shell: bash}\n", "");
-        assert!(load_config_accepts(&yaml).is_err());
+    #[rstest::rstest]
+    #[case::docker_missing("docker: {project_dir: ., shell: bash}\n", "")]
+    #[case::docker_null("docker: {project_dir: ., shell: bash}\n", "docker: ~\n")]
+    #[case::unsupported_version("version: 2\n", "version: 3\n")]
+    fn test_replaced_field_fails_schema(#[case] from: &str, #[case] to: &str) {
+        let yaml = MINIMAL.replace(from, to);
+        assert!(
+            load_config_accepts(&yaml).is_err(),
+            "load_config accepted:\n{yaml}"
+        );
         assert!(!schema_errors(&yaml).is_empty(), "schema accepted:\n{yaml}");
     }
 }

@@ -68,11 +68,17 @@
       "description": "Config format version (must be 2)",
       "type": "integer",
       "format": "uint32",
+      "const": 2,
       "minimum": 0
     }
   },
   "additionalProperties": false,
   "else": {
+    "properties": {
+      "docker": {
+        "type": "object"
+      }
+    },
     "required": [
       "docker"
     ]

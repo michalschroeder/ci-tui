@@ -27,6 +27,12 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # Schema from the tagged commit, not master HEAD (may have moved on)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ steps.release.outputs.release_created }}
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+
       # Asset name ci-tui.schema.json: the `init` template links
       # releases/download/v{version}/ci-tui.schema.json
       - name: Upload config schema

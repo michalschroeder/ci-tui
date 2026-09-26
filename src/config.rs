@@ -73,11 +73,12 @@ pub const DEFAULT_MAX_OUTPUT_LINES: usize = 10_000;
     description = "ci-tui.yaml: CI checks to run for changed files",
     extend(
         "if" = {"properties": {"runner": {"const": "local"}}, "required": ["runner"]},
-        "else" = {"required": ["docker"]}
+        "else" = {"required": ["docker"], "properties": {"docker": {"type": "object"}}}
     )
 )]
 pub(crate) struct RawCiConfig {
     /// Config format version (must be 2)
+    #[schemars(extend("const" = SUPPORTED_VERSION))]
     version: u32,
     /// Where checks run: `docker` (default) or `local` (on the host)
     #[serde(default)]

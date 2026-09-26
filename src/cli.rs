@@ -113,14 +113,16 @@ pub fn missing_config_error() -> clap::Error {
 
 impl Command {
     /// Config path for `init` / `validate`: positional arg, then `--config`,
-    /// then `ci-tui.yaml`. `schema` reads no config (never called for it).
-    pub fn config_path(&self, config: Option<PathBuf>) -> PathBuf {
-        let path = match self {
-            Self::Init { path } | Self::Validate { path } => path.clone(),
-            Self::Schema => None,
+    /// then `ci-tui.yaml`. `None` for `schema`, which reads no config.
+    pub fn config_path(&self, config: Option<PathBuf>) -> Option<PathBuf> {
+        let (Self::Init { path } | Self::Validate { path }) = self else {
+            return None;
         };
-        path.or(config)
-            .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
+        Some(
+            path.clone()
+                .or(config)
+                .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE)),
+        )
     }
 }
 
@@ -153,6 +155,7 @@ mod tests {
         cli.command
             .expect("expected a subcommand")
             .config_path(cli.config)
+            .expect("init / validate resolve a path")
     }
 
     #[rstest::rstest]

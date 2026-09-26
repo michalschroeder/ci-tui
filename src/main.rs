@@ -54,24 +54,33 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
     })
 }
 
+/// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
+fn print_schema() -> Result<()> {
+    use std::io::Write;
+    match std::io::stdout()
+        .lock()
+        .write_all(schema::generate().as_bytes())
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 /// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
-    match &command {
-        Command::Schema => print!("{}", schema::generate()),
-        Command::Init { .. } => {
-            let path = command.config_path(config);
-            commands::init(&path)?;
-            println!("Wrote {}", path.display());
-            println!(
-                "Edit the checks section, then run: ci-tui --config {}",
-                path.display()
-            );
-        }
-        Command::Validate { .. } => {
-            let path = command.config_path(config);
-            commands::validate(&path)?;
-            println!("OK: {} is valid", path.display());
-        }
+    let Some(path) = command.config_path(config) else {
+        return print_schema();
+    };
+    if let Command::Init { .. } = command {
+        commands::init(&path)?;
+        println!("Wrote {}", path.display());
+        println!(
+            "Edit the checks section, then run: ci-tui --config {}",
+            path.display()
+        );
+    } else {
+        commands::validate(&path)?;
+        println!("OK: {} is valid", path.display());
     }
     Ok(())
 }
