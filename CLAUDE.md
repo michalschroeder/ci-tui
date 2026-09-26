@@ -138,6 +138,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`; first line links the versioned release schema)
 - **schema.rs**: `ci-tui schema` — config JSON Schema via `schemars` (root `RawCiConfig`); committed at `schema/ci-tui.schema.json`, drift-guarded by a test (`make schema` regenerates), uploaded as a release asset
+- **filter.rs**: `--only` / `--group` — narrows `CiConfig` right after load (so TUI refresh, simple, fix, list share the subset); unknown ids → exit 2 listing valid ones; empty groups dropped (no `pre_commands`); triggers still apply
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
 - **list.rs**: `--list` / `--dry-run` — per-check run/on-demand/skipped decision plus reason, from the same `Selection` evaluation `determine_checks` uses; executes nothing
 - **preflight.rs**: Docker startup probe — non-fatal warnings when changed files won't resolve in the containers selected checks use (exec: repo-relative path vs container WORKDIR; `docker run` fallback without `volume_mount` or mounted away from `docker.work_dir`)

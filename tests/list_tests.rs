@@ -10,7 +10,7 @@ mod common;
 use common::configs::{
     checks_test_config, rust_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder,
 };
-use common::{git, isolated_git_command};
+use common::{git, run_ci_tui};
 
 fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
     ChangedFiles {
@@ -313,11 +313,7 @@ checks:
 fn binary_list_executes_nothing(#[case] flag: &str) {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ci-tui"))
-        .current_dir(tmp.path())
-        .args([flag, "--files", "src/a.rs", "notes.md"])
-        .output()
-        .unwrap();
+    let out = run_ci_tui(tmp.path(), &[flag, "--files", "src/a.rs", "notes.md"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -351,11 +347,7 @@ fn binary_staged_lists_only_index_files_minus_ignored() {
     git(root, &["add", "src/a.rs", "src/gone.rs", "notes.md"]);
     std::fs::remove_file(root.join("src/gone.rs")).unwrap();
 
-    let out = isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
-        .current_dir(root)
-        .args(["--staged", "--list"])
-        .output()
-        .unwrap();
+    let out = run_ci_tui(root, &["--staged", "--list"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -378,12 +370,7 @@ fn binary_staged_lists_only_index_files_minus_ignored() {
 fn binary_staged_outside_git_repo_exits_with_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
-    let out = isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
-        .current_dir(tmp.path())
-        .env("GIT_CEILING_DIRECTORIES", tmp.path().parent().unwrap())
-        .args(["--staged", "--list"])
-        .output()
-        .unwrap();
+    let out = run_ci_tui(tmp.path(), &["--staged", "--list"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("could not read staged files"), "{stderr}");

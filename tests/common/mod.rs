@@ -27,6 +27,19 @@ pub fn isolated_git_command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Run the ci-tui binary in `dir` with [`OUTER_GIT_ENV`] cleared and git
+/// discovery capped at `dir`, so a run never resolves to an enclosing repo
+/// (e.g. local mode's repo root when the tempdir sits in a work tree).
+#[allow(dead_code)]
+pub fn run_ci_tui(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
+        .current_dir(dir)
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
 /// Run `git args` in `dir` against the real git binary, panicking on failure.
 #[allow(dead_code)]
 pub fn git(dir: &std::path::Path, args: &[&str]) {

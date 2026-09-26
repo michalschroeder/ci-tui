@@ -363,6 +363,8 @@ pub struct App {
     pub results: HashMap<String, CheckResult>,
     /// Current git branch name
     pub(crate) current_branch: String,
+    /// Active `--only` / `--group` filter, shown in the header
+    pub filter_notice: Option<String>,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -450,6 +452,7 @@ impl App {
             checks,
             results,
             current_branch,
+            filter_notice: None,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),

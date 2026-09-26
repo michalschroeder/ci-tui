@@ -45,6 +45,14 @@ pub struct Cli {
     /// Print changed files, base ref and which checks would run and why; execute nothing
     #[arg(long, visible_alias = "dry-run", conflicts_with_all = ["simple", "fix"])]
     pub list: bool,
+
+    /// Run only these check ids (comma-separated or repeated); triggers still apply
+    #[arg(long, value_name = "ID", value_delimiter = ',')]
+    pub only: Vec<String>,
+
+    /// Run only checks in these groups (comma-separated or repeated); with --only, both must match
+    #[arg(long = "group", value_name = "GROUP", value_delimiter = ',')]
+    pub groups: Vec<String>,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -53,6 +61,19 @@ fn parse_base_arg(value: &str) -> Result<String, String> {
         return Err("git ref must not be empty".to_string());
     }
     Ok(value.to_string())
+}
+
+/// `--only` / `--group` values after comma split: trimmed (`"a, b"`), empty
+/// items dropped (`a,` or an empty `"$VAR"` means no filter), deduped in order.
+fn normalize_ids(ids: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|o| o == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
 }
 
 /// `--files` value parser. `--files` takes 1.. values, so a trailing subcommand
@@ -80,18 +101,22 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let cli = Self::try_parse_from(args)?;
+        let mut cli = Self::try_parse_from(args)?;
+        cli.only = normalize_ids(cli.only);
+        cli.groups = normalize_ids(cli.groups);
         if cli.command.is_some()
             && (cli.simple
                 || cli.fix
                 || cli.list
                 || cli.staged
                 || !cli.files.is_empty()
-                || cli.base.is_some())
+                || cli.base.is_some()
+                || !cli.only.is_empty()
+                || !cli.groups.is_empty())
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files and --base cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files, --base, --only and --group cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -120,6 +145,11 @@ pub fn missing_config_error() -> clap::Error {
         clap::error::ErrorKind::MissingRequiredArgument,
         "--config <CONFIG> is required: no ci-tui.yaml in the current directory (run `ci-tui init` to create one)",
     )
+}
+
+/// Clap-styled usage error for a bad `--only` / `--group` value (exit code 2).
+pub fn filter_error(message: String) -> clap::Error {
+    Cli::command().error(clap::error::ErrorKind::InvalidValue, message)
 }
 
 impl Command {
@@ -189,6 +219,8 @@ mod tests {
     #[case::fix_then_staged(&["ci-tui", "--fix", "--staged"])]
     #[case::staged_before_validate(&["ci-tui", "--staged", "validate"])]
     #[case::staged_before_schema(&["ci-tui", "--staged", "schema"])]
+    #[case::only_before_validate(&["ci-tui", "--only", "a", "validate"])]
+    #[case::group_before_init(&["ci-tui", "--group", "g", "init"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -234,6 +266,29 @@ mod tests {
     #[test]
     fn test_staged_flag_default_off() {
         assert!(!Cli::try_parse_checked(["ci-tui"]).unwrap().staged);
+    }
+
+    #[rstest::rstest]
+    #[case::comma(&["ci-tui", "--only", "a,b"], &["a", "b"], &[])]
+    #[case::repeated(&["ci-tui", "--only", "a", "--only=b"], &["a", "b"], &[])]
+    #[case::group(&["ci-tui", "--group", "g1,g2", "--group", "g3"], &[], &["g1", "g2", "g3"])]
+    #[case::both_with_modes(&["ci-tui", "-s", "--only", "a", "--group", "g"], &["a"], &["g"])]
+    #[case::with_fix(&["ci-tui", "--fix", "--group", "g"], &[], &["g"])]
+    #[case::with_list(&["ci-tui", "--list", "--only", "a"], &["a"], &[])]
+    #[case::after_files(&["ci-tui", "-f", "x.rs", "--only", "a"], &["a"], &[])]
+    #[case::none(&["ci-tui"], &[], &[])]
+    #[case::spaces_trimmed(&["ci-tui", "--only", "a, b", "--group", " g "], &["a", "b"], &["g"])]
+    #[case::trailing_comma(&["ci-tui", "--only", "a,"], &["a"], &[])]
+    #[case::empty_value_is_no_filter(&["ci-tui", "--only", "", "--group="], &[], &[])]
+    #[case::deduped(&["ci-tui", "--only", "a,b,a", "--only", "b"], &["a", "b"], &[])]
+    fn test_only_group_flags_parsed(
+        #[case] args: &[&str],
+        #[case] only: &[&str],
+        #[case] groups: &[&str],
+    ) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert_eq!(cli.only, only);
+        assert_eq!(cli.groups, groups);
     }
 
     #[test]
