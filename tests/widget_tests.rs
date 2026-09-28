@@ -249,6 +249,18 @@ fn test_status_icon_running_is_yellow() {
 }
 
 #[test]
+fn test_status_icon_queued_is_blue() {
+    let mut app = make_test_app_running();
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::Queued;
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // Queued check (waiting for a max_parallel slot) uses a blue dotted circle
+    assert_eq!(find_symbol_color(buffer, '◌'), Some(Color::Blue));
+}
+
+#[test]
 fn test_checks_list_shows_group_names() {
     let mut app = make_test_app();
     let mut terminal = create_terminal();

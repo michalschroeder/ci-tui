@@ -78,7 +78,7 @@ impl ConfigBuilder {
     /// Set top-level `max_parallel` (cap on concurrent checks per parallel group)
     #[allow(dead_code)]
     pub fn with_max_parallel(mut self, n: usize) -> Self {
-        self.max_parallel = NonZeroUsize::new(n);
+        self.max_parallel = Some(NonZeroUsize::new(n).expect("max_parallel >= 1"));
         self
     }
 
@@ -86,7 +86,7 @@ impl ConfigBuilder {
     #[allow(dead_code)]
     pub fn with_group_max_parallel(mut self, group_id: &str, n: usize) -> Self {
         self = self.with_parallel_group(group_id);
-        self.checks[group_id].max_parallel = NonZeroUsize::new(n);
+        self.checks[group_id].max_parallel = Some(NonZeroUsize::new(n).expect("max_parallel >= 1"));
         self
     }
 

@@ -570,7 +570,7 @@ impl App {
             can_retry: !busy && finished,
             can_trigger: !busy && status == Some(CheckStatus::OnDemand),
             can_run_all_files: !busy && (finished || status == Some(CheckStatus::OnDemand)),
-            can_cancel: status == Some(CheckStatus::Running),
+            can_cancel: matches!(status, Some(CheckStatus::Queued | CheckStatus::Running)),
         }
     }
 
@@ -832,6 +832,7 @@ impl App {
         // Every event but an invisible output chunk changes what's drawn
         let mut redraw = true;
         match event {
+            RunnerEvent::CheckQueued { check_id } => self.on_check_queued(&check_id),
             RunnerEvent::CheckStarted { check_id } => self.on_check_started(&check_id),
             RunnerEvent::CheckOutput {
                 check_id,
@@ -864,6 +865,12 @@ impl App {
         }
         self.needs_redraw |= redraw;
         self.clamp_selection();
+    }
+
+    fn on_check_queued(&mut self, check_id: &str) {
+        if let Some(result) = self.results.get_mut(check_id) {
+            result.status = CheckStatus::Queued;
+        }
     }
 
     fn on_check_started(&mut self, check_id: &str) {
@@ -1287,15 +1294,16 @@ impl App {
 
     /// Count check results per status bucket (skipped checks are not counted)
     pub fn count_by_status(&self) -> StatusCounts {
+        use CheckStatus as S;
         let mut counts = StatusCounts::default();
         for result in self.results.values() {
             match result.status {
-                CheckStatus::Passed => counts.passed += 1,
-                CheckStatus::Failed | CheckStatus::TimedOut => counts.failed += 1,
-                CheckStatus::Pending | CheckStatus::Running => counts.pending += 1,
-                CheckStatus::OnDemand => counts.on_demand += 1,
-                CheckStatus::Cancelled => counts.cancelled += 1,
-                CheckStatus::Skipped => (),
+                S::Passed => counts.passed += 1,
+                S::Failed | S::TimedOut => counts.failed += 1,
+                S::Pending | S::Queued | S::Running => counts.pending += 1,
+                S::OnDemand => counts.on_demand += 1,
+                S::Cancelled => counts.cancelled += 1,
+                S::Skipped => (),
             }
         }
         counts
@@ -1726,11 +1734,26 @@ checks:
     }
 
     #[test]
-    fn test_only_running_check_can_cancel() {
+    fn test_only_queued_or_running_check_can_cancel() {
         let mut app = make_app();
         assert!(!app.selected_capabilities().can_cancel, "pending");
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Queued;
+        assert!(app.selected_capabilities().can_cancel, "queued");
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Running;
-        assert!(app.selected_capabilities().can_cancel);
+        assert!(app.selected_capabilities().can_cancel, "running");
+    }
+
+    #[test]
+    fn test_queued_is_neither_finished_nor_failure() {
+        assert!(!CheckStatus::Queued.is_finished());
+        assert!(!CheckStatus::Queued.is_failure());
+        let mut app = make_app();
+        let pending = app.count_by_status().pending;
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Queued;
+        let caps = app.selected_capabilities();
+        assert!(!caps.can_retry && !caps.can_fix && !caps.can_run_all_files);
+        assert_eq!(app.count_by_status().pending, pending, "counted as pending");
+        assert_eq!(app.count_by_status().failed, 0);
     }
 
     #[test]
@@ -1977,6 +2000,20 @@ checks:
         assert_eq!(
             app.results.get("php-lint").unwrap().status,
             CheckStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_handle_runner_event_check_queued() {
+        let mut app = make_app();
+
+        app.handle_runner_event(RunnerEvent::CheckQueued {
+            check_id: "php-lint".to_string(),
+        });
+
+        assert_eq!(
+            app.results.get("php-lint").unwrap().status,
+            CheckStatus::Queued
         );
     }
 

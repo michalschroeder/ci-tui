@@ -45,6 +45,7 @@ fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> Check
 #[case(CheckStatus::Failed, "failed-check", 3200)]
 #[case(CheckStatus::Running, "running-check", 0)]
 #[case(CheckStatus::Pending, "pending-check", 0)]
+#[case(CheckStatus::Queued, "queued-check", 0)]
 #[case(CheckStatus::Skipped, "skipped-check", 0)]
 #[case(CheckStatus::OnDemand, "on-demand-check", 0)]
 #[case(CheckStatus::TimedOut, "timed-out-check", 1000)]

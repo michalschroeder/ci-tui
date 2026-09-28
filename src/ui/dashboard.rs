@@ -118,6 +118,7 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
         Some(CheckStatus::Cancelled) => ("⊗", Style::default().fg(Color::Gray)),
         Some(CheckStatus::Running) => ("●", Style::default().fg(Color::Yellow)),
         Some(CheckStatus::Pending) => ("○", Style::default().fg(Color::DarkGray)),
+        Some(CheckStatus::Queued) => ("◌", Style::default().fg(Color::Blue)),
         Some(CheckStatus::Skipped) => ("⊘", Style::default().fg(Color::DarkGray)),
         Some(CheckStatus::OnDemand) => ("◇", Style::default().fg(Color::Cyan)),
         None => ("?", Style::default().fg(Color::DarkGray)),
@@ -1482,6 +1483,7 @@ fn build_check_output_text(
         CheckStatus::Cancelled => "\x1b[37m⊗ CANCELLED\x1b[0m",
         CheckStatus::Running => "\x1b[33m◉ RUNNING...\x1b[0m",
         CheckStatus::Pending => "\x1b[90m○ PENDING\x1b[0m",
+        CheckStatus::Queued => "\x1b[34m◌ QUEUED\x1b[0m",
         CheckStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
         CheckStatus::OnDemand => "\x1b[36m◇ ON-DEMAND\x1b[0m",
     };
@@ -1494,7 +1496,7 @@ fn build_check_output_text(
         raw_output.push_str("  \x1b[33m← press 'x' to fix\x1b[0m");
     } else if result.status == CheckStatus::Cancelled {
         raw_output.push_str("  \x1b[33m← press 'r' to retry\x1b[0m");
-    } else if result.status == CheckStatus::Running {
+    } else if matches!(result.status, CheckStatus::Queued | CheckStatus::Running) {
         raw_output.push_str("  \x1b[33m← press 's' to cancel\x1b[0m");
     }
     raw_output.push_str("\n\n");
@@ -1529,6 +1531,8 @@ fn build_check_output_text(
 
     if result.status == CheckStatus::Pending {
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
+    } else if result.status == CheckStatus::Queued {
+        raw_output.push_str("\x1b[90mWaiting for a free slot (max_parallel / --jobs)...\x1b[0m");
     }
 
     let error_scan = result.status.is_failure().then(|| ErrorScan {

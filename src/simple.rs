@@ -197,6 +197,7 @@ pub fn print_result(result: &CheckResult) {
 /// - Cancelled: gray crossed circle, "cancelled" and duration
 /// - Running: yellow dot with "(running)"
 /// - Pending: gray circle with "(pending)"
+/// - Queued: blue dotted circle with "(queued)"
 /// - Skipped: gray slashed circle with "(skipped)"
 /// - OnDemand: cyan diamond with "(on-demand)"
 pub fn format_result(result: &CheckResult) -> String {
@@ -214,6 +215,7 @@ pub fn format_result(result: &CheckResult) -> String {
         }
         CheckStatus::Running => format!("  \x1b[33m●\x1b[0m {id} \x1b[90m(running)\x1b[0m"),
         CheckStatus::Pending => format!("  \x1b[90m○\x1b[0m {id} \x1b[90m(pending)\x1b[0m"),
+        CheckStatus::Queued => format!("  \x1b[34m◌\x1b[0m {id} \x1b[90m(queued)\x1b[0m"),
         CheckStatus::Skipped => format!("  \x1b[90m⊘\x1b[0m {id} \x1b[90m(skipped)\x1b[0m"),
         CheckStatus::OnDemand => format!("  \x1b[36m◇\x1b[0m {id} \x1b[90m(on-demand)\x1b[0m"),
     }

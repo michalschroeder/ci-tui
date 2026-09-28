@@ -591,6 +591,9 @@ fn merged_env(target: &ExecTarget, extra: &HashMap<String, String>) -> HashMap<S
 pub enum CheckStatus {
     /// Check has not started yet
     Pending,
+    /// Check is spawned in a parallel group, waiting for a `max_parallel` slot
+    /// (cancellable, unlike `Pending`)
+    Queued,
     /// Check is currently executing
     Running,
     /// Check completed successfully (exit code 0)
@@ -749,6 +752,9 @@ pub async fn run_check_cancellable<T: From<CheckResult>>(
 /// Events emitted by the check runner during execution
 #[derive(Debug, Clone)]
 pub enum RunnerEvent {
+    /// A parallel-group check is waiting for a `max_parallel` slot
+    /// (cancellable; [`Self::CheckStarted`] follows once it gets one)
+    CheckQueued { check_id: String },
     /// A check has started executing
     CheckStarted { check_id: String },
     /// Live output chunk of a running check (batched, see
@@ -895,8 +901,8 @@ impl CheckRunner {
         let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         // JoinSet, not detached spawns: aborting the runner (quit, retry-all)
         // drops the set, which aborts the checks and kills their commands.
-        // All tasks spawn up front; a permit gates each before `CheckStarted`,
-        // so queued checks stay pending in the UI until a slot frees up.
+        // All tasks spawn up front (`CheckQueued`); a permit gates each
+        // before `CheckStarted`, see `run_check_with_target`.
         let permits = Arc::new(tokio::sync::Semaphore::new(limit));
         let mut set = tokio::task::JoinSet::new();
         for check in runnable {
@@ -922,8 +928,6 @@ impl CheckRunner {
         let cancels = self.cancels.clone();
 
         async move {
-            // Held until the check ends
-            let _permit = permits.acquire().await.expect("semaphore never closed");
             let result = run_check_with_target(
                 &check,
                 &project_root,
@@ -932,6 +936,7 @@ impl CheckRunner {
                 executor.as_ref(),
                 &cancels,
                 config.max_output_lines,
+                Some(&permits),
             )
             .await;
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
@@ -951,6 +956,7 @@ impl CheckRunner {
             self.executor.as_ref(),
             &self.cancels,
             self.config.max_output_lines,
+            None,
         )
         .await
     }
@@ -1099,8 +1105,12 @@ async fn run_all_pre_commands(
     true
 }
 
-/// Run `check`, cancellable via `cancels`. `CheckStarted` is sent once
-/// registered, so a check shown as running can always be cancelled.
+/// Run `check`, cancellable via `cancels`. With `permits` (parallel group) it
+/// sends `CheckQueued`, then waits for a slot, held until the check ends.
+/// `CheckQueued` / `CheckStarted` are sent once registered, so a check shown
+/// as queued or running can always be cancelled; a cancel while queued drops
+/// the wait, so the command never runs.
+#[allow(clippy::too_many_arguments)]
 async fn run_check_with_target(
     check: &CheckToRun,
     project_root: &Path,
@@ -1109,8 +1119,10 @@ async fn run_check_with_target(
     executor: &dyn CommandExecutor,
     cancels: &CancelRegistry,
     max_output_lines: usize,
+    permits: Option<&tokio::sync::Semaphore>,
 ) -> CheckResult {
     let run = async {
+        let _permit = wait_for_slot(permits, check.id(), event_tx).await;
         let _ = event_tx
             .send(RunnerEvent::CheckStarted {
                 check_id: check.id().to_string(),
@@ -1129,6 +1141,22 @@ async fn run_check_with_target(
         .await
     };
     run_check_cancellable(cancels, check.id(), run).await
+}
+
+/// With `permits`: send `CheckQueued`, then wait for a slot (released when
+/// the returned permit drops). `None` without `permits`.
+async fn wait_for_slot<'a>(
+    permits: Option<&'a tokio::sync::Semaphore>,
+    check_id: &str,
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    let permits = permits?;
+    let _ = event_tx
+        .send(RunnerEvent::CheckQueued {
+            check_id: check_id.to_string(),
+        })
+        .await;
+    Some(permits.acquire().await.expect("semaphore never closed"))
 }
 
 /// Execute a command on `target` and return the result (for testing with executor).

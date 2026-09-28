@@ -899,13 +899,16 @@ impl CiConfig {
 
 /// Effective cap for a `parallel: true` group: `global` (`--jobs` / top-level
 /// `max_parallel`, else CPU count, else 1), lowered by the group's own
-/// `max_parallel`. A group cannot raise the global cap: `--jobs` bounds the
-/// whole machine's load.
+/// `max_parallel` (a group cannot raise the global cap). Applies to checks
+/// started by a group run only: TUI retries (`r`), on-demand triggers (`t`) and
+/// run-all-files (`A`) are not limited. Clamped to the semaphore's
+/// [`MAX_PERMITS`](tokio::sync::Semaphore::MAX_PERMITS) (larger values panic).
 fn parallel_limit(global: Option<NonZeroUsize>, group: Option<NonZeroUsize>) -> NonZeroUsize {
     let global = global
         .or_else(|| std::thread::available_parallelism().ok())
         .unwrap_or(NonZeroUsize::MIN);
-    group.map_or(global, |group| group.min(global))
+    let max = NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS).unwrap_or(NonZeroUsize::MIN);
+    group.map_or(global, |group| group.min(global)).min(max)
 }
 
 impl GroupConfig {
@@ -2768,6 +2771,22 @@ checks:
             #[case] expected: usize,
         ) {
             assert_eq!(parallel_limit(global, group).get(), expected);
+        }
+
+        #[rstest]
+        #[case::global(nz(usize::MAX), None)]
+        #[case::group(None, nz(usize::MAX))]
+        #[case::both(nz(usize::MAX), nz(usize::MAX))]
+        fn huge_limit_clamped_to_semaphore_max(
+            #[case] global: Option<NonZeroUsize>,
+            #[case] group: Option<NonZeroUsize>,
+        ) {
+            let max = tokio::sync::Semaphore::MAX_PERMITS;
+            let limit = parallel_limit(global, group).get();
+            assert!(limit <= max, "{limit} > {max}");
+            if global.is_some() {
+                assert_eq!(limit, max);
+            }
         }
 
         #[test]

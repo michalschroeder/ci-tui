@@ -1104,6 +1104,10 @@ mod check_runner_tests {
         ConfigBuilder::new().with_parallel_group("g").with_max_parallel(8),
         5
     )]
+    #[case::huge_limit_does_not_panic(
+        ConfigBuilder::new().with_parallel_group("g").with_max_parallel(usize::MAX),
+        5
+    )]
     #[case::sequential_group_ignores_cap(
         ConfigBuilder::new()
             .with_max_parallel(4)
@@ -1116,6 +1120,104 @@ mod check_runner_tests {
         #[case] expected: usize,
     ) {
         assert_eq!(peak_concurrency(config.build()).await, expected);
+    }
+
+    #[tokio::test]
+    async fn queued_check_can_be_cancelled_before_it_runs() {
+        use ci_tui::runner::CancelRegistry;
+        use std::collections::HashSet;
+
+        let config = ConfigBuilder::new().with_group_max_parallel("g", 1).build();
+        let executor = Arc::new(common::ConcurrencyExecutor::default());
+        let cancels = CancelRegistry::default();
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), executor.clone())
+            .with_cancels(cancels.clone());
+        let checks = (0..3)
+            .map(|i| make_widget_check(&format!("c{i}"), "g", "C", false))
+            .collect();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let run = tokio::spawn(async move { runner.run_checks(checks, tx).await });
+
+        // Once one check holds the only slot, cancel another still waiting
+        let (mut queued, mut started) = (HashSet::new(), HashSet::new());
+        let mut cancelled = None;
+        let mut results = HashMap::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                RunnerEvent::CheckQueued { check_id } => {
+                    queued.insert(check_id);
+                }
+                RunnerEvent::CheckStarted { check_id } => {
+                    started.insert(check_id);
+                }
+                RunnerEvent::CheckFinished { result } => {
+                    results.insert(result.check_id.clone(), result);
+                }
+                _ => {}
+            }
+            if cancelled.is_none() && !started.is_empty() {
+                if let Some(id) = queued.difference(&started).next().cloned() {
+                    assert!(cancels.cancel(&id), "queued check must be cancellable");
+                    cancelled = Some(id);
+                }
+            }
+        }
+        run.await.unwrap().unwrap();
+
+        let cancelled = cancelled.expect("a check was queued behind the running one");
+        assert_eq!(results.len(), 3);
+        for (id, result) in &results {
+            let expected = if *id == cancelled {
+                CheckStatus::Cancelled
+            } else {
+                CheckStatus::Passed
+            };
+            assert_eq!(result.status, expected, "{id}");
+        }
+        assert!(!started.contains(&cancelled), "never started");
+        let marker = format!("{cancelled} --check");
+        let executed = executor.executed();
+        assert_eq!(executed.len(), 2, "{executed:?}");
+        assert!(
+            executed.iter().all(|cmd| !cmd.contains(&marker)),
+            "cancelled check ran: {executed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_parallel_group_checks_are_queued_before_start() {
+        let config = ConfigBuilder::new()
+            .with_parallel_group("p")
+            .with_check(
+                "s",
+                "s0",
+                common::configs::CheckBuilder::new("S", "s").build(),
+            )
+            .build();
+        let runner = CheckRunner::with_executor(
+            config,
+            Path::new("/tmp"),
+            Arc::new(common::ConcurrencyExecutor::default()),
+        );
+        let checks = vec![
+            make_widget_check("p0", "p", "P", false),
+            make_widget_check("s0", "s", "S", false),
+        ];
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        runner.run_checks(checks, tx).await.unwrap();
+        let events = collect_events(rx).await;
+
+        let pos = |pred: &dyn Fn(&RunnerEvent) -> bool| events.iter().position(|e| pred(e));
+        let queued =
+            pos(&|e| matches!(e, RunnerEvent::CheckQueued { check_id } if check_id == "p0"));
+        let started =
+            pos(&|e| matches!(e, RunnerEvent::CheckStarted { check_id } if check_id == "p0"));
+        assert!(queued.unwrap() < started.unwrap(), "{events:?}");
+        assert!(
+            pos(&|e| matches!(e, RunnerEvent::CheckQueued { check_id } if check_id == "s0"))
+                .is_none(),
+            "sequential checks are never queued"
+        );
     }
 }
 

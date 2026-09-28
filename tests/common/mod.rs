@@ -302,6 +302,7 @@ pub fn make_test_app_running() -> App {
 pub struct ConcurrencyExecutor {
     running: std::sync::atomic::AtomicUsize,
     peak: std::sync::atomic::AtomicUsize,
+    executed: std::sync::Mutex<Vec<String>>,
 }
 
 #[allow(dead_code)]
@@ -310,17 +311,23 @@ impl ConcurrencyExecutor {
     pub fn peak(&self) -> usize {
         self.peak.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Commands passed to `execute`, in call order
+    pub fn executed(&self) -> Vec<String> {
+        self.executed.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl ci_tui::runner::CommandExecutor for ConcurrencyExecutor {
     async fn execute(
         &self,
-        _: &str,
+        command: &str,
         _: &std::path::Path,
         _: &ci_tui::runner::OutputSink,
     ) -> CommandOutput {
         use std::sync::atomic::Ordering::SeqCst;
+        self.executed.lock().unwrap().push(command.to_string());
         let now = self.running.fetch_add(1, SeqCst) + 1;
         self.peak.fetch_max(now, SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
