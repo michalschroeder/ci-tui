@@ -17,9 +17,11 @@
 //!
 //! - [`app`]: Application state management
 //! - [`dashboard`]: Rendering logic using ratatui widgets
+//! - [`external`]: Output in `$PAGER` / `$EDITOR` (`o` / `O`) and log saving (`w`)
 
 pub mod app;
 pub mod dashboard;
+pub mod external;
 
 use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
@@ -38,12 +40,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use external::Viewer;
 use ratatui::prelude::*;
 use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 use sysinfo::System;
@@ -119,11 +122,65 @@ enum TaskEvent {
     },
 }
 
+/// Parks the input thread while an external pager / editor owns the
+/// terminal, so keys typed there reach it instead of being read by the TUI.
+///
+/// The input thread polls / reads only while holding `lock` ([`Self::hold`]);
+/// [`Self::pause`] raises `paused` (the thread stops re-taking the lock),
+/// then takes the lock itself, waiting out at most one in-flight poll
+/// ([`KEYBOARD_POLL_TIMEOUT`]). A lock alone could starve `pause`: the
+/// thread re-locks right after each unlock.
+#[derive(Clone, Default)]
+struct InputGate {
+    paused: Arc<AtomicBool>,
+    lock: Arc<Mutex<()>>,
+}
+
+impl InputGate {
+    /// Input thread: permission to poll / read once, `None` while paused
+    fn hold(&self) -> Option<MutexGuard<'_, ()>> {
+        if self.paused.load(Ordering::Relaxed) {
+            return None;
+        }
+        let guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        // Re-check: `pause` may have raised the flag while we waited
+        (!self.paused.load(Ordering::Relaxed)).then_some(guard)
+    }
+
+    /// Main loop: park the input thread until the returned guard drops.
+    /// Returns once the thread is outside `poll` / `read`.
+    fn pause(&self) -> ParkedInput<'_> {
+        self.paused.store(true, Ordering::Relaxed);
+        let lock = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        ParkedInput {
+            gate: self,
+            _lock: lock,
+        }
+    }
+}
+
+/// Input thread parked by [`InputGate::pause`]; resumes it when dropped
+struct ParkedInput<'a> {
+    gate: &'a InputGate,
+    _lock: MutexGuard<'a, ()>,
+}
+
+impl Drop for ParkedInput<'_> {
+    fn drop(&mut self) {
+        self.gate.paused.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Read keyboard, mouse and resize events and send them through a channel
 ///
 /// This runs on a dedicated OS thread for responsiveness under high CPU load.
-fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
+/// It reads nothing while `gate` is paused (external pager / editor running).
+fn keyboard_loop(shutdown: Arc<AtomicBool>, gate: InputGate, tx: mpsc::UnboundedSender<Event>) {
     while !shutdown.load(Ordering::Relaxed) {
+        let Some(_held) = gate.hold() else {
+            thread::sleep(KEYBOARD_POLL_TIMEOUT);
+            continue;
+        };
         if !event::poll(KEYBOARD_POLL_TIMEOUT).unwrap_or(false) {
             continue;
         }
@@ -163,12 +220,13 @@ fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
 /// keyboard events due to backpressure.
 fn spawn_keyboard_thread(
     shutdown: Arc<AtomicBool>,
+    gate: InputGate,
 ) -> (mpsc::UnboundedReceiver<Event>, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let handle = thread::Builder::new()
         .name("keyboard-input".to_string())
-        .spawn(move || keyboard_loop(shutdown, tx))
+        .spawn(move || keyboard_loop(shutdown, gate, tx))
         .expect("Failed to spawn keyboard thread");
 
     (rx, handle)
@@ -210,11 +268,22 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
 enum Action {
     Continue,
     Quit,
+    /// Suspend the TUI and show a check's output in `$PAGER` / `$EDITOR`
+    OpenViewer(ViewerRequest),
     RestartRunner {
         new_changed_files: ChangedFiles,
         new_checks: Vec<CheckToRun>,
         warnings: Vec<String>,
     },
+}
+
+/// What `o` / `O` open: the selected check's plain-text log in `viewer`
+struct ViewerRequest {
+    viewer: Viewer,
+    /// Resolved command line (`$PAGER` / `$EDITOR` or its fallback)
+    command: String,
+    check_id: String,
+    text: String,
 }
 
 /// Shared handles for spawned async tasks (Arcs for cheap cloning)
@@ -452,6 +521,60 @@ fn copy_to_clipboard(text: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
+/// Hand the terminal to `f` (an external pager / editor): park the input
+/// thread, leave raw mode / alternate screen / mouse capture, run `f`
+/// (blocking: the main loop waits, background tasks keep running), then
+/// restore and clear so the next draw repaints everything.
+fn run_suspended<T>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    gate: &InputGate,
+    f: impl FnOnce() -> T,
+) -> io::Result<T> {
+    let _parked = gate.pause();
+    // With raw mode off, Ctrl-C in the pager sends SIGINT to the whole
+    // foreground process group; a registered handler keeps it from killing
+    // ci-tui (the pager handles it itself). Tokio never unregisters it, which
+    // is harmless: in raw mode Ctrl-C is a key event, not a signal.
+    #[cfg(unix)]
+    let _sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    let output = f();
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(output)
+}
+
+/// Show `request` in its pager / editor with the TUI suspended; a failed
+/// run (not found, non-zero exit) becomes an error status message.
+/// `Err` only when the terminal cannot be restored.
+fn open_viewer(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    gate: &InputGate,
+    app: &mut App,
+    request: &ViewerRequest,
+) -> io::Result<()> {
+    let outcome = run_suspended(terminal, gate, || {
+        external::run_viewer(&request.command, &request.check_id, &request.text)
+    })?;
+    if let Err(message) = outcome {
+        let label = request.viewer.label();
+        app.set_status_message(StatusKind::Error, format!("{label} failed: {message}"));
+    }
+    app.needs_redraw = true;
+    Ok(())
+}
+
 /// Install panic hook to restore terminal on panic
 fn install_panic_hook() {
     let original_hook = panic::take_hook();
@@ -482,6 +605,56 @@ fn warn_slow_keyboard(start: std::time::Instant) {
     if elapsed > std::time::Duration::from_millis(1) {
         eprintln!("WARN: Keyboard response took {:?}", elapsed);
     }
+}
+
+/// The selected check's id and plain-text log, or the status message why
+/// there is none (group header / pre-command row, no output yet)
+fn selected_log(app: &App) -> Result<(String, String), &'static str> {
+    let check = app
+        .selected_check()
+        .ok_or("Select a check to use its output")?;
+    app.results
+        .get(check.id())
+        .and_then(|result| external::check_log_text(&check.resolved_command, result))
+        .map(|text| (check.id().to_string(), text))
+        .ok_or("No output yet for this check")
+}
+
+/// Handle 'o' / 'O' key: open the selected check's output in `viewer`
+/// (the main loop suspends the TUI for it)
+fn handle_open_output(app: &mut App, viewer: Viewer) -> Action {
+    match selected_log(app) {
+        Ok((check_id, text)) => Action::OpenViewer(ViewerRequest {
+            viewer,
+            command: viewer.command(),
+            check_id,
+            text,
+        }),
+        Err(message) => {
+            app.set_status_message(StatusKind::info(), message);
+            Action::Continue
+        }
+    }
+}
+
+/// Handle 'w' key: save the selected check's output to
+/// `.ci-tui/logs/<check>.log` under the project root
+fn handle_save_log(app: &mut App, tasks: &Tasks) -> Action {
+    let root = tasks.ctx.project_root.as_path();
+    match selected_log(app) {
+        Ok((check_id, text)) => match external::save_log(root, &check_id, &text) {
+            Ok(path) => {
+                let shown = path.strip_prefix(root).unwrap_or(&path);
+                app.set_status_message(
+                    StatusKind::info(),
+                    format!("Saved log to {}", shown.display()),
+                );
+            }
+            Err(e) => app.set_status_message(StatusKind::Error, format!("Save log failed: {e}")),
+        },
+        Err(message) => app.set_status_message(StatusKind::info(), message),
+    }
+    Action::Continue
 }
 
 /// Handle 'r' key: retry selected check with git refresh
@@ -746,6 +919,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
         (KeyCode::Char('R'), KeyModifiers::SHIFT) => handle_retry_all(app, tasks),
         (KeyCode::Char('x'), KeyModifiers::NONE) => handle_fix_selected(app, tasks),
         (KeyCode::Char('X'), KeyModifiers::SHIFT) => handle_fix_all(app, tasks),
+        (KeyCode::Char('o'), KeyModifiers::NONE) => handle_open_output(app, Viewer::Pager),
+        (KeyCode::Char('O'), KeyModifiers::SHIFT) => handle_open_output(app, Viewer::Editor),
+        (KeyCode::Char('w'), KeyModifiers::NONE) => handle_save_log(app, tasks),
         _ => Action::Continue,
     }
 }
@@ -940,7 +1116,9 @@ pub async fn run(
     // CRITICAL: Using std::thread ensures keyboard events are processed by the OS
     // scheduler even when Tokio is starved of CPU time by Docker containers.
     let keyboard_shutdown = Arc::new(AtomicBool::new(false));
-    let (mut input_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
+    let input_gate = InputGate::default();
+    let (mut input_rx, keyboard_thread) =
+        spawn_keyboard_thread(Arc::clone(&keyboard_shutdown), input_gate.clone());
 
     // Main event loop - uses tokio::select! for event-driven responsiveness
     //
@@ -1003,6 +1181,9 @@ pub async fn run(
                 let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks, &cancels);
                 runner_handle = new_handle;
                 event_rx = new_rx;
+            }
+            Action::OpenViewer(request) => {
+                open_viewer(&mut terminal, &input_gate, &mut app, &request)?
             }
             Action::Continue => {}
         }
@@ -2319,5 +2500,159 @@ checks:
             app.selected_item(),
             Some(app::SelectableItem::Group("fast"))
         ));
+    }
+
+    fn status_text(app: &App) -> Option<&str> {
+        app.view.status_message.as_ref().map(|m| m.text.as_str())
+    }
+
+    /// App with a failed `php-lint` (selected) that has output
+    fn app_with_output(config: &CiConfig) -> App {
+        let mut app = make_test_app_with_checks(config, vec![make_test_check("php-lint", "fast")]);
+        let result = app.results.get_mut("php-lint").unwrap();
+        result.status = crate::runner::CheckStatus::Failed;
+        result.output = "\x1b[31mParse error\x1b[0m\n".to_string();
+        app
+    }
+
+    #[test]
+    fn test_save_log_key_writes_plain_output() {
+        let config = test_config();
+        let mut app = app_with_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let dir = tempfile::tempdir().unwrap();
+        tasks.ctx.project_root = Arc::new(dir.path().to_path_buf());
+
+        let key = press(KeyCode::Char('w'), KeyModifiers::NONE);
+        let action = handle_message(&mut app, Message::KeyPress(key), &mut tasks);
+
+        assert!(matches!(action, Action::Continue));
+        let log = std::fs::read_to_string(dir.path().join(".ci-tui/logs/php-lint.log")).unwrap();
+        assert!(log.contains("Parse error\n"), "{log}");
+        assert!(!log.contains('\x1b'), "ANSI stripped");
+        assert_eq!(
+            status_text(&app),
+            Some("Saved log to .ci-tui/logs/php-lint.log")
+        );
+    }
+
+    #[test]
+    fn test_save_log_key_failure_shows_error() {
+        let config = test_config();
+        let mut app = app_with_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config); // root does not exist
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        tasks.ctx.project_root = Arc::new(file); // Edge case: root is a file
+
+        handle_key_event(
+            &mut app,
+            press(KeyCode::Char('w'), KeyModifiers::NONE),
+            &mut tasks,
+        );
+
+        let message = app.view.status_message.as_ref().expect("error shown");
+        assert!(matches!(message.kind, StatusKind::Error));
+        assert!(
+            message.text.starts_with("Save log failed"),
+            "{}",
+            message.text
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::save('w', KeyModifiers::NONE)]
+    #[case::pager('o', KeyModifiers::NONE)]
+    #[case::editor('O', KeyModifiers::SHIFT)]
+    fn test_output_keys_without_selected_check_are_noop(
+        #[case] c: char,
+        #[case] modifiers: KeyModifiers,
+    ) {
+        let config = test_config();
+        let mut app = make_test_app(&config); // no checks: nothing selected
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let dir = tempfile::tempdir().unwrap();
+        tasks.ctx.project_root = Arc::new(dir.path().to_path_buf());
+
+        let action = handle_key_event(&mut app, press(KeyCode::Char(c), modifiers), &mut tasks);
+
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(status_text(&app), Some("Select a check to use its output"));
+        assert!(!dir.path().join(".ci-tui").exists(), "nothing written");
+    }
+
+    #[rstest::rstest]
+    #[case::save('w', KeyModifiers::NONE)]
+    #[case::pager('o', KeyModifiers::NONE)]
+    fn test_output_keys_without_output_are_noop(#[case] c: char, #[case] modifiers: KeyModifiers) {
+        let config = test_config();
+        // Selected check never ran: pending, no output
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_key_event(&mut app, press(KeyCode::Char(c), modifiers), &mut tasks);
+
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(status_text(&app), Some("No output yet for this check"));
+    }
+
+    #[rstest::rstest]
+    #[case::pager('o', KeyModifiers::NONE, Viewer::Pager)]
+    #[case::editor('O', KeyModifiers::SHIFT, Viewer::Editor)]
+    fn test_open_keys_request_viewer_with_plain_output(
+        #[case] c: char,
+        #[case] modifiers: KeyModifiers,
+        #[case] expected: Viewer,
+    ) {
+        let config = test_config();
+        let mut app = app_with_output(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_key_event(&mut app, press(KeyCode::Char(c), modifiers), &mut tasks);
+
+        let Action::OpenViewer(request) = action else {
+            panic!("expected OpenViewer");
+        };
+        assert_eq!(request.viewer, expected);
+        assert_eq!(request.check_id, "php-lint");
+        assert!(!request.command.is_empty());
+        assert!(request.text.contains("$ php-lint src/Foo.php\n"));
+        assert!(request.text.contains("Parse error\n"));
+        assert!(!request.text.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_input_gate_pause_blocks_hold_until_dropped() {
+        let gate = InputGate::default();
+        assert!(gate.hold().is_some());
+
+        let parked = gate.pause();
+        assert!(gate.hold().is_none(), "no reads while paused");
+        assert!(gate.lock.try_lock().is_err(), "pause owns the lock");
+
+        drop(parked);
+        assert!(gate.hold().is_some(), "reads resume");
+    }
+
+    #[test]
+    fn test_input_gate_pause_waits_for_in_flight_read() {
+        let gate = InputGate::default();
+        let held = gate.hold().unwrap(); // input thread mid-poll
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pauser = gate.clone();
+        let handle = thread::spawn(move || {
+            let _parked = pauser.pause();
+            tx.send(()).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "pause must wait for the in-flight read"
+        );
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("pause returns once the read ends");
+        handle.join().unwrap();
     }
 }

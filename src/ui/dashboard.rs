@@ -271,7 +271,7 @@ fn render_too_small(frame: &mut Frame, min_height: u16) {
 }
 
 /// Help overlay key bindings: (key, action), shown in two columns
-const HELP_LEFT: [(&str, &str); 9] = [
+const HELP_LEFT: [(&str, &str); 10] = [
     ("↑/k ↓/j", "prev/next row"),
     ("g / G", "first/last row"),
     ("n / N", "next/prev failed"),
@@ -281,8 +281,9 @@ const HELP_LEFT: [(&str, &str); 9] = [
     ("J / K", "scroll line"),
     ("Ctrl-d/u", "half page"),
     ("/", "search output"),
+    ("o / O", "$PAGER/$EDITOR"),
 ];
-const HELP_RIGHT: [(&str, &str); 9] = [
+const HELP_RIGHT: [(&str, &str); 10] = [
     ("f / a", "failed/all"),
     ("r / R", "retry/retry all"),
     ("t", "run on-demand"),
@@ -291,6 +292,7 @@ const HELP_RIGHT: [(&str, &str); 9] = [
     ("A", "run on all files"),
     ("c / e", "copy/expand cmd"),
     ("m", "CPU/MEM stats"),
+    ("w", "save log file"),
     ("q / Ctrl-c", "quit"),
 ];
 /// Columns of one help column: space, 11-col key, space, 16-col action
@@ -2174,6 +2176,30 @@ mod tests {
         assert_eq!(app.output_area_width, 0);
         app.scroll_down(5);
         app.scroll_to_bottom();
+    }
+
+    /// Help overlay lists every binding, even at the minimum terminal size
+    #[test]
+    fn test_help_overlay_lists_output_keys_at_min_size() {
+        let mut app = make_test_app();
+        app.toggle_help();
+        let height = min_height(app.view.stats_visible);
+        let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, height)).expect("terminal");
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..height)
+            .map(|y| (0..MIN_WIDTH).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let screen = rows.join("\n");
+        for text in [
+            "o / O",
+            "$PAGER/$EDITOR",
+            "save log file",
+            "quit",
+            "Esc to close",
+        ] {
+            assert!(screen.contains(text), "missing {text:?}:\n{screen}");
+        }
     }
 
     #[test]
