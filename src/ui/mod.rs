@@ -46,7 +46,7 @@ use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use sysinfo::System;
@@ -122,65 +122,11 @@ enum TaskEvent {
     },
 }
 
-/// Parks the input thread while an external pager / editor owns the
-/// terminal, so keys typed there reach it instead of being read by the TUI.
-///
-/// The input thread polls / reads only while holding `lock` ([`Self::hold`]);
-/// [`Self::pause`] raises `paused` (the thread stops re-taking the lock),
-/// then takes the lock itself, waiting out at most one in-flight poll
-/// ([`KEYBOARD_POLL_TIMEOUT`]). A lock alone could starve `pause`: the
-/// thread re-locks right after each unlock.
-#[derive(Clone, Default)]
-struct InputGate {
-    paused: Arc<AtomicBool>,
-    lock: Arc<Mutex<()>>,
-}
-
-impl InputGate {
-    /// Input thread: permission to poll / read once, `None` while paused
-    fn hold(&self) -> Option<MutexGuard<'_, ()>> {
-        if self.paused.load(Ordering::Relaxed) {
-            return None;
-        }
-        let guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        // Re-check: `pause` may have raised the flag while we waited
-        (!self.paused.load(Ordering::Relaxed)).then_some(guard)
-    }
-
-    /// Main loop: park the input thread until the returned guard drops.
-    /// Returns once the thread is outside `poll` / `read`.
-    fn pause(&self) -> ParkedInput<'_> {
-        self.paused.store(true, Ordering::Relaxed);
-        let lock = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        ParkedInput {
-            gate: self,
-            _lock: lock,
-        }
-    }
-}
-
-/// Input thread parked by [`InputGate::pause`]; resumes it when dropped
-struct ParkedInput<'a> {
-    gate: &'a InputGate,
-    _lock: MutexGuard<'a, ()>,
-}
-
-impl Drop for ParkedInput<'_> {
-    fn drop(&mut self) {
-        self.gate.paused.store(false, Ordering::Relaxed);
-    }
-}
-
 /// Read keyboard, mouse and resize events and send them through a channel
 ///
 /// This runs on a dedicated OS thread for responsiveness under high CPU load.
-/// It reads nothing while `gate` is paused (external pager / editor running).
-fn keyboard_loop(shutdown: Arc<AtomicBool>, gate: InputGate, tx: mpsc::UnboundedSender<Event>) {
+fn keyboard_loop(shutdown: Arc<AtomicBool>, tx: mpsc::UnboundedSender<Event>) {
     while !shutdown.load(Ordering::Relaxed) {
-        let Some(_held) = gate.hold() else {
-            thread::sleep(KEYBOARD_POLL_TIMEOUT);
-            continue;
-        };
         if !event::poll(KEYBOARD_POLL_TIMEOUT).unwrap_or(false) {
             continue;
         }
@@ -220,13 +166,12 @@ fn keyboard_loop(shutdown: Arc<AtomicBool>, gate: InputGate, tx: mpsc::Unbounded
 /// keyboard events due to backpressure.
 fn spawn_keyboard_thread(
     shutdown: Arc<AtomicBool>,
-    gate: InputGate,
 ) -> (mpsc::UnboundedReceiver<Event>, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let handle = thread::Builder::new()
         .name("keyboard-input".to_string())
-        .spawn(move || keyboard_loop(shutdown, gate, tx))
+        .spawn(move || keyboard_loop(shutdown, tx))
         .expect("Failed to spawn keyboard thread");
 
     (rx, handle)
@@ -280,8 +225,6 @@ enum Action {
 /// What `o` / `O` open: the selected check's plain-text log in `viewer`
 struct ViewerRequest {
     viewer: Viewer,
-    /// Resolved command line (`$PAGER` / `$EDITOR` or its fallback)
-    command: String,
     check_id: String,
     text: String,
 }
@@ -521,52 +464,35 @@ fn copy_to_clipboard(text: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
-/// Hand the terminal to `f` (an external pager / editor): park the input
-/// thread, leave raw mode / alternate screen / mouse capture, run `f`
-/// (blocking: the main loop waits, background tasks keep running), then
-/// restore and clear so the next draw repaints everything.
-fn run_suspended<T>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    gate: &InputGate,
-    f: impl FnOnce() -> T,
-) -> io::Result<T> {
-    let _parked = gate.pause();
-    // With raw mode off, Ctrl-C in the pager sends SIGINT to the whole
-    // foreground process group; a registered handler keeps it from killing
-    // ci-tui (the pager handles it itself). Tokio never unregisters it, which
-    // is harmless: in raw mode Ctrl-C is a key event, not a signal.
-    #[cfg(unix)]
-    let _sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    let output = f();
+/// Enter the TUI's terminal modes: raw mode, alternate screen, mouse capture
+fn enter_tui(w: &mut impl io::Write) -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture
-    )?;
-    terminal.clear()?;
-    Ok(output)
+    execute!(w, EnterAlternateScreen, EnableMouseCapture)
 }
 
-/// Show `request` in its pager / editor with the TUI suspended; a failed
-/// run (not found, non-zero exit) becomes an error status message.
-/// `Err` only when the terminal cannot be restored.
+/// Leave the modes [`enter_tui`] set
+fn leave_tui(w: &mut impl io::Write) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(w, LeaveAlternateScreen, DisableMouseCapture)
+}
+
+/// Show `request` in its pager / editor with the TUI suspended (blocking:
+/// the main loop waits, background tasks keep running), then clear so the
+/// next draw repaints everything. The caller stops the keyboard thread
+/// first so keys reach the viewer. A failed run (not found, non-zero exit)
+/// becomes an error status message; `Err` only when the terminal cannot be
+/// restored.
 fn open_viewer(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    gate: &InputGate,
     app: &mut App,
     request: &ViewerRequest,
 ) -> io::Result<()> {
-    let outcome = run_suspended(terminal, gate, || {
-        external::run_viewer(&request.command, &request.check_id, &request.text)
-    })?;
+    leave_tui(terminal.backend_mut())?;
+    terminal.show_cursor()?;
+    let command = request.viewer.command();
+    let outcome = external::run_viewer(&command, &request.check_id, &request.text);
+    enter_tui(terminal.backend_mut())?;
+    terminal.clear()?;
     if let Err(message) = outcome {
         let label = request.viewer.label();
         app.set_status_message(StatusKind::Error, format!("{label} failed: {message}"));
@@ -626,7 +552,6 @@ fn handle_open_output(app: &mut App, viewer: Viewer) -> Action {
     match selected_log(app) {
         Ok((check_id, text)) => Action::OpenViewer(ViewerRequest {
             viewer,
-            command: viewer.command(),
             check_id,
             text,
         }),
@@ -640,19 +565,23 @@ fn handle_open_output(app: &mut App, viewer: Viewer) -> Action {
 /// Handle 'w' key: save the selected check's output to
 /// `.ci-tui/logs/<check>.log` under the project root
 fn handle_save_log(app: &mut App, tasks: &Tasks) -> Action {
+    let (check_id, text) = match selected_log(app) {
+        Ok(log) => log,
+        Err(message) => {
+            app.set_status_message(StatusKind::info(), message);
+            return Action::Continue;
+        }
+    };
     let root = tasks.ctx.project_root.as_path();
-    match selected_log(app) {
-        Ok((check_id, text)) => match external::save_log(root, &check_id, &text) {
-            Ok(path) => {
-                let shown = path.strip_prefix(root).unwrap_or(&path);
-                app.set_status_message(
-                    StatusKind::info(),
-                    format!("Saved log to {}", shown.display()),
-                );
-            }
-            Err(e) => app.set_status_message(StatusKind::Error, format!("Save log failed: {e}")),
-        },
-        Err(message) => app.set_status_message(StatusKind::info(), message),
+    match external::save_log(root, &check_id, &text) {
+        Ok(path) => {
+            let shown = path.strip_prefix(root).unwrap_or(&path);
+            app.set_status_message(
+                StatusKind::info(),
+                format!("Saved log to {}", shown.display()),
+            );
+        }
+        Err(e) => app.set_status_message(StatusKind::Error, format!("Save log failed: {e}")),
     }
     Action::Continue
 }
@@ -1075,13 +1004,18 @@ pub async fn run(
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
+    // Ctrl-C is a key event in raw mode; SIGINT only arrives with the TUI
+    // suspended (Ctrl-C in `$PAGER`, sent to the whole foreground process
+    // group) and must not kill ci-tui. A registered handler keeps the
+    // default action off for the TUI's lifetime (external `kill -INT` too).
+    #[cfg(unix)]
+    let _sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
 
     // Setup terminal. The guard restores it on any early return below,
     // including a setup failure that occurs after raw mode is already on.
-    enable_raw_mode()?;
     let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    enter_tui(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1115,10 +1049,8 @@ pub async fn run(
     // Start dedicated OS thread for keyboard input
     // CRITICAL: Using std::thread ensures keyboard events are processed by the OS
     // scheduler even when Tokio is starved of CPU time by Docker containers.
-    let keyboard_shutdown = Arc::new(AtomicBool::new(false));
-    let input_gate = InputGate::default();
-    let (mut input_rx, keyboard_thread) =
-        spawn_keyboard_thread(Arc::clone(&keyboard_shutdown), input_gate.clone());
+    let mut keyboard_shutdown = Arc::new(AtomicBool::new(false));
+    let (mut input_rx, mut keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
 
     // Main event loop - uses tokio::select! for event-driven responsiveness
     //
@@ -1183,7 +1115,13 @@ pub async fn run(
                 event_rx = new_rx;
             }
             Action::OpenViewer(request) => {
-                open_viewer(&mut terminal, &input_gate, &mut app, &request)?
+                // Stop reading keys (waits out one poll) so they reach the
+                // viewer, then start a fresh keyboard thread
+                keyboard_shutdown.store(true, Ordering::Relaxed);
+                let _ = keyboard_thread.join();
+                open_viewer(&mut terminal, &mut app, &request)?;
+                keyboard_shutdown = Arc::new(AtomicBool::new(false));
+                (input_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
             }
             Action::Continue => {}
         }
@@ -1210,12 +1148,7 @@ pub async fn run(
 
     // Restore terminal: use the backend's own stdout handle to ensure
     // LeaveAlternateScreen goes through the same IO path as all TUI writes.
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    leave_tui(terminal.backend_mut())?;
     terminal.show_cursor()?;
     // Drop terminal before printing to ensure all backend IO is flushed
     drop(terminal);
@@ -2616,43 +2549,8 @@ checks:
         };
         assert_eq!(request.viewer, expected);
         assert_eq!(request.check_id, "php-lint");
-        assert!(!request.command.is_empty());
         assert!(request.text.contains("$ php-lint src/Foo.php\n"));
         assert!(request.text.contains("Parse error\n"));
         assert!(!request.text.contains('\x1b'));
-    }
-
-    #[test]
-    fn test_input_gate_pause_blocks_hold_until_dropped() {
-        let gate = InputGate::default();
-        assert!(gate.hold().is_some());
-
-        let parked = gate.pause();
-        assert!(gate.hold().is_none(), "no reads while paused");
-        assert!(gate.lock.try_lock().is_err(), "pause owns the lock");
-
-        drop(parked);
-        assert!(gate.hold().is_some(), "reads resume");
-    }
-
-    #[test]
-    fn test_input_gate_pause_waits_for_in_flight_read() {
-        let gate = InputGate::default();
-        let held = gate.hold().unwrap(); // input thread mid-poll
-        let (tx, rx) = std::sync::mpsc::channel();
-        let pauser = gate.clone();
-        let handle = thread::spawn(move || {
-            let _parked = pauser.pause();
-            tx.send(()).unwrap();
-        });
-
-        assert!(
-            rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "pause must wait for the in-flight read"
-        );
-        drop(held);
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("pause returns once the read ends");
-        handle.join().unwrap();
     }
 }

@@ -74,19 +74,26 @@ pub fn check_log_text(command: &str, result: &CheckResult) -> Option<String> {
     if result.output.is_empty() && result.error_output.is_empty() {
         return None;
     }
-    let mut text = format!("$ {command}\nstatus: {:?}\n\n", result.status);
-    text.push_str(&result.output);
+    // Strip each part straight into one buffer (outputs can be large)
+    let plain = |s: &str| crate::color::paint(s, false).into_owned();
+    let mut text =
+        String::with_capacity(command.len() + result.output.len() + result.error_output.len() + 64);
+    text.push_str(&format!("$ {command}\nstatus: {:?}\n\n", result.status));
+    text.push_str(&plain(&result.output));
     if !result.error_output.is_empty() {
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
+        push_newline(&mut text);
         text.push_str("── stderr ──\n");
-        text.push_str(&result.error_output);
+        text.push_str(&plain(&result.error_output));
     }
+    push_newline(&mut text);
+    Some(text)
+}
+
+/// End `text` with a newline unless it already does
+fn push_newline(text: &mut String) {
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    Some(crate::color::paint(&text, false).into_owned())
 }
 
 /// `id` safe as a file name: anything but ASCII alphanumerics, `-`, `_`
@@ -138,11 +145,7 @@ pub fn viewer_process(command: &str, path: &Path) -> Command {
 /// inherited (blocks until it exits), then delete the file. `Err` holds a
 /// status message: spawn failure, command not found, or non-zero exit.
 pub fn run_viewer(command: &str, check_id: &str, text: &str) -> Result<(), String> {
-    let path = std::env::temp_dir().join(format!(
-        "ci-tui-{}-{}.log",
-        std::process::id(),
-        sanitize_id(check_id)
-    ));
+    let path = temp_path(check_id);
     write_new(&path, text).map_err(|e| format!("Temp file {}: {e}", path.display()))?;
     let status = viewer_process(command, &path).status();
     let _ = fs::remove_file(&path);
@@ -151,6 +154,15 @@ pub fn run_viewer(command: &str, check_id: &str, text: &str) -> Result<(), Strin
         Ok(status) => Err(exit_message(command, status)),
         Err(e) => Err(format!("Failed to run `{command}`: {e}")),
     }
+}
+
+/// Temp file `o` / `O` hand to the viewer
+fn temp_path(check_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "ci-tui-{}-{}.log",
+        std::process::id(),
+        sanitize_id(check_id)
+    ))
 }
 
 /// Create `path` afresh (a stale file from a crashed run is replaced;
@@ -290,8 +302,7 @@ mod tests {
 
     #[test]
     fn test_run_viewer_removes_temp_file() {
-        let path =
-            std::env::temp_dir().join(format!("ci-tui-{}-{}.log", std::process::id(), "rm-check"));
+        let path = temp_path("rm-check");
         run_viewer("true", "rm-check", "x").unwrap();
         assert!(!path.exists());
     }
