@@ -796,8 +796,8 @@ impl App {
             self.sys.cpu_history.pop_front();
         }
 
-        // Hidden panel: keep history for `m`, but nothing on screen changed
-        self.needs_redraw |= self.view.stats_visible;
+        // Also the periodic tick for elapsed timers, so redraw even when hidden
+        self.needs_redraw = true;
     }
 
     /// Latest CPU usage (percent)
