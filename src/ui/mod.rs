@@ -710,6 +710,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
             app.open_search();
             Action::Continue
         }
+        (KeyCode::Char('m'), KeyModifiers::NONE) => {
+            app.toggle_stats();
+            Action::Continue
+        }
         (KeyCode::Char('f'), _) => {
             app.toggle_failed_filter();
             Action::Continue
@@ -859,10 +863,28 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
     }
 }
 
+/// TUI display options from the CLI. Color follows the process-wide
+/// switch ([`crate::color::enabled`]) set from `--no-color` / `NO_COLOR`.
+pub struct TuiOptions {
+    /// Active `--only` / `--group` filter, shown in the header
+    pub filter_notice: Option<String>,
+    /// Start with the CPU/MEM stats panel shown (off with `--no-stats`)
+    pub show_stats: bool,
+}
+
+impl TuiOptions {
+    pub fn new(filter_notice: Option<String>, show_stats: bool) -> Self {
+        Self {
+            filter_notice,
+            show_stats,
+        }
+    }
+}
+
 /// Run the TUI; returns the process exit code (1 if any check failed).
 /// `startup_warnings` (test discovery, docker preflight) are shown in the footer until a
 /// keypress, since stderr is hidden behind the alternate screen.
-/// `filter_notice` (`--only` / `--group`) stays in the header.
+/// `options.filter_notice` (`--only` / `--group`) stays in the header.
 ///
 /// The caller must drop the tokio runtime before exiting: that drops the
 /// aborted runner/task futures, whose guards kill still-running commands.
@@ -873,7 +895,7 @@ pub async fn run(
     project_root: PathBuf,
     exec_root: PathBuf,
     startup_warnings: Vec<String>,
-    filter_notice: Option<String>,
+    options: TuiOptions,
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -892,7 +914,9 @@ pub async fn run(
 
     // Create app state
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
-    app.filter_notice = filter_notice;
+    app.filter_notice = options.filter_notice;
+    app.color = crate::color::enabled();
+    app.view.stats_visible = options.show_stats;
     app.show_warnings(&startup_warnings);
 
     // Start the runner in background ('s' cancels through `cancels`)
@@ -1023,7 +1047,8 @@ pub async fn run(
 }
 
 /// Print the final summary: same wording as the dashboard header, colored
-/// green (all passed), yellow (some cancelled) or red (any failed)
+/// green (all passed), yellow (some cancelled) or red (any failed); plain
+/// with color off
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
     let elapsed_str = dashboard::format_elapsed(app.elapsed_time());
@@ -1035,7 +1060,8 @@ fn print_summary(app: &App) {
     } else {
         32
     };
-    println!("\n\x1b[{}m{}\x1b[0m", color, text);
+    let line = format!("\n\x1b[{}m{}\x1b[0m", color, text);
+    println!("{}", crate::color::paint(&line, app.color));
 
     // Show failed checks
     for (id, result) in &app.results {
@@ -1813,6 +1839,19 @@ checks:
             &mut tasks,
         );
         assert!(!app.view.help_visible);
+    }
+
+    #[test]
+    fn test_m_key_toggles_stats_panel() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let m = || press(KeyCode::Char('m'), KeyModifiers::NONE);
+
+        handle_key_event(&mut app, m(), &mut tasks);
+        assert!(!app.stats_visible());
+        handle_key_event(&mut app, m(), &mut tasks);
+        assert!(app.stats_visible());
     }
 
     #[test]

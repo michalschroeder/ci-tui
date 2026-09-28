@@ -15,6 +15,7 @@
 //! - `1`: One or more checks failed
 
 use crate::checks::{group_checks, CheckToRun};
+use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus, ExecTarget};
@@ -86,15 +87,15 @@ pub async fn run(
     let target = &config.runner;
     let max_output_lines = config.max_output_lines;
 
-    println!(
+    cprintln!(
         "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
         changed_files.len(),
         changed_files.base_ref
     );
-    println!();
+    cprintln!();
 
     if checks.is_empty() {
-        println!("\x1b[33mNo checks to run for changed files.\x1b[0m");
+        cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
         return Ok(());
     }
 
@@ -109,7 +110,7 @@ pub async fn run(
         let display_name = group
             .map(|g| g.display_name(group_name))
             .unwrap_or(group_name);
-        println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
+        cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
         let parallel = group.is_some_and(|g| g.parallel);
 
@@ -139,7 +140,7 @@ pub async fn run(
             has_failures |= result.status.is_failure();
             all_results.push(result);
         }
-        println!();
+        cprintln!();
     }
 
     let elapsed = start_time.elapsed();
@@ -150,9 +151,9 @@ pub async fn run(
         .count();
     let failed = all_results.iter().filter(|r| r.status.is_failure()).count();
 
-    println!("\x1b[1m── Summary ──\x1b[0m");
+    cprintln!("\x1b[1m── Summary ──\x1b[0m");
     if has_failures {
-        println!(
+        cprintln!(
             "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
             passed,
             all_results.len(),
@@ -160,20 +161,21 @@ pub async fn run(
             elapsed_str
         );
 
-        println!();
-        println!("\x1b[1;31mFailed checks:\x1b[0m");
+        cprintln!();
+        cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
         for result in all_results.iter().filter(|r| r.status.is_failure()) {
             let fix_cmd = checks
                 .iter()
                 .find(|c| c.id() == result.check_id)
                 .and_then(|c| c.resolved_fix_command.as_deref());
-            println!();
-            print!("{}", format_failed_check(result, fix_cmd));
+            cprintln!();
+            let failed = format_failed_check(result, fix_cmd);
+            cprint!("{}", failed);
         }
 
         std::process::exit(crate::exit::CHECKS_FAILED);
     } else {
-        println!(
+        cprintln!(
             "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
             all_results.len(),
             elapsed_str
@@ -183,11 +185,12 @@ pub async fn run(
     Ok(())
 }
 
-/// Print a check result to stdout with colored status indicator.
+/// Print a check result to stdout with colored status indicator (plain
+/// with color off, see [`crate::color`]).
 ///
 /// See [`format_result`] for the per-status layout.
 pub fn print_result(result: &CheckResult) {
-    println!("{}", format_result(result));
+    cprintln!("{}", format_result(result));
 }
 
 /// One colored status line for a check result:
@@ -370,6 +373,29 @@ mod tests {
             resolved_command: command.into(),
             resolved_fix_command: None,
         }
+    }
+
+    fn failed_result() -> CheckResult {
+        let mut result = CheckResult::pending("c");
+        result.status = CheckStatus::Failed;
+        result.output = "\x1b[31merror\x1b[0m: boom\n".into();
+        result.error_output = "warn\n".into();
+        result
+    }
+
+    #[test]
+    fn test_output_has_ansi_only_with_color() {
+        let result = failed_result();
+        let lines = [
+            format_result(&result),
+            format_failed_check(&result, Some("cargo fmt")),
+        ];
+        for line in &lines {
+            assert!(crate::color::paint(line, true).contains("\x1b["));
+            let plain = crate::color::paint(line, false);
+            assert!(!plain.contains("\x1b["), "got: {plain:?}");
+        }
+        assert!(crate::color::paint(&lines[1], false).contains("error: boom"));
     }
 
     #[tokio::test]

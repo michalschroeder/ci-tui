@@ -59,6 +59,15 @@ pub struct Cli {
     /// `max_parallel`, else CPU count]
     #[arg(short, long, value_name = "N")]
     pub jobs: Option<NonZeroUsize>,
+
+    /// Disable colored output (TUI and console); also set by a non-empty `NO_COLOR` env var
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
+    /// TUI only: start with the CPU/MEM stats panel hidden (`m` toggles it);
+    /// no effect with --simple, --fix or --list
+    #[arg(long)]
+    pub no_stats: bool,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -119,14 +128,26 @@ impl Cli {
                 || cli.base.is_some()
                 || !cli.only.is_empty()
                 || !cli.groups.is_empty()
-                || cli.jobs.is_some())
+                || cli.jobs.is_some()
+                || cli.no_stats)
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files, --base, --only, --group and --jobs cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs and --no-stats cannot be used with a subcommand",
             ));
         }
         Ok(cli)
+    }
+}
+
+impl Cli {
+    /// Color on unless `--no-color` or a non-empty `NO_COLOR` env var
+    /// (see [`crate::color::should_color`])
+    pub fn color_enabled(&self) -> bool {
+        crate::color::should_color(
+            self.no_color,
+            std::env::var_os(crate::color::NO_COLOR_ENV).as_deref(),
+        )
     }
 }
 
@@ -229,6 +250,7 @@ mod tests {
     #[case::only_before_validate(&["ci-tui", "--only", "a", "validate"])]
     #[case::group_before_init(&["ci-tui", "--group", "g", "init"])]
     #[case::jobs_before_validate(&["ci-tui", "-j", "2", "validate"])]
+    #[case::no_stats_before_validate(&["ci-tui", "--no-stats", "validate"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -316,6 +338,21 @@ mod tests {
             .expect("expected error");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
         assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false)]
+    #[case::run(&["ci-tui", "--no-color", "-s"], true)]
+    #[case::after_subcommand(&["ci-tui", "validate", "--no-color"], true)]
+    fn test_no_color_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().no_color, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false)]
+    #[case::set(&["ci-tui", "--no-stats"], true)]
+    fn test_no_stats_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().no_stats, expected);
     }
 
     #[test]

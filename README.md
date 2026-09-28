@@ -30,6 +30,8 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
+- `--no-color` (or a non-empty `NO_COLOR` env var, per [no-color.org](https://no-color.org)) disables color in the TUI, `--simple` and `--fix` output
+- `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
 
@@ -137,6 +139,7 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `X` | Fix all checks |
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
+| `m` | Show / hide CPU/MEM stats panel |
 
 Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker run` fallback. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.
 
@@ -152,6 +155,7 @@ ci-tui --base v1.2.0       # diff against a ref instead of git.base_branch
 ci-tui --staged -s         # staged files only (pre-commit hook)
 ci-tui --list              # explain check selection, run nothing (alias --dry-run)
 ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups)
+ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 

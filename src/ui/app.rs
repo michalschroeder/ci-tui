@@ -201,6 +201,8 @@ pub struct ViewState {
     pub output_area: Rect,
     /// True while the `?` help overlay is shown; swallows all other keys
     pub help_visible: bool,
+    /// CPU/MEM stats panel shown (`--no-stats` starts hidden, `m` toggles)
+    pub stats_visible: bool,
     /// Output search state (`/` key); `None` when not searching
     pub search: Option<SearchState>,
     /// Keep the output panel pinned to the bottom while the selected check
@@ -228,6 +230,7 @@ impl Default for ViewState {
             manual_folds: HashSet::new(),
             output_area: Rect::default(),
             help_visible: false,
+            stats_visible: true,
             search: None,
             follow_output: true,
             pending_error_jump: false,
@@ -374,6 +377,8 @@ pub struct App {
     pub(crate) current_branch: String,
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
+    /// Render colors; off with `--no-color` / `NO_COLOR` (text modifiers stay)
+    pub color: bool,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -462,6 +467,7 @@ impl App {
             results,
             current_branch,
             filter_notice: None,
+            color: true,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),
@@ -790,6 +796,7 @@ impl App {
             self.sys.cpu_history.pop_front();
         }
 
+        // Also the periodic tick for elapsed timers, so redraw even when hidden
         self.needs_redraw = true;
     }
 
@@ -1250,6 +1257,17 @@ impl App {
     /// by the key handler rather than dispatched.
     pub fn toggle_help(&mut self) {
         self.view.help_visible = !self.view.help_visible;
+        self.needs_redraw = true;
+    }
+
+    /// Whether the CPU/MEM stats panel is shown
+    pub fn stats_visible(&self) -> bool {
+        self.view.stats_visible
+    }
+
+    /// Show / hide the CPU/MEM stats panel (`m` key)
+    pub fn toggle_stats(&mut self) {
+        self.view.stats_visible = !self.view.stats_visible;
         self.needs_redraw = true;
     }
 

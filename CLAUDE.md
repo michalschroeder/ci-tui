@@ -135,6 +135,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
+- **color.rs**: `--no-color` / non-empty `NO_COLOR` decision (`should_color`); console modes print via `cprintln!` (strips ANSI when off, process-wide switch set in main); TUI resets cell fg/bg after drawing (`App::color`)
 - **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`; first line links the versioned release schema)
 - **schema.rs**: `ci-tui schema` — config JSON Schema via `schemars` (root `RawCiConfig`); committed at `schema/ci-tui.schema.json`, drift-guarded by a test (`make schema` regenerates), uploaded as a release asset

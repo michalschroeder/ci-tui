@@ -14,6 +14,7 @@
 //! - `0`: All fix commands passed
 //! - `1`: One or more fix commands failed
 
+use crate::color::cprintln;
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::ExecTarget;
@@ -79,12 +80,12 @@ pub async fn run(
     changed_files: ChangedFiles,
     project_root: PathBuf,
 ) -> Result<()> {
-    println!(
+    cprintln!(
         "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
         changed_files.len(),
         changed_files.base_ref
     );
-    println!();
+    cprintln!();
 
     let summary = run_with_executor(
         config,
@@ -96,21 +97,25 @@ pub async fn run(
 
     let elapsed_str = time::format_from_duration(summary.elapsed);
     if summary.fix_count == 0 {
-        println!("\x1b[33mNo fix commands found in config.\x1b[0m");
+        cprintln!("\x1b[33mNo fix commands found in config.\x1b[0m");
         return Ok(());
     }
 
-    println!("\x1b[1m── Summary ──\x1b[0m");
+    cprintln!("\x1b[1m── Summary ──\x1b[0m");
     if summary.has_failures {
-        println!(
+        cprintln!(
             "\x1b[31m✗ {}/{} fixes passed, {} failed in {}\x1b[0m",
-            summary.pass_count, summary.fix_count, summary.fail_count, elapsed_str
+            summary.pass_count,
+            summary.fix_count,
+            summary.fail_count,
+            elapsed_str
         );
         std::process::exit(crate::exit::CHECKS_FAILED);
     } else {
-        println!(
+        cprintln!(
             "\x1b[32m✓ All {} fixes passed in {}\x1b[0m",
-            summary.fix_count, elapsed_str
+            summary.fix_count,
+            elapsed_str
         );
     }
 
@@ -163,11 +168,11 @@ async fn run_group_fixes_with_executor(
         };
 
         if !group_has_fixes {
-            println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
+            cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
             group_has_fixes = true;
         }
 
-        println!(
+        cprintln!(
             "  \x1b[33m●\x1b[0m {} \x1b[90m(running fix...)\x1b[0m",
             check_id
         );
@@ -190,7 +195,7 @@ async fn run_group_fixes_with_executor(
     }
 
     if group_has_fixes {
-        println!();
+        cprintln!();
     }
 
     (fix_count, pass_count, fail_count, has_failures)
@@ -216,20 +221,23 @@ fn resolve_matching_files<'a>(
 
 /// Print the result of a fix command execution, returns true if successful
 fn print_fix_result(check_id: &str, result: &Result<u64>) -> bool {
+    cprintln!("{}", format_fix_result(check_id, result));
+    result.is_ok()
+}
+
+/// Colored status line(s) for a fix result: green check and duration, or
+/// red X plus the error
+fn format_fix_result(check_id: &str, result: &Result<u64>) -> String {
     match result {
-        Ok(duration_ms) => {
-            let duration = time::format(*duration_ms);
-            println!(
-                "  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m",
-                check_id, duration
-            );
-            true
-        }
-        Err(e) => {
-            println!("  \x1b[31m✗\x1b[0m {} \x1b[90mfailed\x1b[0m", check_id);
-            println!("  \x1b[31mError:\x1b[0m {}", e);
-            false
-        }
+        Ok(duration_ms) => format!(
+            "  \x1b[32m✓\x1b[0m {} \x1b[90m{}\x1b[0m",
+            check_id,
+            time::format(*duration_ms)
+        ),
+        Err(e) => format!(
+            "  \x1b[31m✗\x1b[0m {} \x1b[90mfailed\x1b[0m\n  \x1b[31mError:\x1b[0m {}",
+            check_id, e
+        ),
     }
 }
 
@@ -314,6 +322,17 @@ mod tests {
     use crate::git::ChangedFiles;
     use indexmap::IndexMap;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_fix_result_has_ansi_only_with_color() {
+        for result in [Ok(1500), Err(anyhow::anyhow!("boom"))] {
+            let line = format_fix_result("fmt", &result);
+            assert!(crate::color::paint(&line, true).contains("\x1b["));
+            let plain = crate::color::paint(&line, false);
+            assert!(!plain.contains("\x1b["), "got: {plain:?}");
+            assert!(plain.contains("fmt"));
+        }
+    }
 
     fn cfg_with_pattern(key: &str, pattern: &str) -> CiConfig {
         let mut patterns = HashMap::new();
