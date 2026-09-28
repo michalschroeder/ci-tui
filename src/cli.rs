@@ -2,6 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 /// CI TUI - Run CI checks for changed files
@@ -53,6 +54,11 @@ pub struct Cli {
     /// Run only checks in these groups (comma-separated or repeated); with --only, both must match
     #[arg(long = "group", value_name = "GROUP", value_delimiter = ',')]
     pub groups: Vec<String>,
+
+    /// Max checks running at once per parallel group (>= 1) [default: config
+    /// `max_parallel`, else CPU count]
+    #[arg(short, long, value_name = "N")]
+    pub jobs: Option<NonZeroUsize>,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -112,11 +118,12 @@ impl Cli {
                 || !cli.files.is_empty()
                 || cli.base.is_some()
                 || !cli.only.is_empty()
-                || !cli.groups.is_empty())
+                || !cli.groups.is_empty()
+                || cli.jobs.is_some())
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files, --base, --only and --group cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files, --base, --only, --group and --jobs cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -221,6 +228,7 @@ mod tests {
     #[case::staged_before_schema(&["ci-tui", "--staged", "schema"])]
     #[case::only_before_validate(&["ci-tui", "--only", "a", "validate"])]
     #[case::group_before_init(&["ci-tui", "--group", "g", "init"])]
+    #[case::jobs_before_validate(&["ci-tui", "-j", "2", "validate"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -289,6 +297,28 @@ mod tests {
         let cli = Cli::try_parse_checked(args).unwrap();
         assert_eq!(cli.only, only);
         assert_eq!(cli.groups, groups);
+    }
+
+    #[rstest::rstest]
+    #[case::long(&["ci-tui", "--jobs", "4"], Some(4))]
+    #[case::short(&["ci-tui", "-j", "1"], Some(1))]
+    #[case::with_simple(&["ci-tui", "-s", "--jobs=2"], Some(2))]
+    #[case::unset(&["ci-tui"], None)]
+    fn test_jobs_flag_parsed(#[case] args: &[&str], #[case] jobs: Option<usize>) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert_eq!(cli.jobs.map(NonZeroUsize::get), jobs);
+    }
+
+    #[rstest::rstest]
+    #[case::zero("--jobs=0")]
+    #[case::negative("--jobs=-1")]
+    #[case::not_a_number("--jobs=many")]
+    fn test_jobs_rejects_invalid(#[case] arg: &str) {
+        let err = Cli::try_parse_checked(["ci-tui", arg])
+            .err()
+            .expect("expected error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
     }
 
     #[test]

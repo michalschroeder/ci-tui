@@ -146,6 +146,9 @@ async fn run() -> Result<i32> {
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
         filter_error(e).exit();
     }
+    // --jobs overrides the config's global parallel cap
+    config.apply_jobs(cli.jobs);
+
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
     let filter_notice = filter::describe(&cli.only, &cli.groups);

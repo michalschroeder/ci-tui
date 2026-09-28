@@ -157,3 +157,5 @@ The tool expects a YAML config with:
 - `file_patterns`: Named regex patterns with optional colors
 - `checks`: Groups containing check definitions with triggers
 - `ignore_patterns`: Regex patterns for files to exclude from change detection
+- `max_parallel`: Cap on concurrent checks in `parallel: true` groups (top-level and per group, >= 1; group can only lower it; default CPU count)
+- `--jobs N` / `-j N`: CLI override of top-level `max_parallel`

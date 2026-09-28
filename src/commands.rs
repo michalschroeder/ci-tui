@@ -63,7 +63,9 @@ ignore_patterns:
 # timeout: 15m
 
 # Groups run sequentially (YAML order); checks inside a group with
-# `parallel: true` run concurrently
+# `parallel: true` run concurrently, at most `max_parallel` at a time
+# (top-level or per group; default CPU count; `--jobs N` overrides top-level)
+# max_parallel: 4
 checks:
   quality:
     name: Code Quality

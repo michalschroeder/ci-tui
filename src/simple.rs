@@ -52,6 +52,7 @@ pub async fn run_with_executor(
                 target,
                 executor.clone(),
                 max_output_lines,
+                config.group_parallel_limit(group_name),
             )
             .await
         } else {
@@ -124,6 +125,7 @@ pub async fn run(
                 target,
                 executor.clone(),
                 max_output_lines,
+                config.group_parallel_limit(group_name),
             )
             .await
         } else {
@@ -278,13 +280,16 @@ async fn run_sequential(
     results
 }
 
+/// Run `checks` concurrently, at most `limit` at a time; results in input order.
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     target: &ExecTarget,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
     max_output_lines: usize,
+    limit: usize,
 ) -> Vec<CheckResult> {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
     let mut handles = Vec::new();
 
     for check in checks {
@@ -295,8 +300,11 @@ async fn run_parallel(
         let project_root = project_root.to_path_buf();
         let target = target.clone();
         let executor = executor.clone();
+        let permits = permits.clone();
 
         let handle = tokio::spawn(async move {
+            // Never closed, so acquire cannot fail; held until the check ends
+            let _permit = permits.acquire_owned().await.ok();
             run_check_with_executor(
                 &check,
                 &project_root,

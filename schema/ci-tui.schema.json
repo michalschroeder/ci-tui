@@ -51,6 +51,16 @@
       "default": null,
       "minimum": 0
     },
+    "max_parallel": {
+      "description": "Max checks running at once in a `parallel: true` group (>= 1; default:\nCPU count; `--jobs` overrides)",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "default": null,
+      "minimum": 1
+    },
     "runner": {
       "description": "Where checks run: `docker` (default) or `local` (on the host)",
       "$ref": "#/$defs/RunnerMode"
@@ -315,6 +325,16 @@
           "additionalProperties": {
             "$ref": "#/$defs/CheckDefinition"
           }
+        },
+        "max_parallel": {
+          "description": "Max checks running at once when `parallel: true` (>= 1; capped by the\ntop-level `max_parallel` / `--jobs`)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 1
         },
         "name": {
           "description": "Optional display name for the group (uses key name if not set)",

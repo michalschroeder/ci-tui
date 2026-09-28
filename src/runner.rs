@@ -863,7 +863,8 @@ impl CheckRunner {
 
         let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
         if parallel {
-            self.run_parallel(group_checks, event_tx).await?;
+            let limit = self.config.group_parallel_limit(group_name);
+            self.run_parallel(group_checks, limit, event_tx).await?;
         } else {
             self.run_sequential(group_checks, event_tx).await?;
         }
@@ -884,26 +885,33 @@ impl CheckRunner {
         Ok(())
     }
 
+    /// Run `checks` concurrently, at most `limit` at a time
     async fn run_parallel(
         &self,
         checks: Vec<&CheckToRun>,
+        limit: usize,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> Result<()> {
         let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         // JoinSet, not detached spawns: aborting the runner (quit, retry-all)
-        // drops the set, which aborts the checks and kills their commands
+        // drops the set, which aborts the checks and kills their commands.
+        // All tasks spawn up front; a permit gates each before `CheckStarted`,
+        // so queued checks stay pending in the UI until a slot frees up.
+        let permits = Arc::new(tokio::sync::Semaphore::new(limit));
         let mut set = tokio::task::JoinSet::new();
         for check in runnable {
-            set.spawn(self.check_task(check, event_tx));
+            set.spawn(self.check_task(check, Arc::clone(&permits), event_tx));
         }
         while set.join_next().await.is_some() {}
         Ok(())
     }
 
-    /// Owned future running `check` and reporting its result
+    /// Owned future running `check` (once it holds a `permits` slot) and
+    /// reporting its result
     fn check_task(
         &self,
         check: &CheckToRun,
+        permits: Arc<tokio::sync::Semaphore>,
         event_tx: &mpsc::Sender<RunnerEvent>,
     ) -> impl Future<Output = ()> + Send + 'static {
         let check = check.clone();
@@ -914,6 +922,8 @@ impl CheckRunner {
         let cancels = self.cancels.clone();
 
         async move {
+            // Never closed, so acquire cannot fail; held until the check ends
+            let _permit = permits.acquire().await.ok();
             let result = run_check_with_target(
                 &check,
                 &project_root,

@@ -1071,6 +1071,52 @@ mod check_runner_tests {
             .any(|e| matches!(e, RunnerEvent::GroupFinished { .. })));
         assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
     }
+
+    /// Peak concurrency of 5 checks in group `g` under `config`
+    async fn peak_concurrency(config: ci_tui::config::CiConfig) -> usize {
+        let executor = Arc::new(common::ConcurrencyExecutor::default());
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), executor.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let checks = (0..5)
+            .map(|i| make_widget_check(&format!("c{i}"), "g", "C", false))
+            .collect();
+        runner.run_checks(checks, tx).await.unwrap();
+        let finished = collect_events(rx)
+            .await
+            .into_iter()
+            .filter(|e| matches!(e, RunnerEvent::CheckFinished { .. }))
+            .count();
+        assert_eq!(finished, 5, "every check still runs");
+        executor.peak()
+    }
+
+    #[rstest]
+    #[case::global_cap(ConfigBuilder::new().with_parallel_group("g").with_max_parallel(2), 2)]
+    #[case::group_cap_below_global(
+        ConfigBuilder::new().with_max_parallel(3).with_group_max_parallel("g", 1),
+        1
+    )]
+    #[case::global_below_group_cap(
+        ConfigBuilder::new().with_max_parallel(2).with_group_max_parallel("g", 4),
+        2
+    )]
+    #[case::uncapped_when_limit_exceeds_checks(
+        ConfigBuilder::new().with_parallel_group("g").with_max_parallel(8),
+        5
+    )]
+    #[case::sequential_group_ignores_cap(
+        ConfigBuilder::new()
+            .with_max_parallel(4)
+            .with_check("g", "c0", common::configs::CheckBuilder::new("C", "c").build()),
+        1
+    )]
+    #[tokio::test]
+    async fn parallel_group_respects_max_parallel(
+        #[case] config: ConfigBuilder,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(peak_concurrency(config.build()).await, expected);
+    }
 }
 
 mod run_single_check_with_executor_tests {

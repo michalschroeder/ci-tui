@@ -27,6 +27,7 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -51,6 +52,9 @@ pub struct CiConfig {
     /// kept; older lines dropped with a "... X lines truncated" marker). Bounds
     /// memory for runaway commands. Defaults to [`DEFAULT_MAX_OUTPUT_LINES`].
     pub max_output_lines: usize,
+    /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides,
+    /// see [`CiConfig::apply_jobs`]). `None` = CPU count; see [`parallel_limit`].
+    pub max_parallel: Option<NonZeroUsize>,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
@@ -102,6 +106,10 @@ pub(crate) struct RawCiConfig {
     /// Max lines kept per stdout/stderr stream (default 10000)
     #[serde(default)]
     max_output_lines: Option<usize>,
+    /// Max checks running at once in a `parallel: true` group (>= 1; default:
+    /// CPU count; `--jobs` overrides)
+    #[serde(default)]
+    max_parallel: Option<NonZeroUsize>,
 }
 
 impl TryFrom<RawCiConfig> for CiConfig {
@@ -132,6 +140,7 @@ impl TryFrom<RawCiConfig> for CiConfig {
             checks,
             ignore_patterns: raw.ignore_patterns,
             max_output_lines: raw.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
+            max_parallel: raw.max_parallel,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         })
@@ -248,6 +257,7 @@ impl Clone for CiConfig {
             checks: self.checks.clone(),
             ignore_patterns: self.ignore_patterns.clone(),
             max_output_lines: self.max_output_lines,
+            max_parallel: self.max_parallel,
             // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -505,6 +515,10 @@ pub struct GroupConfig {
     /// Commands to run before checks in this group (e.g., DB init)
     #[serde(default)]
     pub pre_commands: Vec<PreCommand>,
+    /// Max checks running at once when `parallel: true` (>= 1; capped by the
+    /// top-level `max_parallel` / `--jobs`)
+    #[serde(default)]
+    pub max_parallel: Option<NonZeroUsize>,
     /// Checks in this group (key is check ID)
     pub checks: IndexMap<String, CheckDefinition>,
 }
@@ -732,6 +746,7 @@ impl CiConfig {
             checks,
             ignore_patterns,
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
+            max_parallel: None,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }
@@ -875,6 +890,31 @@ impl CiConfig {
     pub fn groups(&self) -> impl Iterator<Item = (&str, &GroupConfig)> {
         self.checks.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    /// `--jobs N` replaces the top-level `max_parallel` (CLI wins over config).
+    /// Folded into the config so TUI runs, refreshes and simple mode share it.
+    pub fn apply_jobs(&mut self, jobs: Option<NonZeroUsize>) {
+        if jobs.is_some() {
+            self.max_parallel = jobs;
+        }
+    }
+
+    /// Max concurrent checks in parallel group `group_name` (see [`parallel_limit`])
+    pub fn group_parallel_limit(&self, group_name: &str) -> usize {
+        let group = self.get_group(group_name).and_then(|g| g.max_parallel);
+        parallel_limit(self.max_parallel, group).get()
+    }
+}
+
+/// Effective cap for a `parallel: true` group: `global` (`--jobs` / top-level
+/// `max_parallel`, else CPU count, else 1), lowered by the group's own
+/// `max_parallel`. A group cannot raise the global cap: `--jobs` bounds the
+/// whole machine's load.
+pub fn parallel_limit(global: Option<NonZeroUsize>, group: Option<NonZeroUsize>) -> NonZeroUsize {
+    let global = global
+        .or_else(|| std::thread::available_parallelism().ok())
+        .unwrap_or(NonZeroUsize::MIN);
+    group.map_or(global, |group| group.min(global))
 }
 
 impl GroupConfig {
@@ -974,6 +1014,7 @@ mod tests {
                     parallel: false,
                     stop_on_failure: false,
                     pre_commands: Vec::new(),
+                    max_parallel: None,
                     checks: IndexMap::new(),
                 })
                 .checks
@@ -989,6 +1030,7 @@ mod tests {
                     parallel: true,
                     stop_on_failure: false,
                     pre_commands: Vec::new(),
+                    max_parallel: None,
                     checks: IndexMap::new(),
                 })
                 .parallel = true;
@@ -1003,6 +1045,7 @@ mod tests {
                     parallel: false,
                     stop_on_failure: false,
                     pre_commands: Vec::new(),
+                    max_parallel: None,
                     checks: IndexMap::new(),
                 })
                 .name = Some(name.to_string());
@@ -1040,6 +1083,7 @@ mod tests {
                 checks: self.checks,
                 ignore_patterns: self.ignore_patterns,
                 max_output_lines: self.max_output_lines,
+                max_parallel: None,
                 compiled_ignore_patterns: OnceLock::new(),
                 compiled_file_patterns: OnceLock::new(),
             }
@@ -2671,6 +2715,103 @@ checks:
         fn custom_value_is_applied() {
             let config: CiConfig = serde_yaml::from_str(&yaml(Some(500))).unwrap();
             assert_eq!(config.max_output_lines, 500);
+        }
+    }
+
+    mod test_max_parallel {
+        use super::*;
+        use std::io::Write;
+        use std::num::NonZeroUsize;
+
+        /// Local-mode config with parallel group `g`; optional top-level and
+        /// group `max_parallel` lines.
+        fn yaml(global: Option<&str>, group: Option<&str>) -> String {
+            let global = global
+                .map(|n| format!("max_parallel: {n}\n"))
+                .unwrap_or_default();
+            let group = group
+                .map(|n| format!("    max_parallel: {n}\n"))
+                .unwrap_or_default();
+            format!(
+                "version: 2\nrunner: local\n{global}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks:\n  g:\n    parallel: true\n{group}    checks:\n      c:\n        name: C\n        command: 'true'\n"
+            )
+        }
+
+        fn nz(n: usize) -> Option<NonZeroUsize> {
+            NonZeroUsize::new(n)
+        }
+
+        fn cpus() -> usize {
+            std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+        }
+
+        #[test]
+        fn parses_global_and_group() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(Some("4"), Some("2"))).unwrap();
+            assert_eq!(config.max_parallel, nz(4));
+            assert_eq!(config.get_group("g").unwrap().max_parallel, nz(2));
+        }
+
+        #[test]
+        fn omitted_is_none() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(None, None)).unwrap();
+            assert_eq!(config.max_parallel, None);
+            assert_eq!(config.get_group("g").unwrap().max_parallel, None);
+        }
+
+        #[rstest]
+        #[case::global_zero(Some("0"), None)]
+        #[case::group_zero(None, Some("0"))]
+        #[case::global_negative(Some("-1"), None)]
+        #[case::group_string(None, Some("many"))]
+        fn invalid_is_config_error(#[case] global: Option<&str>, #[case] group: Option<&str>) {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml(global, group).as_bytes()).unwrap();
+            let err = load_config(tmp.path()).unwrap_err();
+            assert_eq!(crate::exit::code_for(&err), crate::exit::CONFIG_ERROR);
+            assert!(format!("{err:#}").contains("max_parallel"), "{err:#}");
+        }
+
+        #[rstest]
+        #[case::global_only(nz(3), None, 3)]
+        #[case::group_below_global(nz(4), nz(2), 2)]
+        #[case::group_above_global(nz(2), nz(8), 2)]
+        #[case::group_equal_global(nz(2), nz(2), 2)]
+        fn resolves_limit(
+            #[case] global: Option<NonZeroUsize>,
+            #[case] group: Option<NonZeroUsize>,
+            #[case] expected: usize,
+        ) {
+            assert_eq!(parallel_limit(global, group).get(), expected);
+        }
+
+        #[test]
+        fn defaults_to_cpu_count() {
+            assert_eq!(parallel_limit(None, None).get(), cpus());
+            assert_eq!(parallel_limit(None, nz(1)).get(), 1);
+            let big = cpus() + 5;
+            assert_eq!(parallel_limit(None, nz(big)).get(), cpus());
+        }
+
+        #[rstest]
+        #[case::jobs_overrides_config(Some("4"), nz(2), 2)]
+        #[case::jobs_without_config(None, nz(3), 3)]
+        #[case::no_jobs_keeps_config(Some("4"), None, 4)]
+        fn jobs_overrides_top_level(
+            #[case] global: Option<&str>,
+            #[case] jobs: Option<NonZeroUsize>,
+            #[case] expected: usize,
+        ) {
+            let mut config: CiConfig = serde_yaml::from_str(&yaml(global, None)).unwrap();
+            config.apply_jobs(jobs);
+            assert_eq!(config.group_parallel_limit("g"), expected);
+        }
+
+        #[test]
+        fn group_limit_applies_under_global() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(Some("4"), Some("2"))).unwrap();
+            assert_eq!(config.group_parallel_limit("g"), 2);
+            assert_eq!(config.group_parallel_limit("missing"), 4);
         }
     }
 }
