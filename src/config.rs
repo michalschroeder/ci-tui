@@ -20,6 +20,7 @@
 //! }
 //! ```
 
+use crate::exit::ConfigError;
 use anyhow::{bail, ensure, Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
@@ -696,13 +697,16 @@ fn ensure_group_has_no_docker_targets(g: &str, group: &GroupConfig) -> Result<()
 /// Returns an error if the file cannot be read, parsed, or contains invalid regexes.
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        .with_context(|| format!("Failed to read config file: {}", path.display()))
+        .map_err(ConfigError)?;
 
     let config: CiConfig = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))
+        .map_err(ConfigError)?;
     config
         .validate_and_compile()
-        .with_context(|| format!("Invalid config file: {}", path.display()))?;
+        .with_context(|| format!("Invalid config file: {}", path.display()))
+        .map_err(ConfigError)?;
     Ok(config)
 }
 

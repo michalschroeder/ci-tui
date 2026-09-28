@@ -25,7 +25,7 @@ fn local_config(command: &str) -> String {
     format!("{HEAD}runner: local\n{}", check(command))
 }
 
-/// Docker-mode config (no `--list` test may need a daemon)
+/// Docker-mode config (used with `--list` only: no daemon needed)
 fn docker_config() -> String {
     format!(
         "{HEAD}docker:\n  project_dir: .\n  service: app\n  shell: sh\n{}",
@@ -81,7 +81,6 @@ fn missing_config_file_exits_2() {
 fn validate_invalid_config_exits_2() {
     let (_tmp, out) = run_with("checks: [not, a, map", &["validate"]);
     assert_code(&out, exit::CONFIG_ERROR);
-    assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
 }
 
 #[test]

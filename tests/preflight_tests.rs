@@ -340,33 +340,27 @@ async fn exec_probe_failure_includes_first_stderr_line() {
 // preflight::docker_reachable: exit 3 when docker is down
 // ---------------------------------------------------------------------------
 
-/// Mock answering the reachability probe with `success` / `stderr`
-fn probe_mock(success: bool, stderr: &str, seen: Arc<Mutex<Vec<String>>>) -> MockCommandExecutor {
+/// Mock answering the `docker version` probe with `success` / `stderr`
+fn probe_mock(success: bool, stderr: &str) -> MockCommandExecutor {
     let stderr = stderr.to_string();
     let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().times(1).returning(move |cmd, _, _| {
-        seen.lock().unwrap().push(cmd.to_string());
-        CommandOutput {
+    mock.expect_execute()
+        .withf(|cmd, _, _| cmd.starts_with("docker version"))
+        .times(1)
+        .returning(move |_, _, _| CommandOutput {
             success,
             stdout: String::new(),
             stderr: stderr.clone(),
-        }
-    });
+        });
     mock
 }
 
 #[tokio::test]
 async fn docker_probe_up_is_ok() {
     let target = ConfigBuilder::new().build().runner;
-    let seen = Arc::default();
-    let mock = probe_mock(true, "", Arc::clone(&seen));
-
-    docker_reachable(&target, &default_check(), root(), &mock)
+    docker_reachable(&target, &default_check(), root(), &probe_mock(true, ""))
         .await
         .unwrap();
-
-    assert_eq!(seen.lock().unwrap().len(), 1);
-    assert!(seen.lock().unwrap()[0].starts_with("docker version"));
 }
 
 #[tokio::test]
@@ -375,7 +369,6 @@ async fn docker_probe_failure_is_env_error() {
     let mock = probe_mock(
         false,
         "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\nmore\n",
-        Arc::default(),
     );
 
     let err = docker_reachable(&target, &default_check(), root(), &mock)
@@ -390,18 +383,12 @@ async fn docker_probe_failure_is_env_error() {
 }
 
 #[tokio::test]
-async fn docker_probe_skipped_in_local_mode() {
+async fn docker_probe_skipped_in_local_mode_or_without_checks() {
+    let docker = ConfigBuilder::new().build().runner;
     let mut mock = MockCommandExecutor::new();
     mock.expect_execute().never();
     docker_reachable(&local_sh(), &default_check(), root(), &mock)
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn docker_probe_skipped_without_checks() {
-    let target = ConfigBuilder::new().build().runner;
-    let mut mock = MockCommandExecutor::new();
-    mock.expect_execute().never();
-    docker_reachable(&target, &[], root(), &mock).await.unwrap();
+    docker_reachable(&docker, &[], root(), &mock).await.unwrap();
 }

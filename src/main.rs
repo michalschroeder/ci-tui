@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
-use ci_tui::exit::{self, ConfigError};
+use ci_tui::exit;
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
 use ci_tui::{checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui};
 use std::io::IsTerminal;
@@ -81,7 +81,7 @@ fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Resul
             path.display()
         );
     } else {
-        commands::validate(&path).map_err(ConfigError)?;
+        commands::validate(&path)?;
         println!("OK: {} is valid", path.display());
     }
     Ok(())
@@ -94,7 +94,6 @@ fn main() {
     let result = tokio::runtime::Runtime::new()
         .map_err(anyhow::Error::from)
         .and_then(|runtime| runtime.block_on(run()));
-    // Errors escaping `run`: config errors exit 2, anything else 3
     let code = result.unwrap_or_else(|e| {
         eprintln!("Error: {e:?}");
         exit::code_for(&e)
@@ -102,12 +101,6 @@ fn main() {
     if code != exit::SUCCESS {
         std::process::exit(code);
     }
-}
-
-/// Print a clap usage error and exit [`exit::CONFIG_ERROR`] (clap's own code)
-fn usage_exit(err: clap::Error) -> ! {
-    let _ = err.print();
-    std::process::exit(exit::CONFIG_ERROR)
 }
 
 /// Run `fut`, or stop at Ctrl-C. Commands run in their own process group,
@@ -139,19 +132,19 @@ async fn run() -> Result<i32> {
 
     // Enforced here, not via clap `required`: clap forbids required global args.
     let Some(config_path) = run_config_path(cli.config, &project_root) else {
-        usage_exit(missing_config_error());
+        missing_config_error().exit();
     };
 
     // Auto-detect TUI mode: use simple mode if stdout is not a terminal
     let simple_mode = cli.simple || !std::io::stdout().is_terminal();
 
-    // Load configuration (errors exit 2)
-    let mut config = config::load_config(&config_path).map_err(ConfigError)?;
+    // Load configuration
+    let mut config = config::load_config(&config_path)?;
 
     // --only / --group: narrow the config so every mode sees the same subset.
     // Unknown ids are a usage error (exit 2), like other bad flag values.
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
-        usage_exit(filter_error(e));
+        filter_error(e).exit();
     }
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
@@ -204,7 +197,7 @@ async fn run() -> Result<i32> {
         mut warnings,
     } = checks::select_checks(&config, &changed_files, &exec_root);
 
-    // Checks would run in docker mode: fail fast (exit 3) if Docker is down,
+    // Checks would run in docker mode: fail fast if Docker is down,
     // rather than every check failing on its own.
     preflight::docker_reachable(
         &config.runner,

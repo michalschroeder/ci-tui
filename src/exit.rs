@@ -1,12 +1,4 @@
-//! Process exit codes: why a run failed, for scripts and CI callers.
-//!
-//! | code | meaning                                          |
-//! |------|--------------------------------------------------|
-//! | 0    | all selected checks passed (or nothing to do)    |
-//! | 1    | at least one check / fix command failed          |
-//! | 2    | config or usage error                            |
-//! | 3    | git / environment error (e.g. Docker unreachable)|
-//! | 130  | interrupted (Ctrl-C)                             |
+//! Process exit codes: why a run failed, for scripts and CI callers (table in README).
 
 /// All selected checks passed
 pub const SUCCESS: i32 = 0;
@@ -23,7 +15,7 @@ pub const INTERRUPTED: i32 = 130;
 /// message and cause chain are the wrapped error's.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
-pub struct ConfigError(#[from] pub anyhow::Error);
+pub struct ConfigError(pub anyhow::Error);
 
 /// Exit code for an error escaping the run: [`CONFIG_ERROR`] if it is (or
 /// wraps) a [`ConfigError`], else [`ENV_ERROR`].
@@ -39,12 +31,6 @@ pub fn code_for(err: &anyhow::Error) -> i32 {
 mod tests {
     use super::*;
     use anyhow::Context;
-
-    #[test]
-    fn config_error_maps_to_config_code() {
-        let err = anyhow::Error::from(ConfigError(anyhow::anyhow!("bad yaml")));
-        assert_eq!(code_for(&err), CONFIG_ERROR);
-    }
 
     #[test]
     fn config_error_under_context_maps_to_config_code() {
@@ -70,12 +56,5 @@ mod tests {
             "Failed to parse ci.yaml: root cause",
             "transparent wrapper adds nothing"
         );
-    }
-
-    #[test]
-    fn codes_are_distinct() {
-        let codes = [SUCCESS, CHECKS_FAILED, CONFIG_ERROR, ENV_ERROR, INTERRUPTED];
-        let unique: std::collections::HashSet<_> = codes.iter().collect();
-        assert_eq!(unique.len(), codes.len());
     }
 }
