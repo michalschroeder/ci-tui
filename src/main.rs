@@ -122,6 +122,7 @@ async fn run() -> Result<i32> {
     let _ = color_eyre::install();
 
     let cli = Cli::parse_checked();
+    ci_tui::color::set_enabled(cli.color_enabled());
 
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);
@@ -254,7 +255,7 @@ async fn run() -> Result<i32> {
             project_root,
             exec_root,
             warnings,
-            filter_notice,
+            ui::TuiOptions::new(filter_notice, !cli.no_stats),
         )
         .await
     }

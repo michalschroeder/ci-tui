@@ -853,3 +853,75 @@ fn test_help_overlay_lists_fold_key() {
         "Space / Enter  fold / unfold"
     ));
 }
+
+// ============================================================================
+// #143: NO_COLOR, small terminal, hidden stats panel
+// ============================================================================
+
+/// Render `app` on a `width` x `height` TestBackend
+fn render_at(app: &mut ci_tui::ui::app::App, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| dashboard::render(app, f)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn has_color(buffer: &Buffer) -> bool {
+    buffer
+        .content()
+        .iter()
+        .any(|c| c.fg != Color::Reset || c.bg != Color::Reset)
+}
+
+#[test]
+fn test_no_color_renders_no_fg_bg_colors() {
+    let mut app = make_test_app();
+    app.update_stats(90.0, 8_000_000_000, 16_000_000_000);
+    assert!(has_color(&render_at(&mut app, WIDTH, HEIGHT)), "color on");
+
+    app.color = false;
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    assert!(!has_color(&buffer), "every cell fg/bg must be Reset");
+    assert!(buffer_contains(&buffer, "CPU"), "layout still rendered");
+}
+
+#[rstest::rstest]
+#[case::narrow(59, 24)]
+#[case::short(80, 20)]
+fn test_too_small_terminal_shows_message_only(#[case] width: u16, #[case] height: u16) {
+    let mut app = make_test_app();
+    let buffer = render_at(&mut app, width, height);
+    assert!(buffer_contains(&buffer, "Terminal too small"));
+    assert!(buffer_contains(&buffer, &format!("{width}x{height}")));
+    assert!(buffer_contains(&buffer, "need 60x21"));
+    assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "Checks"));
+}
+
+#[test]
+fn test_min_size_terminal_renders_layout() {
+    let mut app = make_test_app();
+    let buffer = render_at(&mut app, 60, 21);
+    assert!(!buffer_contains(&buffer, "too small"));
+    assert!(buffer_contains(&buffer, "CPU") && buffer_contains(&buffer, "Checks"));
+}
+
+#[test]
+fn test_stats_hidden_renders_no_cpu_mem_panel() {
+    let mut app = make_test_app();
+    assert!(app.stats_visible());
+    app.toggle_stats();
+    assert!(!app.stats_visible());
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "MEM"));
+    // Main content moves up into the stats panel's rows (header is 3 rows)
+    assert!(row_text(&buffer, 3, 0, WIDTH).contains("Checks"));
+}
+
+#[test]
+fn test_stats_hidden_lowers_min_height_by_stats_rows() {
+    let mut app = make_test_app();
+    app.toggle_stats();
+    assert!(!buffer_contains(&render_at(&mut app, 60, 15), "too small"));
+    let buffer = render_at(&mut app, 60, 14);
+    assert!(buffer_contains(&buffer, "Terminal too small"));
+    assert!(buffer_contains(&buffer, "need 60x15"));
+}

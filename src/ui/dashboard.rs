@@ -9,8 +9,12 @@
 //! The UI is divided into four horizontal sections:
 //! 1. **Header**: Progress gauge with branch info and elapsed time
 //! 2. **System stats**: CPU sparkline with 0/50/100 scale, memory gauge
+//!    (hidden with `--no-stats` / `m`; its rows go to the main content)
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
+//!
+//! Below [`MIN_WIDTH`] x [`min_height`] only a "terminal too small" message
+//! renders. With color off every cell's fg/bg is reset after drawing.
 
 use super::app::{App, PreCommandState, PreCommandStatus, SelectableItem, StatusKind};
 use crate::checks::CheckFiles;
@@ -54,6 +58,17 @@ const FIX_ERROR_PREVIEW_LINES: usize = 5;
 const ERROR_LINE_STYLE: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 /// Columns of the CPU y-axis scale: widest label ("100") + 1 gap
 const CPU_SCALE_COLS: u16 = 4;
+/// Rows of the header (progress gauge)
+const HEADER_ROWS: u16 = 3;
+/// Rows of the CPU/MEM stats panel (taller for better graphs)
+const STATS_ROWS: u16 = 6;
+/// Minimum rows of the main content (checks + output)
+const MAIN_MIN_ROWS: u16 = 10;
+/// Rows of the footer (shortcuts / status message)
+const FOOTER_ROWS: u16 = 2;
+/// Narrowest terminal the layout renders in; below it only a "terminal too
+/// small" message shows
+pub const MIN_WIDTH: u16 = 60;
 
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
@@ -172,24 +187,88 @@ fn suffix_width(s: &str, max: usize) -> &str {
     s
 }
 
+/// Lowest terminal height the layout renders in (stats panel rows only when shown)
+pub fn min_height(stats_visible: bool) -> u16 {
+    let stats = if stats_visible { STATS_ROWS } else { 0 };
+    HEADER_ROWS + stats + MAIN_MIN_ROWS + FOOTER_ROWS
+}
+
 pub fn render(app: &mut App, frame: &mut Frame) {
+    let area = frame.area();
+    let min_height = min_height(app.view.stats_visible);
+    if area.width < MIN_WIDTH || area.height < min_height {
+        render_too_small(frame, MIN_WIDTH, min_height);
+    } else {
+        render_dashboard(app, frame);
+    }
+    if !app.color {
+        strip_colors(frame.buffer_mut());
+    }
+}
+
+/// Header, stats (if shown), main content, footer, and the help overlay
+fn render_dashboard(app: &mut App, frame: &mut Frame) {
+    let stats_rows = if app.view.stats_visible {
+        STATS_ROWS
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header with progress
-            Constraint::Length(6), // System stats (taller for better graphs)
-            Constraint::Min(10),   // Main content (checks + output)
-            Constraint::Length(2), // Footer/help
+            Constraint::Length(HEADER_ROWS),
+            Constraint::Length(stats_rows),
+            Constraint::Min(MAIN_MIN_ROWS),
+            Constraint::Length(FOOTER_ROWS),
         ])
         .split(frame.area());
 
     render_header(app, frame, chunks[0]);
-    render_system_stats(app, frame, chunks[1]);
+    if app.view.stats_visible {
+        render_system_stats(app, frame, chunks[1]);
+    }
     render_main(app, frame, chunks[2]);
     render_footer(app, frame, chunks[3]);
 
     if app.view.help_visible {
         render_help_overlay(frame);
+    }
+}
+
+/// Centered "terminal too small" notice with current and required size, in
+/// place of a clipped layout
+fn render_too_small(frame: &mut Frame, min_width: u16, min_height: u16) {
+    let area = frame.area();
+    let lines = vec![
+        Line::from(Span::styled(
+            "Terminal too small",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "{}x{}, need {}x{}",
+            area.width, area.height, min_width, min_height
+        )),
+    ];
+    let height = (lines.len() as u16).min(area.height);
+    let [_, row, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        row,
+    );
+}
+
+/// Reset every cell's fg/bg (`--no-color` / `NO_COLOR`); modifiers
+/// (bold, reversed selection) stay so the UI remains usable
+fn strip_colors(buf: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buf.content {
+        cell.set_fg(Color::Reset).set_bg(Color::Reset);
     }
 }
 
@@ -250,6 +329,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  x / X          fix selected / fix all"),
         Line::from("  A              run selected check for all files"),
         Line::from("  c / e          copy / expand command+files"),
+        Line::from("  m              show / hide CPU/MEM stats"),
         Line::from("  q / Ctrl-c     quit"),
         Line::from(""),
         Line::from(Span::styled(
@@ -1195,7 +1275,11 @@ fn highlight_line_spans(plain: &str, lower: &str, needle: &str, query: &str) -> 
         let end = start + query.len();
         spans.push(Span::styled(
             plain[start..end].to_string(),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
+            // Underline keeps matches visible with color off (NO_COLOR)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::UNDERLINED),
         ));
         idx = end;
     }
