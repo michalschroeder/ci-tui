@@ -84,13 +84,14 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
         });
     }
 
-    if let Some((discovery, sources, outcome)) = &eval.discovery {
+    if let Some(discovery) = &eval.discovery {
         reasons.push(discovery_reason(
-            &discovery.source_pattern,
-            sources,
-            outcome,
+            &discovery.config.source_pattern,
+            &discovery.sources,
+            &discovery.outcome,
             eval.file_pattern_matched(),
         ));
+        reasons.extend(discovery.warnings.iter().map(|w| format!("warning: {w}")));
     }
 
     if reasons.is_empty() {

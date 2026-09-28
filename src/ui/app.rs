@@ -525,6 +525,14 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Show non-fatal warnings (test discovery, docker preflight) in the
+    /// footer; no-op when empty
+    pub fn show_warnings(&mut self, warnings: &[String]) {
+        if !warnings.is_empty() {
+            self.set_status_message(StatusKind::Error, warnings.join("; "));
+        }
+    }
+
     /// Store a git-refreshed file list and check (single-check retry)
     pub fn replace_check(&mut self, changed_files: ChangedFiles, check: CheckToRun) {
         self.changed_files = changed_files;
@@ -2558,6 +2566,23 @@ checks:
 
         assert_eq!(app.view.status_filter, StatusFilter::Failed);
         assert_eq!(app.view.selected_check, 0);
+    }
+
+    #[test]
+    fn test_show_warnings_joins_into_error_status() {
+        let mut app = make_app();
+        app.show_warnings(&["w1".to_string(), "w2".to_string()]);
+
+        let msg = app.view.status_message.as_ref().expect("warning shown");
+        assert_eq!(msg.text, "w1; w2");
+        assert_eq!(msg.kind, StatusKind::Error);
+    }
+
+    #[test]
+    fn test_show_warnings_empty_sets_no_status() {
+        let mut app = make_app();
+        app.show_warnings(&[]);
+        assert!(app.view.status_message.is_none());
     }
 
     #[test]

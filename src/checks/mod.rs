@@ -162,15 +162,35 @@ pub fn determine_checks(
     changed_files: &ChangedFiles,
     project_root: &Path,
 ) -> Vec<CheckToRun> {
+    select_checks(config, changed_files, project_root).checks
+}
+
+/// [`determine_checks`] result plus non-fatal test discovery warnings (e.g. a
+/// `grep_search` that failed or timed out).
+#[derive(Debug)]
+pub struct Selected {
+    pub checks: Vec<CheckToRun>,
+    /// Deduped in first-seen order (checks sharing a discovery config report
+    /// the same failure)
+    pub warnings: Vec<String>,
+}
+
+/// [`determine_checks`], also returning discovery warnings.
+pub fn select_checks(
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    project_root: &Path,
+) -> Selected {
     let mut checks_to_run = Vec::new();
+    let mut warnings = Vec::new();
     let default_service = config.default_service();
 
     for (group_name, group_config) in config.groups() {
         for (check_id, check) in &group_config.checks {
+            let selection = Selection::evaluate(config, changed_files, project_root, check);
+            warnings.extend_from_slice(selection.warnings());
             checks_to_run.extend(process_check(
-                config,
-                changed_files,
-                project_root,
+                selection,
                 group_name,
                 check_id,
                 check,
@@ -179,7 +199,12 @@ pub fn determine_checks(
         }
     }
 
-    checks_to_run
+    let mut seen = std::collections::HashSet::new();
+    warnings.retain(|w| seen.insert(w.clone()));
+    Selected {
+        checks: checks_to_run,
+        warnings,
+    }
 }
 
 /// Resolve placeholders in check command

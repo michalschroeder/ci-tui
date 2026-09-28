@@ -21,7 +21,7 @@
 pub mod app;
 pub mod dashboard;
 
-use crate::checks::{determine_checks, CheckToRun};
+use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
@@ -114,6 +114,8 @@ enum TaskEvent {
     RetryAllReady {
         changed_files: ChangedFiles,
         checks: Vec<CheckToRun>,
+        /// Test discovery warnings from the refresh
+        warnings: Vec<String>,
     },
 }
 
@@ -211,6 +213,7 @@ enum Action {
     RestartRunner {
         new_changed_files: ChangedFiles,
         new_checks: Vec<CheckToRun>,
+        warnings: Vec<String>,
     },
 }
 
@@ -276,7 +279,7 @@ impl TaskCtx {
     /// system): call from `spawn_blocking`. `--files` lists are kept as-is
     /// (no git base to diff against); only the checks are re-determined.
     /// `--staged` re-reads the git index.
-    fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+    fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
         let changed_files = if previous.is_cli_files() {
             previous
         } else {
@@ -284,8 +287,8 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let checks = determine_checks(&self.config, &changed_files, &self.exec_root);
-        Ok((changed_files, checks))
+        let selected = select_checks(&self.config, &changed_files, &self.exec_root);
+        Ok((changed_files, selected))
     }
 
     /// Git re-detection for [`Self::refresh`]: the index for `--staged`,
@@ -299,10 +302,7 @@ impl TaskCtx {
     }
 
     /// [`Self::refresh`] on the blocking pool
-    async fn refresh_async(
-        &self,
-        previous: ChangedFiles,
-    ) -> Result<(ChangedFiles, Vec<CheckToRun>)> {
+    async fn refresh_async(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
         let ctx = self.clone();
         tokio::task::spawn_blocking(move || ctx.refresh(previous)).await?
     }
@@ -397,8 +397,8 @@ async fn refresh_and_run(
     changed_files: ChangedFiles,
 ) -> Option<CheckResult> {
     let check = match ctx.refresh_async(changed_files).await {
-        Ok((changed_files, checks)) => {
-            let Some(new_check) = checks.into_iter().find(|c| c.id() == check.id()) else {
+        Ok((changed_files, selected)) => {
+            let Some(new_check) = selected.checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
                 return None;
             };
@@ -562,7 +562,8 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     let base_ref = previous.base_ref.clone();
     app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
-        let (changed_files, checks) = match ctx.refresh_async(previous).await {
+        let (changed_files, Selected { checks, warnings }) = match ctx.refresh_async(previous).await
+        {
             Ok(refreshed) => refreshed,
             // Git refresh failed - restart with no changed files
             Err(_) => {
@@ -570,14 +571,15 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
                     files: vec![],
                     base_ref,
                 };
-                let checks = determine_checks(&ctx.config, &changed_files, &ctx.exec_root);
-                (changed_files, checks)
+                let selected = select_checks(&ctx.config, &changed_files, &ctx.exec_root);
+                (changed_files, selected)
             }
         };
         let _ = tx
             .send(TaskEvent::RetryAllReady {
                 changed_files,
                 checks,
+                warnings,
             })
             .await;
     });
@@ -796,10 +798,12 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         TaskEvent::RetryAllReady {
             changed_files,
             checks,
+            warnings,
         } => {
             return Action::RestartRunner {
                 new_changed_files: changed_files,
                 new_checks: checks,
+                warnings,
             }
         }
     }
@@ -856,7 +860,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
 }
 
 /// Run the TUI; returns the process exit code (1 if any check failed).
-/// `startup_warning` (e.g. docker preflight) is shown in the footer until a
+/// `startup_warnings` (test discovery, docker preflight) are shown in the footer until a
 /// keypress, since stderr is hidden behind the alternate screen.
 /// `filter_notice` (`--only` / `--group`) stays in the header.
 ///
@@ -868,7 +872,7 @@ pub async fn run(
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
     exec_root: PathBuf,
-    startup_warning: Option<String>,
+    startup_warnings: Vec<String>,
     filter_notice: Option<String>,
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
@@ -889,9 +893,7 @@ pub async fn run(
     // Create app state
     let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
     app.filter_notice = filter_notice;
-    if let Some(warning) = startup_warning {
-        app.set_status_message(StatusKind::Error, warning);
-    }
+    app.show_warnings(&startup_warnings);
 
     // Start the runner in background ('s' cancels through `cancels`)
     let cancels = CancelRegistry::default();
@@ -963,6 +965,7 @@ pub async fn run(
             Action::RestartRunner {
                 new_changed_files,
                 new_checks,
+                warnings,
             } => {
                 // Abort old runner and background tasks (dropping their
                 // futures kills process groups / `docker run` containers),
@@ -972,6 +975,7 @@ pub async fn run(
                 tasks.set.abort_all();
                 (tasks, task_rx) = Tasks::new(tasks.ctx.clone());
                 app.reset_for_retry(new_changed_files, new_checks.clone());
+                app.show_warnings(&warnings);
                 let (new_handle, new_rx) = start_runner(&config, &exec_root, new_checks, &cancels);
                 runner_handle = new_handle;
                 event_rx = new_rx;
@@ -1188,6 +1192,7 @@ checks:
         let TaskEvent::RetryAllReady {
             changed_files,
             checks,
+            ..
         } = event
         else {
             panic!("expected RetryAllReady, got {:?}", event);

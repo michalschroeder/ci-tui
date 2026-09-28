@@ -8,7 +8,8 @@ use std::path::Path;
 
 mod common;
 use common::configs::{
-    checks_test_config, rust_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder,
+    checks_test_config, rust_discovery_config, rust_grep_discovery_config, rust_project_config,
+    CheckBuilder, ConfigBuilder,
 };
 use common::{git, run_ci_tui};
 
@@ -138,6 +139,22 @@ fn test_discovery_found_tests_reason() {
     assert_eq!(
         e.reasons,
         vec!["test_discovery `rust_src` (src/foo.rs): discovered tests: tests/foo_test.rs"]
+    );
+}
+
+#[test]
+fn test_discovery_grep_failure_reason_is_warning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+    let config = rust_grep_discovery_config(r"\({basename}");
+
+    let explained = explain_checks(&config, &changed(&["src/foo.rs"], "main"), tmp.path());
+    let reasons = &find(&explained, "a").reasons;
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.starts_with("warning: test discovery: grep in `tests` failed:")),
+        "{reasons:?}"
     );
 }
 

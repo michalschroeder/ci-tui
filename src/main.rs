@@ -189,21 +189,27 @@ async fn run() -> Result<i32> {
     }
 
     // Determine which checks to run (fix mode reuses it only for the probe)
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
+    let checks::Selected {
+        checks: checks_to_run,
+        mut warnings,
+    } = checks::select_checks(&config, &changed_files, &exec_root);
 
-    // Docker: warn (non-fatal) when changed files won't resolve in the
-    // containers the checks use. Console modes print now; the TUI shows them
-    // in-app (alternate screen).
-    let docker_warnings = preflight::docker_warnings(
-        &config.runner,
-        &checks_to_run,
-        &changed_files.files,
-        &exec_root,
-        &RealCommandExecutor,
-    )
-    .await;
+    // Non-fatal warnings: failed test discovery (e.g. grep error/timeout),
+    // then Docker preflight (changed files won't resolve in the containers
+    // the checks use). Console modes print now; the TUI shows them in-app
+    // (alternate screen).
+    warnings.extend(
+        preflight::docker_warnings(
+            &config.runner,
+            &checks_to_run,
+            &changed_files.files,
+            &exec_root,
+            &RealCommandExecutor,
+        )
+        .await,
+    );
     if cli.fix || simple_mode {
-        for warning in &docker_warnings {
+        for warning in &warnings {
             eprintln!("Warning: {warning}");
         }
     }
@@ -224,7 +230,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             project_root,
             exec_root,
-            (!docker_warnings.is_empty()).then(|| docker_warnings.join("; ")),
+            warnings,
             filter_notice,
         )
         .await

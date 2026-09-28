@@ -467,6 +467,35 @@ pub fn rust_discovery() -> TestDiscoveryConfig {
     }
 }
 
+/// [`rust_discovery`] plus a `grep_search` strategy over `tests/` with `pattern`
+#[allow(dead_code)]
+pub fn rust_discovery_with_grep(pattern: &str) -> TestDiscoveryConfig {
+    let mut discovery = rust_discovery();
+    discovery
+        .strategies
+        .push(TestDiscoveryStrategy::GrepSearch {
+            search_dirs: vec!["tests".to_string()],
+            pattern: pattern.to_string(),
+        });
+    discovery
+}
+
+/// Two `{files}` checks `a` and `b` (group `tests`) sharing
+/// [`rust_discovery_with_grep`]`(pattern)` — source pattern `rust_src`
+#[allow(dead_code)]
+pub fn rust_grep_discovery_config(pattern: &str) -> CiConfig {
+    let check = |name| {
+        CheckBuilder::new(name, "t {files}")
+            .with_test_discovery(rust_discovery_with_grep(pattern))
+            .build()
+    };
+    ConfigBuilder::new()
+        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
+        .with_check("tests", "a", check("A"))
+        .with_check("tests", "b", check("B"))
+        .build()
+}
+
 /// Config with test-discovery checks in group `tests`:
 /// - unit: `{files}` command
 /// - slow: `{files}` command, on_demand
