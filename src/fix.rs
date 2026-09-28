@@ -106,7 +106,7 @@ pub async fn run(
             "\x1b[31m✗ {}/{} fixes passed, {} failed in {}\x1b[0m",
             summary.pass_count, summary.fix_count, summary.fail_count, elapsed_str
         );
-        std::process::exit(1);
+        std::process::exit(crate::exit::CHECKS_FAILED);
     } else {
         println!(
             "\x1b[32m✓ All {} fixes passed in {}\x1b[0m",

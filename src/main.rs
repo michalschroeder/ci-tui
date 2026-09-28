@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
+use ci_tui::exit::{self, ConfigError};
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
 use ci_tui::{checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui};
 use std::io::IsTerminal;
@@ -28,7 +29,7 @@ fn git_detect_changes_or_exit(
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {e:#}\n\n{hint}");
-        std::process::exit(1);
+        std::process::exit(exit::ENV_ERROR);
     })
 }
 
@@ -80,24 +81,33 @@ fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Resul
             path.display()
         );
     } else {
-        commands::validate(&path)?;
+        commands::validate(&path).map_err(ConfigError)?;
         println!("OK: {} is valid", path.display());
     }
     Ok(())
 }
 
-/// Exit code for a Ctrl-C interrupted run (128 + SIGINT)
-const INTERRUPTED_EXIT_CODE: i32 = 130;
-
-fn main() -> Result<()> {
+fn main() {
     // The runtime is dropped at the end of this statement, before exiting:
     // that drops every still-running command future, whose guards kill its
     // process group / `docker run` container (quit, Ctrl-C).
-    let code = tokio::runtime::Runtime::new()?.block_on(run())?;
-    if code != 0 {
+    let result = tokio::runtime::Runtime::new()
+        .map_err(anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(run()));
+    // Errors escaping `run`: config errors exit 2, anything else 3
+    let code = result.unwrap_or_else(|e| {
+        eprintln!("Error: {e:?}");
+        exit::code_for(&e)
+    });
+    if code != exit::SUCCESS {
         std::process::exit(code);
     }
-    Ok(())
+}
+
+/// Print a clap usage error and exit [`exit::CONFIG_ERROR`] (clap's own code)
+fn usage_exit(err: clap::Error) -> ! {
+    let _ = err.print();
+    std::process::exit(exit::CONFIG_ERROR)
 }
 
 /// Run `fut`, or stop at Ctrl-C. Commands run in their own process group,
@@ -105,10 +115,10 @@ fn main() -> Result<()> {
 /// the runtime) kills them instead.
 async fn interruptible(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
     tokio::select! {
-        result = fut => result.map(|()| 0),
+        result = fut => result.map(|()| exit::SUCCESS),
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nInterrupted");
-            Ok(INTERRUPTED_EXIT_CODE)
+            Ok(exit::INTERRUPTED)
         }
     }
 }
@@ -121,7 +131,7 @@ async fn run() -> Result<i32> {
     let cli = Cli::parse_checked();
 
     if let Some(command) = cli.command {
-        return run_subcommand(command, cli.config).map(|()| 0);
+        return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);
     }
 
     // Use current working directory as project root
@@ -129,19 +139,19 @@ async fn run() -> Result<i32> {
 
     // Enforced here, not via clap `required`: clap forbids required global args.
     let Some(config_path) = run_config_path(cli.config, &project_root) else {
-        missing_config_error().exit();
+        usage_exit(missing_config_error());
     };
 
     // Auto-detect TUI mode: use simple mode if stdout is not a terminal
     let simple_mode = cli.simple || !std::io::stdout().is_terminal();
 
-    // Load configuration
-    let mut config = config::load_config(&config_path)?;
+    // Load configuration (errors exit 2)
+    let mut config = config::load_config(&config_path).map_err(ConfigError)?;
 
     // --only / --group: narrow the config so every mode sees the same subset.
     // Unknown ids are a usage error (exit 2), like other bad flag values.
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
-        filter_error(e).exit();
+        usage_exit(filter_error(e));
     }
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
@@ -185,7 +195,7 @@ async fn run() -> Result<i32> {
             "{}",
             list::render(&config, &changed_files, cli.base.as_deref(), &explained)
         );
-        return Ok(0);
+        return Ok(exit::SUCCESS);
     }
 
     // Determine which checks to run (fix mode reuses it only for the probe)
@@ -193,6 +203,16 @@ async fn run() -> Result<i32> {
         checks: checks_to_run,
         mut warnings,
     } = checks::select_checks(&config, &changed_files, &exec_root);
+
+    // Checks would run in docker mode: fail fast (exit 3) if Docker is down,
+    // rather than every check failing on its own.
+    preflight::docker_reachable(
+        &config.runner,
+        &checks_to_run,
+        &exec_root,
+        &RealCommandExecutor,
+    )
+    .await?;
 
     // Non-fatal warnings: failed test discovery (e.g. grep error/timeout),
     // then Docker preflight (changed files won't resolve in the containers

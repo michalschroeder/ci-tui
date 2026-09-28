@@ -4,7 +4,8 @@
 //! without a matching repo mount).
 
 use ci_tui::checks::CheckToRun;
-use ci_tui::preflight::docker_warnings;
+use ci_tui::exit;
+use ci_tui::preflight::{docker_reachable, docker_warnings};
 use ci_tui::runner::ExecTarget;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -333,4 +334,74 @@ async fn exec_probe_failure_includes_first_stderr_line() {
         "{warnings:?}"
     );
     assert!(!warnings[0].contains("second line"), "{warnings:?}");
+}
+
+// ---------------------------------------------------------------------------
+// preflight::docker_reachable: exit 3 when docker is down
+// ---------------------------------------------------------------------------
+
+/// Mock answering the reachability probe with `success` / `stderr`
+fn probe_mock(success: bool, stderr: &str, seen: Arc<Mutex<Vec<String>>>) -> MockCommandExecutor {
+    let stderr = stderr.to_string();
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().times(1).returning(move |cmd, _, _| {
+        seen.lock().unwrap().push(cmd.to_string());
+        CommandOutput {
+            success,
+            stdout: String::new(),
+            stderr: stderr.clone(),
+        }
+    });
+    mock
+}
+
+#[tokio::test]
+async fn docker_probe_up_is_ok() {
+    let target = ConfigBuilder::new().build().runner;
+    let seen = Arc::default();
+    let mock = probe_mock(true, "", Arc::clone(&seen));
+
+    docker_reachable(&target, &default_check(), root(), &mock)
+        .await
+        .unwrap();
+
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(seen.lock().unwrap()[0].starts_with("docker version"));
+}
+
+#[tokio::test]
+async fn docker_probe_failure_is_env_error() {
+    let target = ConfigBuilder::new().build().runner;
+    let mock = probe_mock(
+        false,
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\nmore\n",
+        Arc::default(),
+    );
+
+    let err = docker_reachable(&target, &default_check(), root(), &mock)
+        .await
+        .unwrap_err();
+
+    assert_eq!(exit::code_for(&err), exit::ENV_ERROR);
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Docker is not reachable"), "{msg}");
+    assert!(msg.contains("Cannot connect to the Docker daemon"), "{msg}");
+    assert!(!msg.contains("more"), "{msg}");
+}
+
+#[tokio::test]
+async fn docker_probe_skipped_in_local_mode() {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().never();
+    docker_reachable(&local_sh(), &default_check(), root(), &mock)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn docker_probe_skipped_without_checks() {
+    let target = ConfigBuilder::new().build().runner;
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().never();
+    docker_reachable(&target, &[], root(), &mock).await.unwrap();
 }

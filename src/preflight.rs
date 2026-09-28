@@ -5,7 +5,9 @@
 //! WORKDIR for `docker exec`, `docker.work_dir` for `docker run`). A mismatch would
 //! otherwise surface only as "file not found" inside checks, so warn up front.
 //!
-//! Warnings are advisory: callers print/show them and run normally.
+//! Warnings are advisory: callers print/show them and run normally. An
+//! unreachable Docker daemon is not: [`docker_reachable`] fails the run
+//! (exit 3) before any check starts.
 
 use crate::checks::CheckToRun;
 use crate::config::DockerConfig;
@@ -13,6 +15,39 @@ use crate::runner::{build_docker_exec_command, CommandExecutor, ExecTarget, Outp
 use crate::utils::shell::quote;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Probe run by [`docker_reachable`]: needs the daemon, answers fast when it is up
+const DOCKER_PROBE: &str = "docker version --format '{{.Server.Version}}'";
+
+/// Err when checks would run in docker mode but the Docker CLI / daemon is
+/// unreachable (first stderr line of the probe as cause). No probe in local
+/// mode or with no selected checks.
+pub async fn docker_reachable(
+    target: &ExecTarget,
+    checks: &[CheckToRun],
+    root: &Path,
+    executor: &dyn CommandExecutor,
+) -> anyhow::Result<()> {
+    if !matches!(target, ExecTarget::Docker(_)) || checks.is_empty() {
+        return Ok(());
+    }
+    let output = executor
+        .execute(DOCKER_PROBE, root, &OutputSink::none())
+        .await;
+    if output.success {
+        return Ok(());
+    }
+    let cause = output
+        .stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no output");
+    anyhow::bail!(
+        "Docker is not reachable (`docker version` failed: {cause}). \
+         Start Docker, or set `runner: local` to run checks on the host."
+    )
+}
 
 /// Warnings for containers where changed files likely won't resolve; empty
 /// when fine or not applicable.

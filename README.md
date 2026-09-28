@@ -155,7 +155,17 @@ ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 
-Both TUI and `--simple` exit `1` if any check failed, so `ci-tui && git push` is safe. In the TUI, checks still pending when you quit don't count as failures.
+The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
+
+| Code | Meaning |
+|------|---------|
+| `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
+| `1` | A check failed (TUI, `--simple`), or a fix command failed (`--fix`) |
+| `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), bad flag value (e.g. unknown `--only` id) |
+| `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable when checks would run in docker mode, other runtime errors |
+| `130` | Interrupted (Ctrl-C) |
+
+In the TUI, checks still pending when you quit don't count as failures.
 
 Simple mode is auto-enabled when stdout is not a terminal, so `ci-tui` works as a CI runner. This repo dogfoods it: its own [`ci-tui.yaml`](ci-tui.yaml) runs fmt, clippy and tests in the dev image (`make build-dev`, then `HOST_PWD=$PWD ci-tui`).
 
