@@ -158,7 +158,18 @@ impl CommandExecutor for RealCommandExecutor {
             Err(e) => CommandOutput {
                 success: false,
                 stdout: String::new(),
-                stderr: format!("Failed to execute: {}", e),
+                // Whole command is one `sh -c` arg; huge {files} lists hit
+                // the kernel's arg limit (E2BIG)
+                stderr: if e.kind() == std::io::ErrorKind::ArgumentListTooLong {
+                    format!(
+                        "Command line too long ({} bytes): {}. If it uses {{files}}, narrow \
+                         the change set (e.g. --files) or split the check.",
+                        command.len(),
+                        e
+                    )
+                } else {
+                    format!("Failed to execute: {}", e)
+                },
             },
         }
     }

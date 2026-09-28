@@ -1957,3 +1957,27 @@ mod streaming_tests {
         assert_eq!(finished(&events).1.error_output, "real");
     }
 }
+
+#[cfg(target_os = "linux")]
+mod real_executor_tests {
+    use ci_tui::runner::{CommandExecutor, OutputSink, RealCommandExecutor};
+    use std::path::Path;
+
+    /// Command over the kernel's arg limit (E2BIG) fails with a clear error
+    /// instead of a bare "Argument list too long". Linux-only: relies on its
+    /// 128 KiB per-arg cap (macOS allows ~1 MiB total)
+    #[tokio::test]
+    async fn oversized_command_fails_with_clear_error() {
+        let files = vec!["src/some/long/path/file_name.rs"; 10_000].join(" ");
+        let command = format!("echo {files}");
+        let output = RealCommandExecutor
+            .execute(&command, Path::new("/tmp"), &OutputSink::none())
+            .await;
+        assert!(!output.success);
+        assert!(
+            output.stderr.contains("Command line too long"),
+            "stderr: {}",
+            output.stderr
+        );
+    }
+}
