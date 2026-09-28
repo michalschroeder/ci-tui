@@ -3,13 +3,13 @@
 //! Unit-level coverage of the individual build/process helpers lives in
 //! src/checks/determine.rs #[cfg(test)].
 
-use ci_tui::checks::{determine_checks, CheckFiles, CheckToRun};
+use ci_tui::checks::{determine_checks, discovery_warnings, CheckFiles, CheckToRun};
 use ci_tui::config::CiConfig;
 use ci_tui::git::ChangedFiles;
 use std::path::PathBuf;
 
 mod common;
-use common::configs::{checks_test_config, CheckBuilder, ConfigBuilder};
+use common::configs::{checks_test_config, rust_discovery_with_grep, CheckBuilder, ConfigBuilder};
 
 // ============================================================================
 // Helper Functions
@@ -377,4 +377,78 @@ fn test_group_order_matches_config_definition_order() {
         vec!["warmup", "fast", "analysis", "tests"],
         "Groups should appear in config definition order"
     );
+}
+
+// ============================================================================
+// Test discovery warnings
+// ============================================================================
+
+#[test]
+fn test_grep_failure_is_warning_and_other_strategies_still_find_tests() {
+    // `\(` is an unmatched group in grep BRE -> grep exits 2
+    let discovery = rust_discovery_with_grep(r"\({basename}");
+    let config = ConfigBuilder::new()
+        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
+        .with_check(
+            "tests",
+            "a",
+            CheckBuilder::new("A", "t {files}")
+                .with_test_discovery(discovery.clone())
+                .build(),
+        )
+        .with_check(
+            "tests",
+            "b",
+            CheckBuilder::new("B", "t {files}")
+                .with_test_discovery(discovery)
+                .build(),
+        )
+        .build();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("tests")).unwrap();
+    std::fs::write(root.path().join("tests/foo_test.rs"), "foo").unwrap();
+
+    let checks = determine_checks(
+        &config,
+        &make_changed_files(vec!["src/foo.rs"]),
+        root.path(),
+    );
+
+    let a = assert_check_exists(&checks, "a");
+    assert_eq!(
+        a.files,
+        CheckFiles::Files(vec!["tests/foo_test.rs".to_string()])
+    );
+    assert_eq!(a.discovery_warnings.len(), 1, "{:?}", a.discovery_warnings);
+    assert!(
+        a.discovery_warnings[0]
+            .starts_with("test discovery: grep in `tests` failed: exit status 2"),
+        "{}",
+        a.discovery_warnings[0]
+    );
+    // Both checks hit the same failure; reported once
+    assert_eq!(discovery_warnings(&checks), a.discovery_warnings);
+}
+
+#[test]
+fn test_no_discovery_warnings_when_grep_succeeds() {
+    let config = ConfigBuilder::new()
+        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
+        .with_check(
+            "tests",
+            "a",
+            CheckBuilder::new("A", "t {files}")
+                .with_test_discovery(rust_discovery_with_grep("{basename}"))
+                .build(),
+        )
+        .build();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("tests")).unwrap();
+
+    let checks = determine_checks(
+        &config,
+        &make_changed_files(vec!["src/foo.rs"]),
+        root.path(),
+    );
+    assert!(discovery_warnings(&checks).is_empty());
 }

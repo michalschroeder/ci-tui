@@ -364,6 +364,7 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.into(),
             resolved_fix_command: None,
+            discovery_warnings: Vec::new(),
         }
     }
 

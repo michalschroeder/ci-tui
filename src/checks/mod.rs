@@ -104,6 +104,9 @@ pub struct CheckToRun {
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
     pub resolved_fix_command: Option<String>,
+    /// Non-fatal test discovery warnings (e.g. a `grep_search` that failed or
+    /// timed out); the tests found elsewhere are still in `files`
+    pub discovery_warnings: Vec<String>,
 }
 
 impl CheckToRun {
@@ -180,6 +183,18 @@ pub fn determine_checks(
     }
 
     checks_to_run
+}
+
+/// All checks' discovery warnings, deduped in first-seen order (checks
+/// sharing a discovery config report the same failure).
+pub fn discovery_warnings(checks: &[CheckToRun]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    checks
+        .iter()
+        .flat_map(|c| &c.discovery_warnings)
+        .filter(|w| seen.insert(w.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Resolve placeholders in check command
@@ -440,6 +455,7 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
+            discovery_warnings: Vec::new(),
         }
     }
 

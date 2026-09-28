@@ -1128,6 +1128,7 @@ checks:
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
+            discovery_warnings: Vec::new(),
         }
     }
 

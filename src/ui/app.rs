@@ -10,7 +10,7 @@
 //! - [`StatusFilter`]: Filter for displaying checks by status
 //! - [`PreCommandState`]: State tracking for pre-commands
 
-use crate::checks::{CheckToRun, Decision};
+use crate::checks::{discovery_warnings, CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
@@ -523,6 +523,11 @@ impl App {
         // sys stats deliberately survive retries
         self.output_cache = None;
         self.needs_redraw = true;
+
+        let warnings = discovery_warnings(&self.checks);
+        if !warnings.is_empty() {
+            self.set_status_message(StatusKind::Error, warnings.join("; "));
+        }
     }
 
     /// Store a git-refreshed file list and check (single-check retry)
@@ -1581,6 +1586,7 @@ checks:
             } else {
                 None
             },
+            discovery_warnings: Vec::new(),
         }
     }
 
@@ -2558,6 +2564,27 @@ checks:
 
         assert_eq!(app.view.status_filter, StatusFilter::Failed);
         assert_eq!(app.view.selected_check, 0);
+    }
+
+    #[test]
+    fn test_reset_for_retry_shows_discovery_warnings() {
+        let mut app = make_app();
+        let mut checks = app.checks.clone();
+        checks[0].discovery_warnings = vec!["w1".to_string()];
+        checks[1].discovery_warnings = vec!["w1".to_string(), "w2".to_string()];
+
+        app.reset_for_retry(app.changed_files.clone(), checks);
+
+        let msg = app.view.status_message.as_ref().expect("warning shown");
+        assert_eq!(msg.text, "w1; w2");
+        assert_eq!(msg.kind, StatusKind::Error);
+    }
+
+    #[test]
+    fn test_reset_for_retry_without_warnings_sets_no_status() {
+        let mut app = make_app();
+        app.reset_for_retry(app.changed_files.clone(), app.checks.clone());
+        assert!(app.view.status_message.is_none());
     }
 
     #[test]

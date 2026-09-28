@@ -92,6 +92,7 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
             eval.file_pattern_matched(),
         ));
     }
+    reasons.extend(eval.warnings.iter().map(|w| format!("warning: {w}")));
 
     if reasons.is_empty() {
         reasons.push(
