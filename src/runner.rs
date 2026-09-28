@@ -162,9 +162,10 @@ impl CommandExecutor for RealCommandExecutor {
                 // the kernel's arg limit (E2BIG)
                 stderr: if e.kind() == std::io::ErrorKind::ArgumentListTooLong {
                     format!(
-                        "Command line too long ({} bytes). If it uses {{files}}, narrow \
+                        "Command line too long ({} bytes): {}. If it uses {{files}}, narrow \
                          the change set (e.g. --files) or split the check.",
-                        command.len()
+                        command.len(),
+                        e
                     )
                 } else {
                     format!("Failed to execute: {}", e)
