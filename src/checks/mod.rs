@@ -291,6 +291,7 @@ mod tests {
             parallel: false,
             stop_on_failure: false,
             pre_commands: Vec::new(),
+            max_parallel: None,
             checks: IndexMap::new(),
         };
         warmup_group.checks.insert(
@@ -316,6 +317,7 @@ mod tests {
             parallel: true,
             stop_on_failure: false,
             pre_commands: Vec::new(),
+            max_parallel: None,
             checks: IndexMap::new(),
         };
         fast_group.checks.insert(
@@ -362,6 +364,7 @@ mod tests {
             parallel: false,
             stop_on_failure: false,
             pre_commands: Vec::new(),
+            max_parallel: None,
             checks: IndexMap::new(),
         };
         analysis_group.checks.insert(
@@ -390,6 +393,7 @@ mod tests {
             parallel: false,
             stop_on_failure: false,
             pre_commands: Vec::new(),
+            max_parallel: None,
             checks: IndexMap::new(),
         };
         tests_group.checks.insert(
@@ -432,6 +436,7 @@ mod tests {
             checks,
             ignore_patterns: Vec::new(),
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
+            max_parallel: None,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }

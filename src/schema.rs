@@ -91,6 +91,8 @@ mod tests {
     #[case::bad_timeout("        timeout: 10x\n")]
     #[case::zero_timeout("        timeout: 0s\n")]
     #[case::bad_runner("runner: podman\n")]
+    #[case::zero_max_parallel("max_parallel: 0\n")]
+    #[case::zero_group_max_parallel("    max_parallel: 0\n")]
     #[case::unknown_strategy(
         "        triggers:\n          test_discovery:\n            source_pattern: src\n            \
          strategies:\n              - type: magic\n"

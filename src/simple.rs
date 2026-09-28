@@ -41,10 +41,8 @@ pub async fn run_with_executor(
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
-        let parallel = config
-            .get_group(group_name)
-            .map(|g| g.parallel)
-            .unwrap_or(false);
+        let group = config.get_group(group_name);
+        let parallel = group.is_some_and(|g| g.parallel);
         let results = if parallel {
             run_parallel(
                 group_checks,
@@ -52,6 +50,7 @@ pub async fn run_with_executor(
                 target,
                 executor.clone(),
                 max_output_lines,
+                config.group_parallel_limit(group),
             )
             .await
         } else {
@@ -106,16 +105,13 @@ pub async fn run(
     let mut has_failures = false;
 
     for (group_name, group_checks) in grouped {
-        let display_name = config
-            .get_group(group_name)
+        let group = config.get_group(group_name);
+        let display_name = group
             .map(|g| g.display_name(group_name))
             .unwrap_or(group_name);
         println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
-        let parallel = config
-            .get_group(group_name)
-            .map(|g| g.parallel)
-            .unwrap_or(false);
+        let parallel = group.is_some_and(|g| g.parallel);
 
         let results = if parallel {
             run_parallel(
@@ -124,6 +120,7 @@ pub async fn run(
                 target,
                 executor.clone(),
                 max_output_lines,
+                config.group_parallel_limit(group),
             )
             .await
         } else {
@@ -200,6 +197,7 @@ pub fn print_result(result: &CheckResult) {
 /// - Cancelled: gray crossed circle, "cancelled" and duration
 /// - Running: yellow dot with "(running)"
 /// - Pending: gray circle with "(pending)"
+/// - Queued: blue dotted circle with "(queued)"
 /// - Skipped: gray slashed circle with "(skipped)"
 /// - OnDemand: cyan diamond with "(on-demand)"
 pub fn format_result(result: &CheckResult) -> String {
@@ -217,6 +215,7 @@ pub fn format_result(result: &CheckResult) -> String {
         }
         CheckStatus::Running => format!("  \x1b[33m●\x1b[0m {id} \x1b[90m(running)\x1b[0m"),
         CheckStatus::Pending => format!("  \x1b[90m○\x1b[0m {id} \x1b[90m(pending)\x1b[0m"),
+        CheckStatus::Queued => format!("  \x1b[34m◌\x1b[0m {id} \x1b[90m(queued)\x1b[0m"),
         CheckStatus::Skipped => format!("  \x1b[90m⊘\x1b[0m {id} \x1b[90m(skipped)\x1b[0m"),
         CheckStatus::OnDemand => format!("  \x1b[36m◇\x1b[0m {id} \x1b[90m(on-demand)\x1b[0m"),
     }
@@ -278,13 +277,16 @@ async fn run_sequential(
     results
 }
 
+/// Run `checks` concurrently, at most `limit` at a time; results in input order.
 async fn run_parallel(
     checks: Vec<&CheckToRun>,
     project_root: &Path,
     target: &ExecTarget,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
     max_output_lines: usize,
+    limit: usize,
 ) -> Vec<CheckResult> {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
     let mut handles = Vec::new();
 
     for check in checks {
@@ -295,8 +297,11 @@ async fn run_parallel(
         let project_root = project_root.to_path_buf();
         let target = target.clone();
         let executor = executor.clone();
+        let permits = permits.clone();
 
         let handle = tokio::spawn(async move {
+            // Held until the check ends
+            let _permit = permits.acquire().await.expect("semaphore never closed");
             run_check_with_executor(
                 &check,
                 &project_root,

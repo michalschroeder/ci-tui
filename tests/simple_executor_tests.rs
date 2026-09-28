@@ -224,3 +224,30 @@ async fn hung_check_times_out_with_real_executor() {
         .unwrap();
     assert_eq!(results[0].status, CheckStatus::TimedOut);
 }
+
+#[rstest::rstest]
+#[case::global_cap(common::configs::ConfigBuilder::new().with_parallel_group("g").with_max_parallel(2), 2)]
+#[case::group_cap(
+    common::configs::ConfigBuilder::new().with_max_parallel(3).with_group_max_parallel("g", 1),
+    1
+)]
+#[tokio::test]
+async fn parallel_group_respects_max_parallel(
+    #[case] config: common::configs::ConfigBuilder,
+    #[case] expected: usize,
+) {
+    let executor = Arc::new(common::ConcurrencyExecutor::default());
+    let checks = (0..5)
+        .map(|i| common::make_widget_check(&format!("c{i}"), "g", "C", false))
+        .collect();
+    let results = run_with_executor(
+        config.build(),
+        checks,
+        std::path::PathBuf::from("/app"),
+        executor.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(results.len(), 5, "every check still runs");
+    assert_eq!(executor.peak(), expected);
+}

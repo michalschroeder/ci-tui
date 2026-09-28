@@ -294,3 +294,54 @@ pub fn make_test_app_running() -> App {
     app.results.get_mut("clippy").unwrap().status = CheckStatus::Running;
     app
 }
+
+/// Executor recording peak concurrent `execute` calls; each call holds its
+/// slot for a short sleep so overlapping checks are observable.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct ConcurrencyExecutor {
+    running: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+    executed: std::sync::Mutex<Vec<String>>,
+}
+
+#[allow(dead_code)]
+impl ConcurrencyExecutor {
+    /// Highest number of commands observed running at once
+    pub fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Commands passed to `execute`, in call order
+    pub fn executed(&self) -> Vec<String> {
+        self.executed.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ci_tui::runner::CommandExecutor for ConcurrencyExecutor {
+    async fn execute(
+        &self,
+        command: &str,
+        _: &std::path::Path,
+        _: &ci_tui::runner::OutputSink,
+    ) -> CommandOutput {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.executed.lock().unwrap().push(command.to_string());
+        let now = self.running.fetch_add(1, SeqCst) + 1;
+        self.peak.fetch_max(now, SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        self.running.fetch_sub(1, SeqCst);
+        CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn is_container_running(&self, _: &str) -> bool {
+        true
+    }
+
+    fn kill_container(&self, _: &str) {}
+}

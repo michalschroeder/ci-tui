@@ -34,6 +34,7 @@ use ci_tui::config::{
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 /// Builder for creating `CiConfig` instances in tests
 ///
@@ -51,6 +52,7 @@ pub struct ConfigBuilder {
     file_patterns: HashMap<String, FilePattern>,
     checks: IndexMap<String, GroupConfig>,
     ignore_patterns: Vec<String>,
+    max_parallel: Option<NonZeroUsize>,
 }
 
 impl ConfigBuilder {
@@ -69,7 +71,23 @@ impl ConfigBuilder {
             file_patterns: HashMap::new(),
             checks: IndexMap::new(),
             ignore_patterns: Vec::new(),
+            max_parallel: None,
         }
+    }
+
+    /// Set top-level `max_parallel` (cap on concurrent checks per parallel group)
+    #[allow(dead_code)]
+    pub fn with_max_parallel(mut self, n: usize) -> Self {
+        self.max_parallel = Some(NonZeroUsize::new(n).expect("max_parallel >= 1"));
+        self
+    }
+
+    /// Set a group's `max_parallel` (creates a parallel group if it doesn't exist)
+    #[allow(dead_code)]
+    pub fn with_group_max_parallel(mut self, group_id: &str, n: usize) -> Self {
+        self = self.with_parallel_group(group_id);
+        self.checks[group_id].max_parallel = Some(NonZeroUsize::new(n).expect("max_parallel >= 1"));
+        self
     }
 
     /// Set Docker configuration
@@ -121,6 +139,7 @@ impl ConfigBuilder {
                 parallel: false,
                 stop_on_failure: false,
                 pre_commands: Vec::new(),
+                max_parallel: None,
                 checks: IndexMap::new(),
             })
             .checks
@@ -137,6 +156,7 @@ impl ConfigBuilder {
                 parallel: true,
                 stop_on_failure: false,
                 pre_commands: Vec::new(),
+                max_parallel: None,
                 checks: IndexMap::new(),
             })
             .parallel = true;
@@ -152,6 +172,7 @@ impl ConfigBuilder {
                 parallel: false,
                 stop_on_failure: false,
                 pre_commands: Vec::new(),
+                max_parallel: None,
                 checks: IndexMap::new(),
             })
             .name = Some(name.to_string());
@@ -174,6 +195,7 @@ impl ConfigBuilder {
                 parallel: false,
                 stop_on_failure: false,
                 pre_commands: Vec::new(),
+                max_parallel: None,
                 checks: IndexMap::new(),
             })
             .pre_commands
@@ -202,6 +224,7 @@ impl ConfigBuilder {
                 parallel: false,
                 stop_on_failure: false,
                 pre_commands: Vec::new(),
+                max_parallel: None,
                 checks: IndexMap::new(),
             })
             .pre_commands
@@ -220,7 +243,7 @@ impl ConfigBuilder {
 
     /// Build the final CiConfig
     pub fn build(self) -> CiConfig {
-        CiConfig::new(
+        let mut config = CiConfig::new(
             self.version,
             DockerConfig {
                 project_dir: self.docker_project_dir,
@@ -239,7 +262,9 @@ impl ConfigBuilder {
             self.file_patterns,
             self.checks,
             self.ignore_patterns,
-        )
+        );
+        config.max_parallel = self.max_parallel;
+        config
     }
 }
 
