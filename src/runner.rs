@@ -275,8 +275,9 @@ impl Drop for ProcessGroupGuard {
         if let Some(pgid) = self.0 {
             // Shelling out to kill(1) instead of adding a libc dependency.
             // Blocking but brief; must finish before a quitting process exits.
-            let _ = std::process::Command::new("kill")
+            let _ = crate::utils::own_process_group(&mut std::process::Command::new("kill"))
                 .args(["-9", "--", &format!("-{pgid}")])
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();

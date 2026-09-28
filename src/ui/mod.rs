@@ -177,6 +177,33 @@ fn spawn_keyboard_thread(
     (rx, handle)
 }
 
+/// The keyboard thread and its stop flag; stopped while a viewer owns the
+/// terminal, then started afresh
+struct KeyboardThread {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl KeyboardThread {
+    fn start() -> (Self, mpsc::UnboundedReceiver<Event>) {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (rx, handle) = spawn_keyboard_thread(Arc::clone(&shutdown));
+        let thread = Self {
+            shutdown,
+            handle: Some(handle),
+        };
+        (thread, rx)
+    }
+
+    /// Stop reading and wait for the thread (at most one poll); idempotent
+    fn stop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Spawn a background task that collects system stats without blocking the UI
 ///
 /// This runs sysinfo queries in a separate task and sends results via channel.
@@ -476,28 +503,59 @@ fn leave_tui(w: &mut impl io::Write) -> io::Result<()> {
     execute!(w, LeaveAlternateScreen, DisableMouseCapture)
 }
 
-/// Show `request` in its pager / editor with the TUI suspended (blocking:
-/// the main loop waits, background tasks keep running), then clear so the
-/// next draw repaints everything. The caller stops the keyboard thread
-/// first so keys reach the viewer. A failed run (not found, non-zero exit)
-/// becomes an error status message; `Err` only when the terminal cannot be
-/// restored.
-fn open_viewer(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
+/// A pager / editor running on the blocking pool while the TUI is suspended
+type ViewerTask = (Viewer, JoinHandle<Result<(), String>>);
+
+/// Write `request`'s log into the session's private viewer dir (created on
+/// first use, removed at TUI exit)
+fn viewer_file(
+    dir: &mut Option<tempfile::TempDir>,
     request: &ViewerRequest,
-) -> io::Result<()> {
+) -> io::Result<PathBuf> {
+    if dir.is_none() {
+        *dir = Some(external::viewer_dir()?);
+    }
+    let dir = dir.as_ref().expect("just created");
+    external::write_viewer_file(dir.path(), &request.check_id, &request.text)
+}
+
+/// Suspend the TUI and run `viewer` on `path` in the background, so the
+/// main loop keeps draining check events (a stalled channel would block
+/// running checks). The caller stops the keyboard thread first so keys
+/// reach the viewer.
+fn start_viewer(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    viewer: Viewer,
+    path: PathBuf,
+) -> io::Result<ViewerTask> {
     leave_tui(terminal.backend_mut())?;
     terminal.show_cursor()?;
-    let command = request.viewer.command();
-    let outcome = external::run_viewer(&command, &request.check_id, &request.text);
+    let command = viewer.command();
+    let task = tokio::task::spawn_blocking(move || external::run_viewer(&command, &path));
+    Ok((viewer, task))
+}
+
+/// Restore the TUI after the viewer exited; a failed run (not found,
+/// non-zero exit) becomes an error status message. `Err` only when the
+/// terminal cannot be restored.
+fn finish_viewer(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    viewer: Viewer,
+    outcome: Result<Result<(), String>, tokio::task::JoinError>,
+) -> io::Result<()> {
     enter_tui(terminal.backend_mut())?;
+    // Drop input buffered for the viewer (e.g. read ahead by crossterm
+    // before it started), so it cannot replay into the TUI (a `q` meant for
+    // `less` quitting ci-tui)
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        let _ = event::read();
+    }
     terminal.clear()?;
-    if let Err(message) = outcome {
-        let label = request.viewer.label();
+    if let Err(message) = outcome.unwrap_or_else(|e| Err(e.to_string())) {
+        let label = viewer.label();
         app.set_status_message(StatusKind::Error, format!("{label} failed: {message}"));
     }
-    app.needs_redraw = true;
     Ok(())
 }
 
@@ -1049,8 +1107,10 @@ pub async fn run(
     // Start dedicated OS thread for keyboard input
     // CRITICAL: Using std::thread ensures keyboard events are processed by the OS
     // scheduler even when Tokio is starved of CPU time by Docker containers.
-    let mut keyboard_shutdown = Arc::new(AtomicBool::new(false));
-    let (mut input_rx, mut keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
+    let (mut keyboard, mut input_rx) = KeyboardThread::start();
+    // `o` / `O`: the running viewer (TUI suspended) and its temp dir
+    let mut viewer_task: Option<ViewerTask> = None;
+    let mut viewer_dir: Option<tempfile::TempDir> = None;
 
     // Main event loop - uses tokio::select! for event-driven responsiveness
     //
@@ -1068,12 +1128,24 @@ pub async fn run(
         let msg = tokio::select! {
             biased;
 
-            // Keyboard (and resize) events have highest priority
-            Some(event) = input_rx.recv() => match event {
+            // Keyboard (and resize) events have highest priority. Off while
+            // a viewer runs: keys the old thread read belong to the viewer.
+            Some(event) = input_rx.recv(), if viewer_task.is_none() => match event {
                 Event::Key(key) => Message::KeyPress(key),
                 Event::Mouse(mouse) => Message::Mouse(mouse),
                 _ => Message::Resize,
             },
+
+            // Viewer exited: restore the TUI, read keys again, repaint as
+            // after a resize (the terminal may have been resized meanwhile)
+            outcome = async { (&mut viewer_task.as_mut().expect("guarded").1).await },
+                if viewer_task.is_some() =>
+            {
+                let (viewer, _) = viewer_task.take().expect("guarded");
+                finish_viewer(&mut terminal, &mut app, viewer, outcome)?;
+                (keyboard, input_rx) = KeyboardThread::start();
+                Message::Resize
+            }
 
             // Status message TTL (ahead of busy channels so it cannot starve)
             _ = tokio::time::sleep_until(
@@ -1114,37 +1186,34 @@ pub async fn run(
                 runner_handle = new_handle;
                 event_rx = new_rx;
             }
-            Action::OpenViewer(request) => {
-                // Stop reading keys (waits out one poll) so they reach the
-                // viewer, then start a fresh keyboard thread
-                keyboard_shutdown.store(true, Ordering::Relaxed);
-                let _ = keyboard_thread.join();
-                open_viewer(&mut terminal, &mut app, &request)?;
-                keyboard_shutdown = Arc::new(AtomicBool::new(false));
-                (input_rx, keyboard_thread) = spawn_keyboard_thread(Arc::clone(&keyboard_shutdown));
-            }
+            Action::OpenViewer(request) => match viewer_file(&mut viewer_dir, &request) {
+                Ok(path) => {
+                    // Stop reading keys (waits out one poll) so they reach
+                    // the viewer; restarted when it exits
+                    keyboard.stop();
+                    viewer_task = Some(start_viewer(&mut terminal, request.viewer, path)?);
+                }
+                Err(e) => app.set_status_message(StatusKind::Error, format!("Temp file: {e}")),
+            },
             Action::Continue => {}
         }
 
-        // Render if state changed
-        if app.needs_redraw {
+        // Render if state changed (not while a viewer owns the terminal)
+        if app.needs_redraw && viewer_task.is_none() {
             terminal.draw(|f| dashboard::render(&mut app, f))?;
             app.needs_redraw = false;
         }
     }
 
-    // Cleanup - signal keyboard thread to shutdown and wait for it.
+    // Cleanup - stop the keyboard thread (waits out one poll).
     // Aborted futures kill their commands when dropped: here, or at the
     // latest when main drops the runtime (before process exit).
-    keyboard_shutdown.store(true, Ordering::Relaxed);
+    keyboard.stop();
     runner_handle.abort();
     tasks.set.abort_all();
     stats_handle.abort();
     let _ = runner_handle.await;
     while tasks.set.join_next().await.is_some() {}
-
-    // Wait for keyboard thread to finish (with timeout to avoid hanging)
-    let _ = keyboard_thread.join();
 
     // Restore terminal: use the backend's own stdout handle to ensure
     // LeaveAlternateScreen goes through the same IO path as all TUI writes.

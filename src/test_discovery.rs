@@ -60,7 +60,9 @@ pub(crate) struct RealProcessRunner;
 impl ProcessRunner for RealProcessRunner {
     fn run(&self, dir: &Path, args: &[String], stdin: &str) -> std::io::Result<ProcessOutput> {
         let mut command = Command::new("grep");
-        command.args(args).current_dir(dir);
+        crate::utils::own_process_group(&mut command)
+            .args(args)
+            .current_dir(dir);
         run_with_timeout(command, stdin, GREP_TIMEOUT)
     }
 }

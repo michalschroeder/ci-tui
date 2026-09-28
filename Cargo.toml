@@ -45,6 +45,7 @@ color-eyre = "0.6"
 regex = "1"
 chrono = "0.4"
 base64 = "0.23"
+tempfile = "3"                # Private temp dir for `o` / `O` viewer files
 
 # System monitoring
 sysinfo = "0.39"
@@ -67,7 +68,6 @@ panic = "abort"
 mockall = "0.15"              # Trait-based mocking with #[automock]
 rstest = "0.27"               # Test fixtures and parameterized tests
 pretty_assertions = "1.4"     # Colorful assertion diffs
-tempfile = "3"                # Temporary directories for testing
 jsonschema = { version = "0.58", default-features = false }  # Validate configs against the generated schema
 
 # Async testing support (mockall needs this for async traits)

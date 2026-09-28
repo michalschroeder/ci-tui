@@ -7,7 +7,7 @@
 /// - Container exists but is not running
 /// - Docker command fails
 pub(crate) fn is_running(container_name: &str) -> bool {
-    let output = std::process::Command::new("docker")
+    let output = super::own_process_group(&mut std::process::Command::new("docker"))
         .args(["inspect", "-f", "{{.State.Running}}", container_name])
         .output();
 
@@ -27,7 +27,7 @@ pub(crate) fn is_running(container_name: &str) -> bool {
 /// block. The client is reaped on a helper thread; it outlives our exit, so
 /// the kill still reaches the daemon when quitting.
 pub(crate) fn kill(container_name: &str) {
-    let child = std::process::Command::new("docker")
+    let child = super::own_process_group(&mut std::process::Command::new("docker"))
         .args(["kill", container_name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
