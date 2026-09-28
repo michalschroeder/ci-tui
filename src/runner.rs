@@ -117,30 +117,12 @@ pub trait CommandExecutor: Send + Sync {
     fn kill_container(&self, name: &str);
 }
 
-/// Linux `MAX_ARG_STRLEN` (32 pages): max bytes of one argv string incl. NUL
-const MAX_ARG_LEN: usize = 128 * 1024;
-
 /// Production implementation of CommandExecutor
 pub struct RealCommandExecutor;
 
 #[async_trait]
 impl CommandExecutor for RealCommandExecutor {
     async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput {
-        // Whole command goes to `sh -c` as one arg; Linux caps a single arg
-        // (MAX_ARG_STRLEN, incl. NUL) and would fail with a bare E2BIG
-        if command.len() >= MAX_ARG_LEN {
-            return CommandOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: format!(
-                    "Command too long ({} bytes, limit {}): too many files for {{files}}. \
-                     Narrow the change set (e.g. --files) or split the check.",
-                    command.len(),
-                    MAX_ARG_LEN
-                ),
-            };
-        }
-
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
             .arg(command)
@@ -176,7 +158,17 @@ impl CommandExecutor for RealCommandExecutor {
             Err(e) => CommandOutput {
                 success: false,
                 stdout: String::new(),
-                stderr: format!("Failed to execute: {}", e),
+                // Whole command is one `sh -c` arg; huge {files} lists hit
+                // the kernel's arg limit (E2BIG)
+                stderr: if e.kind() == std::io::ErrorKind::ArgumentListTooLong {
+                    format!(
+                        "Command line too long ({} bytes). If it uses {{files}}, narrow \
+                         the change set (e.g. --files) or split the check.",
+                        command.len()
+                    )
+                } else {
+                    format!("Failed to execute: {}", e)
+                },
             },
         }
     }
