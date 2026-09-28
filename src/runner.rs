@@ -863,7 +863,7 @@ impl CheckRunner {
 
         let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
         if parallel {
-            let limit = self.config.group_parallel_limit(group_name);
+            let limit = self.config.group_parallel_limit(group_config);
             self.run_parallel(group_checks, limit, event_tx).await?;
         } else {
             self.run_sequential(group_checks, event_tx).await?;
@@ -922,8 +922,8 @@ impl CheckRunner {
         let cancels = self.cancels.clone();
 
         async move {
-            // Never closed, so acquire cannot fail; held until the check ends
-            let _permit = permits.acquire().await.ok();
+            // Held until the check ends
+            let _permit = permits.acquire().await.expect("semaphore never closed");
             let result = run_check_with_target(
                 &check,
                 &project_root,

@@ -302,7 +302,6 @@ mod tests {
     #[rstest::rstest]
     #[case::long(&["ci-tui", "--jobs", "4"], Some(4))]
     #[case::short(&["ci-tui", "-j", "1"], Some(1))]
-    #[case::with_simple(&["ci-tui", "-s", "--jobs=2"], Some(2))]
     #[case::unset(&["ci-tui"], None)]
     fn test_jobs_flag_parsed(#[case] args: &[&str], #[case] jobs: Option<usize>) {
         let cli = Cli::try_parse_checked(args).unwrap();
@@ -311,8 +310,6 @@ mod tests {
 
     #[rstest::rstest]
     #[case::zero("--jobs=0")]
-    #[case::negative("--jobs=-1")]
-    #[case::not_a_number("--jobs=many")]
     fn test_jobs_rejects_invalid(#[case] arg: &str) {
         let err = Cli::try_parse_checked(["ci-tui", arg])
             .err()

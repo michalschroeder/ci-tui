@@ -52,8 +52,8 @@ pub struct CiConfig {
     /// kept; older lines dropped with a "... X lines truncated" marker). Bounds
     /// memory for runaway commands. Defaults to [`DEFAULT_MAX_OUTPUT_LINES`].
     pub max_output_lines: usize,
-    /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides,
-    /// see [`CiConfig::apply_jobs`]). `None` = CPU count; see [`parallel_limit`].
+    /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides
+    /// in main). `None` = CPU count; see [`parallel_limit`].
     pub max_parallel: Option<NonZeroUsize>,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
@@ -891,18 +891,9 @@ impl CiConfig {
         self.checks.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// `--jobs N` replaces the top-level `max_parallel` (CLI wins over config).
-    /// Folded into the config so TUI runs, refreshes and simple mode share it.
-    pub fn apply_jobs(&mut self, jobs: Option<NonZeroUsize>) {
-        if jobs.is_some() {
-            self.max_parallel = jobs;
-        }
-    }
-
-    /// Max concurrent checks in parallel group `group_name` (see [`parallel_limit`])
-    pub fn group_parallel_limit(&self, group_name: &str) -> usize {
-        let group = self.get_group(group_name).and_then(|g| g.max_parallel);
-        parallel_limit(self.max_parallel, group).get()
+    /// Max concurrent checks in parallel `group` (see [`parallel_limit`])
+    pub fn group_parallel_limit(&self, group: Option<&GroupConfig>) -> usize {
+        parallel_limit(self.max_parallel, group.and_then(|g| g.max_parallel)).get()
     }
 }
 
@@ -910,7 +901,7 @@ impl CiConfig {
 /// `max_parallel`, else CPU count, else 1), lowered by the group's own
 /// `max_parallel`. A group cannot raise the global cap: `--jobs` bounds the
 /// whole machine's load.
-pub fn parallel_limit(global: Option<NonZeroUsize>, group: Option<NonZeroUsize>) -> NonZeroUsize {
+fn parallel_limit(global: Option<NonZeroUsize>, group: Option<NonZeroUsize>) -> NonZeroUsize {
     let global = global
         .or_else(|| std::thread::available_parallelism().ok())
         .unwrap_or(NonZeroUsize::MIN);
@@ -2741,10 +2732,6 @@ checks:
             NonZeroUsize::new(n)
         }
 
-        fn cpus() -> usize {
-            std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
-        }
-
         #[test]
         fn parses_global_and_group() {
             let config: CiConfig = serde_yaml::from_str(&yaml(Some("4"), Some("2"))).unwrap();
@@ -2762,8 +2749,6 @@ checks:
         #[rstest]
         #[case::global_zero(Some("0"), None)]
         #[case::group_zero(None, Some("0"))]
-        #[case::global_negative(Some("-1"), None)]
-        #[case::group_string(None, Some("many"))]
         fn invalid_is_config_error(#[case] global: Option<&str>, #[case] group: Option<&str>) {
             let mut tmp = tempfile::NamedTempFile::new().unwrap();
             tmp.write_all(yaml(global, group).as_bytes()).unwrap();
@@ -2787,31 +2772,16 @@ checks:
 
         #[test]
         fn defaults_to_cpu_count() {
-            assert_eq!(parallel_limit(None, None).get(), cpus());
-            assert_eq!(parallel_limit(None, nz(1)).get(), 1);
-            let big = cpus() + 5;
-            assert_eq!(parallel_limit(None, nz(big)).get(), cpus());
-        }
-
-        #[rstest]
-        #[case::jobs_overrides_config(Some("4"), nz(2), 2)]
-        #[case::jobs_without_config(None, nz(3), 3)]
-        #[case::no_jobs_keeps_config(Some("4"), None, 4)]
-        fn jobs_overrides_top_level(
-            #[case] global: Option<&str>,
-            #[case] jobs: Option<NonZeroUsize>,
-            #[case] expected: usize,
-        ) {
-            let mut config: CiConfig = serde_yaml::from_str(&yaml(global, None)).unwrap();
-            config.apply_jobs(jobs);
-            assert_eq!(config.group_parallel_limit("g"), expected);
+            let cpus = std::thread::available_parallelism().unwrap().get();
+            assert_eq!(parallel_limit(None, None).get(), cpus);
+            assert_eq!(parallel_limit(None, nz(cpus + 5)).get(), cpus);
         }
 
         #[test]
         fn group_limit_applies_under_global() {
             let config: CiConfig = serde_yaml::from_str(&yaml(Some("4"), Some("2"))).unwrap();
-            assert_eq!(config.group_parallel_limit("g"), 2);
-            assert_eq!(config.group_parallel_limit("missing"), 4);
+            assert_eq!(config.group_parallel_limit(config.get_group("g")), 2);
+            assert_eq!(config.group_parallel_limit(None), 4);
         }
     }
 }

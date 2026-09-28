@@ -147,7 +147,7 @@ async fn run() -> Result<i32> {
         filter_error(e).exit();
     }
     // --jobs overrides the config's global parallel cap
-    config.apply_jobs(cli.jobs);
+    config.max_parallel = cli.jobs.or(config.max_parallel);
 
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.

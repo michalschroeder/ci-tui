@@ -41,10 +41,8 @@ pub async fn run_with_executor(
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
     for (group_name, group_checks) in grouped {
-        let parallel = config
-            .get_group(group_name)
-            .map(|g| g.parallel)
-            .unwrap_or(false);
+        let group = config.get_group(group_name);
+        let parallel = group.is_some_and(|g| g.parallel);
         let results = if parallel {
             run_parallel(
                 group_checks,
@@ -52,7 +50,7 @@ pub async fn run_with_executor(
                 target,
                 executor.clone(),
                 max_output_lines,
-                config.group_parallel_limit(group_name),
+                config.group_parallel_limit(group),
             )
             .await
         } else {
@@ -107,16 +105,13 @@ pub async fn run(
     let mut has_failures = false;
 
     for (group_name, group_checks) in grouped {
-        let display_name = config
-            .get_group(group_name)
+        let group = config.get_group(group_name);
+        let display_name = group
             .map(|g| g.display_name(group_name))
             .unwrap_or(group_name);
         println!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
 
-        let parallel = config
-            .get_group(group_name)
-            .map(|g| g.parallel)
-            .unwrap_or(false);
+        let parallel = group.is_some_and(|g| g.parallel);
 
         let results = if parallel {
             run_parallel(
@@ -125,7 +120,7 @@ pub async fn run(
                 target,
                 executor.clone(),
                 max_output_lines,
-                config.group_parallel_limit(group_name),
+                config.group_parallel_limit(group),
             )
             .await
         } else {
@@ -303,8 +298,8 @@ async fn run_parallel(
         let permits = permits.clone();
 
         let handle = tokio::spawn(async move {
-            // Never closed, so acquire cannot fail; held until the check ends
-            let _permit = permits.acquire_owned().await.ok();
+            // Held until the check ends
+            let _permit = permits.acquire().await.expect("semaphore never closed");
             run_check_with_executor(
                 &check,
                 &project_root,
