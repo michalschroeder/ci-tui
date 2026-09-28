@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.5.0](https://github.com/michalschroeder/ci-tui/compare/v0.4.0...v0.5.0) (2026-09-28)
+
+
+### Features
+
+* add --only and --group check filters ([#200](https://github.com/michalschroeder/ci-tui/issues/200)) ([72147b0](https://github.com/michalschroeder/ci-tui/commit/72147b04fd54fffd31f54a100bef6daeda9c9c87))
+* add --staged mode to check only index files ([#198](https://github.com/michalschroeder/ci-tui/issues/198)) ([81947a2](https://github.com/michalschroeder/ci-tui/commit/81947a2bcf14325a3e273542073973b8aaf1bb13))
+* bound parallelism with --jobs and max_parallel ([#204](https://github.com/michalschroeder/ci-tui/issues/204)) ([628e39b](https://github.com/michalschroeder/ci-tui/commit/628e39b9121317ac4b384ce2e0d45f1bffcd740a))
+* distinct exit codes ([#203](https://github.com/michalschroeder/ci-tui/issues/203)) ([868c7d0](https://github.com/michalschroeder/ci-tui/commit/868c7d092a5ca817da260cfe588800129ad18a48))
+* JSON Schema for config ([#196](https://github.com/michalschroeder/ci-tui/issues/196)) ([fdaa989](https://github.com/michalschroeder/ci-tui/commit/fdaa989efe9a35e43ae28c48c7ef0988ca72fc70))
+* **ui:** jump to first failure and highlight error lines ([#201](https://github.com/michalschroeder/ci-tui/issues/201)) ([67ba38c](https://github.com/michalschroeder/ci-tui/commit/67ba38c9f4476e7b3fe4803cfc4b9360956b668e))
+* **ui:** NO_COLOR support and small-terminal handling ([#206](https://github.com/michalschroeder/ci-tui/issues/206)) ([8cf8cf3](https://github.com/michalschroeder/ci-tui/commit/8cf8cf31211412f5a62281752968c1b0c8acf470))
+* **ui:** open output in $PAGER/$EDITOR and save log ([#207](https://github.com/michalschroeder/ci-tui/issues/207)) ([2143df0](https://github.com/michalschroeder/ci-tui/commit/2143df0d7aac961670c235bc23e3010ae7ab560a))
+
+
+### Bug Fixes
+
+* clear error when {files} command exceeds arg limit ([#205](https://github.com/michalschroeder/ci-tui/issues/205)) ([9f681e3](https://github.com/michalschroeder/ci-tui/commit/9f681e3dde6249a924f8fb4ceedc18a0393c510a))
+* reject --staged with --fix, drop staged files deleted on disk ([#199](https://github.com/michalschroeder/ci-tui/issues/199)) ([2c95fd5](https://github.com/michalschroeder/ci-tui/commit/2c95fd5e2f483acf3150d8bc86d1eff3c76ff2bb))
+
+
+### Performance Improvements
+
+* batch grep_search test discovery ([#202](https://github.com/michalschroeder/ci-tui/issues/202)) ([4e97a33](https://github.com/michalschroeder/ci-tui/commit/4e97a3372f88c86b2eb2b6548b33c4a2cce85502))
+
+
+### Documentation
+
+* add ui/external.rs to CLAUDE.md module list ([ae583b0](https://github.com/michalschroeder/ci-tui/commit/ae583b03037371eb200d7d458fa1f3d205d484b7))
+
 ## [0.4.0](https://github.com/michalschroeder/ci-tui/compare/v0.3.0...v0.4.0) (2026-09-25)
 
 
