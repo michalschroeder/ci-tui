@@ -559,9 +559,12 @@ fn render_check_item(
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
 
+    // Cached passes did not run: "cached" instead of a duration
     let duration = result
         .map(|r| {
-            if r.duration_ms > 0 {
+            if r.cached {
+                " cached".to_string()
+            } else if r.duration_ms > 0 {
                 format!(" {}", time::format(r.duration_ms))
             } else {
                 String::new()

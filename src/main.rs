@@ -2,7 +2,9 @@ use anyhow::Result;
 use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
 use ci_tui::exit;
 use ci_tui::runner::{ExecTarget, RealCommandExecutor};
-use ci_tui::{checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui};
+use ci_tui::{
+    cache, checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui,
+};
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
@@ -54,6 +56,35 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
         eprintln!("Warning: {e:#}; running checks from the current directory");
         cwd.to_path_buf()
     })
+}
+
+/// Docker startup checks. Fatal: commands would run in docker mode
+/// (`docker_needed`) but Docker is down, rather than every command failing
+/// on its own. Otherwise warnings for changed files that won't resolve in
+/// the containers `checks` use.
+async fn docker_preflight(
+    target: &ExecTarget,
+    docker_needed: bool,
+    exec_root: &std::path::Path,
+    checks: &[ci_tui::CheckToRun],
+    changed_files: &[String],
+) -> Result<Vec<String>> {
+    preflight::docker_reachable(
+        target,
+        docker_needed,
+        exec_root,
+        &RealCommandExecutor,
+        preflight::DOCKER_PROBE_TIMEOUT,
+    )
+    .await?;
+    Ok(preflight::docker_warnings(
+        target,
+        checks,
+        changed_files,
+        exec_root,
+        &RealCommandExecutor,
+    )
+    .await)
 }
 
 /// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
@@ -206,41 +237,36 @@ async fn run() -> Result<i32> {
 
     // Determine which checks to run (fix mode reuses it only for the probe)
     let checks::Selected {
-        checks: checks_to_run,
+        checks: mut checks_to_run,
         mut warnings,
     } = checks::select_checks(&config, &changed_files, &exec_root);
 
-    // Commands would run in docker mode: fail fast if Docker is down, rather
-    // than every command failing on its own. On-demand checks only run on
-    // request; fix mode runs its own commands.
+    // Result cache: key every check (hashes its files) so checks unchanged
+    // since their last pass are skipped. Fix mode only runs fix commands.
+    let cache = if cli.fix {
+        cache::ResultCache::disabled()
+    } else {
+        cache::stamp_keys(&mut checks_to_run, &config, &changed_files, &exec_root);
+        cache::ResultCache::open(&project_root, !cli.no_cache)
+    };
+
+    // Docker is needed when commands would run: on-demand checks only run
+    // on request, cached ones not at all; fix mode runs its own commands.
     let docker_needed = if cli.fix {
         fix::has_fixes(&config, &changed_files)
     } else {
-        checks_to_run.iter().any(|c| !c.is_on_demand())
+        checks_to_run
+            .iter()
+            .any(|c| !c.is_on_demand() && !cache.is_fresh(c))
     };
-    preflight::docker_reachable(
-        &config.runner,
-        docker_needed,
-        &exec_root,
-        &RealCommandExecutor,
-        preflight::DOCKER_PROBE_TIMEOUT,
-    )
-    .await?;
 
-    // Non-fatal warnings: failed test discovery (e.g. grep error/timeout),
-    // then Docker preflight (changed files won't resolve in the containers
-    // the checks use). Console modes print now; the TUI shows them in-app
-    // (alternate screen).
-    warnings.extend(
-        preflight::docker_warnings(
-            &config.runner,
-            &checks_to_run,
-            &changed_files.files,
-            &exec_root,
-            &RealCommandExecutor,
-        )
-        .await,
-    );
+    // Docker preflight (fatal if needed but down). Non-fatal warnings:
+    // failed test discovery (e.g. grep error/timeout), then Docker preflight
+    // ones. Console modes print now; the TUI shows them in-app (alternate
+    // screen).
+    let (target, files) = (&config.runner, &changed_files.files);
+    let preflight = docker_preflight(target, docker_needed, &exec_root, &checks_to_run, files);
+    warnings.extend(preflight.await?);
     if cli.fix || simple_mode {
         for warning in &warnings {
             eprintln!("Warning: {warning}");
@@ -254,7 +280,14 @@ async fn run() -> Result<i32> {
 
     if simple_mode {
         // Run in simple console mode
-        interruptible(simple::run(config, changed_files, checks_to_run, exec_root)).await
+        interruptible(simple::run(
+            config,
+            changed_files,
+            checks_to_run,
+            exec_root,
+            cache,
+        ))
+        .await
     } else {
         // Run the TUI
         ui::run(
@@ -264,7 +297,7 @@ async fn run() -> Result<i32> {
             project_root,
             exec_root,
             warnings,
-            ui::TuiOptions::new(filter_notice, !cli.no_stats),
+            ui::TuiOptions::new(filter_notice, !cli.no_stats, cache),
         )
         .await
     }

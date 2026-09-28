@@ -104,6 +104,9 @@ pub struct CheckToRun {
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
     pub resolved_fix_command: Option<String>,
+    /// Result cache key, stamped by [`crate::cache::stamp_keys`]; `None`
+    /// before that and for checks without concrete files (never cached)
+    pub cache_key: Option<u64>,
 }
 
 impl CheckToRun {
@@ -437,6 +440,7 @@ mod tests {
             ignore_patterns: Vec::new(),
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             max_parallel: None,
+            source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }
@@ -470,6 +474,7 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
+            cache_key: None,
         }
     }
 

@@ -36,6 +36,7 @@ pub(super) fn new_check_to_run(
         files,
         resolved_command,
         resolved_fix_command,
+        cache_key: None,
     }
 }
 

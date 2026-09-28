@@ -20,6 +20,7 @@ fn make_result(check_id: &str, status: CheckStatus, duration_ms: u64) -> CheckRe
         duration_ms,
         started_at: None,
         finished_at: None,
+        cached: false,
     }
 }
 
@@ -33,6 +34,7 @@ fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> Check
         duration_ms: 1000,
         started_at: None,
         finished_at: None,
+        cached: false,
     }
 }
 

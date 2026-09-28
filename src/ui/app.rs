@@ -531,6 +531,15 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Show checks served from the result cache as passed without running
+    /// (see [`CheckResult::cached`])
+    pub fn mark_cached<'a>(&mut self, check_ids: impl IntoIterator<Item = &'a str>) {
+        for id in check_ids {
+            self.results.insert(id.to_string(), CheckResult::cached(id));
+        }
+        self.needs_redraw = true;
+    }
+
     /// Show non-fatal warnings (test discovery, docker preflight) in the
     /// footer; no-op when empty
     pub fn show_warnings(&mut self, warnings: &[String]) {
@@ -683,6 +692,7 @@ impl App {
             result.duration_ms = 0;
             result.started_at = Some(chrono::Local::now());
             result.finished_at = None;
+            result.cached = false;
         }
         self.clamp_selection();
     }
@@ -1620,6 +1630,7 @@ checks:
             } else {
                 None
             },
+            cache_key: None,
         }
     }
 
@@ -1950,6 +1961,7 @@ checks:
             duration_ms: 100,
             started_at: None,
             finished_at: None,
+            cached: false,
         };
 
         app.finish_fix(result);
@@ -2047,6 +2059,7 @@ checks:
             duration_ms: 500,
             started_at: None,
             finished_at: None,
+            cached: false,
         };
 
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
@@ -2336,6 +2349,30 @@ checks:
     }
 
     #[test]
+    fn test_cached_checks_count_as_passed() {
+        let mut app = make_app();
+        app.mark_cached(["php-lint", "phpunit"]);
+
+        let result = &app.results["php-lint"];
+        assert!(result.cached);
+        assert_eq!(result.status, CheckStatus::Passed);
+        assert_eq!(app.count_by_status().passed, 2);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    #[test]
+    fn test_rerun_of_cached_check_clears_cached() {
+        let mut app = make_app();
+        app.mark_cached(["php-lint"]);
+
+        app.reset_check_for_retry("php-lint");
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.status, CheckStatus::Running);
+        assert!(!result.cached && result.output.is_empty());
+    }
+
+    #[test]
     fn test_toggle_full_command() {
         let mut app = make_app();
 
@@ -2550,6 +2587,7 @@ checks:
             duration_ms: 10,
             started_at: None,
             finished_at: None,
+            cached: false,
         };
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
@@ -2580,6 +2618,7 @@ checks:
             duration_ms: 10,
             started_at: None,
             finished_at: None,
+            cached: false,
         };
         app.set_retry_result(result);
 
@@ -3090,6 +3129,7 @@ checks:
                         duration_ms: 10,
                         started_at: None,
                         finished_at: None,
+                        cached: false,
                     })
                 }),
                 ("trigger_on_demand_check", |a| {
@@ -3107,6 +3147,7 @@ checks:
                         duration_ms: 10,
                         started_at: None,
                         finished_at: None,
+                        cached: false,
                     })
                 }),
             ];

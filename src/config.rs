@@ -55,6 +55,9 @@ pub struct CiConfig {
     /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides
     /// in main). `None` = CPU count; see [`parallel_limit`].
     pub max_parallel: Option<NonZeroUsize>,
+    /// Hash of the config file text, set by [`load_config`] (0 otherwise); a
+    /// result cache key input, see [`crate::cache`]
+    pub(crate) source_hash: u64,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
     pub(crate) compiled_ignore_patterns: OnceLock<Vec<Regex>>,
@@ -141,6 +144,7 @@ impl TryFrom<RawCiConfig> for CiConfig {
             ignore_patterns: raw.ignore_patterns,
             max_output_lines: raw.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_parallel: raw.max_parallel,
+            source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         })
@@ -258,6 +262,7 @@ impl Clone for CiConfig {
             ignore_patterns: self.ignore_patterns.clone(),
             max_output_lines: self.max_output_lines,
             max_parallel: self.max_parallel,
+            source_hash: self.source_hash,
             // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -714,13 +719,14 @@ pub fn load_config(path: &Path) -> Result<CiConfig> {
         .with_context(|| format!("Failed to read config file: {}", path.display()))
         .map_err(ConfigError)?;
 
-    let config: CiConfig = serde_yaml::from_str(&content)
+    let mut config: CiConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
         .map_err(ConfigError)?;
     config
         .validate_and_compile()
         .with_context(|| format!("Invalid config file: {}", path.display()))
         .map_err(ConfigError)?;
+    config.source_hash = crate::cache::hash_bytes(content.as_bytes());
     Ok(config)
 }
 
@@ -747,6 +753,7 @@ impl CiConfig {
             ignore_patterns,
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             max_parallel: None,
+            source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
         }
@@ -1078,6 +1085,7 @@ mod tests {
                 ignore_patterns: self.ignore_patterns,
                 max_output_lines: self.max_output_lines,
                 max_parallel: None,
+                source_hash: 0,
                 compiled_ignore_patterns: OnceLock::new(),
                 compiled_file_patterns: OnceLock::new(),
             }

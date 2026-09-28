@@ -27,6 +27,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
 - `--staged` checks only files staged in the git index (`git diff --cached`) — for pre-commit hooks; checks still read the working tree, so unstaged edits in staged files are included
 - `--only <id>[,<id>]` / `--group <id>[,<id>]` run a subset of checks for fast iteration (TUI, `--simple`, `--fix`, `--list`); unknown ids error with the valid ones listed
+- Result cache: a check whose inputs (id, resolved command, content of its matched files and test-discovery sources, config file) are unchanged since its last passing run is skipped and shown as `✓ cached` (counts as passed). Stored per check in `.git/ci-tui/` (per linked worktree); checks without concrete files (always-run, run-all, on-demand) are never cached, `r` / `R` / `t` in the TUI always run. `--no-cache` runs everything (passes are still recorded)
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
@@ -159,6 +160,7 @@ ci-tui --staged -s         # staged files only (pre-commit hook)
 ci-tui --list              # explain check selection, run nothing (alias --dry-run)
 ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups)
 ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
+ci-tui -s --no-cache       # run every check, even ones cached as unchanged
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 

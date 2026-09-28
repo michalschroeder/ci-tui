@@ -23,6 +23,7 @@ pub mod app;
 pub mod dashboard;
 pub mod external;
 
+use crate::cache::{self, ResultCache};
 use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
@@ -314,10 +315,10 @@ impl TaskCtx {
         run_check_cancellable(&self.cancels, check.id(), run).await
     }
 
-    /// Re-detect changed files and matching checks. Blocking (git + file
-    /// system): call from `spawn_blocking`. `--files` lists are kept as-is
-    /// (no git base to diff against); only the checks are re-determined.
-    /// `--staged` re-reads the git index.
+    /// Re-detect changed files and matching checks, with fresh result cache
+    /// keys. Blocking (git + file system): call from `spawn_blocking`.
+    /// `--files` lists are kept as-is (no git base to diff against); only
+    /// the checks are re-determined. `--staged` re-reads the git index.
     fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
         let changed_files = if previous.is_cli_files() {
             previous
@@ -326,7 +327,13 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let selected = select_checks(&self.config, &changed_files, &self.exec_root);
+        let mut selected = select_checks(&self.config, &changed_files, &self.exec_root);
+        cache::stamp_keys(
+            &mut selected.checks,
+            &self.config,
+            &changed_files,
+            &self.exec_root,
+        );
         Ok((changed_files, selected))
     }
 
@@ -977,6 +984,32 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
     Action::Continue
 }
 
+/// Record a finished check (runner, or retry / on-demand task) in the
+/// result cache. A write error shows once in the footer (the cache is then
+/// off for the session); it never stops the run.
+fn record_result(cache: &mut ResultCache, app: &mut App, msg: &Message) {
+    let (Message::RunnerEvent(RunnerEvent::CheckFinished { result })
+    | Message::Task(TaskEvent::RetryResult(result))) = msg
+    else {
+        return;
+    };
+    let Some(check) = app.checks.iter().find(|c| c.id() == result.check_id) else {
+        return;
+    };
+    if let Err(e) = cache.record(check, result) {
+        app.set_status_message(StatusKind::Error, format!("Result cache not saved: {e}"));
+    }
+}
+
+/// Show checks `cache` finds unchanged since their last pass as cached in
+/// `app`; returns the others, for the runner. Only the initial run uses
+/// this: retries and on-demand runs always execute.
+fn skip_cached(app: &mut App, cache: &ResultCache, checks: Vec<CheckToRun>) -> Vec<CheckToRun> {
+    let (cached, runnable): (Vec<_>, Vec<_>) = checks.into_iter().partition(|c| cache.is_fresh(c));
+    app.mark_cached(cached.iter().map(CheckToRun::id));
+    runnable
+}
+
 /// Handle a message from the event loop and update app state
 /// All state changes go through this function via &mut App
 fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
@@ -1026,20 +1059,23 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
     }
 }
 
-/// TUI display options from the CLI. Color follows the process-wide
+/// TUI options from the CLI. Color follows the process-wide
 /// switch ([`crate::color::enabled`]) set from `--no-color` / `NO_COLOR`.
 pub struct TuiOptions {
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
     /// Start with the CPU/MEM stats panel shown (off with `--no-stats`)
     pub show_stats: bool,
+    /// Result cache: skips unchanged checks at start, records finished runs
+    pub cache: ResultCache,
 }
 
 impl TuiOptions {
-    pub fn new(filter_notice: Option<String>, show_stats: bool) -> Self {
+    pub fn new(filter_notice: Option<String>, show_stats: bool, cache: ResultCache) -> Self {
         Self {
             filter_notice,
             show_stats,
+            cache,
         }
     }
 }
@@ -1086,6 +1122,8 @@ pub async fn run(
     app.color = crate::color::enabled();
     app.view.stats_visible = options.show_stats;
     app.show_warnings(&startup_warnings);
+    let mut cache = options.cache;
+    let checks = skip_cached(&mut app, &cache, checks);
 
     // Start the runner in background ('s' cancels through `cancels`)
     let cancels = CancelRegistry::default();
@@ -1166,6 +1204,7 @@ pub async fn run(
         };
 
         // Handle the message and get the action
+        record_result(&mut cache, &mut app, &msg);
         match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
             Action::RestartRunner {
@@ -1257,6 +1296,7 @@ fn print_summary(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::CheckStatus;
 
     fn test_config() -> CiConfig {
         serde_yaml::from_str(
@@ -1341,6 +1381,7 @@ checks:
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
+            cache_key: None,
         }
     }
 
@@ -1776,6 +1817,7 @@ checks:
             duration_ms: 42,
             started_at: None,
             finished_at: None,
+            cached: false,
         };
 
         handle_message(
@@ -1788,6 +1830,85 @@ checks:
             app.results.get("php-lint").map(|r| r.status.clone()),
             Some(crate::runner::CheckStatus::Passed)
         );
+    }
+
+    /// `make_test_check` with a result cache key
+    fn keyed_check(id: &str, key: u64) -> CheckToRun {
+        CheckToRun {
+            cache_key: Some(key),
+            ..make_test_check(id, "fast")
+        }
+    }
+
+    fn finished(id: &str, status: crate::runner::CheckStatus) -> Message {
+        Message::RunnerEvent(RunnerEvent::CheckFinished {
+            result: CheckResult {
+                status,
+                ..CheckResult::pending(id)
+            },
+        })
+    }
+
+    #[test]
+    fn test_skip_cached_marks_fresh_checks_and_runs_the_rest() {
+        let config = test_config();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = ResultCache::at(dir.path().join("results.json"), true);
+        let (lint, unit) = (keyed_check("php-lint", 1), keyed_check("phpunit", 2));
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
+        record_result(
+            &mut cache,
+            &mut app,
+            &finished("php-lint", CheckStatus::Passed),
+        );
+
+        let runnable = skip_cached(&mut app, &cache, vec![lint, unit]);
+
+        let ids: Vec<&str> = runnable.iter().map(CheckToRun::id).collect();
+        assert_eq!(ids, ["phpunit"]);
+        assert!(app.results["php-lint"].cached);
+        assert!(!app.results["phpunit"].cached);
+    }
+
+    #[test]
+    fn test_record_result_from_runner_and_retry() {
+        let config = test_config();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = ResultCache::at(dir.path().join("results.json"), true);
+        let lint = keyed_check("php-lint", 1);
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone()]);
+
+        record_result(
+            &mut cache,
+            &mut app,
+            &finished("php-lint", CheckStatus::Passed),
+        );
+        assert!(cache.is_fresh(&lint), "runner pass recorded");
+
+        let retry_failed = Message::Task(TaskEvent::RetryResult(CheckResult {
+            status: CheckStatus::Failed,
+            ..CheckResult::pending("php-lint")
+        }));
+        record_result(&mut cache, &mut app, &retry_failed);
+        assert!(!cache.is_fresh(&lint), "retry failure drops the entry");
+    }
+
+    #[test]
+    fn test_record_result_write_error_sets_status_message() {
+        let config = test_config();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ci-tui"), "").unwrap();
+        let mut cache = ResultCache::at(dir.path().join("ci-tui/results.json"), true);
+        let mut app = make_test_app_with_checks(&config, vec![keyed_check("php-lint", 1)]);
+
+        record_result(
+            &mut cache,
+            &mut app,
+            &finished("php-lint", CheckStatus::Passed),
+        );
+
+        let message = app.view.status_message.as_ref().expect("status message");
+        assert!(message.text.contains("Result cache"), "{}", message.text);
     }
 
     /// 't' runs through the task channel; output streams as

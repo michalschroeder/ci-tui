@@ -167,6 +167,7 @@ pub fn make_check_with_options(
         } else {
             None
         },
+        cache_key: None,
     }
 }
 
@@ -224,6 +225,7 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,
+        cache_key: None,
     }
 }
 

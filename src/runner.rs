@@ -652,6 +652,9 @@ pub struct CheckResult {
     pub started_at: Option<DateTime<Local>>,
     /// When the check finished executing
     pub finished_at: Option<DateTime<Local>>,
+    /// Not executed: passed on an earlier run with identical inputs
+    /// (`status` is `Passed`), see [`crate::cache`]
+    pub cached: bool,
 }
 
 impl CheckResult {
@@ -665,6 +668,7 @@ impl CheckResult {
             duration_ms: 0,
             started_at: None,
             finished_at: None,
+            cached: false,
         }
     }
 
@@ -678,6 +682,7 @@ impl CheckResult {
             duration_ms: 0,
             started_at: None,
             finished_at: None,
+            cached: false,
         }
     }
 
@@ -692,6 +697,19 @@ impl CheckResult {
             duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
+            cached: false,
+        }
+    }
+
+    /// Create a cached result: passed on an earlier run with identical
+    /// inputs, so not executed (see [`crate::cache`])
+    pub fn cached(check_id: &str) -> Self {
+        Self {
+            status: CheckStatus::Passed,
+            output: "Cached: inputs unchanged since the last passing run (press 'r' to re-run)"
+                .to_string(),
+            cached: true,
+            ..Self::pending(check_id)
         }
     }
 
@@ -705,6 +723,7 @@ impl CheckResult {
             duration_ms: 0,
             started_at: None,
             finished_at: None,
+            cached: false,
         }
     }
 }
@@ -1219,6 +1238,7 @@ pub async fn execute_command_with_executor(
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
+        cached: false,
     }
 }
 
