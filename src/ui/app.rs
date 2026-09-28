@@ -10,7 +10,7 @@
 //! - [`StatusFilter`]: Filter for displaying checks by status
 //! - [`PreCommandState`]: State tracking for pre-commands
 
-use crate::checks::{discovery_warnings, CheckToRun, Decision};
+use crate::checks::{CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
@@ -523,8 +523,11 @@ impl App {
         // sys stats deliberately survive retries
         self.output_cache = None;
         self.needs_redraw = true;
+    }
 
-        let warnings = discovery_warnings(&self.checks);
+    /// Show non-fatal warnings (test discovery, docker preflight) in the
+    /// footer; no-op when empty
+    pub fn show_warnings(&mut self, warnings: &[String]) {
         if !warnings.is_empty() {
             self.set_status_message(StatusKind::Error, warnings.join("; "));
         }
@@ -1586,7 +1589,6 @@ checks:
             } else {
                 None
             },
-            discovery_warnings: Vec::new(),
         }
     }
 
@@ -2567,13 +2569,9 @@ checks:
     }
 
     #[test]
-    fn test_reset_for_retry_shows_discovery_warnings() {
+    fn test_show_warnings_joins_into_error_status() {
         let mut app = make_app();
-        let mut checks = app.checks.clone();
-        checks[0].discovery_warnings = vec!["w1".to_string()];
-        checks[1].discovery_warnings = vec!["w1".to_string(), "w2".to_string()];
-
-        app.reset_for_retry(app.changed_files.clone(), checks);
+        app.show_warnings(&["w1".to_string(), "w2".to_string()]);
 
         let msg = app.view.status_message.as_ref().expect("warning shown");
         assert_eq!(msg.text, "w1; w2");
@@ -2581,9 +2579,9 @@ checks:
     }
 
     #[test]
-    fn test_reset_for_retry_without_warnings_sets_no_status() {
+    fn test_show_warnings_empty_sets_no_status() {
         let mut app = make_app();
-        app.reset_for_retry(app.changed_files.clone(), app.checks.clone());
+        app.show_warnings(&[]);
         assert!(app.view.status_message.is_none());
     }
 

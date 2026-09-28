@@ -36,28 +36,23 @@ pub(super) fn new_check_to_run(
         files,
         resolved_command,
         resolved_fix_command,
-        discovery_warnings: Vec::new(),
     }
 }
 
-/// Process a single check definition and return a CheckToRun if applicable
+/// Build a CheckToRun from an evaluated [`Selection`]; `None` drops the
+/// check (empty `triggers` block). The caller reads `selection.warnings()` first.
 pub(super) fn process_check(
-    config: &CiConfig,
-    changed_files: &ChangedFiles,
-    project_root: &Path,
+    selection: Selection,
     group_name: &str,
     check_id: &str,
     check: &CheckDefinition,
     default_service: Option<&str>,
 ) -> Option<CheckToRun> {
     let service = check.service_or_default(default_service).map(str::to_owned);
-    let selection = Selection::evaluate(config, changed_files, project_root, check);
-    let discovery_warnings = selection.warnings().to_vec();
     let files = selection.into_check_files()?;
-    Some(CheckToRun {
-        discovery_warnings,
-        ..new_check_to_run(check_id, check, group_name, service, files)
-    })
+    Some(new_check_to_run(
+        check_id, check, group_name, service, files,
+    ))
 }
 
 /// Match changed files against a file pattern trigger
@@ -149,8 +144,11 @@ impl<'a> Selection<'a> {
     /// Non-fatal test discovery warnings (e.g. a failed `grep_search`).
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
-            Self::AlwaysRun => &[],
-            Self::Triggered(eval) => &eval.warnings,
+            Self::Triggered(TriggerEval {
+                discovery: Some(discovery),
+                ..
+            }) => &discovery.warnings,
+            _ => &[],
         }
     }
 
@@ -168,9 +166,19 @@ impl<'a> Selection<'a> {
 pub(crate) struct TriggerEval<'a> {
     /// `file_pattern` key + changed files it matched, if configured
     pub file_pattern: Option<(&'a str, Vec<&'a str>)>,
-    /// `test_discovery` config + matched source files + outcome, if configured
-    pub discovery: Option<(&'a TestDiscoveryConfig, Vec<&'a str>, DiscoveryOutcome)>,
-    /// Non-fatal test discovery warnings (e.g. a failed `grep_search`)
+    /// `test_discovery` evaluation, if configured
+    pub discovery: Option<DiscoveryEval<'a>>,
+}
+
+/// Evaluation of a `test_discovery` trigger.
+#[derive(Debug)]
+pub(crate) struct DiscoveryEval<'a> {
+    /// The trigger's config
+    pub config: &'a TestDiscoveryConfig,
+    /// Changed files matching `source_pattern`
+    pub sources: Vec<&'a str>,
+    pub outcome: DiscoveryOutcome,
+    /// Non-fatal warnings (e.g. a failed `grep_search`)
     pub warnings: Vec<String>,
 }
 
@@ -182,20 +190,21 @@ impl<'a> TriggerEval<'a> {
         triggers: &'a CheckTriggers,
         check: &CheckDefinition,
     ) -> Self {
-        let mut warnings = Vec::new();
-        let discovery = triggers.test_discovery.as_ref().map(|discovery| {
-            let (sources, outcome, discovery_warnings) =
-                run_test_discovery(config, changed_files, project_root, discovery, check);
-            warnings = discovery_warnings;
-            (discovery, sources, outcome)
-        });
         Self {
             file_pattern: triggers
                 .file_pattern
                 .as_deref()
                 .map(|key| (key, match_file_pattern(config, changed_files, key))),
-            discovery,
-            warnings,
+            discovery: triggers.test_discovery.as_ref().map(|discovery| {
+                let (sources, outcome, warnings) =
+                    run_test_discovery(config, changed_files, project_root, discovery, check);
+                DiscoveryEval {
+                    config: discovery,
+                    sources,
+                    outcome,
+                    warnings,
+                }
+            }),
         }
     }
 
@@ -220,7 +229,7 @@ impl<'a> TriggerEval<'a> {
             .collect();
 
         match (
-            self.discovery.map(|(_, _, outcome)| outcome),
+            self.discovery.map(|discovery| discovery.outcome),
             matched_files.is_empty(),
         ) {
             (Some(DiscoveryOutcome::TestsFound(tests)), _) => matched_files.extend(tests),
@@ -311,6 +320,20 @@ mod tests {
             timeout: None,
             error_pattern: None,
         }
+    }
+
+    /// Evaluate `def` and build it, as `select_checks` does
+    fn process(
+        cfg: &CiConfig,
+        cf: &ChangedFiles,
+        root: &Path,
+        group: &str,
+        id: &str,
+        def: &CheckDefinition,
+        default_service: Option<&str>,
+    ) -> Option<CheckToRun> {
+        let selection = Selection::evaluate(cfg, cf, root, def);
+        process_check(selection, group, id, def, default_service)
     }
 
     fn changed(files: &[&str]) -> ChangedFiles {
@@ -551,7 +574,7 @@ mod tests {
             let cfg = base_config();
             let def = mk_check("cargo bench", None, None, false);
             let cf = changed(&[]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -575,7 +598,7 @@ mod tests {
                 None,
                 false,
             );
-            let run = process_check(
+            let run = process(
                 &cfg,
                 &changed(&[]),
                 &PathBuf::from("/tmp"),
@@ -598,7 +621,7 @@ mod tests {
             let mut def = mk_check("cmd", None, None, false);
             def.service = Some("special".to_string());
             let cf = changed(&[]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -626,7 +649,7 @@ mod tests {
             let cfg = base_config();
             let def = mk_check("cmd", None, Some(CheckTriggers::default()), false);
             let cf = changed(&["src/main.rs"]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -648,7 +671,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/main.rs", "README.md"]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -676,7 +699,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -701,7 +724,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let run = process_check(
+            let run = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -726,7 +749,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/a.rs", "src/b.rs", "src/a.rs"]);
-            let out = process_check(
+            let out = process(
                 &cfg,
                 &cf,
                 &PathBuf::from("/tmp"),
@@ -765,7 +788,7 @@ mod tests {
                 /*on_demand=*/ true,
             );
             let cf = changed(&["src/foo.rs"]);
-            let out = process_check(&cfg, &cf, tmp.path(), "g", "id", &def, Some("svc")).unwrap();
+            let out = process(&cfg, &cf, tmp.path(), "g", "id", &def, Some("svc")).unwrap();
             assert!(out.is_on_demand());
             assert_eq!(out.files, CheckFiles::OnDemand);
         }

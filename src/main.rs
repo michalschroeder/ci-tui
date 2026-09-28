@@ -189,13 +189,15 @@ async fn run() -> Result<i32> {
     }
 
     // Determine which checks to run (fix mode reuses it only for the probe)
-    let checks_to_run = checks::determine_checks(&config, &changed_files, &exec_root);
+    let checks::Selected {
+        checks: checks_to_run,
+        mut warnings,
+    } = checks::select_checks(&config, &changed_files, &exec_root);
 
     // Non-fatal warnings: failed test discovery (e.g. grep error/timeout),
     // then Docker preflight (changed files won't resolve in the containers
     // the checks use). Console modes print now; the TUI shows them in-app
     // (alternate screen).
-    let mut warnings = checks::discovery_warnings(&checks_to_run);
     warnings.extend(
         preflight::docker_warnings(
             &config.runner,
@@ -228,7 +230,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             project_root,
             exec_root,
-            (!warnings.is_empty()).then(|| warnings.join("; ")),
+            warnings,
             filter_notice,
         )
         .await

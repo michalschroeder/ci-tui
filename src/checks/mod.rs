@@ -104,9 +104,6 @@ pub struct CheckToRun {
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
     pub resolved_fix_command: Option<String>,
-    /// Non-fatal test discovery warnings (e.g. a `grep_search` that failed or
-    /// timed out); the tests found elsewhere are still in `files`
-    pub discovery_warnings: Vec<String>,
 }
 
 impl CheckToRun {
@@ -165,15 +162,35 @@ pub fn determine_checks(
     changed_files: &ChangedFiles,
     project_root: &Path,
 ) -> Vec<CheckToRun> {
+    select_checks(config, changed_files, project_root).checks
+}
+
+/// [`determine_checks`] result plus non-fatal test discovery warnings (e.g. a
+/// `grep_search` that failed or timed out).
+#[derive(Debug)]
+pub struct Selected {
+    pub checks: Vec<CheckToRun>,
+    /// Deduped in first-seen order (checks sharing a discovery config report
+    /// the same failure)
+    pub warnings: Vec<String>,
+}
+
+/// [`determine_checks`], also returning discovery warnings.
+pub fn select_checks(
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    project_root: &Path,
+) -> Selected {
     let mut checks_to_run = Vec::new();
+    let mut warnings = Vec::new();
     let default_service = config.default_service();
 
     for (group_name, group_config) in config.groups() {
         for (check_id, check) in &group_config.checks {
+            let selection = Selection::evaluate(config, changed_files, project_root, check);
+            warnings.extend_from_slice(selection.warnings());
             checks_to_run.extend(process_check(
-                config,
-                changed_files,
-                project_root,
+                selection,
                 group_name,
                 check_id,
                 check,
@@ -182,19 +199,12 @@ pub fn determine_checks(
         }
     }
 
-    checks_to_run
-}
-
-/// All checks' discovery warnings, deduped in first-seen order (checks
-/// sharing a discovery config report the same failure).
-pub fn discovery_warnings(checks: &[CheckToRun]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    checks
-        .iter()
-        .flat_map(|c| &c.discovery_warnings)
-        .filter(|w| seen.insert(w.as_str()))
-        .cloned()
-        .collect()
+    warnings.retain(|w| seen.insert(w.clone()));
+    Selected {
+        checks: checks_to_run,
+        warnings,
+    }
 }
 
 /// Resolve placeholders in check command
@@ -455,7 +465,6 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
-            discovery_warnings: Vec::new(),
         }
     }
 
