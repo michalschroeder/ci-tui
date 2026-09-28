@@ -1756,6 +1756,23 @@ mod cancel_tests {
         assert_dies(wait_for_pid(&pidfile).await).await;
     }
 
+    /// Command over the kernel's single-arg limit fails with a clear error
+    /// instead of a cryptic spawn failure
+    #[tokio::test]
+    async fn oversized_command_fails_with_clear_error() {
+        let files = vec!["src/some/long/path/file_name.rs"; 10_000].join(" ");
+        let command = format!("echo {files}");
+        let output = RealCommandExecutor
+            .execute(&command, Path::new("/tmp"), &OutputSink::none())
+            .await;
+        assert!(!output.success);
+        assert!(
+            output.stderr.contains("Command too long"),
+            "stderr: {}",
+            output.stderr
+        );
+    }
+
     /// Quit / retry-all abort the task running the command
     #[tokio::test]
     async fn aborted_task_kills_whole_process_group() {
