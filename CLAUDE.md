@@ -142,7 +142,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **filter.rs**: `--only` / `--group` — narrows `CiConfig` right after load (so TUI refresh, simple, fix, list share the subset); unknown ids → exit 2 listing valid ones; empty groups dropped (no `pre_commands`); triggers still apply
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks
 - **list.rs**: `--list` / `--dry-run` — per-check run/on-demand/skipped decision plus reason, from the same `Selection` evaluation `determine_checks` uses; executes nothing
-- **preflight.rs**: `docker_reachable()` — `docker version` probe when checks would run in docker mode, Err → exit 3; Docker startup probe — non-fatal warnings when changed files won't resolve in the containers selected checks use (exec: repo-relative path vs container WORKDIR; `docker run` fallback without `volume_mount` or mounted away from `docker.work_dir`)
+- **preflight.rs**: Docker startup checks. Fatal: `docker_reachable()` — `docker version` probe (10s timeout) when non-on-demand checks / fix commands would run in docker mode, Err → exit 3. Non-fatal: `docker_warnings()` when changed files won't resolve in the containers selected checks use (exec: repo-relative path vs container WORKDIR; `docker run` fallback without `volume_mount` or mounted away from `docker.work_dir`)
 - **simple.rs**: Non-TUI console output mode for CI pipelines
 - **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)
 

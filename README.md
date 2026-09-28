@@ -161,8 +161,8 @@ The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
 |------|---------|
 | `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
 | `1` | A check failed (TUI, `--simple`), or a fix command failed (`--fix`) |
-| `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), bad flag value (e.g. unknown `--only` id) |
-| `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable when checks would run in docker mode, other runtime errors |
+| `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), `ci-tui init` refusing to overwrite, bad flag value (e.g. unknown `--only` id) |
+| `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, other runtime errors |
 | `130` | Interrupted (Ctrl-C) |
 
 In the TUI, checks still pending when you quit don't count as failures.

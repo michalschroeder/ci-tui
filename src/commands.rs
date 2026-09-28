@@ -1,5 +1,6 @@
 //! `ci-tui init` / `ci-tui validate` subcommands: scaffold and check config files.
 
+use crate::exit::ConfigError;
 use anyhow::{Context, Result};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -81,7 +82,12 @@ checks:
 );
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
+/// Errors are [`ConfigError`]s (exit 2).
 pub fn init(path: &Path) -> Result<()> {
+    write_template(path).map_err(|e| ConfigError(e).into())
+}
+
+fn write_template(path: &Path) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

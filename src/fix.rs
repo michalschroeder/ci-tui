@@ -131,6 +131,16 @@ fn resolve_check_fix(
     Some(resolve_fix_command(fix_command, &matching_files))
 }
 
+/// Whether fix mode would run any fix command
+pub fn has_fixes(config: &CiConfig, changed_files: &ChangedFiles) -> bool {
+    config.groups().any(|(_, group)| {
+        group
+            .checks
+            .values()
+            .any(|check| resolve_check_fix(config, check, changed_files).is_some())
+    })
+}
+
 /// Run fix commands for a single group, returns (fix_count, pass_count, fail_count, has_failures)
 async fn run_group_fixes_with_executor(
     config: &CiConfig,

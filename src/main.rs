@@ -197,13 +197,20 @@ async fn run() -> Result<i32> {
         mut warnings,
     } = checks::select_checks(&config, &changed_files, &exec_root);
 
-    // Checks would run in docker mode: fail fast if Docker is down,
-    // rather than every check failing on its own.
+    // Commands would run in docker mode: fail fast if Docker is down, rather
+    // than every command failing on its own. On-demand checks only run on
+    // request; fix mode runs its own commands.
+    let docker_needed = if cli.fix {
+        fix::has_fixes(&config, &changed_files)
+    } else {
+        checks_to_run.iter().any(|c| !c.is_on_demand())
+    };
     preflight::docker_reachable(
         &config.runner,
-        &checks_to_run,
+        docker_needed,
         &exec_root,
         &RealCommandExecutor,
+        preflight::DOCKER_PROBE_TIMEOUT,
     )
     .await?;
 

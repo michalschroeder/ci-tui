@@ -25,10 +25,11 @@ fn local_config(command: &str) -> String {
     format!("{HEAD}runner: local\n{}", check(command))
 }
 
-/// Docker-mode config (used with `--list` only: no daemon needed)
-fn docker_config() -> String {
+/// Docker-mode config; `extra` adds fields to check `c`. Tests never need a
+/// daemon: none of them runs a command in docker.
+fn docker_config(extra: &str) -> String {
     format!(
-        "{HEAD}docker:\n  project_dir: .\n  service: app\n  shell: sh\n{}",
+        "{HEAD}docker:\n  project_dir: .\n  service: app\n  shell: sh\n{}{extra}",
         check("'true'")
     )
 }
@@ -109,6 +110,31 @@ fn unknown_base_ref_exits_3() {
 #[test]
 fn list_in_docker_mode_does_not_probe_docker() {
     // No daemon needed: --list executes nothing
-    let (_tmp, out) = run_with(&docker_config(), &["--list", "--files", "a.rs"]);
+    let (_tmp, out) = run_with(&docker_config(""), &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
+}
+
+#[test]
+fn only_on_demand_checks_do_not_probe_docker() {
+    // `rust`-triggered check, no `.rs` changed: selected on-demand only
+    let config = docker_config("        triggers:\n          file_pattern: rust\n").replace(
+        "file_patterns: {}",
+        "file_patterns:\n  rust:\n    pattern: '\\.rs$'",
+    );
+    let (_tmp, out) = run_with(&config, &["--simple", "--files", "README.md"]);
+    assert_code(&out, exit::SUCCESS);
+}
+
+#[test]
+fn fix_without_fix_commands_does_not_probe_docker() {
+    let (_tmp, out) = run_with(&docker_config(""), &["--fix", "--files", "a.rs"]);
+    assert_code(&out, exit::SUCCESS);
+}
+
+#[test]
+fn init_over_existing_config_exits_2() {
+    let (_tmp, out) = run_with(&local_config("'true'"), &["init"]);
+    assert_code(&out, exit::CONFIG_ERROR);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("already exists"), "{stderr}");
 }
