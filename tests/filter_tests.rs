@@ -220,7 +220,11 @@ fn binary_list_shows_only_selected_checks() {
 fn binary_unknown_id_exits_listing_valid_ids(#[case] args: &[&str], #[case] valid: &str) {
     let (tmp, out) = run_binary(args);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(ci_tui::exit::CONFIG_ERROR),
+        "{stderr}"
+    );
     assert!(stderr.contains("`nope`"), "{stderr}");
     assert!(stderr.contains(valid), "{stderr}");
     assert!(out.stdout.is_empty(), "nothing listed or run on error");

@@ -139,7 +139,7 @@ pub enum Command {
     Schema,
 }
 
-/// Clap-styled usage error for a missing `--config` (exit code 2).
+/// Clap-styled usage error for a missing `--config` ([`CONFIG_ERROR`](crate::exit::CONFIG_ERROR)).
 pub fn missing_config_error() -> clap::Error {
     Cli::command().error(
         clap::error::ErrorKind::MissingRequiredArgument,
@@ -147,7 +147,7 @@ pub fn missing_config_error() -> clap::Error {
     )
 }
 
-/// Clap-styled usage error for a bad `--only` / `--group` value (exit code 2).
+/// Clap-styled usage error for a bad `--only` / `--group` value ([`CONFIG_ERROR`](crate::exit::CONFIG_ERROR)).
 pub fn filter_error(message: String) -> clap::Error {
     Cli::command().error(clap::error::ErrorKind::InvalidValue, message)
 }
@@ -187,7 +187,7 @@ mod tests {
         assert!(cli.command.is_none() && cli.config.is_none());
         let err = missing_config_error();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
     }
 
     /// Parse `args` and return the resolved `init` / `validate` config path.

@@ -4,10 +4,12 @@
 //! without a matching repo mount).
 
 use ci_tui::checks::CheckToRun;
-use ci_tui::preflight::docker_warnings;
-use ci_tui::runner::ExecTarget;
+use ci_tui::exit;
+use ci_tui::preflight::{docker_reachable, docker_warnings};
+use ci_tui::runner::{CommandExecutor, ExecTarget, OutputSink};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 mod common;
 use common::configs::ConfigBuilder;
@@ -333,4 +335,98 @@ async fn exec_probe_failure_includes_first_stderr_line() {
         "{warnings:?}"
     );
     assert!(!warnings[0].contains("second line"), "{warnings:?}");
+}
+
+// ---------------------------------------------------------------------------
+// preflight::docker_reachable: exit 3 when docker is down
+// ---------------------------------------------------------------------------
+
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Mock answering the `docker version` probe with `success` / `stderr`
+fn probe_mock(success: bool, stderr: &str) -> MockCommandExecutor {
+    let stderr = stderr.to_string();
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute()
+        .withf(|cmd, _, _| cmd.starts_with("docker version"))
+        .times(1)
+        .returning(move |_, _, _| CommandOutput {
+            success,
+            stdout: String::new(),
+            stderr: stderr.clone(),
+        });
+    mock
+}
+
+#[tokio::test]
+async fn docker_probe_up_is_ok() {
+    let target = ConfigBuilder::new().build().runner;
+    docker_reachable(&target, true, root(), &probe_mock(true, ""), TIMEOUT)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn docker_probe_failure_is_env_error() {
+    let target = ConfigBuilder::new().build().runner;
+    let mock = probe_mock(
+        false,
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\nmore\n",
+    );
+
+    let err = docker_reachable(&target, true, root(), &mock, TIMEOUT)
+        .await
+        .unwrap_err();
+
+    assert_eq!(exit::code_for(&err), exit::ENV_ERROR);
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Docker is not reachable"), "{msg}");
+    assert!(msg.contains("Cannot connect to the Docker daemon"), "{msg}");
+    assert!(!msg.contains("more"), "{msg}");
+}
+
+#[tokio::test]
+async fn docker_probe_skipped_in_local_mode_or_when_not_needed() {
+    let docker = ConfigBuilder::new().build().runner;
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_execute().never();
+    docker_reachable(&local_sh(), true, root(), &mock, TIMEOUT)
+        .await
+        .unwrap();
+    docker_reachable(&docker, false, root(), &mock, TIMEOUT)
+        .await
+        .unwrap();
+}
+
+/// Executor whose probe never answers (daemon hanging)
+struct HangingExecutor;
+
+#[async_trait::async_trait]
+impl CommandExecutor for HangingExecutor {
+    async fn execute(&self, _: &str, _: &Path, _: &OutputSink) -> CommandOutput {
+        std::future::pending().await
+    }
+
+    fn is_container_running(&self, _: &str) -> bool {
+        false
+    }
+
+    fn kill_container(&self, _: &str) {}
+}
+
+#[tokio::test]
+async fn docker_probe_timeout_is_env_error() {
+    let target = ConfigBuilder::new().build().runner;
+    let err = docker_reachable(
+        &target,
+        true,
+        root(),
+        &HangingExecutor,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(exit::code_for(&err), exit::ENV_ERROR);
+    assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
 }

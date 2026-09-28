@@ -1301,9 +1301,14 @@ impl App {
         counts
     }
 
-    /// Process exit code at quit: 1 if any check failed, else 0 (matches simple mode)
+    /// Process exit code at quit: [`CHECKS_FAILED`](crate::exit::CHECKS_FAILED)
+    /// if any check failed, else [`SUCCESS`](crate::exit::SUCCESS) (matches simple mode)
     pub fn exit_code(&self) -> i32 {
-        i32::from(self.count_by_status().failed > 0)
+        if self.count_by_status().failed > 0 {
+            crate::exit::CHECKS_FAILED
+        } else {
+            crate::exit::SUCCESS
+        }
     }
 
     /// Groups that have checks, in config (YAML) order
@@ -1692,7 +1697,7 @@ checks:
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::TimedOut;
 
         assert_eq!(app.count_by_status().failed, 1);
-        assert_eq!(app.exit_code(), 1);
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
 
         app.view.status_filter = StatusFilter::Failed;
         let visible: Vec<_> = app.get_selectable_items();
@@ -1713,7 +1718,7 @@ checks:
 
         let counts = app.count_by_status();
         assert_eq!((counts.passed, counts.failed, counts.cancelled), (0, 0, 1));
-        assert_eq!(app.exit_code(), 0);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
 
         let caps = app.selected_capabilities(); // php-lint selected
         assert!(caps.can_retry && caps.can_run_all_files);
@@ -1805,7 +1810,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Passed;
 
-        assert_eq!(app.exit_code(), 0);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
     }
 
     #[test]
@@ -1814,7 +1819,7 @@ checks:
         app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
         app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
 
-        assert_eq!(app.exit_code(), 1);
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
     }
 
     #[test]

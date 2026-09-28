@@ -389,7 +389,7 @@ fn binary_staged_outside_git_repo_exits_with_error() {
     std::fs::write(tmp.path().join("ci-tui.yaml"), MARKER_CONFIG).unwrap();
     let out = run_ci_tui(tmp.path(), &["--staged", "--list"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(ci_tui::exit::ENV_ERROR), "{stderr}");
     assert!(stderr.contains("could not read staged files"), "{stderr}");
     assert!(stderr.contains("--staged reads the git index"), "{stderr}");
     assert!(out.stdout.is_empty(), "nothing listed on git failure");

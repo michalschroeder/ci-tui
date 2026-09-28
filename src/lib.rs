@@ -9,6 +9,7 @@
 //! - `cli`: Command-line argument parsing
 //! - `commands`: `init` / `validate` subcommands (scaffold and check config)
 //! - `config`: Configuration loading and parsing from YAML
+//! - `exit`: Process exit codes (0 pass, 1 checks failed, 2 config, 3 git/env)
 //! - `filter`: `--only` / `--group` check subset selection
 //! - `fix`: Auto-fix mode (`--fix`) running fix commands for matched checks
 //! - `git`: Git operations for detecting changed files
@@ -24,6 +25,7 @@ pub mod checks;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod exit;
 pub mod filter;
 pub mod fix;
 pub mod git;

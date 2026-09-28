@@ -174,7 +174,7 @@ pub async fn run(
             print!("{}", format_failed_check(result, fix_cmd));
         }
 
-        std::process::exit(1);
+        std::process::exit(crate::exit::CHECKS_FAILED);
     } else {
         println!(
             "\x1b[32m✓ All {} checks passed in {}\x1b[0m",

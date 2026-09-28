@@ -5,7 +5,9 @@
 //! WORKDIR for `docker exec`, `docker.work_dir` for `docker run`). A mismatch would
 //! otherwise surface only as "file not found" inside checks, so warn up front.
 //!
-//! Warnings are advisory: callers print/show them and run normally.
+//! Warnings are advisory: callers print/show them and run normally. An
+//! unreachable Docker daemon is not: [`docker_reachable`] fails the run
+//! (exit 3) before any check starts.
 
 use crate::checks::CheckToRun;
 use crate::config::DockerConfig;
@@ -13,6 +15,53 @@ use crate::runner::{build_docker_exec_command, CommandExecutor, ExecTarget, Outp
 use crate::utils::shell::quote;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+
+/// Probe run by [`docker_reachable`]: fails when the daemon is down. No
+/// `--format`: podman's docker shim may not fill the server fields.
+const DOCKER_PROBE: &str = "docker version";
+
+/// How long [`docker_reachable`] waits for the probe (daemon starting,
+/// unreachable remote `DOCKER_HOST`)
+pub const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Err when commands would run in docker mode (`needed`) but the Docker CLI /
+/// daemon is unreachable or does not answer within `timeout` (first stderr
+/// line of the probe as cause). No probe in local mode or when not `needed`.
+pub async fn docker_reachable(
+    target: &ExecTarget,
+    needed: bool,
+    root: &Path,
+    executor: &dyn CommandExecutor,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    if !matches!(target, ExecTarget::Docker(_)) || !needed {
+        return Ok(());
+    }
+    // On timeout the probe future is dropped, which kills its process group.
+    let sink = OutputSink::none();
+    let probe = executor.execute(DOCKER_PROBE, root, &sink);
+    let Ok(output) = tokio::time::timeout(timeout, probe).await else {
+        anyhow::bail!(
+            "Docker is not reachable (`docker version` did not answer within {}s). \
+             Start Docker, or set `runner: local` to run checks on the host.",
+            timeout.as_secs()
+        );
+    };
+    if output.success {
+        return Ok(());
+    }
+    let cause = output
+        .stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no output");
+    anyhow::bail!(
+        "Docker is not reachable (`docker version` failed: {cause}). \
+         Start Docker, or set `runner: local` to run checks on the host."
+    )
+}
 
 /// Warnings for containers where changed files likely won't resolve; empty
 /// when fine or not applicable.
