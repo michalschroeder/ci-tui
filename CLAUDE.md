@@ -135,6 +135,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
+- **ui/external.rs**: `o`/`O` output in `$PAGER`/`$EDITOR` (plain text in private session temp dir; main loop stops keyboard thread, runs viewer on blocking pool, keeps draining events) and `w` log save to `.ci-tui/logs/<id>.log` (writes `.ci-tui/.gitignore`). Helper processes use `utils::own_process_group` so pager Ctrl-C spares them
 - **color.rs**: `--no-color` / non-empty `NO_COLOR` decision (`should_color`); console modes print via `cprintln!` (strips ANSI when off, process-wide switch set in main); TUI resets cell fg/bg after drawing (`App::color`)
 - **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`; first line links the versioned release schema)
