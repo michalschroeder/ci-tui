@@ -850,7 +850,7 @@ fn test_help_overlay_lists_fold_key() {
 
     assert!(buffer_contains(
         terminal.backend().buffer(),
-        "Space / Enter  fold / unfold"
+        "Space/Enter fold group"
     ));
 }
 
@@ -924,4 +924,36 @@ fn test_stats_hidden_lowers_min_height_by_stats_rows() {
     let buffer = render_at(&mut app, 60, 14);
     assert!(buffer_contains(&buffer, "Terminal too small"));
     assert!(buffer_contains(&buffer, "need 60x15"));
+}
+
+/// Color off: gauge fill has no bg color left, so filled cells must show as
+/// `█` or reversed (under the label) and unfilled cells as neither
+#[test]
+fn test_no_color_header_gauge_fill_visible() {
+    let mut app = make_test_app(); // 2 of 3 auto-run checks done
+    app.color = false;
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    let filled = |x: u16| {
+        let cell = &buffer[(x, 1)];
+        cell.symbol() == "█" || cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+    };
+    // Inner gauge row 1, cols 1..79; fill ends at 1 + round(78 * 2/3)
+    let end = 1 + (78.0_f64 * 2.0 / 3.0).round() as u16;
+    assert!((1..end).all(filled), "filled part distinguishable");
+    assert!(!(end..WIDTH - 1).any(filled), "unfilled part plain");
+}
+
+#[rstest::rstest]
+#[case::with_stats(21, true)]
+#[case::without_stats(15, false)]
+fn test_help_overlay_fits_min_size(#[case] height: u16, #[case] stats: bool) {
+    let mut app = make_test_app();
+    if !stats {
+        app.toggle_stats();
+    }
+    app.toggle_help();
+    let buffer = render_at(&mut app, 60, height);
+    assert!(!buffer_contains(&buffer, "too small"));
+    assert!(buffer_contains(&buffer, "Press ? or Esc to close"));
+    assert!(buffer_contains(&buffer, "CPU/MEM stats"));
 }

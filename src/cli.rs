@@ -64,7 +64,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_color: bool,
 
-    /// Start the TUI with the CPU/MEM stats panel hidden (`m` toggles it)
+    /// TUI only: start with the CPU/MEM stats panel hidden (`m` toggles it);
+    /// no effect with --simple, --fix or --list
     #[arg(long)]
     pub no_stats: bool,
 }

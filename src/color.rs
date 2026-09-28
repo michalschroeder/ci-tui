@@ -33,7 +33,9 @@ pub fn enabled() -> bool {
 }
 
 /// `s` as is with color on; with color off, without ANSI CSI sequences
-/// (`ESC [` params, final byte `@`..=`~`), incl. escapes in check output.
+/// (`ESC [`, param/intermediate bytes `0x20..=0x3F`, final byte
+/// `0x40..=0x7E`), incl. escapes in check output. A truncated sequence ends
+/// at the first other char, which is kept as text.
 pub fn paint(s: &str, color: bool) -> Cow<'_, str> {
     if color || !s.contains('\x1b') {
         return Cow::Borrowed(s);
@@ -45,9 +47,10 @@ pub fn paint(s: &str, color: bool) -> Cow<'_, str> {
             out.push(c);
             continue;
         }
-        // Skip `[`, params, and the final byte
+        // Skip `[` and params / intermediates, then the final byte
         chars.next();
-        let _ = chars.by_ref().find(|c| ('@'..='~').contains(c));
+        while chars.next_if(|c| (' '..='?').contains(c)).is_some() {}
+        let _ = chars.next_if(|c| ('@'..='~').contains(c));
     }
     Cow::Owned(out)
 }
@@ -97,6 +100,13 @@ mod tests {
         let s = "\x1b[1;31mred\x1b[0m plain \x1b[2Kx";
         assert_eq!(paint(s, false), "red plain x");
         assert_eq!(paint(s, true), s);
+    }
+
+    #[test]
+    fn test_paint_malformed_csi_keeps_following_text() {
+        // Truncated CSI: `\n` is not a param/intermediate byte, so it ends it
+        assert_eq!(paint("\x1b[31\nerror", false), "\nerror");
+        assert_eq!(paint("a\x1b[", false), "a");
     }
 
     #[test]

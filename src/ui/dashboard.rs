@@ -205,6 +205,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let min_height = min_height(app.view.stats_visible);
     if area.width < MIN_WIDTH || area.height < min_height {
+        // Hidden layout: drop its areas so clicks / scroll can't hit it
+        app.set_checks_list_layout(Rect::default());
+        app.set_output_layout(Rect::default(), Rect::default());
         render_too_small(frame, min_height);
     } else {
         render_dashboard(app, frame);
@@ -267,72 +270,67 @@ fn render_too_small(frame: &mut Frame, min_height: u16) {
     );
 }
 
-/// Centered rect covering `percent_x`/`percent_y` of `area` — the standard
-/// ratatui popup idiom.
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+/// Help overlay key bindings: (key, action), shown in two columns
+const HELP_LEFT: [(&str, &str); 9] = [
+    ("↑/k ↓/j", "prev/next row"),
+    ("g / G", "first/last row"),
+    ("n / N", "next/prev failed"),
+    ("Space/Enter", "fold group"),
+    ("PgUp/PgDn", "scroll page"),
+    ("Home/End", "top/bottom"),
+    ("J / K", "scroll line"),
+    ("Ctrl-d/u", "half page"),
+    ("/", "search output"),
+];
+const HELP_RIGHT: [(&str, &str); 9] = [
+    ("f / a", "failed/all"),
+    ("r / R", "retry/retry all"),
+    ("t", "run on-demand"),
+    ("s", "cancel running"),
+    ("x / X", "fix/fix all"),
+    ("A", "run on all files"),
+    ("c / e", "copy/expand cmd"),
+    ("m", "CPU/MEM stats"),
+    ("q / Ctrl-c", "quit"),
+];
+/// Columns of one help column: space, 11-col key, space, 16-col action
+const HELP_COL_WIDTH: usize = 29;
+
+/// One padded help column cell: ` key         action`
+fn help_cell((key, action): (&str, &str)) -> String {
+    format!(
+        "{:<width$}",
+        format!(" {key:<11} {action}"),
+        width = HELP_COL_WIDTH
+    )
 }
 
-/// Centered popup listing all key bindings (`?` to toggle, `Esc` to close)
+/// Centered popup listing all key bindings (`?` to toggle, `Esc` to close).
+/// Sized to its content so it fits the minimum terminal size (60x15).
 fn render_help_overlay(frame: &mut Frame) {
-    let area = centered_rect(64, 80, frame.area());
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{:<HELP_COL_WIDTH$}", " Navigation / Output"), bold),
+        Span::styled(" Actions", bold),
+    ])];
+    lines.extend(
+        HELP_LEFT
+            .into_iter()
+            .zip(HELP_RIGHT)
+            .map(|(l, r)| Line::from(help_cell(l) + &help_cell(r))),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Press ? or Esc to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let width = (2 * HELP_COL_WIDTH as u16) + PANEL_BORDER_COLS;
+    let height = lines.len() as u16 + PANEL_BORDER_ROWS as u16;
+    let area = frame
+        .area()
+        .centered(Constraint::Max(width), Constraint::Max(height));
     frame.render_widget(Clear, area);
-
-    let lines = vec![
-        Line::from(Span::styled(
-            "Navigation",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  ↑/k  ↓/j       previous / next row"),
-        Line::from("  g  /  G        first / last row"),
-        Line::from("  n  /  N        next / previous failed check"),
-        Line::from("  Space / Enter  fold / unfold selected group"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Output",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  PageUp/Down    scroll by page"),
-        Line::from("  Home / End     scroll to top / bottom"),
-        Line::from("  J  /  K        scroll one line down / up"),
-        Line::from("  Ctrl-d/Ctrl-u  scroll half page down / up"),
-        Line::from("  /              search output (Enter confirms, Esc cancels)"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Actions",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  f / a          filter failed / show all"),
-        Line::from("  r / R          retry selected / retry all"),
-        Line::from("  t              trigger on-demand check"),
-        Line::from("  s              cancel running check"),
-        Line::from("  x / X          fix selected / fix all"),
-        Line::from("  A              run selected check for all files"),
-        Line::from("  c / e          copy / expand command+files"),
-        Line::from("  m              show / hide CPU/MEM stats"),
-        Line::from("  q / Ctrl-c     quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press ? or Esc to close",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
@@ -416,6 +414,22 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         .label(status_text);
 
     frame.render_widget(gauge, area);
+    if !app.color {
+        mark_gauge_fill(frame, Block::bordered().inner(area), ratio);
+    }
+}
+
+/// Color off: a Gauge draws its fill as `█` except under the label, where
+/// only swapped fg/bg mark it; reverse those cells so the fill stays visible
+fn mark_gauge_fill(frame: &mut Frame, inner: Rect, ratio: f64) {
+    let end = inner.left() + (f64::from(inner.width) * ratio).round() as u16;
+    let buf = frame.buffer_mut();
+    for pos in inner.positions().filter(|p| p.x < end) {
+        let cell = &mut buf[pos];
+        if cell.symbol() != symbols::block::FULL {
+            cell.modifier.insert(Modifier::REVERSED);
+        }
+    }
 }
 
 fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
@@ -460,6 +474,9 @@ fn render_system_stats(app: &App, frame: &mut Frame, area: Rect) {
         .ratio(mem_ratio)
         .label(mem_label);
     frame.render_widget(mem_gauge, chunks[1]);
+    if !app.color {
+        mark_gauge_fill(frame, Block::bordered().inner(chunks[1]), mem_ratio);
+    }
 }
 
 fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -2131,6 +2148,32 @@ mod tests {
             1,
             "second frame with unchanged content/width must hit the cache, not reparse"
         );
+    }
+
+    /// Too-small frame hides the layout: clicks at the old checks-list
+    /// position must not select hidden rows, scrolling must not panic
+    #[test]
+    fn test_too_small_clears_stale_layout_areas() {
+        let mut app = make_test_app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        let old = app.view.checks_list_area;
+        assert!(old.height > 0);
+        let selected = app.view.selected_check;
+
+        terminal.backend_mut().resize(40, 10);
+        terminal.autoresize().expect("resize");
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        for row in old.y..old.bottom() {
+            app.select_check_at_position(old.x + 1, row);
+        }
+        assert_eq!(app.view.selected_check, selected);
+        assert_eq!(app.view.checks_list_area, Rect::default());
+        assert_eq!(app.view.output_area, Rect::default());
+        assert_eq!(app.view.output_visible_lines, 0);
+        assert_eq!(app.output_area_width, 0);
+        app.scroll_down(5);
+        app.scroll_to_bottom();
     }
 
     #[test]

@@ -116,13 +116,22 @@ async fn interruptible(fut: impl std::future::Future<Output = Result<()>>) -> Re
     }
 }
 
+/// Set the console color switch and install color-eyre for better panic
+/// reports (errors are ignored if it fails), themeless with color off
+fn init_color(color: bool) {
+    ci_tui::color::set_enabled(color);
+    let hook = if color {
+        color_eyre::config::HookBuilder::default()
+    } else {
+        color_eyre::config::HookBuilder::blank()
+    };
+    let _ = hook.install();
+}
+
 /// Process exit code of the whole run
 async fn run() -> Result<i32> {
-    // Install color-eyre for better panic handling (errors are ignored if it fails)
-    let _ = color_eyre::install();
-
     let cli = Cli::parse_checked();
-    ci_tui::color::set_enabled(cli.color_enabled());
+    init_color(cli.color_enabled());
 
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);
