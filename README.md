@@ -139,6 +139,9 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `X` | Fix all checks |
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
+| `o` | Open selected check's output in `$PAGER` (default `less`; TUI suspended until it exits) |
+| `O` | Open selected check's output in `$EDITOR` (default `vi`) |
+| `w` | Save selected check's output to `.ci-tui/logs/<check>.log` (plain text, overwritten) |
 | `m` | Show / hide CPU/MEM stats panel |
 
 Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker run` fallback. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.

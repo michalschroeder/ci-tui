@@ -49,7 +49,7 @@ pub struct RealGitExecutor;
 
 impl GitExecutor for RealGitExecutor {
     fn run_command(&self, project_root: &Path, args: &[String]) -> Result<String> {
-        let output = Command::new("git")
+        let output = crate::utils::own_process_group(&mut Command::new("git"))
             .args(args)
             .current_dir(project_root)
             .output()
