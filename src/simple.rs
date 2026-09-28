@@ -15,7 +15,7 @@
 //! - `1`: One or more checks failed
 
 use crate::checks::{group_checks, CheckToRun};
-use crate::color::cprintln;
+use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus, ExecTarget};
@@ -170,7 +170,7 @@ pub async fn run(
                 .and_then(|c| c.resolved_fix_command.as_deref());
             cprintln!();
             let failed = format_failed_check(result, fix_cmd);
-            print!("{}", crate::color::paint(&failed, crate::color::enabled()));
+            cprint!("{}", failed);
         }
 
         std::process::exit(crate::exit::CHECKS_FAILED);

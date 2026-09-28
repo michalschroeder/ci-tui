@@ -796,7 +796,8 @@ impl App {
             self.sys.cpu_history.pop_front();
         }
 
-        self.needs_redraw = true;
+        // Hidden panel: keep history for `m`, but nothing on screen changed
+        self.needs_redraw |= self.view.stats_visible;
     }
 
     /// Latest CPU usage (percent)

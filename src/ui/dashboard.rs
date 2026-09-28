@@ -68,7 +68,7 @@ const MAIN_MIN_ROWS: u16 = 10;
 const FOOTER_ROWS: u16 = 2;
 /// Narrowest terminal the layout renders in; below it only a "terminal too
 /// small" message shows
-pub const MIN_WIDTH: u16 = 60;
+const MIN_WIDTH: u16 = 60;
 
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
@@ -187,32 +187,40 @@ fn suffix_width(s: &str, max: usize) -> &str {
     s
 }
 
-/// Lowest terminal height the layout renders in (stats panel rows only when shown)
-pub fn min_height(stats_visible: bool) -> u16 {
-    let stats = if stats_visible { STATS_ROWS } else { 0 };
-    HEADER_ROWS + stats + MAIN_MIN_ROWS + FOOTER_ROWS
+/// Rows of the stats panel: [`STATS_ROWS`] when shown, else none
+fn stats_rows(stats_visible: bool) -> u16 {
+    if stats_visible {
+        STATS_ROWS
+    } else {
+        0
+    }
+}
+
+/// Lowest terminal height the layout renders in
+fn min_height(stats_visible: bool) -> u16 {
+    HEADER_ROWS + stats_rows(stats_visible) + MAIN_MIN_ROWS + FOOTER_ROWS
 }
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let min_height = min_height(app.view.stats_visible);
     if area.width < MIN_WIDTH || area.height < min_height {
-        render_too_small(frame, MIN_WIDTH, min_height);
+        render_too_small(frame, min_height);
     } else {
         render_dashboard(app, frame);
     }
+    // Color off: reset every cell's fg/bg; modifiers (bold, reversed
+    // selection) stay so the UI remains usable
     if !app.color {
-        strip_colors(frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::new().fg(Color::Reset).bg(Color::Reset));
     }
 }
 
 /// Header, stats (if shown), main content, footer, and the help overlay
 fn render_dashboard(app: &mut App, frame: &mut Frame) {
-    let stats_rows = if app.view.stats_visible {
-        STATS_ROWS
-    } else {
-        0
-    };
+    let stats_rows = stats_rows(app.view.stats_visible);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -237,7 +245,7 @@ fn render_dashboard(app: &mut App, frame: &mut Frame) {
 
 /// Centered "terminal too small" notice with current and required size, in
 /// place of a clipped layout
-fn render_too_small(frame: &mut Frame, min_width: u16, min_height: u16) {
+fn render_too_small(frame: &mut Frame, min_height: u16) {
     let area = frame.area();
     let lines = vec![
         Line::from(Span::styled(
@@ -246,30 +254,17 @@ fn render_too_small(frame: &mut Frame, min_width: u16, min_height: u16) {
         )),
         Line::from(format!(
             "{}x{}, need {}x{}",
-            area.width, area.height, min_width, min_height
+            area.width, area.height, MIN_WIDTH, min_height
         )),
     ];
     let height = (lines.len() as u16).min(area.height);
-    let [_, row, _] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(height),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
+    let row = area.centered_vertically(Constraint::Length(height));
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(ratatui::layout::Alignment::Center)
             .wrap(Wrap { trim: true }),
         row,
     );
-}
-
-/// Reset every cell's fg/bg (`--no-color` / `NO_COLOR`); modifiers
-/// (bold, reversed selection) stay so the UI remains usable
-fn strip_colors(buf: &mut ratatui::buffer::Buffer) {
-    for cell in &mut buf.content {
-        cell.set_fg(Color::Reset).set_bg(Color::Reset);
-    }
 }
 
 /// Centered rect covering `percent_x`/`percent_y` of `area` — the standard

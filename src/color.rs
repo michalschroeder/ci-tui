@@ -66,6 +66,17 @@ macro_rules! cprintln {
 }
 pub(crate) use cprintln;
 
+/// `print!` honoring the console color switch ([`enabled`])
+macro_rules! cprint {
+    ($($arg:tt)*) => {
+        print!(
+            "{}",
+            $crate::color::paint(&format!($($arg)*), $crate::color::enabled())
+        )
+    };
+}
+pub(crate) use cprint;
+
 #[cfg(test)]
 mod tests {
     use super::*;
