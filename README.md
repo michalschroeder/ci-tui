@@ -32,6 +32,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `--no-color` (or a non-empty `NO_COLOR` env var, per [no-color.org](https://no-color.org)) disables color in the TUI, `--simple` and `--fix` output
+- `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
 - `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
@@ -161,6 +162,7 @@ ci-tui --list              # explain check selection, run nothing (alias --dry-r
 ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups)
 ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
 ci-tui -s --no-cache       # run every check, even ones cached as unchanged
+ci-tui --notify --exit-on-finish  # TUI: notify when done, quit with the exit code
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 

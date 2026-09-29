@@ -73,6 +73,16 @@ pub struct Cli {
     /// (passes are still recorded in `.git/ci-tui/`)
     #[arg(long)]
     pub no_cache: bool,
+
+    /// TUI only: ring the bell and send a desktop notification (OSC 9) when a
+    /// full run finishes; also config `notify: true`. No effect with --simple,
+    /// --fix or --list
+    #[arg(long)]
+    pub notify: bool,
+
+    /// TUI only: quit when the run finishes; exit 1 if any check failed, else 0
+    #[arg(long, conflicts_with_all = ["simple", "list", "fix"])]
+    pub exit_on_finish: bool,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -135,11 +145,13 @@ impl Cli {
                 || !cli.groups.is_empty()
                 || cli.jobs.is_some()
                 || cli.no_stats
-                || cli.no_cache)
+                || cli.no_cache
+                || cli.notify
+                || cli.exit_on_finish)
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs, --no-stats and --no-cache cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs, --no-stats, --no-cache, --notify and --exit-on-finish cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -258,6 +270,13 @@ mod tests {
     #[case::jobs_before_validate(&["ci-tui", "-j", "2", "validate"])]
     #[case::no_stats_before_validate(&["ci-tui", "--no-stats", "validate"])]
     #[case::no_cache_before_validate(&["ci-tui", "--no-cache", "validate"])]
+    #[case::notify_before_validate(&["ci-tui", "--notify", "validate"])]
+    #[case::exit_on_finish_before_init(&["ci-tui", "--exit-on-finish", "init"])]
+    #[case::exit_on_finish_with_simple(&["ci-tui", "--exit-on-finish", "-s"])]
+    #[case::simple_then_exit_on_finish(&["ci-tui", "-s", "--exit-on-finish"])]
+    #[case::exit_on_finish_with_list(&["ci-tui", "--exit-on-finish", "--list"])]
+    #[case::dry_run_then_exit_on_finish(&["ci-tui", "--dry-run", "--exit-on-finish"])]
+    #[case::exit_on_finish_with_fix(&["ci-tui", "--exit-on-finish", "--fix"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -368,6 +387,21 @@ mod tests {
     #[case::simple(&["ci-tui", "-s", "--no-cache", "-f", "a.rs"], true)]
     fn test_no_cache_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
         assert_eq!(Cli::try_parse_checked(args).unwrap().no_cache, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false, false)]
+    #[case::notify(&["ci-tui", "--notify"], true, false)]
+    #[case::exit_on_finish(&["ci-tui", "--exit-on-finish"], false, true)]
+    #[case::both(&["ci-tui", "--notify", "--exit-on-finish", "-f", "a.rs"], true, true)]
+    #[case::notify_with_simple(&["ci-tui", "-s", "--notify"], true, false)]
+    fn test_notify_exit_on_finish_flags_parsed(
+        #[case] args: &[&str],
+        #[case] notify: bool,
+        #[case] exit_on_finish: bool,
+    ) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert_eq!((cli.notify, cli.exit_on_finish), (notify, exit_on_finish));
     }
 
     #[test]

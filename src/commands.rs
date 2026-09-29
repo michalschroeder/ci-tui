@@ -66,6 +66,10 @@ ignore_patterns:
 # `parallel: true` run concurrently, at most `max_parallel` at a time
 # (top-level or per group; default CPU count; `--jobs N` overrides top-level)
 # max_parallel: 4
+
+# TUI: ring the bell and send a desktop notification when a run finishes
+# (also `--notify`)
+# notify: true
 checks:
   quality:
     name: Code Quality

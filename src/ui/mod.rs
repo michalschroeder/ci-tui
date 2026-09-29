@@ -18,10 +18,12 @@
 //! - [`app`]: Application state management
 //! - [`dashboard`]: Rendering logic using ratatui widgets
 //! - [`external`]: Output in `$PAGER` / `$EDITOR` (`o` / `O`) and log saving (`w`)
+//! - [`notify`]: End-of-run bell + desktop notification (`notify` / `--notify`)
 
 pub mod app;
 pub mod dashboard;
 pub mod external;
+pub mod notify;
 
 use crate::cache::{stamp_keys, ResultCache};
 use crate::checks::{select_checks, CheckToRun, Selected};
@@ -84,6 +86,8 @@ enum Message {
     KeyPress(KeyEvent),
     /// Terminal resized - redraw with the new layout
     Resize,
+    /// `$PAGER` / `$EDITOR` exited and the TUI is back
+    ViewerClosed,
     Mouse(MouseEvent),
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
@@ -1192,9 +1196,24 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             app.needs_redraw = true;
             Action::Continue
         }
+        // Repaint as after a resize (the terminal may have been resized
+        // meanwhile); quit if `--exit-on-finish` was deferred for the viewer
+        Message::ViewerClosed => {
+            app.needs_redraw = true;
+            match app.exit_on_finish && app.run.all_finished {
+                true => Action::Quit,
+                false => Action::Continue,
+            }
+        }
         Message::Mouse(mouse) => handle_mouse_event(app, mouse),
         Message::RunnerEvent(event) => {
+            let finished = matches!(event, RunnerEvent::AllFinished);
             app.handle_runner_event(event);
+            // `--exit-on-finish`: only the runner sends AllFinished, so this
+            // is the first full run (initial or restarted by 'R' / 'a')
+            if finished && app.exit_on_finish {
+                return Action::Quit;
+            }
             Action::Continue
         }
         Message::SystemStats(stats) => {
@@ -1218,15 +1237,50 @@ pub struct TuiOptions {
     pub show_stats: bool,
     /// Result cache: skips unchanged checks at start, records finished runs
     pub cache: ResultCache,
+    /// Quit when the run finishes (`--exit-on-finish`); exit code as for `q`
+    pub exit_on_finish: bool,
 }
 
 impl TuiOptions {
-    pub fn new(filter_notice: Option<String>, show_stats: bool, cache: ResultCache) -> Self {
+    pub fn new(
+        filter_notice: Option<String>,
+        show_stats: bool,
+        cache: ResultCache,
+        exit_on_finish: bool,
+    ) -> Self {
         Self {
             filter_notice,
             show_stats,
             cache,
+            exit_on_finish,
         }
+    }
+}
+
+/// App state for the TUI on the current branch, with `options` applied
+/// (takes its filter notice)
+fn new_app(
+    config: &CiConfig,
+    changed_files: ChangedFiles,
+    checks: &[CheckToRun],
+    project_root: &Path,
+    options: &mut TuiOptions,
+) -> App {
+    let branch_name = current_branch(project_root).unwrap_or_else(|_| "unknown".to_string());
+    let mut app = App::new(config.clone(), changed_files, checks.to_vec(), branch_name);
+    app.filter_notice = options.filter_notice.take();
+    app.color = crate::color::enabled();
+    app.view.stats_visible = options.show_stats;
+    app.exit_on_finish = options.exit_on_finish;
+    app
+}
+
+/// Send the end-of-run notification `app` queued (config `notify`) to the
+/// TUI's terminal. Best effort; also while a viewer runs (BEL / OSC print
+/// nothing).
+fn send_notification(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
+    if let Some(message) = app.take_notification() {
+        let _ = notify::emit(terminal.backend_mut(), &message);
     }
 }
 
@@ -1244,7 +1298,7 @@ pub async fn run(
     project_root: PathBuf,
     exec_root: PathBuf,
     startup_warnings: Vec<String>,
-    options: TuiOptions,
+    mut options: TuiOptions,
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -1263,14 +1317,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get current branch name
-    let branch_name = current_branch(&project_root).unwrap_or_else(|_| "unknown".to_string());
-
-    // Create app state
-    let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
-    app.filter_notice = options.filter_notice;
-    app.color = crate::color::enabled();
-    app.view.stats_visible = options.show_stats;
+    let mut app = new_app(&config, changed_files, &checks, &project_root, &mut options);
     app.show_warnings(&startup_warnings);
     let checks = skip_cached(&mut app, &options.cache, checks);
 
@@ -1325,15 +1372,14 @@ pub async fn run(
                 _ => Message::Resize,
             },
 
-            // Viewer exited: restore the TUI, read keys again, repaint as
-            // after a resize (the terminal may have been resized meanwhile)
+            // Viewer exited: restore the TUI, read keys again
             outcome = async { (&mut viewer_task.as_mut().expect("guarded").1).await },
                 if viewer_task.is_some() =>
             {
                 let (viewer, _) = viewer_task.take().expect("guarded");
                 finish_viewer(&mut terminal, &mut app, viewer, outcome)?;
                 (keyboard, input_rx) = KeyboardThread::start();
-                Message::Resize
+                Message::ViewerClosed
             }
 
             // Status message TTL (ahead of busy channels so it cannot starve)
@@ -1356,7 +1402,13 @@ pub async fn run(
 
         // Handle the message and get the action
         recorder.record(&mut app, &msg);
-        match handle_message(&mut app, msg, &mut tasks) {
+        let action = handle_message(&mut app, msg, &mut tasks);
+        // Before an `--exit-on-finish` quit
+        send_notification(&mut terminal, &mut app);
+        match action {
+            // Only `--exit-on-finish` quits while a viewer runs (keys go to
+            // the viewer): deferred to `Message::ViewerClosed`
+            Action::Quit if viewer_task.is_some() => {}
             Action::Quit => break,
             Action::RestartRunner {
                 new_changed_files,
@@ -1953,6 +2005,96 @@ checks:
 
         assert!(matches!(action, Action::Continue));
         assert!(app.run.all_finished);
+    }
+
+    #[rstest::rstest]
+    #[case::passed(crate::runner::CheckStatus::Passed, crate::exit::SUCCESS)]
+    #[case::failed(crate::runner::CheckStatus::Failed, crate::exit::CHECKS_FAILED)]
+    #[case::timed_out(crate::runner::CheckStatus::TimedOut, crate::exit::CHECKS_FAILED)]
+    fn test_exit_on_finish_quits_with_run_outcome(
+        #[case] status: crate::runner::CheckStatus,
+        #[case] code: i32,
+    ) {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        app.exit_on_finish = true;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let result = CheckResult {
+            status,
+            ..CheckResult::pending("php-lint")
+        };
+        let finished = Message::RunnerEvent(RunnerEvent::CheckFinished { result });
+        assert!(matches!(
+            handle_message(&mut app, finished, &mut tasks),
+            Action::Continue
+        ));
+
+        let action = handle_message(
+            &mut app,
+            Message::RunnerEvent(RunnerEvent::AllFinished),
+            &mut tasks,
+        );
+
+        assert!(matches!(action, Action::Quit));
+        assert_eq!(app.exit_code(), code);
+    }
+
+    #[test]
+    fn test_exit_on_finish_ignores_skipped_and_on_demand() {
+        let config = test_config();
+        let mut on_demand = make_test_check("behat", "fast");
+        on_demand.files = crate::checks::CheckFiles::OnDemand;
+        let mut app = make_test_app_with_checks(&config, vec![on_demand]);
+        app.exit_on_finish = true;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_message(
+            &mut app,
+            Message::RunnerEvent(RunnerEvent::AllFinished),
+            &mut tasks,
+        );
+
+        assert!(matches!(action, Action::Quit));
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    #[rstest::rstest]
+    #[case::run_finished(true, true)]
+    #[case::run_going(false, false)]
+    fn test_viewer_closed_runs_deferred_exit_on_finish(
+        #[case] all_finished: bool,
+        #[case] quits: bool,
+    ) {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.exit_on_finish = true;
+        app.run.all_finished = all_finished;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let action = handle_message(&mut app, Message::ViewerClosed, &mut tasks);
+
+        assert_eq!(matches!(action, Action::Quit), quits);
+        assert!(app.needs_redraw);
+    }
+
+    #[test]
+    fn test_retry_result_does_not_notify() {
+        let mut config = test_config();
+        config.notify = true;
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let result = CheckResult {
+            status: crate::runner::CheckStatus::Failed,
+            ..CheckResult::pending("php-lint")
+        };
+
+        handle_message(
+            &mut app,
+            Message::Task(TaskEvent::RetryResult(result)),
+            &mut tasks,
+        );
+
+        assert_eq!(app.take_notification(), None, "single runs never notify");
     }
 
     #[test]

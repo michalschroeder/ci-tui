@@ -453,6 +453,7 @@ mod tests {
             ignore_patterns: Vec::new(),
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             max_parallel: None,
+            notify: false,
             source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),

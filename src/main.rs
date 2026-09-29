@@ -179,6 +179,8 @@ async fn run() -> Result<i32> {
     }
     // --jobs overrides the config's global parallel cap
     config.max_parallel = cli.jobs.or(config.max_parallel);
+    // --notify or config `notify: true` enables the TUI end-of-run notification
+    config.notify |= cli.notify;
 
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
@@ -282,7 +284,7 @@ async fn run() -> Result<i32> {
             project_root,
             exec_root,
             warnings,
-            ui::TuiOptions::new(filter_notice, !cli.no_stats, cache),
+            ui::TuiOptions::new(filter_notice, !cli.no_stats, cache, cli.exit_on_finish),
         )
         .await
     }

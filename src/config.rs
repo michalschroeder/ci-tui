@@ -55,6 +55,9 @@ pub struct CiConfig {
     /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides
     /// in main). `None` = CPU count; see [`parallel_limit`].
     pub max_parallel: Option<NonZeroUsize>,
+    /// TUI end-of-run bell + desktop notification (`--notify` also sets it
+    /// in main); see [`crate::ui::notify`]
+    pub notify: bool,
     /// Hash of the config file text, set by [`load_config`] (0 otherwise); a
     /// result cache key input, see [`crate::cache`]
     pub(crate) source_hash: u64,
@@ -113,6 +116,10 @@ pub(crate) struct RawCiConfig {
     /// CPU count; `--jobs` overrides)
     #[serde(default)]
     max_parallel: Option<NonZeroUsize>,
+    /// TUI: ring the bell and send a desktop notification (OSC 9) when a full
+    /// run finishes (default false; `--notify` also enables it)
+    #[serde(default)]
+    notify: bool,
 }
 
 impl TryFrom<RawCiConfig> for CiConfig {
@@ -144,6 +151,7 @@ impl TryFrom<RawCiConfig> for CiConfig {
             ignore_patterns: raw.ignore_patterns,
             max_output_lines: raw.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_parallel: raw.max_parallel,
+            notify: raw.notify,
             source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -281,6 +289,7 @@ impl Clone for CiConfig {
             ignore_patterns: self.ignore_patterns.clone(),
             max_output_lines: self.max_output_lines,
             max_parallel: self.max_parallel,
+            notify: self.notify,
             source_hash: self.source_hash,
             // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
@@ -787,6 +796,7 @@ impl CiConfig {
             ignore_patterns,
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             max_parallel: None,
+            notify: false,
             source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -1161,6 +1171,7 @@ mod tests {
                 ignore_patterns: self.ignore_patterns,
                 max_output_lines: self.max_output_lines,
                 max_parallel: None,
+                notify: false,
                 source_hash: 0,
                 compiled_ignore_patterns: OnceLock::new(),
                 compiled_file_patterns: OnceLock::new(),
@@ -2863,6 +2874,35 @@ checks:
         fn custom_value_is_applied() {
             let config: CiConfig = serde_yaml::from_str(&yaml(Some(500))).unwrap();
             assert_eq!(config.max_output_lines, 500);
+        }
+    }
+
+    mod test_notify {
+        use super::*;
+
+        /// Minimal local-mode config; `notify` line optional.
+        fn yaml(notify: Option<&str>) -> String {
+            let extra = notify.map(|v| format!("notify: {v}\n")).unwrap_or_default();
+            format!(
+                "version: 2\nrunner: local\n{extra}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
+            )
+        }
+
+        #[test]
+        fn off_when_omitted() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(None)).unwrap();
+            assert!(!config.notify);
+        }
+
+        #[test]
+        fn true_enables() {
+            let config: CiConfig = serde_yaml::from_str(&yaml(Some("true"))).unwrap();
+            assert!(config.notify);
+        }
+
+        #[test]
+        fn non_bool_rejected() {
+            assert!(serde_yaml::from_str::<CiConfig>(&yaml(Some("loud"))).is_err());
         }
     }
 
