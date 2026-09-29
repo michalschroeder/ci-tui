@@ -23,7 +23,7 @@ pub mod app;
 pub mod dashboard;
 pub mod external;
 
-use crate::cache::ResultCache;
+use crate::cache::{stamp_keys, ResultCache};
 use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
@@ -338,7 +338,7 @@ impl TaskCtx {
     /// [`TaskEvent::Output`]; false when one failed
     async fn run_setup(&self, group: &str, tx: &mpsc::Sender<TaskEvent>) -> bool {
         let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
-        let runner = CheckRunner::new((*self.config).clone(), &self.exec_root);
+        let runner = CheckRunner::new(Arc::clone(&self.config), &self.exec_root);
         // `out_tx` dropped at the end of this block, ending `forward`
         let setup = async move { runner.run_group_setup(group, &out_tx).await };
         let (ok, ()) = tokio::join!(setup, forward_output(&mut out_rx, tx));
@@ -361,11 +361,29 @@ impl TaskCtx {
         }
     }
 
-    /// Re-detect changed files and matching checks, with fresh result cache
-    /// keys. Blocking (git + file system): call from `spawn_blocking`.
+    /// Checks `changed_files` selects (with `only`, just that one), with
+    /// fresh result cache keys. Blocking: keys read the files.
+    fn select(&self, changed_files: &ChangedFiles, only: Option<&str>) -> Selected {
+        let mut selected = select_checks(&self.config, changed_files, &self.exec_root, None);
+        selected
+            .checks
+            .retain(|c| only.is_none_or(|id| c.id() == id));
+        if let Some(root) = &self.key_root {
+            let checks = &mut selected.checks;
+            stamp_keys(checks, &self.config, changed_files, root, &self.exec_root);
+        }
+        selected
+    }
+
+    /// Re-detect changed files and matching checks ([`Self::select`]).
+    /// Blocking (git + file system): call from `spawn_blocking`.
     /// `--files` lists are kept as-is (no git base to diff against); only
     /// the checks are re-determined. `--staged` re-reads the git index.
-    fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
+    fn refresh(
+        &self,
+        previous: ChangedFiles,
+        only: Option<&str>,
+    ) -> Result<(ChangedFiles, Selected)> {
         let changed_files = if previous.is_cli_files() {
             previous
         } else {
@@ -373,8 +391,7 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let key_root = self.key_root.as_deref();
-        let selected = select_checks(&self.config, &changed_files, &self.exec_root, key_root);
+        let selected = self.select(&changed_files, only);
         Ok((changed_files, selected))
     }
 
@@ -389,9 +406,13 @@ impl TaskCtx {
     }
 
     /// [`Self::refresh`] on the blocking pool
-    async fn refresh_async(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
+    async fn refresh_async(
+        &self,
+        previous: ChangedFiles,
+        only: Option<String>,
+    ) -> Result<(ChangedFiles, Selected)> {
         let ctx = self.clone();
-        tokio::task::spawn_blocking(move || ctx.refresh(previous)).await?
+        tokio::task::spawn_blocking(move || ctx.refresh(previous, only.as_deref())).await?
     }
 }
 
@@ -495,7 +516,8 @@ async fn refresh_and_run(
     changed_files: ChangedFiles,
     setup: bool,
 ) -> Option<CheckResult> {
-    let check = match ctx.refresh_async(changed_files).await {
+    let only = Some(check.id().to_string());
+    let check = match ctx.refresh_async(changed_files, only).await {
         Ok((changed_files, selected)) => {
             let Some(new_check) = selected.checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
@@ -807,20 +829,19 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     let base_ref = previous.base_ref.clone();
     app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
-        let (changed_files, Selected { checks, warnings }) = match ctx.refresh_async(previous).await
-        {
-            Ok(refreshed) => refreshed,
-            // Git refresh failed - restart with no changed files
-            Err(_) => {
-                let changed_files = ChangedFiles {
-                    files: vec![],
-                    base_ref,
-                };
-                let key_root = ctx.key_root.as_deref();
-                let selected = select_checks(&ctx.config, &changed_files, &ctx.exec_root, key_root);
-                (changed_files, selected)
-            }
-        };
+        let (changed_files, Selected { checks, warnings }) =
+            match ctx.refresh_async(previous, None).await {
+                Ok(refreshed) => refreshed,
+                // Git refresh failed - restart with no changed files
+                Err(_) => {
+                    let changed_files = ChangedFiles {
+                        files: vec![],
+                        base_ref,
+                    };
+                    let selected = ctx.select(&changed_files, None);
+                    (changed_files, selected)
+                }
+            };
         let _ = tx
             .send(TaskEvent::RetryAllReady {
                 changed_files,
@@ -1619,7 +1640,7 @@ checks:
             base_ref: crate::git::STAGED_BASE_REF.to_string(),
         };
 
-        let (changed_files, _) = tasks.ctx.refresh(previous).unwrap();
+        let (changed_files, _) = tasks.ctx.refresh(previous, None).unwrap();
 
         assert_eq!(changed_files.files, vec!["Staged.php".to_string()]);
         assert!(changed_files.is_staged());

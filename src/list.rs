@@ -77,7 +77,7 @@ pub fn explain_checks_cached(
             explanation
         })
         .collect();
-    if let Some(root) = cache.key_root() {
+    if let Some(root) = cache.key_root().filter(|_| cache.reads()) {
         stamp_keys(&mut checks, config, changed_files, root, project_root);
         let (fresh, _) = cache.split_fresh(&checks);
         let ids: Vec<&str> = fresh.iter().map(|c| c.id()).collect();

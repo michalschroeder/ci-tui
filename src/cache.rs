@@ -205,6 +205,11 @@ impl ResultCache {
         self.root.as_deref()
     }
 
+    /// True unless `--no-cache`: fresh checks are served from the cache
+    pub(crate) fn reads(&self) -> bool {
+        self.read
+    }
+
     /// True when `check` passed last time with the same key: serve it as
     /// [`CheckResult::cached`] instead of running it
     pub fn is_fresh(&self, check: &CheckToRun) -> bool {

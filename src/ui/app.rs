@@ -272,8 +272,8 @@ pub struct RunState {
     /// User pressed a key / clicked / scrolled during this run: skip the
     /// end-of-run auto-select of the first failed check
     pub user_interacted: bool,
-    /// Group -> check id whose single run took over the group's
-    /// pre-commands, until its result arrives (see [`App::claim_group_setup`])
+    /// Check id -> group whose pre-commands its single run took over,
+    /// until its result arrives (see [`App::claim_group_setup`])
     pub setup_claims: HashMap<String, String>,
 }
 
@@ -753,8 +753,8 @@ impl App {
             return GroupSetup::Ready;
         }
         let running = rows.any(|p| p.status == PreCommandStatus::Running);
-        let busy = running || self.runner_owes_setup(group);
-        match busy || self.run.setup_claims.contains_key(group) {
+        let claimed = self.run.setup_claims.values().any(|g| g == group);
+        match running || claimed || self.runner_owes_setup(group) {
             true => GroupSetup::Busy,
             false => GroupSetup::Run,
         }
@@ -766,8 +766,8 @@ impl App {
     pub fn claim_group_setup(&mut self, group: &str, check_id: &str) -> GroupSetup {
         let setup = self.group_setup(group);
         if setup == GroupSetup::Run {
-            let (group, check_id) = (group.to_string(), check_id.to_string());
-            self.run.setup_claims.insert(group, check_id);
+            let (check_id, group) = (check_id.to_string(), group.to_string());
+            self.run.setup_claims.insert(check_id, group);
         }
         setup
     }
@@ -776,15 +776,9 @@ impl App {
     /// Rows it left running (cancelled mid-setup) go back to skipped, so the
     /// next single run starts the setup over.
     fn release_group_setup(&mut self, check_id: &str) {
-        let Some(group) = self
-            .run
-            .setup_claims
-            .iter()
-            .find_map(|(group, id)| (id == check_id).then(|| group.clone()))
-        else {
+        let Some(group) = self.run.setup_claims.remove(check_id) else {
             return;
         };
-        self.run.setup_claims.remove(&group);
         let running =
             |row: &PreCommandState| row.group == group && row.status == PreCommandStatus::Running;
         let current = self.run.current_pre_command;

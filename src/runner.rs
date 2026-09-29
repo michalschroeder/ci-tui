@@ -820,18 +820,18 @@ pub struct CheckRunner {
 
 impl CheckRunner {
     /// Create a new check runner with the given configuration
-    pub fn new(config: CiConfig, project_root: &Path) -> Self {
+    pub fn new(config: impl Into<Arc<CiConfig>>, project_root: &Path) -> Self {
         Self::with_executor(config, project_root, Arc::new(RealCommandExecutor))
     }
 
     /// Create a new check runner with a custom executor (for testing)
     pub fn with_executor(
-        config: CiConfig,
+        config: impl Into<Arc<CiConfig>>,
         project_root: &Path,
         executor: Arc<dyn CommandExecutor>,
     ) -> Self {
         Self {
-            config: Arc::new(config),
+            config: config.into(),
             project_root: Arc::from(project_root),
             executor,
             cancels: CancelRegistry::default(),
@@ -866,11 +866,7 @@ impl CheckRunner {
     /// Run `group`'s pre-commands, sending their events to `event_tx`; false
     /// when one fails. For a single check run whose group setup never ran.
     pub async fn run_group_setup(&self, group: &str, event_tx: &mpsc::Sender<RunnerEvent>) -> bool {
-        let pre_commands = self
-            .config
-            .get_group(group)
-            .map(|g| g.pre_commands.as_slice())
-            .unwrap_or(&[]);
+        let pre_commands = self.config.pre_commands(group);
         run_all_pre_commands(self, group, pre_commands, event_tx).await
     }
 
@@ -886,9 +882,7 @@ impl CheckRunner {
 
         let has_runnable = group_checks.iter().any(|c| !c.is_on_demand());
         let pre_commands = if has_runnable {
-            group_config
-                .map(|g| g.pre_commands.as_slice())
-                .unwrap_or(&[])
+            self.config.pre_commands(group_name)
         } else {
             &[]
         };

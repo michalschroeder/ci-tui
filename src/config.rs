@@ -911,6 +911,11 @@ impl CiConfig {
         self.checks.get(group_name)
     }
 
+    /// Pre-commands of `group` (none for an unknown group)
+    pub fn pre_commands(&self, group: &str) -> &[PreCommand] {
+        self.get_group(group).map_or(&[], |g| &g.pre_commands)
+    }
+
     /// Iterate over groups in execution order
     pub fn groups(&self) -> impl Iterator<Item = (&str, &GroupConfig)> {
         self.checks.iter().map(|(k, v)| (k.as_str(), v))

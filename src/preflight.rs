@@ -25,7 +25,7 @@ const DOCKER_PROBE: &str = "docker version";
 
 /// How long [`docker_reachable`] waits for the probe (daemon starting,
 /// unreachable remote `DOCKER_HOST`)
-pub const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Startup Docker checks with the real executor: [`docker_reachable`]
 /// (fatal), then the [`docker_warnings`] for `checks` and `changed_files`.
