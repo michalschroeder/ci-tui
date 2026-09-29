@@ -27,12 +27,12 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
 - `--staged` checks only files staged in the git index (`git diff --cached`) — for pre-commit hooks; checks still read the working tree, so unstaged edits in staged files are included
 - `--only <id>[,<id>]` / `--group <id>[,<id>]` run a subset of checks for fast iteration (TUI, `--simple`, `--fix`, `--list`); unknown ids error with the valid ones listed
-- Result cache: a check whose inputs (id, resolved command, content of its matched files and test-discovery sources, config file) are unchanged since its last passing run is skipped and shown as `✓ cached` (counts as passed). Stored per check in `.git/ci-tui/` (per linked worktree); checks without concrete files (always-run, run-all, on-demand) are never cached, `r` / `R` / `t` in the TUI always run (a skipped group's `pre_commands` run first); `--list` marks cached checks. Only those inputs count: edits elsewhere (`Cargo.toml`, unchanged files the changed ones use, a new base ref, the docker image, env) don't invalidate a pass — use `--no-cache` then. `--no-cache` runs everything (passes are still recorded). Check ids must be unique across groups
+- Result cache: a check whose inputs (id, resolved command, content of its matched files and test-discovery sources, config file except `notify`, comments and formatting) are unchanged since its last passing run is skipped and shown as `✓ cached` (counts as passed). Stored per check in `.git/ci-tui/` (per linked worktree); checks without concrete files (always-run, run-all, on-demand) are never cached, `r` / `R` / `t` in the TUI always run (a skipped group's `pre_commands` run first); `--list` marks cached checks. Only those inputs count: edits elsewhere (`Cargo.toml`, unchanged files the changed ones use, a new base ref, the docker image, env) don't invalidate a pass — use `--no-cache` then. `--no-cache` runs everything (passes are still recorded). Check ids must be unique across groups
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `--no-color` (or a non-empty `NO_COLOR` env var, per [no-color.org](https://no-color.org)) disables color in the TUI, `--simple` and `--fix` output
-- `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
+- `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
 - `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
@@ -171,7 +171,7 @@ The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
 | Code | Meaning |
 |------|---------|
 | `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
-| `1` | A check failed (TUI, `--simple`), or a fix command failed (`--fix`) |
+| `1` | A check failed (TUI, `--simple`; in the TUI also a group pre-command), or a fix command failed (`--fix`) |
 | `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), `ci-tui init` refusing to overwrite, bad flag value (e.g. unknown `--only` id) |
 | `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, other runtime errors |
 | `130` | Interrupted (Ctrl-C) |

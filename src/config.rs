@@ -55,11 +55,11 @@ pub struct CiConfig {
     /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides
     /// in main). `None` = CPU count; see [`parallel_limit`].
     pub max_parallel: Option<NonZeroUsize>,
-    /// TUI end-of-run bell + desktop notification (`--notify` also sets it
-    /// in main); see [`crate::ui::notify`]
+    /// TUI end-of-run bell + desktop notification (or `--notify`); see
+    /// [`crate::ui::notify`]
     pub notify: bool,
-    /// Hash of the config file text, set by [`load_config`] (0 otherwise); a
-    /// result cache key input, see [`crate::cache`]
+    /// Hash of the config file content, set by [`load_config`] (0 otherwise);
+    /// a result cache key input, see [`crate::cache`] and [`cache_text`]
     pub(crate) source_hash: u64,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
@@ -769,8 +769,21 @@ pub fn load_config(path: &Path) -> Result<CiConfig> {
         .validate_and_compile()
         .with_context(|| format!("Invalid config file: {}", path.display()))
         .map_err(ConfigError)?;
-    config.source_hash = crate::cache::hash_bytes(content.as_bytes());
+    config.source_hash = crate::cache::hash_bytes(cache_text(&content).as_bytes());
     Ok(config)
+}
+
+/// Config content the result cache key covers: the YAML re-serialized
+/// without the UI-only `notify` key (toggling it keeps cached passes;
+/// comments and formatting don't count either). Raw text if not a mapping.
+fn cache_text(content: &str) -> String {
+    match serde_yaml::from_str::<serde_yaml::Value>(content) {
+        Ok(serde_yaml::Value::Mapping(mut map)) => {
+            map.remove("notify");
+            serde_yaml::to_string(&map).unwrap_or_else(|_| content.to_string())
+        }
+        _ => content.to_string(),
+    }
 }
 
 impl CiConfig {
@@ -2880,11 +2893,26 @@ checks:
     mod test_notify {
         use super::*;
 
+        const YAML: &str = "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+
         #[test]
         fn off_when_omitted() {
-            let yaml = "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let config: CiConfig = serde_yaml::from_str(YAML).unwrap();
             assert!(!config.notify);
+        }
+
+        #[test]
+        fn on_when_set() {
+            let config: CiConfig = serde_yaml::from_str(&format!("{YAML}notify: true\n")).unwrap();
+            assert!(config.notify);
+        }
+
+        #[test]
+        fn not_in_cache_text() {
+            let with_notify = format!("{YAML}notify: true\n");
+            assert_eq!(cache_text(&with_notify), cache_text(YAML));
+            let jobs = format!("{YAML}max_parallel: 2\n");
+            assert_ne!(cache_text(&jobs), cache_text(YAML));
         }
     }
 

@@ -140,26 +140,39 @@ fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
     }
 }
 
-/// Header label once all checks finished (without the on-demand suffix)
-pub(crate) fn finished_status_text(
-    counts: &super::app::StatusCounts,
-    total: usize,
-    elapsed: &str,
-) -> String {
-    let (passed, failed, cancelled) = (counts.passed, counts.failed, counts.cancelled);
-    if failed == 0 && cancelled == 0 {
-        return format!("✓ All {} checks passed in {}", total, elapsed);
-    }
-    let mark = if failed > 0 { "✗ " } else { "" };
-    let cancelled_text = if cancelled > 0 {
-        format!(", {} cancelled", cancelled)
+/// " +N on-demand" header suffix (empty without on-demand checks)
+fn on_demand_suffix(counts: &super::app::StatusCounts) -> String {
+    if counts.on_demand > 0 {
+        format!(" +{} on-demand", counts.on_demand)
     } else {
         String::new()
-    };
-    format!(
-        "{}{}/{} passed, {} failed{} in {}",
-        mark, passed, total, failed, cancelled_text, elapsed
-    )
+    }
+}
+
+/// Header label once all checks finished; also the end-of-run notification
+/// and the summary printed at quit. Checks that never ran (a failed group
+/// pre-command stopped the run) count as pending, not passed.
+pub(crate) fn finished_status_text(counts: &super::app::StatusCounts, elapsed: &str) -> String {
+    let (passed, failed, cancelled, pending) = (
+        counts.passed,
+        counts.failed,
+        counts.cancelled,
+        counts.pending,
+    );
+    let total = counts.auto_run();
+    let on_demand = on_demand_suffix(counts);
+    if failed == 0 && cancelled == 0 && pending == 0 {
+        return format!("✓ All {total} checks passed in {elapsed}{on_demand}");
+    }
+    let mark = if failed > 0 { "✗ " } else { "" };
+    let mut rest = String::new();
+    if cancelled > 0 {
+        rest += &format!(", {cancelled} cancelled");
+    }
+    if pending > 0 {
+        rest += &format!(", {pending} pending");
+    }
+    format!("{mark}{passed}/{total} passed, {failed} failed{rest} in {elapsed}{on_demand}")
 }
 
 /// Longest prefix of `s` at most `max` terminal columns wide (wide CJK/emoji
@@ -362,9 +375,7 @@ fn header_title(app: &App, elapsed: &str) -> String {
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let counts = app.count_by_status();
-    let on_demand = counts.on_demand;
-    let total = app.checks.len();
-    let auto_run_total = total - on_demand;
+    let auto_run_total = counts.auto_run();
     let completed = counts.completed();
     let ratio = if auto_run_total > 0 {
         completed as f64 / auto_run_total as f64
@@ -378,13 +389,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 
     let branch_info = header_title(app, &elapsed_str);
 
-    let on_demand_text = if on_demand > 0 {
-        format!(" +{} on-demand", on_demand)
-    } else {
-        String::new()
-    };
+    let on_demand_text = on_demand_suffix(&counts);
     let status_text = if app.run.all_finished {
-        finished_status_text(&counts, auto_run_total, &elapsed_str) + &on_demand_text
+        finished_status_text(&counts, &elapsed_str)
     } else if counts.pending > 0 {
         format!(
             "Running... {}/{} ({} in progress){}",
@@ -400,7 +407,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let color = if app.run.all_finished {
         if counts.failed > 0 {
             Color::Red
-        } else if counts.cancelled > 0 {
+        } else if counts.cancelled > 0 || counts.pending > 0 {
             Color::Yellow
         } else {
             Color::Green

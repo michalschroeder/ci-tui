@@ -1220,22 +1220,27 @@ pub struct TuiOptions {
     pub show_stats: bool,
     /// Result cache: skips unchanged checks at start, records finished runs
     pub cache: ResultCache,
+    /// Bell + desktop notification when a full run finishes (config
+    /// `notify` or `--notify`)
+    pub notify: bool,
     /// Quit when the run finishes (`--exit-on-finish`); exit code as for `q`
     pub exit_on_finish: bool,
 }
 
 impl TuiOptions {
+    /// From the CLI flags; `notify` also from config
     pub fn new(
+        cli: &crate::cli::Cli,
+        config: &CiConfig,
         filter_notice: Option<String>,
-        show_stats: bool,
         cache: ResultCache,
-        exit_on_finish: bool,
     ) -> Self {
         Self {
             filter_notice,
-            show_stats,
+            show_stats: !cli.no_stats,
             cache,
-            exit_on_finish,
+            notify: cli.notify || config.notify,
+            exit_on_finish: cli.exit_on_finish,
         }
     }
 }
@@ -1256,27 +1261,36 @@ fn new_app(
     app
 }
 
-/// End-of-run notification to the TUI's terminal when config `notify` is on
-/// and the message just handled was the runner's `AllFinished` (full runs
-/// only; single runs never send it). Best effort; also while a viewer runs
-/// (BEL / OSC print nothing).
-fn notify_run_end(
+/// The run is over and nothing else changes its outcome: the runner sent
+/// `AllFinished` (full runs only: initial, 'R', 'a'; a restart resets it),
+/// no retry / on-demand run / fix / 'R' refresh is in flight ([`App::busy`])
+/// and no viewer owns the terminal
+fn run_settled(app: &App, viewer_open: bool) -> bool {
+    app.run.all_finished && !app.busy() && !viewer_open
+}
+
+/// Once per run, when it settled: the end-of-run notification to the TUI's
+/// terminal if `notify` is on (best effort)
+fn report_run_end(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &App,
-    run_finished: bool,
+    app: &mut App,
+    notify: bool,
+    viewer_open: bool,
 ) {
-    if run_finished && app.config.notify {
+    if app.run.end_reported || !run_settled(app, viewer_open) {
+        return;
+    }
+    app.run.end_reported = true;
+    if notify {
         let message = format!("ci-tui: {}", finished_text(app, &app.count_by_status()));
         let _ = notify::emit(terminal.backend_mut(), &message);
     }
 }
 
-/// `--exit-on-finish` quit due: the run finished and no viewer owns the
-/// terminal (checked each loop turn, so it quits once the viewer exits).
-/// Only the runner finishes a run (initial, 'R', 'a'); a restart resets
-/// `run.all_finished`.
+/// `--exit-on-finish` quit due: the run settled (checked each loop turn, so
+/// it quits once a viewer exits or in-flight work ends)
 fn exit_due(app: &App, exit_on_finish: bool, viewer_open: bool) -> bool {
-    exit_on_finish && app.run.all_finished && !viewer_open
+    exit_on_finish && run_settled(app, viewer_open)
 }
 
 /// Run the TUI; returns the process exit code (1 if any check failed).
@@ -1330,6 +1344,7 @@ pub async fn run(
         key_root: options.cache.key_root().map(Arc::from),
     });
     let recorder = Recorder::start(options.cache);
+    let notify = options.notify;
 
     // Start background stats worker - runs sysinfo queries without blocking UI
     let (stats_tx, mut stats_rx) = mpsc::channel::<SystemStats>(STATS_CHANNEL_CAPACITY);
@@ -1399,7 +1414,6 @@ pub async fn run(
         };
 
         // Handle the message and get the action
-        let run_finished = matches!(msg, Message::RunnerEvent(RunnerEvent::AllFinished));
         recorder.record(&mut app, &msg);
         match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
@@ -1433,7 +1447,7 @@ pub async fn run(
             Action::Continue => {}
         }
         // Before the `--exit-on-finish` check in the loop condition
-        notify_run_end(&mut terminal, &app, run_finished);
+        report_run_end(&mut terminal, &mut app, notify, viewer_task.is_some());
 
         // Render if state changed (not while a viewer owns the terminal)
         if app.needs_redraw && viewer_task.is_none() {
@@ -1469,18 +1483,18 @@ pub async fn run(
 /// Run outcome line: same wording as the finished dashboard header
 fn finished_text(app: &App, counts: &app::StatusCounts) -> String {
     let elapsed = dashboard::format_elapsed(app.elapsed_time());
-    dashboard::finished_status_text(counts, counts.completed(), &elapsed)
+    dashboard::finished_status_text(counts, &elapsed)
 }
 
 /// Print the final summary: same wording as the dashboard header, colored
-/// green (all passed), yellow (some cancelled) or red (any failed); plain
-/// with color off
+/// green (all passed), yellow (some cancelled / pending) or red (exit code
+/// 1: a check or group pre-command failed); plain with color off
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
     let text = finished_text(app, &counts);
-    let color = if counts.failed > 0 {
+    let color = if app.exit_code() != crate::exit::SUCCESS {
         31
-    } else if counts.cancelled > 0 {
+    } else if counts.cancelled > 0 || counts.pending > 0 {
         33
     } else {
         32
@@ -2048,6 +2062,28 @@ checks:
         assert_eq!(app.exit_code(), crate::exit::SUCCESS);
     }
 
+    #[test]
+    fn test_exit_on_finish_fails_when_group_setup_failed() {
+        // A failed group pre-command stops the run: its checks never run
+        let config = setup_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("lint", "db")]);
+        app.handle_runner_event(RunnerEvent::PreCommandFinished {
+            group: "db".to_string(),
+            name: "seed".to_string(),
+            success: false,
+            output: String::new(),
+            duration_ms: 1,
+        });
+        finish_run(&mut app, &config, None);
+        assert!(exit_due(&app, true, false));
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(
+            text.starts_with("0/1 passed, 0 failed, 1 pending in "),
+            "{text}"
+        );
+    }
+
     #[rstest::rstest]
     #[case::finished(true, true, false, true)]
     #[case::flag_off(true, false, false, false)]
@@ -2062,6 +2098,43 @@ checks:
         let mut app = make_test_app(&test_config());
         app.run.all_finished = all_finished;
         assert_eq!(exit_due(&app, exit_on_finish, viewer_open), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::retry_running(CheckStatus::Running)]
+    #[case::waiting_for_setup(CheckStatus::Queued)]
+    fn test_exit_due_waits_for_single_run(#[case] status: CheckStatus) {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        finish_run(&mut app, &config, Some(("php-lint", CheckStatus::Failed)));
+        app.results.get_mut("php-lint").unwrap().status = status;
+        assert!(!exit_due(&app, true, false));
+    }
+
+    #[test]
+    fn test_exit_due_waits_for_fix_and_refresh() {
+        let mut app = make_test_app(&test_config());
+        app.run.all_finished = true;
+        app.fix.running = true;
+        assert!(!exit_due(&app, true, false), "fix in flight");
+        app.fix.running = false;
+        app.run.refresh_pending = true;
+        assert!(!exit_due(&app, true, false), "'R' refresh replaces the run");
+    }
+
+    #[test]
+    fn test_finished_text_total_excludes_skipped_and_on_demand() {
+        let config = test_config();
+        let mut on_demand = make_test_check("behat", "fast");
+        on_demand.files = crate::checks::CheckFiles::OnDemand;
+        let mut skipped = make_test_check("phpcs", "fast");
+        skipped.files = crate::checks::CheckFiles::SkippedNoMatch;
+        let checks = vec![make_test_check("php-lint", "fast"), on_demand, skipped];
+        let mut app = make_test_app_with_checks(&config, checks);
+        finish_run(&mut app, &config, Some(("php-lint", CheckStatus::Passed)));
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(text.starts_with("✓ All 1 checks passed in "), "{text}");
+        assert!(text.ends_with(" +1 on-demand"), "{text}");
     }
 
     #[test]

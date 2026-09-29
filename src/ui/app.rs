@@ -275,6 +275,8 @@ pub struct RunState {
     /// Check id -> group whose pre-commands its single run took over,
     /// until its result arrives (see [`App::claim_group_setup`])
     pub setup_claims: HashMap<String, String>,
+    /// The main loop handled this run's end (notification sent if enabled)
+    pub end_reported: bool,
 }
 
 impl RunState {
@@ -289,6 +291,7 @@ impl RunState {
             refresh_pending: false,
             user_interacted: false,
             setup_claims: HashMap::new(),
+            end_reported: false,
         }
     }
 }
@@ -447,6 +450,11 @@ impl StatusCounts {
     /// Checks that ran to an outcome (passed, failed or cancelled)
     pub fn completed(&self) -> usize {
         self.passed + self.failed + self.cancelled
+    }
+
+    /// Checks the run covers: all but skipped and untriggered on-demand ones
+    pub fn auto_run(&self) -> usize {
+        self.completed() + self.pending
     }
 }
 
@@ -727,6 +735,18 @@ impl App {
             StatusKind::Progress { check_id: None },
             "Refreshing changed files...",
         );
+    }
+
+    /// Work in flight besides the runner: a single check run (retry, 't',
+    /// group setup wait), a fix, or a retry-all git refresh
+    pub fn busy(&self) -> bool {
+        self.fix.running
+            || self.fix.all_running
+            || self.run.refresh_pending
+            || self
+                .results
+                .values()
+                .any(|r| matches!(r.status, CheckStatus::Queued | CheckStatus::Running))
     }
 
     /// Check if retry-all can start (blocked while fixes edit files)
@@ -1433,9 +1453,15 @@ impl App {
     }
 
     /// Process exit code at quit: [`CHECKS_FAILED`](crate::exit::CHECKS_FAILED)
-    /// if any check failed, else [`SUCCESS`](crate::exit::SUCCESS) (matches simple mode)
+    /// if any check or group pre-command failed (a failed one stops the run,
+    /// its checks never run), else [`SUCCESS`](crate::exit::SUCCESS) (matches
+    /// simple mode). Pending and cancelled checks do not fail it.
     pub fn exit_code(&self) -> i32 {
-        if self.count_by_status().failed > 0 {
+        let pre_command_failed = self
+            .pre_commands
+            .iter()
+            .any(|p| p.status == PreCommandStatus::Failed);
+        if self.count_by_status().failed > 0 || pre_command_failed {
             crate::exit::CHECKS_FAILED
         } else {
             crate::exit::SUCCESS

@@ -5,7 +5,8 @@
 //! resolved command + content of its `{files}` (plus the changed source
 //! files behind its test discovery, so editing only the source re-runs its
 //! tests, and the `file_pattern` matches `files_filter` dropped, so editing
-//! only a fixture re-runs its tests) + hash of the config file text. Changed files are read under the
+//! only a fixture re-runs its tests) + hash of the config content (minus the
+//! UI-only `notify` key). Changed files are read under the
 //! key root, where their paths resolve (repo root for git paths, execution
 //! root for `--files`); discovered tests under the execution root, where
 //! test discovery found them. Checks without concrete files (always-run,

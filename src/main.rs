@@ -162,7 +162,7 @@ async fn run() -> Result<i32> {
     let project_root = std::env::current_dir()?;
 
     // Enforced here, not via clap `required`: clap forbids required global args.
-    let Some(config_path) = run_config_path(cli.config, &project_root) else {
+    let Some(config_path) = run_config_path(cli.config.clone(), &project_root) else {
         missing_config_error().exit();
     };
 
@@ -179,8 +179,6 @@ async fn run() -> Result<i32> {
     }
     // --jobs overrides the config's global parallel cap
     config.max_parallel = cli.jobs.or(config.max_parallel);
-    // --notify or config `notify: true` enables the TUI end-of-run notification
-    config.notify |= cli.notify;
 
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
@@ -277,6 +275,7 @@ async fn run() -> Result<i32> {
         .await
     } else {
         // Run the TUI
+        let options = ui::TuiOptions::new(&cli, &config, filter_notice, cache);
         ui::run(
             config,
             changed_files,
@@ -284,7 +283,7 @@ async fn run() -> Result<i32> {
             project_root,
             exec_root,
             warnings,
-            ui::TuiOptions::new(filter_notice, !cli.no_stats, cache, cli.exit_on_finish),
+            options,
         )
         .await
     }

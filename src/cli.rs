@@ -1,6 +1,7 @@
 //! Command-line interface: argument parsing and config-path resolution.
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -123,7 +124,8 @@ impl Cli {
         Self::try_parse_checked(std::env::args_os()).unwrap_or_else(|e| e.exit())
     }
 
-    /// Parse `args` and reject run-mode flags combined with a subcommand.
+    /// Parse `args` and reject run-mode flags (every non-global top-level
+    /// arg) combined with a subcommand.
     ///
     /// Not `args_conflicts_with_subcommands`: that also rejects the global `--config`.
     pub fn try_parse_checked<I, T>(args: I) -> Result<Self, clap::Error>
@@ -131,31 +133,31 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let mut cli = Self::try_parse_from(args)?;
-        cli.only = normalize_ids(cli.only);
-        cli.groups = normalize_ids(cli.groups);
-        if cli.command.is_some()
-            && (cli.simple
-                || cli.fix
-                || cli.list
-                || cli.staged
-                || !cli.files.is_empty()
-                || cli.base.is_some()
-                || !cli.only.is_empty()
-                || !cli.groups.is_empty()
-                || cli.jobs.is_some()
-                || cli.no_stats
-                || cli.no_cache
-                || cli.notify
-                || cli.exit_on_finish)
-        {
-            return Err(Self::command().error(
+        let mut command = Self::command();
+        let matches = command.try_get_matches_from_mut(args)?;
+        if let Some(name) = run_flag_with_subcommand(&command, &matches) {
+            return Err(command.error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs, --no-stats, --no-cache, --notify and --exit-on-finish cannot be used with a subcommand",
+                format!("--{name} cannot be used with a subcommand"),
             ));
         }
+        let mut cli = Self::from_arg_matches(&matches).map_err(|e| e.format(&mut command))?;
+        cli.only = normalize_ids(cli.only);
+        cli.groups = normalize_ids(cli.groups);
         Ok(cli)
     }
+}
+
+/// Long name of the first run flag (non-global top-level arg) given on the
+/// command line, when a subcommand is given too
+fn run_flag_with_subcommand(command: &clap::Command, matches: &clap::ArgMatches) -> Option<String> {
+    matches.subcommand()?;
+    let given = |arg: &&clap::Arg| {
+        !arg.is_global_set()
+            && matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
+    };
+    let arg = command.get_arguments().find(given)?;
+    Some(arg.get_long().unwrap_or(arg.get_id().as_str()).to_string())
 }
 
 impl Cli {
