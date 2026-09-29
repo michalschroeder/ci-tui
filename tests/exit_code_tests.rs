@@ -69,6 +69,15 @@ fn missing_config_file_exits_2() {
 }
 
 #[test]
+fn invalid_files_filter_regex_exits_2() {
+    let config = docker_config("        triggers:\n          files_filter: '[invalid'\n");
+    let (_tmp, out) = run_with(&config, &["--list", "--files", "a.rs"]);
+    assert_code(&out, exit::CONFIG_ERROR);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`files_filter`"), "{stderr}");
+}
+
+#[test]
 fn validate_invalid_config_exits_2() {
     let (_tmp, out) = run_with("checks: [not, a, map", &["validate"]);
     assert_code(&out, exit::CONFIG_ERROR);

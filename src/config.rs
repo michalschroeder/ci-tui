@@ -179,10 +179,11 @@ where
         .transpose()
 }
 
-/// Deserialize an optional `error_pattern:` regex, compiled at load so a bad
-/// pattern fails startup (serde_yaml prefixes the check's path, as for `timeout`).
-fn deserialize_error_pattern<'de, D>(
+/// Deserialize an optional `field:` regex, compiled at load so a bad pattern
+/// fails startup (serde_yaml prefixes the check's path, as for `timeout`).
+fn deserialize_regex<'de, D>(
     deserializer: D,
+    field: &str,
 ) -> std::result::Result<Option<Regex>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -190,10 +191,28 @@ where
     Option::<String>::deserialize(deserializer)?
         .map(|raw| {
             Regex::new(&raw).map_err(|e| {
-                serde::de::Error::custom(format!("`error_pattern`: invalid regex '{raw}': {e}"))
+                serde::de::Error::custom(format!("`{field}`: invalid regex '{raw}': {e}"))
             })
         })
         .transpose()
+}
+
+/// [`deserialize_regex`] for a check's `error_pattern:`
+fn deserialize_error_pattern<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Regex>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_regex(deserializer, "error_pattern")
+}
+
+/// [`deserialize_regex`] for `triggers.files_filter:`
+fn deserialize_files_filter<'de, D>(deserializer: D) -> std::result::Result<Option<Regex>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_regex(deserializer, "files_filter")
 }
 
 /// Built-in error-line regex for checks without `error_pattern`. Matches error
@@ -575,6 +594,21 @@ pub struct CheckTriggers {
     pub file_pattern: Option<String>,
     #[serde(default)]
     pub test_discovery: Option<TestDiscoveryConfig>,
+    /// Inline regex every `{files}` path must match: file_pattern matches and
+    /// discovered tests that don't are dropped (e.g. `Test\.php$` keeps test
+    /// fixtures away from the test runner). All dropped: no-tests fallback
+    /// (on_demand / full command without `{files}` / skip). Needs
+    /// `file_pattern` or `test_discovery`.
+    #[serde(default, deserialize_with = "deserialize_files_filter")]
+    #[schemars(with = "Option<String>")]
+    pub files_filter: Option<Regex>,
+}
+
+impl CheckTriggers {
+    /// `files_filter` without `file_pattern` / `test_discovery` to filter
+    fn files_filter_alone(&self) -> bool {
+        self.files_filter.is_some() && self.file_pattern.is_none() && self.test_discovery.is_none()
+    }
 }
 
 /// Inline test discovery configuration for a check
@@ -795,6 +829,7 @@ impl CiConfig {
             }
         }
         self.check_pattern_references()?;
+        self.check_files_filter_scope()?;
         self.check_unique_ids()?;
         let _ = self
             .compiled_file_patterns
@@ -821,6 +856,24 @@ impl CiConfig {
             });
         match dangling {
             Some(msg) => bail!(msg),
+            None => Ok(()),
+        }
+    }
+
+    /// `files_filter` filters `file_pattern` / `test_discovery` files: alone it
+    /// would silently drop the check (empty triggers block).
+    fn check_files_filter_scope(&self) -> Result<()> {
+        let orphan = self
+            .checks
+            .iter()
+            .flat_map(|(g, group)| group.checks.iter().map(move |(c, check)| (g, c, check)))
+            .find(|(_, _, check)| {
+                (check.triggers.as_ref()).is_some_and(CheckTriggers::files_filter_alone)
+            });
+        match orphan {
+            Some((g, c, _)) => bail!(
+                "checks.{g}.checks.{c}.triggers.files_filter: needs `file_pattern` or `test_discovery` (it filters their files)"
+            ),
             None => Ok(()),
         }
     }
@@ -2725,6 +2778,64 @@ checks:
             assert!(
                 msg.contains("`error_pattern`") && msg.contains("[invalid"),
                 "names field + pattern: {msg}"
+            );
+        }
+    }
+
+    mod test_files_filter {
+        use super::*;
+        use std::io::Write;
+
+        /// Local-mode config with one `src`-triggered check `c` in group `g`;
+        /// `filter` is an optional raw YAML `files_filter:` scalar.
+        fn yaml(filter: Option<&str>) -> String {
+            let extra = filter
+                .map(|f| format!("          files_filter: {f}\n"))
+                .unwrap_or_default();
+            format!(
+                "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns:\n  src: {{ pattern: 'x' }}\nchecks:\n  g:\n    checks:\n      c:\n        name: C\n        command: 'true'\n        triggers:\n          file_pattern: src\n{extra}"
+            )
+        }
+
+        fn triggers(yaml: &str) -> CheckTriggers {
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let check = &config.get_group("g").unwrap().checks["c"];
+            check.triggers.clone().unwrap()
+        }
+
+        #[test]
+        fn omitted_is_none() {
+            assert!(triggers(&yaml(None)).files_filter.is_none());
+        }
+
+        #[test]
+        fn inline_regex_is_compiled() {
+            let filter = triggers(&yaml(Some("'Test\\.php$'"))).files_filter.unwrap();
+            assert!(filter.is_match("tests/FooTest.php"));
+            assert!(!filter.is_match("tests/Fixtures/Foo/valid_case.php"));
+        }
+
+        #[test]
+        fn invalid_regex_rejected_at_load() {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml(Some("'[invalid'")).as_bytes()).unwrap();
+            let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
+            assert!(msg.contains("checks.g.checks.c"), "names the check: {msg}");
+            assert!(
+                msg.contains("`files_filter`") && msg.contains("[invalid"),
+                "names field + pattern: {msg}"
+            );
+        }
+
+        #[test]
+        fn without_file_pattern_or_test_discovery_rejected_at_load() {
+            let yaml = yaml(Some("'Test'")).replace("          file_pattern: src\n", "");
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml.as_bytes()).unwrap();
+            let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
+            assert!(
+                msg.contains("checks.g.checks.c.triggers.files_filter: needs"),
+                "got: {msg}"
             );
         }
     }

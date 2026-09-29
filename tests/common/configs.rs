@@ -328,6 +328,14 @@ impl CheckBuilder {
         self
     }
 
+    /// Set `triggers.files_filter` (inline regex kept paths must match)
+    #[allow(dead_code)]
+    pub fn with_files_filter(mut self, pattern: &str) -> Self {
+        let triggers = self.triggers.get_or_insert_with(CheckTriggers::default);
+        triggers.files_filter = Some(regex::Regex::new(pattern).expect("valid files_filter"));
+        self
+    }
+
     /// Mark this check as on-demand
     pub fn on_demand(mut self) -> Self {
         self.on_demand = true;
@@ -561,6 +569,51 @@ pub fn rust_discovery_config() -> CiConfig {
                 .on_demand()
                 .build(),
         )
+        .build()
+}
+
+/// Test file for [`php_files_filter_config`]
+#[allow(dead_code)]
+pub const FOO_TEST: &str = "tools/linter/tests/Rule/FooRuleTest.php";
+/// Fixtures for [`php_files_filter_config`]: match `linter_tests`, not `files_filter`
+#[allow(dead_code)]
+pub const FOO_FIXTURES: [&str; 2] = [
+    "tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php",
+    "tools/linter/tests/Rule/Fixtures/FooRule/invalid_case.php",
+];
+
+/// PHP linter layout (#210): tests and their fixtures both live under
+/// `tools/linter/tests/`; every check has `files_filter: Test\.php$`.
+/// Discovery greps `tools/linter/tests` for `{basename}` of changed
+/// `linter_src` files (so it finds fixtures too). Checks in group `tests`:
+/// - unit: `phpunit {files}`, `file_pattern: linter_tests` + discovery
+/// - slow: `slow {files}`, discovery only, on_demand
+/// - suite: `phpunit` (no `{files}`), discovery only
+#[allow(dead_code)]
+pub fn php_files_filter_config() -> CiConfig {
+    let discovery = || TestDiscoveryConfig {
+        source_pattern: "linter_src".to_string(),
+        strategies: vec![TestDiscoveryStrategy::GrepSearch {
+            search_dirs: vec!["tools/linter/tests".to_string()],
+            pattern: "{basename}".to_string(),
+        }],
+    };
+    let check = |name, command| {
+        CheckBuilder::new(name, command)
+            .with_file_pattern_trigger("linter_tests")
+            .with_test_discovery(discovery())
+            .with_files_filter(r"Test\.php$")
+    };
+    ConfigBuilder::new()
+        .with_file_pattern("linter_src", r"^tools/linter/src/.*\.php$", None)
+        .with_file_pattern("linter_tests", r"^tools/linter/tests/.*\.php$", None)
+        .with_check("tests", "unit", check("Unit", "phpunit {files}").build())
+        .with_check(
+            "tests",
+            "slow",
+            check("Slow", "slow {files}").on_demand().build(),
+        )
+        .with_check("tests", "suite", check("Suite", "phpunit").build())
         .build()
 }
 

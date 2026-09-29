@@ -8,6 +8,7 @@
 use crate::config::{CheckDefinition, CheckTriggers, CiConfig, TestDiscoveryConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
+use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -84,33 +85,59 @@ pub(crate) enum DiscoveryOutcome {
 }
 
 /// Evaluate a test_discovery trigger: matched source files, outcome, and
-/// discovery warnings (e.g. a failed `grep_search`).
+/// discovery warnings (e.g. a failed `grep_search`). Discovered tests
+/// `filter` rejects are dropped before the outcome is decided.
 pub(super) fn run_test_discovery<'a>(
     config: &CiConfig,
     changed_files: &'a ChangedFiles,
     project_root: &Path,
-    discovery: &TestDiscoveryConfig,
+    discovery: &'a TestDiscoveryConfig,
     check: &CheckDefinition,
-) -> (Vec<&'a str>, DiscoveryOutcome, Vec<String>) {
+    filter: Option<&Regex>,
+) -> DiscoveryEval<'a> {
     let sources = match_file_pattern(config, changed_files, &discovery.source_pattern);
-    if sources.is_empty() {
-        return (sources, DiscoveryOutcome::NoSources, Vec::new());
-    }
-
-    let test_discovery::DiscoveredTests {
-        tests: related_tests,
-        warnings,
-    } = test_discovery::find_related_tests(&discovery.strategies, &sources, project_root);
-    let outcome = if !related_tests.is_empty() {
-        DiscoveryOutcome::TestsFound(related_tests)
-    } else if check.on_demand {
-        DiscoveryOutcome::NoTestsOnDemand
-    } else if check.command.contains("{files}") {
-        DiscoveryOutcome::NoTestsSkip
+    let (outcome, warnings, filtered_out) = if sources.is_empty() {
+        (DiscoveryOutcome::NoSources, Vec::new(), Vec::new())
     } else {
-        DiscoveryOutcome::NoTestsRunAll
+        let test_discovery::DiscoveredTests { tests, warnings } =
+            test_discovery::find_related_tests(&discovery.strategies, &sources, project_root);
+        let (related_tests, filtered_out): (Vec<String>, Vec<String>) =
+            tests.into_iter().partition(|test| keeps(filter, test));
+        let outcome = if !related_tests.is_empty() {
+            DiscoveryOutcome::TestsFound(related_tests)
+        } else {
+            match no_files_fallback(check) {
+                CheckFiles::OnDemand => DiscoveryOutcome::NoTestsOnDemand,
+                CheckFiles::RunAll => DiscoveryOutcome::NoTestsRunAll,
+                _ => DiscoveryOutcome::NoTestsSkip,
+            }
+        };
+        (outcome, warnings, filtered_out)
     };
-    (sources, outcome, warnings)
+    DiscoveryEval {
+        config: discovery,
+        sources,
+        outcome,
+        warnings,
+        filtered_out,
+    }
+}
+
+/// True when `path` passes `triggers.files_filter` (always without one)
+pub(crate) fn keeps(filter: Option<&Regex>, path: &str) -> bool {
+    filter.is_none_or(|re| re.is_match(path))
+}
+
+/// Files state of a check whose trigger fired but left no files for
+/// `{files}`: on_demand → manual trigger; no `{files}` → full command; else skip.
+fn no_files_fallback(check: &CheckDefinition) -> CheckFiles {
+    if check.on_demand {
+        CheckFiles::OnDemand
+    } else if check.command.contains("{files}") {
+        CheckFiles::SkippedNoMatch
+    } else {
+        CheckFiles::RunAll
+    }
 }
 
 /// How a check is selected. Single evaluation shared by `determine_checks`
@@ -165,10 +192,47 @@ impl<'a> Selection<'a> {
 /// Per-trigger evaluation of a triggered check, each trigger paired with its config.
 #[derive(Debug)]
 pub(crate) struct TriggerEval<'a> {
-    /// `file_pattern` key + changed files it matched, if configured
-    pub file_pattern: Option<(&'a str, Vec<&'a str>)>,
+    /// `file_pattern` evaluation, if configured
+    pub file_pattern: Option<FilePatternEval<'a>>,
     /// `test_discovery` evaluation, if configured
     pub discovery: Option<DiscoveryEval<'a>>,
+    /// `files_filter` regex, if configured: `{files}` keeps only matching paths
+    pub files_filter: Option<&'a Regex>,
+    /// The evaluated check (its no-files fallback)
+    check: &'a CheckDefinition,
+}
+
+/// Evaluation of a `file_pattern` trigger.
+#[derive(Debug)]
+pub(crate) struct FilePatternEval<'a> {
+    /// The `file_patterns` key
+    pub key: &'a str,
+    /// Changed files matching the pattern that `files_filter` keeps: the
+    /// ones that go into `{files}`
+    pub kept: Vec<&'a str>,
+    /// Changed files matching the pattern that `files_filter` dropped
+    pub dropped: Vec<&'a str>,
+}
+
+impl<'a> FilePatternEval<'a> {
+    /// Match changed files against file pattern `key`, split by `filter`.
+    /// Shared by check selection and `--fix`.
+    pub(crate) fn evaluate(
+        config: &CiConfig,
+        changed_files: &'a ChangedFiles,
+        key: &'a str,
+        filter: Option<&Regex>,
+    ) -> Self {
+        let (kept, dropped) = match_file_pattern(config, changed_files, key)
+            .into_iter()
+            .partition(|f| keeps(filter, f));
+        Self { key, kept, dropped }
+    }
+
+    /// True when no changed file matched the pattern
+    pub(crate) fn is_empty(&self) -> bool {
+        self.kept.is_empty() && self.dropped.is_empty()
+    }
 }
 
 /// Evaluation of a `test_discovery` trigger.
@@ -181,6 +245,8 @@ pub(crate) struct DiscoveryEval<'a> {
     pub outcome: DiscoveryOutcome,
     /// Non-fatal warnings (e.g. a failed `grep_search`)
     pub warnings: Vec<String>,
+    /// Discovered tests `files_filter` dropped (not in `outcome`)
+    pub filtered_out: Vec<String>,
 }
 
 impl<'a> TriggerEval<'a> {
@@ -189,31 +255,65 @@ impl<'a> TriggerEval<'a> {
         changed_files: &'a ChangedFiles,
         project_root: &Path,
         triggers: &'a CheckTriggers,
-        check: &CheckDefinition,
+        check: &'a CheckDefinition,
     ) -> Self {
+        let files_filter = triggers.files_filter.as_ref();
         Self {
             file_pattern: triggers
                 .file_pattern
                 .as_deref()
-                .map(|key| (key, match_file_pattern(config, changed_files, key))),
+                .map(|key| FilePatternEval::evaluate(config, changed_files, key, files_filter)),
             discovery: triggers.test_discovery.as_ref().map(|discovery| {
-                let (sources, outcome, warnings) =
-                    run_test_discovery(config, changed_files, project_root, discovery, check);
-                DiscoveryEval {
-                    config: discovery,
-                    sources,
-                    outcome,
-                    warnings,
-                }
+                run_test_discovery(
+                    config,
+                    changed_files,
+                    project_root,
+                    discovery,
+                    check,
+                    files_filter,
+                )
             }),
+            files_filter,
+            check,
         }
     }
 
-    /// True when the `file_pattern` trigger matched at least one file.
+    /// Fallback files state when `files_filter` dropped every `file_pattern`
+    /// match and `test_discovery` (if any) had no changed source: the trigger
+    /// fired but left nothing for `{files}` (see [`no_files_fallback`]).
+    /// `None` otherwise. Discovery without tests applies the same fallback.
+    pub(crate) fn filter_fallback(&self) -> Option<CheckFiles> {
+        let emptied = self
+            .file_pattern
+            .as_ref()
+            .is_some_and(|fp| fp.kept.is_empty() && !fp.dropped.is_empty());
+        let no_sources = self
+            .discovery
+            .as_ref()
+            .is_none_or(|d| d.outcome == DiscoveryOutcome::NoSources);
+        (emptied && no_sources).then(|| no_files_fallback(self.check))
+    }
+
+    /// True when the `file_pattern` trigger kept at least one file.
     pub(crate) fn file_pattern_matched(&self) -> bool {
         self.file_pattern
             .as_ref()
-            .is_some_and(|(_, matched)| !matched.is_empty())
+            .is_some_and(|fp| !fp.kept.is_empty())
+    }
+
+    /// Paths `files_filter` dropped from `{files}`, deduplicated:
+    /// `file_pattern` matches, then discovered tests.
+    pub(crate) fn filtered_out(&self) -> Vec<&str> {
+        let matches = self
+            .file_pattern
+            .iter()
+            .flat_map(|fp| fp.dropped.iter().copied());
+        let tests = self
+            .discovery
+            .iter()
+            .flat_map(|d| d.filtered_out.iter().map(String::as_str));
+        let mut seen = HashSet::new();
+        matches.chain(tests).filter(|f| seen.insert(*f)).collect()
     }
 
     /// Files state implied by the evaluation; `None` for an empty `triggers`
@@ -222,10 +322,13 @@ impl<'a> TriggerEval<'a> {
         if self.file_pattern.is_none() && self.discovery.is_none() {
             return None;
         }
+        if let Some(files) = self.filter_fallback() {
+            return Some(files);
+        }
         let mut matched_files: Vec<String> = self
             .file_pattern
             .into_iter()
-            .flat_map(|(_, matched)| matched)
+            .flat_map(|fp| fp.kept)
             .map(String::from)
             .collect();
 
@@ -400,8 +503,15 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["README.md"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let out =
-                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &discovery_cfg(), &check).1;
+            let out = run_test_discovery(
+                &cfg,
+                &cf,
+                &PathBuf::from("/tmp"),
+                &discovery_cfg(),
+                &check,
+                None,
+            )
+            .outcome;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -414,7 +524,8 @@ mod tests {
                 source_pattern: "nonexistent".to_string(),
                 strategies: vec![],
             };
-            let out = run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -424,7 +535,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsOnDemand);
         }
 
@@ -434,7 +546,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("run-all-tests", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsRunAll);
         }
 
@@ -444,7 +557,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("test {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsSkip);
         }
 
@@ -458,7 +572,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(
                 out,
                 DiscoveryOutcome::TestsFound(vec!["tests/foo_test.rs".to_string()])
@@ -641,7 +756,7 @@ mod tests {
         fn triggers_file_pattern(key: &str) -> CheckTriggers {
             CheckTriggers {
                 file_pattern: Some(key.to_string()),
-                test_discovery: None,
+                ..Default::default()
             }
         }
 
@@ -781,6 +896,7 @@ mod tests {
                         }],
                     }],
                 }),
+                ..Default::default()
             };
             let def = mk_check(
                 "slow {files}",

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 mod common;
 use common::configs::{
-    checks_test_config, rust_grep_discovery_config, CheckBuilder, ConfigBuilder,
+    checks_test_config, php_files_filter_config, rust_grep_discovery_config, CheckBuilder,
+    ConfigBuilder, FOO_FIXTURES, FOO_TEST,
 };
 
 // ============================================================================
@@ -433,4 +434,86 @@ fn test_no_discovery_warnings_when_grep_succeeds() {
         CheckFiles::Files(vec!["tests/foo_test.rs".to_string()])
     );
     assert!(selected.warnings.is_empty());
+}
+
+// ============================================================================
+// triggers.files_filter (#210)
+// ============================================================================
+
+/// Tempdir holding `paths`, each mentioning `FooRule` (grep discovery finds them)
+fn linter_root(paths: &[&str]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for path in paths {
+        let file = root.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "<?php // FooRule").unwrap();
+    }
+    root
+}
+
+#[test]
+fn test_files_filter_drops_fixtures_from_files() {
+    // Issue #210 repro: fixtures match `file_pattern` and grep discovery
+    let root = linter_root(&[FOO_TEST, FOO_FIXTURES[0], FOO_FIXTURES[1]]);
+    let mut changed = vec!["tools/linter/src/Rule/FooRule.php", FOO_TEST];
+    changed.extend(FOO_FIXTURES);
+
+    let checks = determine_checks(
+        &php_files_filter_config(),
+        &make_changed_files(changed),
+        root.path(),
+    );
+
+    // grep also found both fixtures: filter keeps only the test
+    let unit = assert_check_exists(&checks, "unit");
+    assert_eq!(unit.files, CheckFiles::Files(vec![FOO_TEST.to_string()]));
+    assert_eq!(unit.resolved_command, format!("phpunit {FOO_TEST}"));
+}
+
+#[test]
+fn test_files_filter_dropping_every_file_pattern_match_applies_no_files_fallback() {
+    // Only fixtures changed: `file_pattern` matched them, filter drops all,
+    // so the trigger fired with nothing for `{files}` (skip / on_demand / run all)
+    let root = linter_root(&FOO_FIXTURES);
+    let checks = determine_checks(
+        &php_files_filter_config(),
+        &make_changed_files(FOO_FIXTURES.to_vec()),
+        root.path(),
+    );
+
+    let unit = assert_check_exists(&checks, "unit");
+    assert_eq!(unit.files, CheckFiles::SkippedNoMatch);
+    assert!(unit.is_skipped_no_files());
+    assert_eq!(
+        assert_check_exists(&checks, "slow").files,
+        CheckFiles::OnDemand
+    );
+    let suite = assert_check_exists(&checks, "suite");
+    assert_eq!(suite.files, CheckFiles::RunAll);
+    assert_eq!(suite.resolved_command, "phpunit");
+}
+
+#[test]
+fn test_files_filter_dropping_all_discovered_tests_is_no_tests_found() {
+    // Source changed, grep discovers only fixtures: filter drops them, so
+    // the no-tests fallbacks apply (skip / on_demand / run full command)
+    let root = linter_root(&FOO_FIXTURES);
+    let checks = determine_checks(
+        &php_files_filter_config(),
+        &make_changed_files(vec!["tools/linter/src/Rule/FooRule.php"]),
+        root.path(),
+    );
+
+    assert_eq!(
+        assert_check_exists(&checks, "unit").files,
+        CheckFiles::SkippedNoMatch
+    );
+    assert_eq!(
+        assert_check_exists(&checks, "slow").files,
+        CheckFiles::OnDemand
+    );
+    assert_eq!(
+        assert_check_exists(&checks, "suite").files,
+        CheckFiles::RunAll
+    );
 }
