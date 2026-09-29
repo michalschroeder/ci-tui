@@ -563,20 +563,21 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
 /// running, nothing before start
 fn check_duration_span(result: &CheckResult, now: DateTime<Local>) -> Span<'static> {
     let done_style = Style::default().fg(Color::DarkGray);
-    // Dimmed running-yellow: still ticking, not a final duration
-    let live_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::DIM);
-    match (&result.status, result.started_at) {
-        _ if result.cached => Span::styled(" cached", done_style),
-        (CheckStatus::Running, Some(started)) => {
-            let elapsed_ms = (now - started).num_milliseconds().max(0) as u64;
-            Span::styled(format!(" {}", time::format(elapsed_ms)), live_style)
-        }
-        _ if result.duration_ms > 0 => {
-            Span::styled(format!(" {}", time::format(result.duration_ms)), done_style)
-        }
-        _ => Span::raw(""),
+    if result.cached {
+        return Span::styled(" cached", done_style);
+    }
+    if let (CheckStatus::Running, Some(started)) = (&result.status, result.started_at) {
+        // Dimmed running icon color: still ticking, not a final duration
+        let live_style = get_status_display(Some(&CheckStatus::Running))
+            .1
+            .add_modifier(Modifier::DIM);
+        let elapsed = time::format(time::ms_between(started, now));
+        return Span::styled(format!(" {elapsed}"), live_style);
+    }
+    if result.duration_ms > 0 {
+        Span::styled(format!(" {}", time::format(result.duration_ms)), done_style)
+    } else {
+        Span::default()
     }
 }
 
@@ -586,12 +587,13 @@ fn render_check_item(
     check: &crate::checks::CheckToRun,
     area: Rect,
     is_selected: bool,
+    now: DateTime<Local>,
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
 
     let duration = result
-        .map(|r| check_duration_span(r, Local::now()))
+        .map(|r| check_duration_span(r, now))
         .unwrap_or_default();
 
     let is_on_demand = result
@@ -674,6 +676,8 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
 /// (group headers included), so row index == item index and the list and
 /// the selection can never disagree.
 fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
+    // One clock read per frame: all live timers agree
+    let now = Local::now();
     app.selectable_items()
         .enumerate()
         .map(|(idx, item)| {
@@ -681,7 +685,9 @@ fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
             match item {
                 SelectableItem::Group(group) => group_header_item(app, group, is_selected),
                 SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
-                SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
+                SelectableItem::Check(check) => {
+                    render_check_item(app, check, area, is_selected, now)
+                }
             }
         })
         .collect()
@@ -2100,31 +2106,21 @@ mod tests {
         (result, now)
     }
 
-    /// #141: running row shows live elapsed, same format as final durations
+    /// #141: running row shows live elapsed, same format as final durations,
+    /// dimmed apart from them
     #[test]
     fn test_check_duration_running_shows_live_elapsed() {
         let (result, now) = timed_result(CheckStatus::Running, 5_300);
 
         let span = check_duration_span(&result, now);
 
-        assert_eq!(span.content, format!(" {}", time::format(5_300)));
         assert_eq!(span.content, " 5.3s");
-    }
-
-    /// #141: live elapsed styled apart from final durations
-    #[test]
-    fn test_check_duration_live_style_differs_from_final() {
-        let (running, now) = timed_result(CheckStatus::Running, 1_500);
-        let mut passed = running.clone();
-        passed.status = CheckStatus::Passed;
-        passed.duration_ms = 1_500;
-
-        let live = check_duration_span(&running, now);
-        let done = check_duration_span(&passed, now);
-
-        assert_eq!(live.content, done.content);
-        assert_ne!(live.style, done.style);
-        assert!(live.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(
+            span.style,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM)
+        );
     }
 
     /// Finished rows keep `duration_ms`, not elapsed since start

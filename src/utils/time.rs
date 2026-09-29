@@ -32,6 +32,14 @@ pub(crate) fn format(ms: u64) -> String {
     }
 }
 
+/// Milliseconds from `start` to `end`, clamped at 0 (clock skew)
+pub(crate) fn ms_between(
+    start: chrono::DateTime<chrono::Local>,
+    end: chrono::DateTime<chrono::Local>,
+) -> u64 {
+    (end - start).num_milliseconds().max(0) as u64
+}
+
 /// Format a std::time::Duration to human-readable string.
 ///
 /// Returns:

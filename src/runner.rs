@@ -687,7 +687,7 @@ impl CheckResult {
         Self {
             status: CheckStatus::Cancelled,
             output: "cancelled by user".to_string(),
-            duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
+            duration_ms: crate::utils::time::ms_between(started_at, finished_at),
             started_at: Some(started_at),
             finished_at: Some(finished_at),
             ..Self::pending(check_id)
