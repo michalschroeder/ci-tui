@@ -269,6 +269,16 @@ fn linked_worktree_caches_in_its_git_dir() {
 }
 
 #[test]
+fn list_shows_cached_checks() {
+    let tmp = project(CONFIG, true);
+    run(tmp.path(), &[]);
+    let out = run_ci_tui(tmp.path(), &["--list", "--files", "a.rs"]);
+    assert_code(&out, exit::SUCCESS);
+    assert!(stdout(&out).contains("cached     lint"), "{}", stdout(&out));
+    assert_eq!(runs(tmp.path(), "lint"), 1, "--list executes nothing");
+}
+
+#[test]
 fn fix_mode_ignores_cache() {
     let tmp = project(CONFIG, true);
     run(tmp.path(), &[]);

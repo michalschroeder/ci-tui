@@ -211,7 +211,10 @@ fn binary_list_shows_only_selected_checks() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("run        b  B"), "{stdout}");
     assert!(!stdout.contains(" a  A"), "{stdout}");
-    assert!(stdout.contains("1 run, 0 on-demand, 0 skipped"), "{stdout}");
+    assert!(
+        stdout.contains("1 run, 0 cached, 0 on-demand, 0 skipped"),
+        "{stdout}"
+    );
 }
 
 #[rstest::rstest]

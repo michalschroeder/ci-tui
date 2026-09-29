@@ -675,14 +675,9 @@ impl CheckResult {
     /// Create a skipped check result (no matching files)
     pub fn skipped(check_id: &str) -> Self {
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::Skipped,
             output: "No changes detected".to_string(),
-            error_output: String::new(),
-            duration_ms: 0,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..Self::pending(check_id)
         }
     }
 
@@ -690,14 +685,12 @@ impl CheckResult {
     pub fn cancelled(check_id: &str, started_at: DateTime<Local>) -> Self {
         let finished_at = Local::now();
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::Cancelled,
             output: "cancelled by user".to_string(),
-            error_output: String::new(),
             duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
-            cached: false,
+            ..Self::pending(check_id)
         }
     }
 
@@ -716,14 +709,9 @@ impl CheckResult {
     /// Create an on-demand check result (requires manual trigger)
     pub fn on_demand(check_id: &str) -> Self {
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::OnDemand,
             output: "Press 't' to run this test".to_string(),
-            error_output: String::new(),
-            duration_ms: 0,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..Self::pending(check_id)
         }
     }
 }
@@ -873,6 +861,17 @@ impl CheckRunner {
         use crate::checks::group_checks;
         let grouped = group_checks(&checks);
         run_check_groups(self, grouped, &event_tx).await
+    }
+
+    /// Run `group`'s pre-commands, sending their events to `event_tx`; false
+    /// when one fails. For a single check run whose group setup never ran.
+    pub async fn run_group_setup(&self, group: &str, event_tx: &mpsc::Sender<RunnerEvent>) -> bool {
+        let pre_commands = self
+            .config
+            .get_group(group)
+            .map(|g| g.pre_commands.as_slice())
+            .unwrap_or(&[]);
+        run_all_pre_commands(self, group, pre_commands, event_tx).await
     }
 
     /// Execute a single group: run pre-commands, then checks (parallel or sequential)
@@ -1231,14 +1230,13 @@ pub async fn execute_command_with_executor(
     };
 
     CheckResult {
-        check_id,
         status,
         output: truncate_output(stdout, max_output_lines),
         error_output: truncate_output(filter_docker_warnings(&stderr), max_output_lines),
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
-        cached: false,
+        ..CheckResult::pending(&check_id)
     }
 }
 

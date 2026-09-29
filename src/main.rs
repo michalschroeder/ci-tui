@@ -58,6 +58,43 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
     })
 }
 
+/// Result cache for a run (not fix mode). Keys read the changed files where
+/// their paths resolve: the repo root for git paths, `exec_root` for
+/// `--files`. Disabled outside a git repo.
+fn open_cache(
+    cwd: &std::path::Path,
+    exec_root: &std::path::Path,
+    changed_files: &git::ChangedFiles,
+    read: bool,
+) -> cache::ResultCache {
+    let root = match changed_files.is_cli_files() {
+        true => Ok(exec_root.to_path_buf()),
+        false => git::repo_root(cwd),
+    };
+    root.map_or_else(
+        |_| cache::ResultCache::disabled(),
+        |root| cache::ResultCache::open(cwd, root, read),
+    )
+}
+
+/// `--list` report; `Run` checks the result cache would serve show as cached
+fn list_report(
+    config: &config::CiConfig,
+    changed_files: &git::ChangedFiles,
+    base_override: Option<&str>,
+    exec_root: &std::path::Path,
+    cache: &cache::ResultCache,
+) -> String {
+    let mut explained = list::explain_checks(config, changed_files, exec_root);
+    if let Some(root) = cache.key_root() {
+        let selected = checks::select_checks(config, changed_files, exec_root, Some(root));
+        let (fresh, _) = cache.split_fresh(&selected.checks);
+        let ids: Vec<&str> = fresh.iter().map(|c| c.id()).collect();
+        list::mark_cached(&mut explained, &ids);
+    }
+    list::render(config, changed_files, base_override, &explained)
+}
+
 /// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
 fn print_schema() -> Result<()> {
     use std::io::Write;
@@ -196,46 +233,41 @@ async fn run() -> Result<i32> {
     };
     changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
 
+    // Result cache: skips checks unchanged since their last pass. Fix mode
+    // only runs fix commands.
+    let cache = match cli.fix {
+        true => cache::ResultCache::disabled(),
+        false => open_cache(&project_root, &exec_root, &changed_files, !cli.no_cache),
+    };
+
     // Dry run: explain check selection, execute nothing
     if cli.list {
-        let explained = list::explain_checks(&config, &changed_files, &exec_root);
+        let base = cli.base.as_deref();
         print!(
             "{}",
-            list::render(&config, &changed_files, cli.base.as_deref(), &explained)
+            list_report(&config, &changed_files, base, &exec_root, &cache)
         );
         return Ok(exit::SUCCESS);
     }
 
-    // Determine which checks to run (fix mode reuses it only for the probe)
+    // Determine which checks to run, keyed for the cache (fix mode reuses it
+    // only for the probe)
     let checks::Selected {
-        checks: mut checks_to_run,
+        checks: checks_to_run,
         mut warnings,
-    } = checks::select_checks(&config, &changed_files, &exec_root);
+    } = checks::select_checks(&config, &changed_files, &exec_root, cache.key_root());
 
-    // Result cache: key every check (hashes its files) so checks unchanged
-    // since their last pass are skipped. Fix mode only runs fix commands.
-    let cache = if cli.fix {
-        cache::ResultCache::disabled()
-    } else {
-        cache::stamp_keys(&mut checks_to_run, &config, &changed_files, &exec_root);
-        cache::ResultCache::open(&project_root, !cli.no_cache)
+    // Checks that execute now: cached ones never, on-demand ones only on
+    // request; fix mode runs its own commands. Docker preflight: fatal if
+    // needed but down. Non-fatal warnings (failed test discovery, then Docker
+    // ones): console modes print now, the TUI shows them in-app.
+    let (_, runnable) = cache.split_fresh(checks_to_run.clone());
+    let docker_needed = match cli.fix {
+        true => fix::has_fixes(&config, &changed_files),
+        false => runnable.iter().any(|c| !c.is_on_demand()),
     };
-
-    // Docker is needed when commands would run: on-demand checks only run
-    // on request, cached ones not at all; fix mode runs its own commands.
-    let docker_needed = if cli.fix {
-        fix::has_fixes(&config, &changed_files)
-    } else {
-        checks_to_run
-            .iter()
-            .any(|c| !c.is_on_demand() && !cache.is_fresh(c))
-    };
-
-    // Docker preflight: fatal if needed but down. Non-fatal warnings (failed
-    // test discovery, then Docker ones): console modes print now, the TUI shows
-    // them in-app (alternate screen).
     let (target, files) = (&config.runner, &changed_files.files);
-    let preflight = preflight::run(target, docker_needed, &exec_root, &checks_to_run, files);
+    let preflight = preflight::run(target, docker_needed, &exec_root, &runnable, files);
     warnings.extend(preflight.await?);
     if cli.fix || simple_mode {
         for warning in &warnings {

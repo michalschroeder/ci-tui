@@ -13,28 +13,20 @@ use rstest::rstest;
 /// Create a CheckResult with the given status for testing
 fn make_result(check_id: &str, status: CheckStatus, duration_ms: u64) -> CheckResult {
     CheckResult {
-        check_id: check_id.to_string(),
         status,
-        output: String::new(),
-        error_output: String::new(),
         duration_ms,
-        started_at: None,
-        finished_at: None,
-        cached: false,
+        ..CheckResult::pending(check_id)
     }
 }
 
 /// Create a failed CheckResult with stdout/stderr output
 fn make_failed_result(check_id: &str, output: &str, error_output: &str) -> CheckResult {
     CheckResult {
-        check_id: check_id.to_string(),
         status: CheckStatus::Failed,
         output: output.to_string(),
         error_output: error_output.to_string(),
         duration_ms: 1000,
-        started_at: None,
-        finished_at: None,
-        cached: false,
+        ..CheckResult::pending(check_id)
     }
 }
 

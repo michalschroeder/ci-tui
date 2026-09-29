@@ -13,6 +13,8 @@ use std::path::Path;
 
 /// Label for checks `determine_checks` drops (never shown in TUI / simple mode).
 const EXCLUDED_LABEL: &str = "excluded";
+/// Label for `Run` checks the result cache would serve instead
+const CACHED_LABEL: &str = "cached";
 
 /// One configured check with its decision and the reasons behind it.
 #[derive(Debug, Clone)]
@@ -27,6 +29,9 @@ pub struct CheckExplanation {
     pub decision: Option<Decision>,
     /// Human-readable reasons, one per evaluated trigger
     pub reasons: Vec<String>,
+    /// `Run`, but unchanged since its last pass: served from the result
+    /// cache (see [`mark_cached`])
+    pub cached: bool,
 }
 
 /// Explain every configured check, in config group order.
@@ -46,9 +51,23 @@ pub fn explain_checks(
                 name: check.name.clone(),
                 decision,
                 reasons,
+                cached: false,
             }
         })
         .collect()
+}
+
+/// Mark the `Run` checks among `ids` (fresh in the result cache) as cached,
+/// so the report matches what a real run executes
+pub fn mark_cached(explained: &mut [CheckExplanation], ids: &[&str]) {
+    let fresh = |e: &&mut CheckExplanation| {
+        e.decision == Some(Decision::Run) && ids.contains(&e.id.as_str())
+    };
+    for e in explained.iter_mut().filter(fresh) {
+        e.cached = true;
+        e.reasons
+            .push("unchanged since its last pass: result cached (--no-cache runs it)".to_string());
+    }
 }
 
 /// Decision plus one reason per configured trigger.
@@ -161,10 +180,11 @@ pub fn render(
     }
 
     let count = |d: Decision| explained.iter().filter(|e| e.decision == Some(d)).count();
+    let cached = explained.iter().filter(|e| e.cached).count();
     let _ = writeln!(
         out,
-        "\n{} run, {} on-demand, {} skipped (nothing executed)",
-        count(Decision::Run),
+        "\n{} run, {cached} cached, {} on-demand, {} skipped (nothing executed)",
+        count(Decision::Run) - cached,
         count(Decision::OnDemand),
         count(Decision::Skipped)
     );
@@ -173,9 +193,11 @@ pub fn render(
 
 /// Decision line plus one indented line per reason.
 fn render_check(out: &mut String, e: &CheckExplanation) {
-    let label = e
-        .decision
-        .map_or(EXCLUDED_LABEL.to_string(), |d| d.to_string());
+    let label = match e.decision {
+        _ if e.cached => CACHED_LABEL.to_string(),
+        Some(d) => d.to_string(),
+        None => EXCLUDED_LABEL.to_string(),
+    };
     let _ = writeln!(out, "  {label:<10} {}  {}", e.id, e.name);
     for reason in &e.reasons {
         let _ = writeln!(out, "      - {reason}");

@@ -119,8 +119,7 @@ pub async fn run(
         let parallel = group.is_some_and(|g| g.parallel);
 
         // Unchanged since their last pass: listed first as cached, not run
-        let (cached, group_checks): (Vec<&CheckToRun>, Vec<&CheckToRun>) =
-            group_checks.into_iter().partition(|c| cache.is_fresh(c));
+        let (cached, group_checks) = cache.split_fresh(group_checks);
         let mut results: Vec<CheckResult> =
             cached.iter().map(|c| CheckResult::cached(c.id())).collect();
         results.extend(if parallel {

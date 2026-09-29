@@ -104,9 +104,9 @@ pub struct CheckToRun {
     pub resolved_command: String,
     /// The fully resolved fix command (if available)
     pub resolved_fix_command: Option<String>,
-    /// Result cache key, stamped by [`crate::cache::stamp_keys`]; `None`
-    /// before that and for checks without concrete files (never cached)
-    pub cache_key: Option<u64>,
+    /// Result cache key, set by [`select_checks`] with a key root; `None`
+    /// otherwise and for checks without concrete files (never cached)
+    pub cache_key: Option<crate::cache::CacheKey>,
 }
 
 impl CheckToRun {
@@ -165,7 +165,7 @@ pub fn determine_checks(
     changed_files: &ChangedFiles,
     project_root: &Path,
 ) -> Vec<CheckToRun> {
-    select_checks(config, changed_files, project_root).checks
+    select_checks(config, changed_files, project_root, None).checks
 }
 
 /// [`determine_checks`] result plus non-fatal test discovery warnings (e.g. a
@@ -178,11 +178,14 @@ pub struct Selected {
     pub warnings: Vec<String>,
 }
 
-/// [`determine_checks`], also returning discovery warnings.
+/// [`determine_checks`], also returning discovery warnings. With `key_root`
+/// ([`crate::cache::ResultCache::key_root`]) every check gets its result
+/// cache key from the files there (blocking reads).
 pub fn select_checks(
     config: &CiConfig,
     changed_files: &ChangedFiles,
     project_root: &Path,
+    key_root: Option<&Path>,
 ) -> Selected {
     let mut checks_to_run = Vec::new();
     let mut warnings = Vec::new();
@@ -202,6 +205,9 @@ pub fn select_checks(
         }
     }
 
+    if let Some(root) = key_root {
+        crate::cache::stamp_keys(&mut checks_to_run, config, changed_files, root);
+    }
     let mut seen = std::collections::HashSet::new();
     warnings.retain(|w| seen.insert(w.clone()));
     Selected {

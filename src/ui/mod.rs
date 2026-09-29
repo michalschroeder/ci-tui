@@ -23,13 +23,13 @@ pub mod app;
 pub mod dashboard;
 pub mod external;
 
-use crate::cache::{self, ResultCache};
+use crate::cache::ResultCache;
 use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
     run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
-    CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
+    CheckRunner, CheckStatus, OutputSink, RealCommandExecutor, RunnerEvent,
 };
 use anyhow::Result;
 use app::{App, StatusKind};
@@ -268,6 +268,9 @@ struct TaskCtx {
     config: Arc<CiConfig>,
     /// Cancel switches shared with the runner ('s' key)
     cancels: CancelRegistry,
+    /// Result cache key root ([`ResultCache::key_root`]); refreshed checks
+    /// get keys only with it
+    key_root: Option<Arc<Path>>,
 }
 
 impl TaskCtx {
@@ -287,13 +290,23 @@ impl TaskCtx {
     }
 
     /// [`Self::run`], streaming live output to `tx` as [`TaskEvent::Output`]
-    /// (all chunks are sent before this returns, so before the result)
+    /// (all chunks are sent before this returns, so before the result).
+    /// With `setup`, the group's pre-commands run first (see
+    /// [`App::claim_group_setup`]); if one fails, so does the check.
     async fn run_streaming(
         &self,
         check: &CheckToRun,
         command: &str,
+        setup: bool,
         tx: &mpsc::Sender<TaskEvent>,
     ) -> CheckResult {
+        if setup && !self.run_setup(check.group(), tx).await {
+            return CheckResult {
+                status: CheckStatus::Failed,
+                output: format!("Pre-command of group `{}` failed", check.group()),
+                ..CheckResult::pending(check.id())
+            };
+        }
         let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
         let run = async move {
             // Sink dropped at the end of this block, ending `forward`
@@ -304,14 +317,26 @@ impl TaskCtx {
         result
     }
 
+    /// Run `group`'s pre-commands, their events to `tx` as
+    /// [`TaskEvent::Output`]; false when one failed
+    async fn run_setup(&self, group: &str, tx: &mpsc::Sender<TaskEvent>) -> bool {
+        let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
+        let runner = CheckRunner::new((*self.config).clone(), &self.exec_root);
+        // `out_tx` dropped at the end of this block, ending `forward`
+        let setup = async move { runner.run_group_setup(group, &out_tx).await };
+        let (ok, ()) = tokio::join!(setup, forward_output(&mut out_rx, tx));
+        ok
+    }
+
     /// [`Self::run_streaming`], cancellable with 's' (then reports `Cancelled`)
     async fn run_cancellable(
         &self,
         check: &CheckToRun,
         command: &str,
+        setup: bool,
         tx: &mpsc::Sender<TaskEvent>,
     ) -> CheckResult {
-        let run = self.run_streaming(check, command, tx);
+        let run = self.run_streaming(check, command, setup, tx);
         run_check_cancellable(&self.cancels, check.id(), run).await
     }
 
@@ -327,13 +352,8 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let mut selected = select_checks(&self.config, &changed_files, &self.exec_root);
-        cache::stamp_keys(
-            &mut selected.checks,
-            &self.config,
-            &changed_files,
-            &self.exec_root,
-        );
+        let key_root = self.key_root.as_deref();
+        let selected = select_checks(&self.config, &changed_files, &self.exec_root, key_root);
         Ok((changed_files, selected))
     }
 
@@ -406,28 +426,31 @@ impl Tasks {
         });
     }
 
-    /// Spawn a task running `command` as `check`, streaming its output,
-    /// cancellable with 's'; reports [`TaskEvent::RetryResult`].
-    fn spawn_check(&mut self, check: CheckToRun, command: String) {
+    /// Spawn a task running `command` as `check` (after its group's
+    /// pre-commands with `setup`), streaming its output, cancellable with
+    /// 's'; reports [`TaskEvent::RetryResult`].
+    fn spawn_check(&mut self, check: CheckToRun, command: String, setup: bool) {
         self.spawn(|ctx, tx| async move {
-            let result = ctx.run_cancellable(&check, &command, &tx).await;
+            let result = ctx.run_cancellable(&check, &command, setup, &tx).await;
             let _ = tx.send(TaskEvent::RetryResult(result)).await;
         });
     }
 }
 
-/// Retry `check` after a git refresh. `previous` is restored if the check
-/// no longer applies to the refreshed file list. Cancellable with 's' from
-/// the start (the check shows as running during the refresh too).
+/// Retry `check` after a git refresh (and its group's pre-commands with
+/// `setup`). `previous` is restored if the check no longer applies to the
+/// refreshed file list. Cancellable with 's' from the start (the check shows
+/// as running during the refresh too).
 async fn retry_with_refresh(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
     check: CheckToRun,
     previous: CheckResult,
     changed_files: ChangedFiles,
+    setup: bool,
 ) {
     let check_id = check.id().to_string();
-    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files);
+    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup);
     // None: not applicable, already reported
     if let Some(result) = run_check_cancellable(&ctx.cancels, &check_id, run).await {
         let _ = tx.send(TaskEvent::RetryResult(result)).await;
@@ -441,6 +464,7 @@ async fn refresh_and_run(
     check: CheckToRun,
     previous: CheckResult,
     changed_files: ChangedFiles,
+    setup: bool,
 ) -> Option<CheckResult> {
     let check = match ctx.refresh_async(changed_files).await {
         Ok((changed_files, selected)) => {
@@ -462,7 +486,8 @@ async fn refresh_and_run(
             check
         }
     };
-    Some(ctx.run_streaming(&check, &check.resolved_command, tx).await)
+    let command = &check.resolved_command;
+    Some(ctx.run_streaming(&check, command, setup, tx).await)
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -666,11 +691,12 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
+    let setup = app.claim_group_setup(check.group());
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
     app.reset_check_for_retry(check.id());
-    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files));
+    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup));
     Action::Continue
 }
 
@@ -683,9 +709,10 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     };
     let check = check.clone();
+    let setup = app.claim_group_setup(check.group());
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_check(check, command);
+    tasks.spawn_check(check, command, setup);
     Action::Continue
 }
 
@@ -699,12 +726,13 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
     };
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
+    let setup = app.claim_group_setup(check.group());
     app.reset_check_for_retry(check.id());
     app.set_status_message(
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_check(check, all_files_cmd);
+    tasks.spawn_check(check, all_files_cmd, setup);
     Action::Continue
 }
 
@@ -738,7 +766,8 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
                     files: vec![],
                     base_ref,
                 };
-                let selected = select_checks(&ctx.config, &changed_files, &ctx.exec_root);
+                let key_root = ctx.key_root.as_deref();
+                let selected = select_checks(&ctx.config, &changed_files, &ctx.exec_root, key_root);
                 (changed_files, selected)
             }
         };
@@ -1002,7 +1031,7 @@ fn record_result(cache: &mut ResultCache, app: &mut App, msg: &Message) {
 /// `app`; returns the others, for the runner. Only the initial run uses
 /// this: retries and on-demand runs always execute.
 fn skip_cached(app: &mut App, cache: &ResultCache, checks: Vec<CheckToRun>) -> Vec<CheckToRun> {
-    let (cached, runnable): (Vec<_>, Vec<_>) = checks.into_iter().partition(|c| cache.is_fresh(c));
+    let (cached, runnable) = cache.split_fresh(checks);
     app.mark_cached(cached.iter().map(CheckToRun::id));
     runnable
 }
@@ -1133,6 +1162,7 @@ pub async fn run(
         exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
         cancels: cancels.clone(),
+        key_root: cache.key_root().map(Arc::from),
     });
 
     // Start background stats worker - runs sysinfo queries without blocking UI
@@ -1293,7 +1323,6 @@ fn print_summary(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::CheckStatus;
 
     fn test_config() -> CiConfig {
         serde_yaml::from_str(
@@ -1334,6 +1363,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         })
     }
 
@@ -1807,14 +1837,10 @@ checks:
         let mut app = make_test_app(&config);
         let (mut tasks, _rx) = make_test_tasks(&config);
         let result = CheckResult {
-            check_id: "php-lint".to_string(),
             status: crate::runner::CheckStatus::Passed,
             output: "OK".to_string(),
-            error_output: String::new(),
             duration_ms: 42,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..CheckResult::pending("php-lint")
         };
 
         handle_message(
@@ -1829,12 +1855,24 @@ checks:
         );
     }
 
-    /// `make_test_check` with a result cache key
-    fn keyed_check(id: &str, key: u64) -> CheckToRun {
-        CheckToRun {
-            cache_key: Some(key),
-            ..make_test_check(id, "fast")
-        }
+    /// Tempdir holding `src/Foo.php` (the test checks' file), with a result
+    /// cache file at `cache_file` in it
+    fn cache_in_tempdir(cache_file: &str) -> (tempfile::TempDir, ResultCache) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/Foo.php"), "<?php").unwrap();
+        let root = dir.path().to_path_buf();
+        let cache = ResultCache::at(dir.path().join(cache_file), root, true);
+        (dir, cache)
+    }
+
+    /// `make_test_check` keyed from the files under `root`
+    fn keyed_check(config: &CiConfig, id: &str, root: &Path) -> CheckToRun {
+        let mut check = make_test_check(id, "fast");
+        let changed = make_test_app(config).changed_files;
+        crate::cache::stamp_keys(std::slice::from_mut(&mut check), config, &changed, root);
+        assert!(check.cache_key.is_some());
+        check
     }
 
     fn finished(id: &str, status: crate::runner::CheckStatus) -> Message {
@@ -1849,9 +1887,9 @@ checks:
     #[test]
     fn test_skip_cached_marks_fresh_checks_and_runs_the_rest() {
         let config = test_config();
-        let dir = tempfile::tempdir().unwrap();
-        let mut cache = ResultCache::at(dir.path().join("results.json"), true);
-        let (lint, unit) = (keyed_check("php-lint", 1), keyed_check("phpunit", 2));
+        let (dir, mut cache) = cache_in_tempdir("results.json");
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        let unit = keyed_check(&config, "phpunit", dir.path());
         let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
         record_result(
             &mut cache,
@@ -1870,9 +1908,8 @@ checks:
     #[test]
     fn test_record_result_from_runner_and_retry() {
         let config = test_config();
-        let dir = tempfile::tempdir().unwrap();
-        let mut cache = ResultCache::at(dir.path().join("results.json"), true);
-        let lint = keyed_check("php-lint", 1);
+        let (dir, mut cache) = cache_in_tempdir("results.json");
+        let lint = keyed_check(&config, "php-lint", dir.path());
         let mut app = make_test_app_with_checks(&config, vec![lint.clone()]);
 
         record_result(
@@ -1893,10 +1930,10 @@ checks:
     #[test]
     fn test_record_result_write_error_sets_status_message() {
         let config = test_config();
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, mut cache) = cache_in_tempdir("ci-tui/results.json");
         std::fs::write(dir.path().join("ci-tui"), "").unwrap();
-        let mut cache = ResultCache::at(dir.path().join("ci-tui/results.json"), true);
-        let mut app = make_test_app_with_checks(&config, vec![keyed_check("php-lint", 1)]);
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        let mut app = make_test_app_with_checks(&config, vec![lint]);
 
         record_result(
             &mut cache,
@@ -1906,6 +1943,73 @@ checks:
 
         let message = app.view.status_message.as_ref().expect("status message");
         assert!(message.text.contains("Result cache"), "{}", message.text);
+    }
+
+    /// Edge case: local-mode group `db` whose `seed` pre-command creates the
+    /// `seeded` file that check `lint` needs
+    fn setup_config() -> CiConfig {
+        serde_yaml::from_str(
+            r#"
+version: 2
+runner: local
+local: { shell: sh }
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns: {}
+checks:
+  db:
+    pre_commands:
+      - { name: seed, command: "echo seeded > seeded" }
+    checks:
+      lint: { name: Lint, command: "test -e seeded" }
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_group_setup_claimed_once_when_the_runner_skips_it() {
+        let config = setup_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("lint", "db")]);
+        assert!(
+            !app.claim_group_setup("db"),
+            "lint waits for the runner, which runs the pre-commands"
+        );
+        app.mark_cached(["lint"]);
+        assert!(app.claim_group_setup("db"));
+        assert!(!app.claim_group_setup("db"), "once per run");
+    }
+
+    /// 'r' on a cached check whose group was skipped (setup never ran) runs
+    /// the group's pre-commands first
+    #[tokio::test]
+    async fn test_retry_runs_group_setup_that_never_ran() {
+        let config = setup_config();
+        let dir = tempfile::tempdir().unwrap();
+        let mut check = make_test_check("lint", "db");
+        check.resolved_command = "test -e seeded".to_string();
+        let mut app = make_test_app_with_checks(&config, vec![check]);
+        app.mark_cached(["lint"]);
+        app.select_last();
+        let (mut tasks, mut rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(dir.path().to_path_buf()),
+            exec_root: Arc::new(dir.path().to_path_buf()),
+            config: Arc::new(config),
+            cancels: CancelRegistry::default(),
+            key_root: None,
+        });
+
+        handle_retry_selected(&mut app, &mut tasks);
+        loop {
+            let event = rx.recv().await.expect("task event");
+            let done = matches!(event, TaskEvent::RetryResult(_));
+            handle_task_event(&mut app, event);
+            if done {
+                break;
+            }
+        }
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Passed);
     }
 
     /// 't' runs through the task channel; output streams as
@@ -1926,6 +2030,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         });
 
         handle_trigger_on_demand(&mut app, &mut tasks);
@@ -1969,6 +2074,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         });
 
         handle_fix_selected(&mut app, &mut tasks);

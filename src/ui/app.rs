@@ -256,6 +256,9 @@ pub struct RunState {
     /// User pressed a key / clicked / scrolled during this run: skip the
     /// end-of-run auto-select of the first failed check
     pub user_interacted: bool,
+    /// Groups whose pre-commands a single check run took over (see
+    /// [`App::claim_group_setup`])
+    pub setup_claimed: HashSet<String>,
 }
 
 impl RunState {
@@ -269,6 +272,7 @@ impl RunState {
             current_pre_command: None,
             refresh_pending: false,
             user_interacted: false,
+            setup_claimed: HashSet::new(),
         }
     }
 }
@@ -686,15 +690,36 @@ impl App {
     /// Reset a check's result to Running and clear previous output/timing
     fn reset_result_to_running(&mut self, check_id: &str) {
         if let Some(result) = self.results.get_mut(check_id) {
-            result.status = CheckStatus::Running;
-            result.output.clear();
-            result.error_output.clear();
-            result.duration_ms = 0;
-            result.started_at = Some(chrono::Local::now());
-            result.finished_at = None;
-            result.cached = false;
+            *result = CheckResult {
+                status: CheckStatus::Running,
+                started_at: Some(chrono::Local::now()),
+                ..CheckResult::pending(check_id)
+            };
         }
         self.clamp_selection();
+    }
+
+    /// Claim `group`'s pre-commands for a single check run (retry, on-demand,
+    /// all files): true when none ran yet and the runner will not run them
+    /// (run over, or no check of the group waits for it), e.g. a group
+    /// served fully from the result cache. Once per group and run.
+    pub fn claim_group_setup(&mut self, group: &str) -> bool {
+        let mut rows = self
+            .pre_commands
+            .iter()
+            .filter(|p| p.group == group)
+            .peekable();
+        let never_ran =
+            rows.peek().is_some() && rows.all(|p| p.status == PreCommandStatus::Pending);
+        let runner_will = !self.run.all_finished
+            && self.checks.iter().any(|c| {
+                c.group() == group
+                    && self
+                        .results
+                        .get(c.id())
+                        .is_some_and(|r| r.status == CheckStatus::Pending)
+            });
+        never_ran && !runner_will && self.run.setup_claimed.insert(group.to_string())
     }
 
     /// Mark an on-demand check as running (preparing to execute)
@@ -1954,14 +1979,10 @@ checks:
         assert!(app.fix.result.is_none());
 
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
             output: "Fixed!".to_string(),
-            error_output: String::new(),
             duration_ms: 100,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..CheckResult::pending("phpunit")
         };
 
         app.finish_fix(result);
@@ -2052,14 +2073,10 @@ checks:
         let mut app = make_app();
 
         let result = CheckResult {
-            check_id: "php-lint".to_string(),
             status: CheckStatus::Passed,
             output: "OK".to_string(),
-            error_output: String::new(),
             duration_ms: 500,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..CheckResult::pending("php-lint")
         };
 
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
@@ -2580,14 +2597,9 @@ checks:
 
         // phpunit passes on retry - the filtered list shrinks to 1 item
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
-            output: String::new(),
-            error_output: String::new(),
             duration_ms: 10,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..CheckResult::pending("phpunit")
         };
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
@@ -2611,14 +2623,9 @@ checks:
 
         // phpunit passes via set_retry_result - the filtered list shrinks to 1 item
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
-            output: String::new(),
-            error_output: String::new(),
             duration_ms: 10,
-            started_at: None,
-            finished_at: None,
-            cached: false,
+            ..CheckResult::pending("phpunit")
         };
         app.set_retry_result(result);
 
@@ -3122,14 +3129,9 @@ checks:
                 ("start_fix", |a| a.start_fix()),
                 ("finish_fix", |a| {
                     a.finish_fix(CheckResult {
-                        check_id: "phpunit".to_string(),
                         status: CheckStatus::Passed,
-                        output: String::new(),
-                        error_output: String::new(),
                         duration_ms: 10,
-                        started_at: None,
-                        finished_at: None,
-                        cached: false,
+                        ..CheckResult::pending("phpunit")
                     })
                 }),
                 ("trigger_on_demand_check", |a| {
@@ -3140,14 +3142,9 @@ checks:
                 }),
                 ("set_retry_result", |a| {
                     a.set_retry_result(CheckResult {
-                        check_id: "phpunit".to_string(),
                         status: CheckStatus::Passed,
-                        output: String::new(),
-                        error_output: String::new(),
                         duration_ms: 10,
-                        started_at: None,
-                        finished_at: None,
-                        cached: false,
+                        ..CheckResult::pending("phpunit")
                     })
                 }),
             ];

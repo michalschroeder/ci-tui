@@ -795,6 +795,7 @@ impl CiConfig {
             }
         }
         self.check_pattern_references()?;
+        self.check_unique_ids()?;
         let _ = self
             .compiled_file_patterns
             .set(compile_file_patterns(&self.file_patterns)?);
@@ -820,6 +821,23 @@ impl CiConfig {
             });
         match dangling {
             Some(msg) => bail!(msg),
+            None => Ok(()),
+        }
+    }
+
+    /// Check ids must be unique across groups: results, `--only` and the
+    /// result cache are keyed by id alone.
+    fn check_unique_ids(&self) -> Result<()> {
+        let mut groups: HashMap<&str, &str> = HashMap::new();
+        let duplicate = self
+            .checks
+            .iter()
+            .flat_map(|(g, group)| group.checks.keys().map(move |c| (g, c)))
+            .find_map(|(g, c)| Some((c, groups.insert(c, g)?, g)));
+        match duplicate {
+            Some((c, first, g)) => {
+                bail!("check id `{c}` is defined in groups `{first}` and `{g}`: ids must be unique")
+            }
             None => Ok(()),
         }
     }
@@ -2014,6 +2032,18 @@ checks: {}
             let msg = config.validate_and_compile().unwrap_err().to_string();
             assert!(
                 msg.contains(&format!("checks.g.checks.lint.{field}")) && msg.contains("'sorce'"),
+                "got: {msg}"
+            );
+        }
+
+        // Edge case: the same check id in two groups is rejected at load
+        #[test]
+        fn test_validate_rejects_duplicate_check_id() {
+            let yaml = "version: 2\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks:\n  php:\n    checks:\n      lint: {name: A, command: 'true'}\n  js:\n    checks:\n      lint: {name: B, command: 'true'}\n";
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
+            let msg = config.validate_and_compile().unwrap_err().to_string();
+            assert!(
+                msg.contains("`lint`") && msg.contains("`php` and `js`"),
                 "got: {msg}"
             );
         }
