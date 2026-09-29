@@ -2110,9 +2110,12 @@ checks:
     #[test]
     fn test_update_stats() {
         let mut app = make_app();
+        app.needs_redraw = false;
 
         app.update_stats(50.0, 8_000_000_000, 16_000_000_000);
 
+        // #141: the stats tick redraws live elapsed timers
+        assert!(app.needs_redraw);
         assert_eq!(app.cpu_usage(), 50.0);
         assert_eq!(app.mem_usage(), 50.0); // 8/16 = 50%
         assert_eq!(app.sys.mem_used_bytes, 8_000_000_000);

@@ -21,6 +21,7 @@ use crate::checks::CheckFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
 use ansi_to_tui::IntoText;
+use chrono::{DateTime, Local};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -557,6 +558,28 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
     ]))
 }
 
+/// Duration span beside a check name: final `duration_ms` once finished,
+/// " cached" for cached passes, live elapsed since `started_at` while
+/// running, nothing before start
+fn check_duration_span(result: &CheckResult, now: DateTime<Local>) -> Span<'static> {
+    let done_style = Style::default().fg(Color::DarkGray);
+    // Dimmed running-yellow: still ticking, not a final duration
+    let live_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::DIM);
+    match (&result.status, result.started_at) {
+        _ if result.cached => Span::styled(" cached", done_style),
+        (CheckStatus::Running, Some(started)) => {
+            let elapsed_ms = (now - started).num_milliseconds().max(0) as u64;
+            Span::styled(format!(" {}", time::format(elapsed_ms)), live_style)
+        }
+        _ if result.duration_ms > 0 => {
+            Span::styled(format!(" {}", time::format(result.duration_ms)), done_style)
+        }
+        _ => Span::raw(""),
+    }
+}
+
 /// Render a check as a list item
 fn render_check_item(
     app: &App,
@@ -567,17 +590,8 @@ fn render_check_item(
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
 
-    // Cached passes did not run: "cached" instead of a duration
     let duration = result
-        .map(|r| {
-            if r.cached {
-                " cached".to_string()
-            } else if r.duration_ms > 0 {
-                format!(" {}", time::format(r.duration_ms))
-            } else {
-                String::new()
-            }
-        })
+        .map(|r| check_duration_span(r, Local::now()))
         .unwrap_or_default();
 
     let is_on_demand = result
@@ -624,7 +638,7 @@ fn render_check_item(
         Span::styled(icon, final_icon_style),
         Span::raw(" "),
         Span::styled(name, name_style),
-        Span::styled(duration, Style::default().fg(Color::DarkGray)),
+        duration,
     ]))
 }
 
@@ -2075,6 +2089,79 @@ mod tests {
         result.status = CheckStatus::Passed;
         result.output = "\x1b[32mok\x1b[0m line\n".repeat(2000);
         app
+    }
+
+    /// Result with `status`, started `ago` before a fixed `now`
+    fn timed_result(status: CheckStatus, ago_ms: i64) -> (CheckResult, DateTime<Local>) {
+        let now = Local::now();
+        let mut result = CheckResult::pending("php-lint");
+        result.status = status;
+        result.started_at = Some(now - chrono::Duration::milliseconds(ago_ms));
+        (result, now)
+    }
+
+    /// #141: running row shows live elapsed, same format as final durations
+    #[test]
+    fn test_check_duration_running_shows_live_elapsed() {
+        let (result, now) = timed_result(CheckStatus::Running, 5_300);
+
+        let span = check_duration_span(&result, now);
+
+        assert_eq!(span.content, format!(" {}", time::format(5_300)));
+        assert_eq!(span.content, " 5.3s");
+    }
+
+    /// #141: live elapsed styled apart from final durations
+    #[test]
+    fn test_check_duration_live_style_differs_from_final() {
+        let (running, now) = timed_result(CheckStatus::Running, 1_500);
+        let mut passed = running.clone();
+        passed.status = CheckStatus::Passed;
+        passed.duration_ms = 1_500;
+
+        let live = check_duration_span(&running, now);
+        let done = check_duration_span(&passed, now);
+
+        assert_eq!(live.content, done.content);
+        assert_ne!(live.style, done.style);
+        assert!(live.style.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// Finished rows keep `duration_ms`, not elapsed since start
+    #[rstest::rstest]
+    #[case::passed(CheckStatus::Passed)]
+    #[case::failed(CheckStatus::Failed)]
+    #[case::timed_out(CheckStatus::TimedOut)]
+    #[case::cancelled(CheckStatus::Cancelled)]
+    fn test_check_duration_finished_shows_duration_ms(#[case] status: CheckStatus) {
+        let (mut result, now) = timed_result(status, 60_000);
+        result.duration_ms = 2_000;
+
+        let span = check_duration_span(&result, now);
+
+        assert_eq!(span.content, " 2.0s");
+        assert_eq!(span.style, Style::default().fg(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_check_duration_cached_pass() {
+        let (mut result, now) = timed_result(CheckStatus::Passed, 0);
+        result.cached = true;
+
+        assert_eq!(check_duration_span(&result, now).content, " cached");
+    }
+
+    /// Not-started rows show no time (no `started_at`, or queued)
+    #[rstest::rstest]
+    #[case::pending(CheckStatus::Pending)]
+    #[case::queued(CheckStatus::Queued)]
+    #[case::on_demand(CheckStatus::OnDemand)]
+    #[case::running_without_start(CheckStatus::Running)]
+    fn test_check_duration_not_started_is_empty(#[case] status: CheckStatus) {
+        let mut result = CheckResult::pending("php-lint");
+        result.status = status;
+
+        assert_eq!(check_duration_span(&result, Local::now()).content, "");
     }
 
     /// App with one check matching `files`; `expanded` toggles `e` view
