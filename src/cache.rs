@@ -17,13 +17,13 @@
 //! runs): no extra dependency. A toolchain changing the algorithm only costs
 //! one cache miss per check; 64 bits make a false hit negligible.
 
-use crate::checks::{CheckFiles, CheckToRun};
+use crate::checks::{match_file_pattern, CheckFiles, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Cache directory inside the git dir
@@ -64,8 +64,7 @@ fn discovery_sources<'a>(
         .triggers
         .as_ref()
         .and_then(|t| t.test_discovery.as_ref())
-        .and_then(|d| config.get_compiled_file_pattern(&d.source_pattern))
-        .map(|re| changed_files.filter_by_pattern(re))
+        .map(|d| match_file_pattern(config, changed_files, &d.source_pattern))
         .unwrap_or_default()
 }
 
@@ -140,12 +139,23 @@ impl ResultCache {
                 .is_some_and(|key| self.entries.get(check.id()) == Some(&key))
     }
 
+    /// [`Self::record`] for the check in `checks` that produced `result`
+    pub fn record_for(&mut self, checks: &[CheckToRun], result: &CheckResult) -> io::Result<()> {
+        match checks.iter().find(|c| c.id() == result.check_id) {
+            Some(check) => self.record(check, result),
+            None => Ok(()),
+        }
+    }
+
     /// Record a finished run of `check`: a pass stores its key (replacing the
     /// previous one), a failure drops the entry; cached / cancelled results
     /// change nothing. Saves on change. A write error is returned once, then
     /// the cache is off for the rest of the run.
     pub fn record(&mut self, check: &CheckToRun, result: &CheckResult) -> io::Result<()> {
-        if self.path.is_none() || result.cached {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if result.cached {
             return Ok(());
         }
         let id = check.id();
@@ -156,19 +166,9 @@ impl ResultCache {
             _ if result.status.is_failure() => self.entries.remove(id).is_some(),
             _ => false,
         };
-        if changed {
-            self.save()
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Write all entries (temp file + rename, so readers never see a partial
-    /// file); on error the cache turns off
-    fn save(&mut self) -> io::Result<()> {
-        let Some(path) = &self.path else {
+        if !changed {
             return Ok(());
-        };
+        }
         let written = write_atomic(path, &serde_json::to_vec(&self.entries)?);
         if written.is_err() {
             self.path = None;
@@ -177,13 +177,15 @@ impl ResultCache {
     }
 }
 
+/// Write via a unique temp file + rename: readers (another ci-tui run in the
+/// same worktree) never see a partial file
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    tmp.persist(path)?;
+    Ok(())
 }
 
 #[cfg(test)]

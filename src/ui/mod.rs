@@ -993,10 +993,7 @@ fn record_result(cache: &mut ResultCache, app: &mut App, msg: &Message) {
     else {
         return;
     };
-    let Some(check) = app.checks.iter().find(|c| c.id() == result.check_id) else {
-        return;
-    };
-    if let Err(e) = cache.record(check, result) {
+    if let Err(e) = cache.record_for(&app.checks, result) {
         app.set_status_message(StatusKind::Error, format!("Result cache not saved: {e}"));
     }
 }

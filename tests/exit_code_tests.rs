@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{git, run_ci_tui};
+use common::{assert_code, git, run_ci_tui};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Config head shared by the fixtures below
@@ -40,16 +40,6 @@ fn run_with(config: &str, args: &[&str]) -> (tempfile::TempDir, std::process::Ou
     std::fs::write(tmp.path().join("ci-tui.yaml"), config).unwrap();
     let out = run_ci_tui(tmp.path(), args);
     (tmp, out)
-}
-
-fn assert_code(out: &std::process::Output, code: i32) {
-    assert_eq!(
-        out.status.code(),
-        Some(code),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 #[test]

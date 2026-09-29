@@ -146,7 +146,9 @@ pub async fn run(
 
         for result in results {
             print_result(&result);
-            record_result(&mut cache, &checks, &result);
+            cache
+                .record_for(&checks, &result)
+                .unwrap_or_else(|e| eprintln!("Warning: result cache not saved: {e}"));
             has_failures |= result.status.is_failure();
             all_results.push(result);
         }
@@ -193,17 +195,6 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-/// Record `result` in the result cache. A write error warns once (the cache
-/// is then off for the run); it never fails the run.
-fn record_result(cache: &mut ResultCache, checks: &[CheckToRun], result: &CheckResult) {
-    let Some(check) = checks.iter().find(|c| c.id() == result.check_id) else {
-        return;
-    };
-    if let Err(e) = cache.record(check, result) {
-        eprintln!("Warning: result cache not saved: {e}");
-    }
 }
 
 /// Print a check result to stdout with colored status indicator (plain

@@ -57,7 +57,7 @@ pub(super) fn process_check(
 }
 
 /// Match changed files against a file pattern trigger
-pub(super) fn match_file_pattern<'a>(
+pub(crate) fn match_file_pattern<'a>(
     config: &CiConfig,
     changed_files: &'a ChangedFiles,
     pattern_key: &str,

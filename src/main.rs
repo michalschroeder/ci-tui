@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
 use ci_tui::exit;
-use ci_tui::runner::{ExecTarget, RealCommandExecutor};
+use ci_tui::runner::ExecTarget;
 use ci_tui::{
     cache, checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui,
 };
@@ -56,35 +56,6 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
         eprintln!("Warning: {e:#}; running checks from the current directory");
         cwd.to_path_buf()
     })
-}
-
-/// Docker startup checks. Fatal: commands would run in docker mode
-/// (`docker_needed`) but Docker is down, rather than every command failing
-/// on its own. Otherwise warnings for changed files that won't resolve in
-/// the containers `checks` use.
-async fn docker_preflight(
-    target: &ExecTarget,
-    docker_needed: bool,
-    exec_root: &std::path::Path,
-    checks: &[ci_tui::CheckToRun],
-    changed_files: &[String],
-) -> Result<Vec<String>> {
-    preflight::docker_reachable(
-        target,
-        docker_needed,
-        exec_root,
-        &RealCommandExecutor,
-        preflight::DOCKER_PROBE_TIMEOUT,
-    )
-    .await?;
-    Ok(preflight::docker_warnings(
-        target,
-        checks,
-        changed_files,
-        exec_root,
-        &RealCommandExecutor,
-    )
-    .await)
 }
 
 /// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
@@ -260,12 +231,11 @@ async fn run() -> Result<i32> {
             .any(|c| !c.is_on_demand() && !cache.is_fresh(c))
     };
 
-    // Docker preflight (fatal if needed but down). Non-fatal warnings:
-    // failed test discovery (e.g. grep error/timeout), then Docker preflight
-    // ones. Console modes print now; the TUI shows them in-app (alternate
-    // screen).
+    // Docker preflight: fatal if needed but down. Non-fatal warnings (failed
+    // test discovery, then Docker ones): console modes print now, the TUI shows
+    // them in-app (alternate screen).
     let (target, files) = (&config.runner, &changed_files.files);
-    let preflight = docker_preflight(target, docker_needed, &exec_root, &checks_to_run, files);
+    let preflight = preflight::run(target, docker_needed, &exec_root, &checks_to_run, files);
     warnings.extend(preflight.await?);
     if cli.fix || simple_mode {
         for warning in &warnings {
