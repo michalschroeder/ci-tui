@@ -957,3 +957,15 @@ fn test_help_overlay_fits_min_size(#[case] height: u16, #[case] stats: bool) {
     assert!(buffer_contains(&buffer, "Press ? or Esc to close"));
     assert!(buffer_contains(&buffer, "CPU/MEM stats"));
 }
+
+// ============================================================================
+// #150: result cache
+// ============================================================================
+
+#[test]
+fn test_cached_check_row_shows_cached_and_check_mark() {
+    let mut app = make_test_app();
+    app.mark_cached(["clippy"]);
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    assert!(buffer_contains(&buffer, "✓ Clippy cached"));
+}

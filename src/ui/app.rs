@@ -64,6 +64,22 @@ pub enum PreCommandStatus {
     Running,
     Passed,
     Failed,
+    /// Not run: no check of the group runs (served from the result cache,
+    /// or on-demand only); a single run of one of them runs it first
+    Skipped,
+}
+
+/// What a single check run (retry, on-demand, all files) does about its
+/// group's pre-commands, see [`App::claim_group_setup`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupSetup {
+    /// Nothing to run: no pre-commands, or all passed
+    Ready,
+    /// Run them first: not (all) passed, and the runner will not run them
+    /// (e.g. a group served fully from the result cache)
+    Run,
+    /// Wait: the runner will run them, or they are running now
+    Busy,
 }
 
 /// State of a pre-command for UI display
@@ -256,6 +272,9 @@ pub struct RunState {
     /// User pressed a key / clicked / scrolled during this run: skip the
     /// end-of-run auto-select of the first failed check
     pub user_interacted: bool,
+    /// Check id -> group whose pre-commands its single run took over,
+    /// until its result arrives (see [`App::claim_group_setup`])
+    pub setup_claims: HashMap<String, String>,
 }
 
 impl RunState {
@@ -269,6 +288,7 @@ impl RunState {
             current_pre_command: None,
             refresh_pending: false,
             user_interacted: false,
+            setup_claims: HashMap::new(),
         }
     }
 }
@@ -477,6 +497,7 @@ impl App {
             sys: SysStats::default(),
             needs_redraw: true, // Initial render needed
         };
+        app.skip_unowed_setups();
         app.select_initial_item();
         app
     }
@@ -525,10 +546,49 @@ impl App {
         };
         self.select_initial_item();
         self.run = RunState::started_now();
+        self.skip_unowed_setups();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
         self.output_cache = None;
         self.needs_redraw = true;
+    }
+
+    /// Show checks served from the result cache as passed without running
+    /// (see [`CheckResult::cached`]). Pre-commands of groups left without a
+    /// pending check show as skipped: the runner does not run them.
+    pub fn mark_cached<'a>(&mut self, check_ids: impl IntoIterator<Item = &'a str>) {
+        for id in check_ids {
+            self.results.insert(id.to_string(), CheckResult::cached(id));
+        }
+        self.skip_unowed_setups();
+        self.needs_redraw = true;
+    }
+
+    /// True while the runner will still run `group`'s pre-commands: the run
+    /// is on and a check of the group waits for it
+    fn runner_owes_setup(&self, group: &str) -> bool {
+        let pending = |c: &&CheckToRun| {
+            self.results
+                .get(c.id())
+                .is_some_and(|r| r.status == CheckStatus::Pending)
+        };
+        !self.run.all_finished && self.checks_in_group(group).iter().any(pending)
+    }
+
+    /// Show pending pre-commands the runner will not run as skipped
+    fn skip_unowed_setups(&mut self) {
+        let unowed: HashSet<String> = self
+            .pre_commands
+            .iter()
+            .filter(|p| !self.runner_owes_setup(&p.group))
+            .map(|p| p.group.clone())
+            .collect();
+        let idle = |row: &&mut PreCommandState| {
+            row.status == PreCommandStatus::Pending && unowed.contains(&row.group)
+        };
+        for row in self.pre_commands.iter_mut().filter(idle) {
+            row.status = PreCommandStatus::Skipped;
+        }
     }
 
     /// Show non-fatal warnings (test discovery, docker preflight) in the
@@ -677,14 +737,57 @@ impl App {
     /// Reset a check's result to Running and clear previous output/timing
     fn reset_result_to_running(&mut self, check_id: &str) {
         if let Some(result) = self.results.get_mut(check_id) {
-            result.status = CheckStatus::Running;
-            result.output.clear();
-            result.error_output.clear();
-            result.duration_ms = 0;
-            result.started_at = Some(chrono::Local::now());
-            result.finished_at = None;
+            *result = CheckResult {
+                status: CheckStatus::Running,
+                started_at: Some(chrono::Local::now()),
+                ..CheckResult::pending(check_id)
+            };
         }
         self.clamp_selection();
+    }
+
+    /// State of `group`'s pre-commands for a single check run
+    pub fn group_setup(&self, group: &str) -> GroupSetup {
+        let mut rows = self.pre_commands.iter().filter(|p| p.group == group);
+        if rows.clone().all(|p| p.status == PreCommandStatus::Passed) {
+            return GroupSetup::Ready;
+        }
+        let running = rows.any(|p| p.status == PreCommandStatus::Running);
+        let claimed = self.run.setup_claims.values().any(|g| g == group);
+        match running || claimed || self.runner_owes_setup(group) {
+            true => GroupSetup::Busy,
+            false => GroupSetup::Run,
+        }
+    }
+
+    /// [`Self::group_setup`] for a single run of `check_id`; on
+    /// [`GroupSetup::Run`] the run owns the pre-commands (others in the
+    /// group wait) until its result arrives
+    pub fn claim_group_setup(&mut self, group: &str, check_id: &str) -> GroupSetup {
+        let setup = self.group_setup(group);
+        if setup == GroupSetup::Run {
+            let (check_id, group) = (check_id.to_string(), group.to_string());
+            self.run.setup_claims.insert(check_id, group);
+        }
+        setup
+    }
+
+    /// Drop the pre-commands claim of `check_id`'s run (its result arrived).
+    /// Rows it left running (cancelled mid-setup) go back to skipped, so the
+    /// next single run starts the setup over.
+    fn release_group_setup(&mut self, check_id: &str) {
+        let Some(group) = self.run.setup_claims.remove(check_id) else {
+            return;
+        };
+        let running =
+            |row: &PreCommandState| row.group == group && row.status == PreCommandStatus::Running;
+        let current = self.run.current_pre_command;
+        if current.is_some_and(|idx| self.pre_commands.get(idx).is_some_and(running)) {
+            self.run.current_pre_command = None;
+        }
+        for row in self.pre_commands.iter_mut().filter(|row| running(row)) {
+            row.status = PreCommandStatus::Skipped;
+        }
     }
 
     /// Mark an on-demand check as running (preparing to execute)
@@ -702,8 +805,10 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Store a finished check result (runner, retry or run-all-files)
+    /// Store a finished check result (runner, retry or run-all-files),
+    /// releasing its pre-commands claim
     pub fn set_retry_result(&mut self, result: CheckResult) {
+        self.release_group_setup(&result.check_id);
         self.insert_result(result);
         self.clamp_selection();
         self.needs_redraw = true;
@@ -1620,6 +1725,7 @@ checks:
             } else {
                 None
             },
+            cache_key: None,
         }
     }
 
@@ -1943,13 +2049,10 @@ checks:
         assert!(app.fix.result.is_none());
 
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
             output: "Fixed!".to_string(),
-            error_output: String::new(),
             duration_ms: 100,
-            started_at: None,
-            finished_at: None,
+            ..CheckResult::pending("phpunit")
         };
 
         app.finish_fix(result);
@@ -2040,13 +2143,10 @@ checks:
         let mut app = make_app();
 
         let result = CheckResult {
-            check_id: "php-lint".to_string(),
             status: CheckStatus::Passed,
             output: "OK".to_string(),
-            error_output: String::new(),
             duration_ms: 500,
-            started_at: None,
-            finished_at: None,
+            ..CheckResult::pending("php-lint")
         };
 
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
@@ -2336,6 +2436,30 @@ checks:
     }
 
     #[test]
+    fn test_cached_checks_count_as_passed() {
+        let mut app = make_app();
+        app.mark_cached(["php-lint", "phpunit"]);
+
+        let result = &app.results["php-lint"];
+        assert!(result.cached);
+        assert_eq!(result.status, CheckStatus::Passed);
+        assert_eq!(app.count_by_status().passed, 2);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    #[test]
+    fn test_rerun_of_cached_check_clears_cached() {
+        let mut app = make_app();
+        app.mark_cached(["php-lint"]);
+
+        app.reset_check_for_retry("php-lint");
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.status, CheckStatus::Running);
+        assert!(!result.cached && result.output.is_empty());
+    }
+
+    #[test]
     fn test_toggle_full_command() {
         let mut app = make_app();
 
@@ -2543,13 +2667,9 @@ checks:
 
         // phpunit passes on retry - the filtered list shrinks to 1 item
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
-            output: String::new(),
-            error_output: String::new(),
             duration_ms: 10,
-            started_at: None,
-            finished_at: None,
+            ..CheckResult::pending("phpunit")
         };
         app.handle_runner_event(RunnerEvent::CheckFinished { result });
 
@@ -2573,13 +2693,9 @@ checks:
 
         // phpunit passes via set_retry_result - the filtered list shrinks to 1 item
         let result = CheckResult {
-            check_id: "phpunit".to_string(),
             status: CheckStatus::Passed,
-            output: String::new(),
-            error_output: String::new(),
             duration_ms: 10,
-            started_at: None,
-            finished_at: None,
+            ..CheckResult::pending("phpunit")
         };
         app.set_retry_result(result);
 
@@ -3083,13 +3199,9 @@ checks:
                 ("start_fix", |a| a.start_fix()),
                 ("finish_fix", |a| {
                     a.finish_fix(CheckResult {
-                        check_id: "phpunit".to_string(),
                         status: CheckStatus::Passed,
-                        output: String::new(),
-                        error_output: String::new(),
                         duration_ms: 10,
-                        started_at: None,
-                        finished_at: None,
+                        ..CheckResult::pending("phpunit")
                     })
                 }),
                 ("trigger_on_demand_check", |a| {
@@ -3100,13 +3212,9 @@ checks:
                 }),
                 ("set_retry_result", |a| {
                     a.set_retry_result(CheckResult {
-                        check_id: "phpunit".to_string(),
                         status: CheckStatus::Passed,
-                        output: String::new(),
-                        error_output: String::new(),
                         duration_ms: 10,
-                        started_at: None,
-                        finished_at: None,
+                        ..CheckResult::pending("phpunit")
                     })
                 }),
             ];

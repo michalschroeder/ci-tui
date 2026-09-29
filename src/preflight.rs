@@ -11,7 +11,9 @@
 
 use crate::checks::CheckToRun;
 use crate::config::DockerConfig;
-use crate::runner::{build_docker_exec_command, CommandExecutor, ExecTarget, OutputSink};
+use crate::runner::{
+    build_docker_exec_command, CommandExecutor, ExecTarget, OutputSink, RealCommandExecutor,
+};
 use crate::utils::shell::quote;
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,7 +25,21 @@ const DOCKER_PROBE: &str = "docker version";
 
 /// How long [`docker_reachable`] waits for the probe (daemon starting,
 /// unreachable remote `DOCKER_HOST`)
-pub const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Startup Docker checks with the real executor: [`docker_reachable`]
+/// (fatal), then the [`docker_warnings`] for `checks` and `changed_files`.
+pub async fn run(
+    target: &ExecTarget,
+    needed: bool,
+    root: &Path,
+    checks: &[CheckToRun],
+    changed_files: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let executor = RealCommandExecutor;
+    docker_reachable(target, needed, root, &executor, DOCKER_PROBE_TIMEOUT).await?;
+    Ok(docker_warnings(target, checks, changed_files, root, &executor).await)
+}
 
 /// Err when commands would run in docker mode (`needed`) but the Docker CLI /
 /// daemon is unreachable or does not answer within `timeout` (first stderr

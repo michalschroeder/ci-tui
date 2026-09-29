@@ -36,12 +36,13 @@ pub(super) fn new_check_to_run(
         files,
         resolved_command,
         resolved_fix_command,
+        cache_key: None,
     }
 }
 
 /// Build a CheckToRun from an evaluated [`Selection`]; `None` drops the
 /// check (empty `triggers` block). The caller reads `selection.warnings()` first.
-pub(super) fn process_check(
+pub(crate) fn process_check(
     selection: Selection,
     group_name: &str,
     check_id: &str,
@@ -56,7 +57,7 @@ pub(super) fn process_check(
 }
 
 /// Match changed files against a file pattern trigger
-pub(super) fn match_file_pattern<'a>(
+pub(crate) fn match_file_pattern<'a>(
     config: &CiConfig,
     changed_files: &'a ChangedFiles,
     pattern_key: &str,

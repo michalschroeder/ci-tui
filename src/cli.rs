@@ -68,6 +68,11 @@ pub struct Cli {
     /// no effect with --simple, --fix or --list
     #[arg(long)]
     pub no_stats: bool,
+
+    /// Run every check, even ones unchanged since their last passing run
+    /// (passes are still recorded in `.git/ci-tui/`)
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -129,11 +134,12 @@ impl Cli {
                 || !cli.only.is_empty()
                 || !cli.groups.is_empty()
                 || cli.jobs.is_some()
-                || cli.no_stats)
+                || cli.no_stats
+                || cli.no_cache)
         {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs and --no-stats cannot be used with a subcommand",
+                "--simple, --fix, --list, --staged, --files, --base, --only, --group, --jobs, --no-stats and --no-cache cannot be used with a subcommand",
             ));
         }
         Ok(cli)
@@ -251,6 +257,7 @@ mod tests {
     #[case::group_before_init(&["ci-tui", "--group", "g", "init"])]
     #[case::jobs_before_validate(&["ci-tui", "-j", "2", "validate"])]
     #[case::no_stats_before_validate(&["ci-tui", "--no-stats", "validate"])]
+    #[case::no_cache_before_validate(&["ci-tui", "--no-cache", "validate"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -353,6 +360,20 @@ mod tests {
     #[case::set(&["ci-tui", "--no-stats"], true)]
     fn test_no_stats_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
         assert_eq!(Cli::try_parse_checked(args).unwrap().no_stats, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false)]
+    #[case::set(&["ci-tui", "--no-cache"], true)]
+    #[case::simple(&["ci-tui", "-s", "--no-cache", "-f", "a.rs"], true)]
+    fn test_no_cache_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().no_cache, expected);
+    }
+
+    #[test]
+    fn test_no_cache_flag_in_help() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("--no-cache"), "{help}");
     }
 
     #[test]

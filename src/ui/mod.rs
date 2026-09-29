@@ -23,15 +23,16 @@ pub mod app;
 pub mod dashboard;
 pub mod external;
 
+use crate::cache::{stamp_keys, ResultCache};
 use crate::checks::{select_checks, CheckToRun, Selected};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
     run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
-    CheckRunner, OutputSink, RealCommandExecutor, RunnerEvent,
+    CheckRunner, CheckStatus, OutputSink, RealCommandExecutor, RunnerEvent,
 };
 use anyhow::Result;
-use app::{App, StatusKind};
+use app::{App, GroupSetup, StatusKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -109,8 +110,12 @@ enum TaskEvent {
     CheckNotApplicable(CheckResult),
     /// Git refresh failed; the retry runs with the previous file list
     GitRefreshFailed,
-    /// Retry / on-demand / run-all-files result
+    /// Retry / on-demand result
     RetryResult(CheckResult),
+    /// Result the result cache does not record: a run-all-files run (its
+    /// command is not the one the check's key covers), or a single run
+    /// whose group pre-commands failed (the check did not run)
+    UnrecordedResult(CheckResult),
     /// Live output chunk ([`RunnerEvent::CheckOutput`]) of a task-run check
     Output(RunnerEvent),
     /// Git refresh for retry-all finished; restart the runner
@@ -267,6 +272,9 @@ struct TaskCtx {
     config: Arc<CiConfig>,
     /// Cancel switches shared with the runner ('s' key)
     cancels: CancelRegistry,
+    /// Result cache key root ([`ResultCache::key_root`]); refreshed checks
+    /// get keys only with it
+    key_root: Option<Arc<Path>>,
 }
 
 impl TaskCtx {
@@ -283,6 +291,29 @@ impl TaskCtx {
             sink,
         )
         .await
+    }
+
+    /// [`Self::run_streaming`], after the group's pre-commands with `setup`
+    /// (see [`GroupSetup::Run`]). `None` when one failed: the check did not
+    /// run, its failed result went to `tx` as
+    /// [`TaskEvent::UnrecordedResult`] (a cached pass stays).
+    async fn run_after_setup(
+        &self,
+        check: &CheckToRun,
+        command: &str,
+        setup: bool,
+        tx: &mpsc::Sender<TaskEvent>,
+    ) -> Option<CheckResult> {
+        if setup && !self.run_setup(check.group(), tx).await {
+            let result = CheckResult {
+                status: CheckStatus::Failed,
+                output: format!("Pre-command of group `{}` failed", check.group()),
+                ..CheckResult::pending(check.id())
+            };
+            let _ = tx.send(TaskEvent::UnrecordedResult(result)).await;
+            return None;
+        }
+        Some(self.run_streaming(check, command, tx).await)
     }
 
     /// [`Self::run`], streaming live output to `tx` as [`TaskEvent::Output`]
@@ -303,22 +334,56 @@ impl TaskCtx {
         result
     }
 
-    /// [`Self::run_streaming`], cancellable with 's' (then reports `Cancelled`)
+    /// Run `group`'s pre-commands, their events to `tx` as
+    /// [`TaskEvent::Output`]; false when one failed
+    async fn run_setup(&self, group: &str, tx: &mpsc::Sender<TaskEvent>) -> bool {
+        let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
+        let runner = CheckRunner::new(Arc::clone(&self.config), &self.exec_root);
+        // `out_tx` dropped at the end of this block, ending `forward`
+        let setup = async move { runner.run_group_setup(group, &out_tx).await };
+        let (ok, ()) = tokio::join!(setup, forward_output(&mut out_rx, tx));
+        ok
+    }
+
+    /// [`Self::run_after_setup`], cancellable with 's' (then reports
+    /// `Cancelled`); sends the result to `tx` as `done(result)`
     async fn run_cancellable(
         &self,
         check: &CheckToRun,
         command: &str,
+        setup: bool,
         tx: &mpsc::Sender<TaskEvent>,
-    ) -> CheckResult {
-        let run = self.run_streaming(check, command, tx);
-        run_check_cancellable(&self.cancels, check.id(), run).await
+        done: fn(CheckResult) -> TaskEvent,
+    ) {
+        let run = self.run_after_setup(check, command, setup, tx);
+        if let Some(result) = run_check_cancellable(&self.cancels, check.id(), run).await {
+            let _ = tx.send(done(result)).await;
+        }
     }
 
-    /// Re-detect changed files and matching checks. Blocking (git + file
-    /// system): call from `spawn_blocking`. `--files` lists are kept as-is
-    /// (no git base to diff against); only the checks are re-determined.
-    /// `--staged` re-reads the git index.
-    fn refresh(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
+    /// Checks `changed_files` selects (with `only`, just that one), with
+    /// fresh result cache keys. Blocking: keys read the files.
+    fn select(&self, changed_files: &ChangedFiles, only: Option<&str>) -> Selected {
+        let mut selected = select_checks(&self.config, changed_files, &self.exec_root, None);
+        selected
+            .checks
+            .retain(|c| only.is_none_or(|id| c.id() == id));
+        if let Some(root) = &self.key_root {
+            let checks = &mut selected.checks;
+            stamp_keys(checks, &self.config, changed_files, root, &self.exec_root);
+        }
+        selected
+    }
+
+    /// Re-detect changed files and matching checks ([`Self::select`]).
+    /// Blocking (git + file system): call from `spawn_blocking`.
+    /// `--files` lists are kept as-is (no git base to diff against); only
+    /// the checks are re-determined. `--staged` re-reads the git index.
+    fn refresh(
+        &self,
+        previous: ChangedFiles,
+        only: Option<&str>,
+    ) -> Result<(ChangedFiles, Selected)> {
         let changed_files = if previous.is_cli_files() {
             previous
         } else {
@@ -326,7 +391,7 @@ impl TaskCtx {
             changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
             changed
         };
-        let selected = select_checks(&self.config, &changed_files, &self.exec_root);
+        let selected = self.select(&changed_files, only);
         Ok((changed_files, selected))
     }
 
@@ -341,9 +406,13 @@ impl TaskCtx {
     }
 
     /// [`Self::refresh`] on the blocking pool
-    async fn refresh_async(&self, previous: ChangedFiles) -> Result<(ChangedFiles, Selected)> {
+    async fn refresh_async(
+        &self,
+        previous: ChangedFiles,
+        only: Option<String>,
+    ) -> Result<(ChangedFiles, Selected)> {
         let ctx = self.clone();
-        tokio::task::spawn_blocking(move || ctx.refresh(previous)).await?
+        tokio::task::spawn_blocking(move || ctx.refresh(previous, only.as_deref())).await?
     }
 }
 
@@ -399,43 +468,56 @@ impl Tasks {
         });
     }
 
-    /// Spawn a task running `command` as `check`, streaming its output,
-    /// cancellable with 's'; reports [`TaskEvent::RetryResult`].
-    fn spawn_check(&mut self, check: CheckToRun, command: String) {
+    /// Spawn a task running `command` as `check` (after its group's
+    /// pre-commands with `setup`), streaming its output, cancellable with
+    /// 's'; reports the result as `done(result)` (a failed setup as
+    /// [`TaskEvent::UnrecordedResult`]).
+    fn spawn_check(
+        &mut self,
+        check: CheckToRun,
+        command: String,
+        setup: bool,
+        done: fn(CheckResult) -> TaskEvent,
+    ) {
         self.spawn(|ctx, tx| async move {
-            let result = ctx.run_cancellable(&check, &command, &tx).await;
-            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+            ctx.run_cancellable(&check, &command, setup, &tx, done)
+                .await;
         });
     }
 }
 
-/// Retry `check` after a git refresh. `previous` is restored if the check
-/// no longer applies to the refreshed file list. Cancellable with 's' from
-/// the start (the check shows as running during the refresh too).
+/// Retry `check` after a git refresh (and its group's pre-commands with
+/// `setup`). `previous` is restored if the check no longer applies to the
+/// refreshed file list. Cancellable with 's' from the start (the check shows
+/// as running during the refresh too).
 async fn retry_with_refresh(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
     check: CheckToRun,
     previous: CheckResult,
     changed_files: ChangedFiles,
+    setup: bool,
 ) {
     let check_id = check.id().to_string();
-    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files);
-    // None: not applicable, already reported
+    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup);
+    // None: not applicable or failed setup, already reported
     if let Some(result) = run_check_cancellable(&ctx.cancels, &check_id, run).await {
         let _ = tx.send(TaskEvent::RetryResult(result)).await;
     }
 }
 
 /// Body of [`retry_with_refresh`]; `None` when the check no longer applies
+/// or its setup failed (see [`TaskCtx::run_after_setup`])
 async fn refresh_and_run(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
     check: CheckToRun,
     previous: CheckResult,
     changed_files: ChangedFiles,
+    setup: bool,
 ) -> Option<CheckResult> {
-    let check = match ctx.refresh_async(changed_files).await {
+    let only = Some(check.id().to_string());
+    let check = match ctx.refresh_async(changed_files, only).await {
         Ok((changed_files, selected)) => {
             let Some(new_check) = selected.checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
@@ -455,7 +537,8 @@ async fn refresh_and_run(
             check
         }
     };
-    Some(ctx.run_streaming(&check, &check.resolved_command, tx).await)
+    let command = &check.resolved_command;
+    ctx.run_after_setup(&check, command, setup, tx).await
 }
 
 /// Restore terminal to normal state (called on exit and panic)
@@ -659,11 +742,14 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
     app.reset_check_for_retry(check.id());
-    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files));
+    tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup));
     Action::Continue
 }
 
@@ -676,9 +762,12 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     };
     let check = check.clone();
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_check(check, command);
+    tasks.spawn_check(check, command, setup, TaskEvent::RetryResult);
     Action::Continue
 }
 
@@ -692,13 +781,31 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
     };
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
     app.reset_check_for_retry(check.id());
     app.set_status_message(
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_check(check, all_files_cmd);
+    tasks.spawn_check(check, all_files_cmd, setup, TaskEvent::UnrecordedResult);
     Action::Continue
+}
+
+/// Claim the group's pre-commands for a single run of `check`: `Some(true)`
+/// runs them first. `None` while the runner is due to run them or they are
+/// running (the footer says so): the check must not run before its setup.
+fn claim_setup(app: &mut App, check: &CheckToRun) -> Option<bool> {
+    match app.claim_group_setup(check.group(), check.id()) {
+        GroupSetup::Busy => {
+            let group = check.group();
+            let text = format!("Pre-commands of group `{group}` pending: try again once they ran");
+            app.set_status_message(StatusKind::info(), text);
+            None
+        }
+        setup => Some(setup == GroupSetup::Run),
+    }
 }
 
 /// Handle 's' key: cancel the selected running check. Its runner or retry
@@ -722,19 +829,19 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     let base_ref = previous.base_ref.clone();
     app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
-        let (changed_files, Selected { checks, warnings }) = match ctx.refresh_async(previous).await
-        {
-            Ok(refreshed) => refreshed,
-            // Git refresh failed - restart with no changed files
-            Err(_) => {
-                let changed_files = ChangedFiles {
-                    files: vec![],
-                    base_ref,
-                };
-                let selected = select_checks(&ctx.config, &changed_files, &ctx.exec_root);
-                (changed_files, selected)
-            }
-        };
+        let (changed_files, Selected { checks, warnings }) =
+            match ctx.refresh_async(previous, None).await {
+                Ok(refreshed) => refreshed,
+                // Git refresh failed - restart with no changed files
+                Err(_) => {
+                    let changed_files = ChangedFiles {
+                        files: vec![],
+                        base_ref,
+                    };
+                    let selected = ctx.select(&changed_files, None);
+                    (changed_files, selected)
+                }
+            };
         let _ = tx
             .send(TaskEvent::RetryAllReady {
                 changed_files,
@@ -957,7 +1064,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
             "Git refresh failed - retrying with previous file list",
         ),
         TaskEvent::Output(event) => app.handle_runner_event(event),
-        TaskEvent::RetryResult(result) => {
+        TaskEvent::RetryResult(result) | TaskEvent::UnrecordedResult(result) => {
             let check_id = result.check_id.clone();
             app.set_retry_result(result);
             app.finish_progress(&check_id);
@@ -975,6 +1082,82 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         }
     }
     Action::Continue
+}
+
+/// Records finished checks in the result cache on its own thread, in
+/// arrival order: file hashing and the write stay off the event loop.
+/// Dropping it waits until every queued result is recorded.
+struct Recorder {
+    /// Queue; `None` once dropped, ending the thread
+    tx: Option<std::sync::mpsc::Sender<(CheckToRun, CheckResult)>>,
+    thread: Option<thread::JoinHandle<()>>,
+    /// Write error (at most one: the cache is then off)
+    errors: std::sync::mpsc::Receiver<io::Error>,
+}
+
+impl Recorder {
+    fn start(mut cache: ResultCache) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(CheckToRun, CheckResult)>();
+        let (error_tx, errors) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            rx.into_iter()
+                .filter_map(|(check, result)| cache.record(&check, &result).err())
+                .for_each(|e| drop(error_tx.send(e)));
+        });
+        Self {
+            tx: Some(tx),
+            thread: Some(thread),
+            errors,
+        }
+    }
+
+    /// Queue the check result in `msg` (runner, retry or on-demand; not a
+    /// run-all-files one), with the check as `app` has it now. A write
+    /// error of an earlier result shows in the footer; it never stops the
+    /// run.
+    fn record(&self, app: &mut App, msg: &Message) {
+        if let Ok(e) = self.errors.try_recv() {
+            app.set_status_message(StatusKind::Error, format!("Result cache not saved: {e}"));
+        }
+        let (Message::RunnerEvent(RunnerEvent::CheckFinished { result })
+        | Message::Task(TaskEvent::RetryResult(result))) = msg
+        else {
+            return;
+        };
+        // Only status and `cached` count: leave the output behind
+        let result = CheckResult {
+            status: result.status.clone(),
+            cached: result.cached,
+            ..CheckResult::pending(&result.check_id)
+        };
+        let check = app.checks.iter().find(|c| c.id() == result.check_id);
+        if let (Some(tx), Some(check)) = (&self.tx, check) {
+            let _ = tx.send((check.clone(), result));
+        }
+    }
+
+    /// Stop queueing and wait until every queued result is recorded
+    fn flush(&mut self) {
+        self.tx = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+/// Show checks `cache` finds unchanged since their last pass as cached in
+/// `app`; returns the others, for the runner. Only the initial run uses
+/// this: retries and on-demand runs always execute.
+fn skip_cached(app: &mut App, cache: &ResultCache, checks: Vec<CheckToRun>) -> Vec<CheckToRun> {
+    let (cached, runnable) = cache.split_fresh(checks);
+    app.mark_cached(cached.iter().map(CheckToRun::id));
+    runnable
 }
 
 /// Handle a message from the event loop and update app state
@@ -1026,20 +1209,23 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
     }
 }
 
-/// TUI display options from the CLI. Color follows the process-wide
+/// TUI options from the CLI. Color follows the process-wide
 /// switch ([`crate::color::enabled`]) set from `--no-color` / `NO_COLOR`.
 pub struct TuiOptions {
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
     /// Start with the CPU/MEM stats panel shown (off with `--no-stats`)
     pub show_stats: bool,
+    /// Result cache: skips unchanged checks at start, records finished runs
+    pub cache: ResultCache,
 }
 
 impl TuiOptions {
-    pub fn new(filter_notice: Option<String>, show_stats: bool) -> Self {
+    pub fn new(filter_notice: Option<String>, show_stats: bool, cache: ResultCache) -> Self {
         Self {
             filter_notice,
             show_stats,
+            cache,
         }
     }
 }
@@ -1086,6 +1272,7 @@ pub async fn run(
     app.color = crate::color::enabled();
     app.view.stats_visible = options.show_stats;
     app.show_warnings(&startup_warnings);
+    let checks = skip_cached(&mut app, &options.cache, checks);
 
     // Start the runner in background ('s' cancels through `cancels`)
     let cancels = CancelRegistry::default();
@@ -1098,7 +1285,9 @@ pub async fn run(
         exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
         cancels: cancels.clone(),
+        key_root: options.cache.key_root().map(Arc::from),
     });
+    let recorder = Recorder::start(options.cache);
 
     // Start background stats worker - runs sysinfo queries without blocking UI
     let (stats_tx, mut stats_rx) = mpsc::channel::<SystemStats>(STATS_CHANNEL_CAPACITY);
@@ -1166,6 +1355,7 @@ pub async fn run(
         };
 
         // Handle the message and get the action
+        recorder.record(&mut app, &msg);
         match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
             Action::RestartRunner {
@@ -1297,6 +1487,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         })
     }
 
@@ -1341,6 +1532,7 @@ checks:
             files: crate::checks::CheckFiles::Files(vec!["src/Foo.php".to_string()]),
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
+            cache_key: None,
         }
     }
 
@@ -1448,7 +1640,7 @@ checks:
             base_ref: crate::git::STAGED_BASE_REF.to_string(),
         };
 
-        let (changed_files, _) = tasks.ctx.refresh(previous).unwrap();
+        let (changed_files, _) = tasks.ctx.refresh(previous, None).unwrap();
 
         assert_eq!(changed_files.files, vec!["Staged.php".to_string()]);
         assert!(changed_files.is_staged());
@@ -1769,13 +1961,10 @@ checks:
         let mut app = make_test_app(&config);
         let (mut tasks, _rx) = make_test_tasks(&config);
         let result = CheckResult {
-            check_id: "php-lint".to_string(),
             status: crate::runner::CheckStatus::Passed,
             output: "OK".to_string(),
-            error_output: String::new(),
             duration_ms: 42,
-            started_at: None,
-            finished_at: None,
+            ..CheckResult::pending("php-lint")
         };
 
         handle_message(
@@ -1788,6 +1977,256 @@ checks:
             app.results.get("php-lint").map(|r| r.status.clone()),
             Some(crate::runner::CheckStatus::Passed)
         );
+    }
+
+    /// Tempdir holding `src/Foo.php` (the test checks' file), with a result
+    /// cache file at `cache_file` in it
+    fn cache_in_tempdir(cache_file: &str) -> (tempfile::TempDir, ResultCache) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/Foo.php"), "<?php").unwrap();
+        let root = dir.path().to_path_buf();
+        let cache = ResultCache::at(dir.path().join(cache_file), root, true);
+        (dir, cache)
+    }
+
+    /// `make_test_check` keyed from the files under `root`
+    fn keyed_check(config: &CiConfig, id: &str, root: &Path) -> CheckToRun {
+        let mut check = make_test_check(id, "fast");
+        let changed = make_test_app(config).changed_files;
+        let checks = std::slice::from_mut(&mut check);
+        crate::cache::stamp_keys(checks, config, &changed, root, root);
+        assert!(check.cache_key.is_some());
+        check
+    }
+
+    fn with_status(id: &str, status: CheckStatus) -> CheckResult {
+        CheckResult {
+            status,
+            ..CheckResult::pending(id)
+        }
+    }
+
+    fn finished(id: &str, status: CheckStatus) -> Message {
+        let result = with_status(id, status);
+        Message::RunnerEvent(RunnerEvent::CheckFinished { result })
+    }
+
+    #[test]
+    fn test_skip_cached_marks_fresh_checks_and_runs_the_rest() {
+        let config = test_config();
+        let (dir, mut cache) = cache_in_tempdir("results.json");
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        let unit = keyed_check(&config, "phpunit", dir.path());
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
+        let pass = with_status("php-lint", CheckStatus::Passed);
+        cache.record(&lint, &pass).unwrap();
+
+        let runnable = skip_cached(&mut app, &cache, vec![lint, unit]);
+
+        let ids: Vec<&str> = runnable.iter().map(CheckToRun::id).collect();
+        assert_eq!(ids, ["phpunit"]);
+        assert!(app.results["php-lint"].cached);
+        assert!(!app.results["phpunit"].cached);
+    }
+
+    #[test]
+    fn test_recorder_records_runner_and_retry_results_not_all_files_runs() {
+        let config = test_config();
+        let (dir, cache) = cache_in_tempdir("results.json");
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        let unit = keyed_check(&config, "phpunit", dir.path());
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
+        let recorder = Recorder::start(cache);
+
+        recorder.record(&mut app, &finished("php-lint", CheckStatus::Passed));
+        recorder.record(&mut app, &finished("phpunit", CheckStatus::Passed));
+        let retry_failed = with_status("phpunit", CheckStatus::Failed);
+        recorder.record(
+            &mut app,
+            &Message::Task(TaskEvent::RetryResult(retry_failed)),
+        );
+        let all_files = with_status("phpunit", CheckStatus::Passed);
+        recorder.record(
+            &mut app,
+            &Message::Task(TaskEvent::UnrecordedResult(all_files)),
+        );
+        drop(recorder);
+
+        let root = dir.path().to_path_buf();
+        let reopened = ResultCache::at(dir.path().join("results.json"), root, true);
+        assert!(reopened.is_fresh(&lint), "runner pass recorded");
+        assert!(
+            !reopened.is_fresh(&unit),
+            "retry failure dropped it; the all-files pass is not stored"
+        );
+    }
+
+    #[test]
+    fn test_recorder_write_error_sets_status_message() {
+        let config = test_config();
+        let (dir, cache) = cache_in_tempdir("ci-tui/results.json");
+        std::fs::write(dir.path().join("ci-tui"), "").unwrap();
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        let mut app = make_test_app_with_checks(&config, vec![lint]);
+        let mut recorder = Recorder::start(cache);
+
+        recorder.record(&mut app, &finished("php-lint", CheckStatus::Passed));
+        // Wait for the write, then any message shows its error
+        recorder.flush();
+        recorder.record(&mut app, &Message::Task(TaskEvent::FixAllDone));
+
+        let message = app.view.status_message.as_ref().expect("status message");
+        assert!(message.text.contains("Result cache"), "{}", message.text);
+    }
+
+    /// Edge case: local-mode group `db` whose `seed` pre-command creates the
+    /// `seeded` file that check `lint` needs
+    fn setup_config() -> CiConfig {
+        setup_config_with("echo seeded > seeded")
+    }
+
+    /// [`setup_config`] with `seed` running `command`
+    fn setup_config_with(command: &str) -> CiConfig {
+        let yaml = r#"
+version: 2
+runner: local
+local: { shell: sh }
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns: {}
+checks:
+  db:
+    pre_commands:
+      - { name: seed, command: "SEED" }
+    checks:
+      lint: { name: Lint, command: "test -e seeded" }
+"#;
+        serde_yaml::from_str(&yaml.replace("SEED", command)).unwrap()
+    }
+
+    #[test]
+    fn test_group_setup_claimed_by_one_run_until_its_result() {
+        let config = setup_config();
+        let checks = vec![make_test_check("lint", "db"), make_test_check("unit", "db")];
+        let mut app = make_test_app_with_checks(&config, checks);
+        assert_eq!(
+            app.claim_group_setup("db", "lint"),
+            GroupSetup::Busy,
+            "pending checks: the runner runs the pre-commands"
+        );
+        app.mark_cached(["lint", "unit"]);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Skipped);
+        assert_eq!(app.claim_group_setup("db", "lint"), GroupSetup::Run);
+        assert_eq!(
+            app.claim_group_setup("db", "unit"),
+            GroupSetup::Busy,
+            "lint's run owns them"
+        );
+
+        // Cancelled mid-setup: claim and running row released
+        let (group, name) = ("db".to_string(), "seed".to_string());
+        let started = RunnerEvent::PreCommandStarted {
+            group: group.clone(),
+            name: name.clone(),
+        };
+        app.handle_runner_event(started);
+        app.set_retry_result(CheckResult::cancelled("lint", chrono::Local::now()));
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Skipped);
+        assert_eq!(app.run.current_pre_command, None);
+        assert_eq!(app.claim_group_setup("db", "unit"), GroupSetup::Run);
+
+        let finished = RunnerEvent::PreCommandFinished {
+            group,
+            name,
+            success: true,
+            output: String::new(),
+            duration_ms: 1,
+        };
+        app.handle_runner_event(finished);
+        app.set_retry_result(with_status("unit", CheckStatus::Passed));
+        assert_eq!(app.claim_group_setup("db", "lint"), GroupSetup::Ready);
+    }
+
+    /// 'r' on a cached check while the runner still owes its group's
+    /// pre-commands (a sibling is pending) does not start it
+    #[test]
+    fn test_retry_waits_for_group_setup_the_runner_owes() {
+        let config = setup_config();
+        let checks = vec![make_test_check("unit", "db"), make_test_check("lint", "db")];
+        let mut app = make_test_app_with_checks(&config, checks);
+        app.mark_cached(["lint"]);
+        app.select_last();
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_retry_selected(&mut app, &mut tasks);
+
+        let pre_command = &app.pre_commands[0];
+        assert_eq!(
+            pre_command.status,
+            app::PreCommandStatus::Pending,
+            "runner-owed"
+        );
+        assert!(app.results["lint"].cached, "not started");
+        assert!(tasks.set.is_empty());
+        let message = app.view.status_message.as_ref().expect("status message");
+        assert!(message.text.contains("pending"), "{}", message.text);
+    }
+
+    /// 'r' on the cached `lint` of [`setup_config_with`] `seed` (group setup
+    /// never ran), in a tempdir: the app after the task's final result, and
+    /// whether that result is one the result cache records
+    async fn retry_cached_lint(seed: &str) -> (App, bool) {
+        let config = setup_config_with(seed);
+        let dir = tempfile::tempdir().unwrap();
+        let mut check = make_test_check("lint", "db");
+        check.resolved_command = "test -e seeded".to_string();
+        let mut app = make_test_app_with_checks(&config, vec![check]);
+        app.mark_cached(["lint"]);
+        app.select_last();
+        let (mut tasks, mut rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(dir.path().to_path_buf()),
+            exec_root: Arc::new(dir.path().to_path_buf()),
+            config: Arc::new(config),
+            cancels: CancelRegistry::default(),
+            key_root: None,
+        });
+
+        handle_retry_selected(&mut app, &mut tasks);
+        loop {
+            let event = rx.recv().await.expect("task event");
+            let recorded = match &event {
+                TaskEvent::RetryResult(_) => Some(true),
+                TaskEvent::UnrecordedResult(_) => Some(false),
+                _ => None,
+            };
+            handle_task_event(&mut app, event);
+            if let Some(recorded) = recorded {
+                return (app, recorded);
+            }
+        }
+    }
+
+    /// 'r' on a cached check whose group was skipped runs the group's
+    /// pre-commands first
+    #[tokio::test]
+    async fn test_retry_runs_group_setup_that_never_ran() {
+        let (app, recorded) = retry_cached_lint("echo seeded > seeded").await;
+
+        assert!(recorded);
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Passed);
+    }
+
+    /// A failed group setup fails the check without it running: not
+    /// recorded, so its cached pass stays; the next run retries the setup
+    #[tokio::test]
+    async fn test_failed_group_setup_is_not_recorded() {
+        let (app, recorded) = retry_cached_lint("exit 1").await;
+
+        assert!(!recorded);
+        assert_eq!(app.results["lint"].status, CheckStatus::Failed);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Failed);
+        assert_eq!(app.group_setup("db"), GroupSetup::Run);
     }
 
     /// 't' runs through the task channel; output streams as
@@ -1808,6 +2247,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         });
 
         handle_trigger_on_demand(&mut app, &mut tasks);
@@ -1851,6 +2291,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
+            key_root: None,
         });
 
         handle_fix_selected(&mut app, &mut tasks);

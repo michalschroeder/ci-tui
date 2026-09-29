@@ -369,16 +369,38 @@ pub fn repo_root(cwd: &Path) -> Result<PathBuf> {
 
 /// Repo root using a custom executor (testable version). See [`repo_root`].
 pub(crate) fn repo_root_with_executor(cwd: &Path, executor: &impl GitExecutor) -> Result<PathBuf> {
-    let args = vec!["rev-parse".to_string(), "--show-toplevel".to_string()];
+    rev_parse_path(cwd, executor, "--show-toplevel", "git repository root")
+}
+
+/// Absolute git dir of the repo containing `cwd` (`.git`, or
+/// `.git/worktrees/<name>` in a linked worktree). Errors outside a repo.
+pub fn git_dir(cwd: &Path) -> Result<PathBuf> {
+    git_dir_with_executor(cwd, &RealGitExecutor)
+}
+
+/// Git dir using a custom executor (testable version). See [`git_dir`].
+pub(crate) fn git_dir_with_executor(cwd: &Path, executor: &impl GitExecutor) -> Result<PathBuf> {
+    rev_parse_path(cwd, executor, "--absolute-git-dir", "git dir")
+}
+
+/// Path printed by `git rev-parse <flag>` (trimmed, non-empty); `what` names
+/// it in errors
+fn rev_parse_path(
+    cwd: &Path,
+    executor: &impl GitExecutor,
+    flag: &str,
+    what: &str,
+) -> Result<PathBuf> {
+    let args = vec!["rev-parse".to_string(), flag.to_string()];
     let output = executor
         .run_command(cwd, &args)
-        .context("failed to resolve git repository root")?;
-    let root = output.trim();
+        .with_context(|| format!("failed to resolve {what}"))?;
+    let path = output.trim();
     anyhow::ensure!(
-        !root.is_empty(),
-        "failed to resolve git repository root: empty `git rev-parse --show-toplevel` output"
+        !path.is_empty(),
+        "failed to resolve {what}: empty `git rev-parse {flag}` output"
     );
-    Ok(PathBuf::from(root))
+    Ok(PathBuf::from(path))
 }
 
 /// Rewrite a cwd-relative path to repo-relative (`cwd.join(path)` stripped of
@@ -420,6 +442,25 @@ mod tests {
             .returning(|_, _| Ok("/home/u/repo\n".to_string()));
         let root = repo_root_with_executor(Path::new("/home/u/repo/src"), &mock).unwrap();
         assert_eq!(root, PathBuf::from("/home/u/repo"));
+    }
+
+    #[test]
+    fn git_dir_uses_absolute_git_dir() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args == ["rev-parse", "--absolute-git-dir"])
+            .times(1)
+            .returning(|_, _| Ok("/home/u/repo/.git/worktrees/wt\n".to_string()));
+        let dir = git_dir_with_executor(Path::new("/home/u/wt"), &mock).unwrap();
+        assert_eq!(dir, PathBuf::from("/home/u/repo/.git/worktrees/wt"));
+    }
+
+    #[test]
+    fn git_dir_err_on_empty_output() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .returning(|_, _| Ok("\n".to_string()));
+        assert!(git_dir_with_executor(Path::new("/tmp"), &mock).is_err());
     }
 
     #[test]

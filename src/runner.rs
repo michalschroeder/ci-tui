@@ -652,6 +652,9 @@ pub struct CheckResult {
     pub started_at: Option<DateTime<Local>>,
     /// When the check finished executing
     pub finished_at: Option<DateTime<Local>>,
+    /// Not executed: passed on an earlier run with identical inputs
+    /// (`status` is `Passed`), see [`crate::cache`]
+    pub cached: bool,
 }
 
 impl CheckResult {
@@ -665,19 +668,16 @@ impl CheckResult {
             duration_ms: 0,
             started_at: None,
             finished_at: None,
+            cached: false,
         }
     }
 
     /// Create a skipped check result (no matching files)
     pub fn skipped(check_id: &str) -> Self {
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::Skipped,
             output: "No changes detected".to_string(),
-            error_output: String::new(),
-            duration_ms: 0,
-            started_at: None,
-            finished_at: None,
+            ..Self::pending(check_id)
         }
     }
 
@@ -685,26 +685,33 @@ impl CheckResult {
     pub fn cancelled(check_id: &str, started_at: DateTime<Local>) -> Self {
         let finished_at = Local::now();
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::Cancelled,
             output: "cancelled by user".to_string(),
-            error_output: String::new(),
             duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
+            ..Self::pending(check_id)
+        }
+    }
+
+    /// Create a cached result: passed on an earlier run with identical
+    /// inputs, so not executed (see [`crate::cache`])
+    pub fn cached(check_id: &str) -> Self {
+        Self {
+            status: CheckStatus::Passed,
+            output: "Cached: inputs unchanged since the last passing run (press 'r' to re-run)"
+                .to_string(),
+            cached: true,
+            ..Self::pending(check_id)
         }
     }
 
     /// Create an on-demand check result (requires manual trigger)
     pub fn on_demand(check_id: &str) -> Self {
         Self {
-            check_id: check_id.to_string(),
             status: CheckStatus::OnDemand,
             output: "Press 't' to run this test".to_string(),
-            error_output: String::new(),
-            duration_ms: 0,
-            started_at: None,
-            finished_at: None,
+            ..Self::pending(check_id)
         }
     }
 }
@@ -813,18 +820,18 @@ pub struct CheckRunner {
 
 impl CheckRunner {
     /// Create a new check runner with the given configuration
-    pub fn new(config: CiConfig, project_root: &Path) -> Self {
+    pub fn new(config: impl Into<Arc<CiConfig>>, project_root: &Path) -> Self {
         Self::with_executor(config, project_root, Arc::new(RealCommandExecutor))
     }
 
     /// Create a new check runner with a custom executor (for testing)
     pub fn with_executor(
-        config: CiConfig,
+        config: impl Into<Arc<CiConfig>>,
         project_root: &Path,
         executor: Arc<dyn CommandExecutor>,
     ) -> Self {
         Self {
-            config: Arc::new(config),
+            config: config.into(),
             project_root: Arc::from(project_root),
             executor,
             cancels: CancelRegistry::default(),
@@ -856,6 +863,13 @@ impl CheckRunner {
         run_check_groups(self, grouped, &event_tx).await
     }
 
+    /// Run `group`'s pre-commands, sending their events to `event_tx`; false
+    /// when one fails. For a single check run whose group setup never ran.
+    pub async fn run_group_setup(&self, group: &str, event_tx: &mpsc::Sender<RunnerEvent>) -> bool {
+        let pre_commands = self.config.pre_commands(group);
+        run_all_pre_commands(self, group, pre_commands, event_tx).await
+    }
+
     /// Execute a single group: run pre-commands, then checks (parallel or sequential)
     /// Returns Ok(true) to continue, Ok(false) to stop execution
     async fn execute_group(
@@ -868,9 +882,7 @@ impl CheckRunner {
 
         let has_runnable = group_checks.iter().any(|c| !c.is_on_demand());
         let pre_commands = if has_runnable {
-            group_config
-                .map(|g| g.pre_commands.as_slice())
-                .unwrap_or(&[])
+            self.config.pre_commands(group_name)
         } else {
             &[]
         };
@@ -1212,13 +1224,13 @@ pub async fn execute_command_with_executor(
     };
 
     CheckResult {
-        check_id,
         status,
         output: truncate_output(stdout, max_output_lines),
         error_output: truncate_output(filter_docker_warnings(&stderr), max_output_lines),
         duration_ms,
         started_at: Some(started_at),
         finished_at: Some(finished_at),
+        ..CheckResult::pending(&check_id)
     }
 }
 

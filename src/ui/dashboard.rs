@@ -522,6 +522,7 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
         PreCommandStatus::Running => ("⚡", Style::default().fg(Color::Yellow)),
         PreCommandStatus::Passed => ("✓", Style::default().fg(Color::Green)),
         PreCommandStatus::Failed => ("✗", Style::default().fg(Color::Red)),
+        PreCommandStatus::Skipped => ("⊘", Style::default().fg(Color::DarkGray)),
     };
 
     let duration = if pre_cmd.duration_ms > 0 {
@@ -559,9 +560,12 @@ fn render_check_item(
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
 
+    // Cached passes did not run: "cached" instead of a duration
     let duration = result
         .map(|r| {
-            if r.duration_ms > 0 {
+            if r.cached {
+                " cached".to_string()
+            } else if r.duration_ms > 0 {
                 format!(" {}", time::format(r.duration_ms))
             } else {
                 String::new()
@@ -1718,6 +1722,7 @@ fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
         super::app::PreCommandStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
         super::app::PreCommandStatus::Running => "\x1b[33m⚡ RUNNING...\x1b[0m",
         super::app::PreCommandStatus::Pending => "\x1b[90m◦ PENDING\x1b[0m",
+        super::app::PreCommandStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
     };
     raw_output.push_str(status_line);
 
@@ -1735,6 +1740,10 @@ fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
         raw_output.push_str(&pre_cmd.output);
     } else if pre_cmd.status == super::app::PreCommandStatus::Pending {
         raw_output.push_str("\x1b[90mWaiting to run...\x1b[0m");
+    } else if pre_cmd.status == super::app::PreCommandStatus::Skipped {
+        raw_output.push_str(
+            "\x1b[90mNot run: no check of this group runs. Re-running one of them runs it first.\x1b[0m",
+        );
     }
 
     raw_output

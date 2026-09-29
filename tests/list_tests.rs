@@ -3,7 +3,7 @@
 
 use ci_tui::config::CheckTriggers;
 use ci_tui::git::{ChangedFiles, CLI_FILES_BASE_REF, STAGED_BASE_REF};
-use ci_tui::list::{explain_checks, render, CheckExplanation, Decision};
+use ci_tui::list::{explain_checks, mark_cached, render, CheckExplanation, Decision};
 use std::path::Path;
 
 mod common;
@@ -119,7 +119,7 @@ fn empty_triggers_block_is_listed_as_excluded() {
     let out = render(&config, &cf, None, &explained);
     assert!(out.contains("excluded   never  Never\n"), "{out}");
     assert!(
-        out.contains("0 run, 0 on-demand, 0 skipped (nothing executed)"),
+        out.contains("0 run, 0 cached, 0 on-demand, 0 skipped (nothing executed)"),
         "{out}"
     );
 }
@@ -260,7 +260,26 @@ fn render_lists_changed_files_and_checks_by_group() {
     );
     assert!(out.contains("skipped    phpunit  PHPUnit\n"), "{out}");
     assert!(
-        out.contains("4 run, 0 on-demand, 1 skipped (nothing executed)"),
+        out.contains("4 run, 0 cached, 0 on-demand, 1 skipped (nothing executed)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn render_marks_fresh_run_checks_cached() {
+    let config = checks_test_config();
+    let cf = changed(&["src/A.php", "x.yaml"], "origin/development");
+    let mut explained = explain_checks(&config, &cf, Path::new("."));
+    // phpunit is skipped: only `Run` checks can be cached
+    mark_cached(&mut explained, &["php-lint", "phpunit"]);
+    let out = render(&config, &cf, None, &explained);
+    assert!(
+        out.contains("cached     php-lint  PHP syntax check\n"),
+        "{out}"
+    );
+    assert!(out.contains("skipped    phpunit  PHPUnit\n"), "{out}");
+    assert!(
+        out.contains("3 run, 1 cached, 0 on-demand, 1 skipped (nothing executed)"),
         "{out}"
     );
 }

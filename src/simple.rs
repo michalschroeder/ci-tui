@@ -14,6 +14,7 @@
 //! - `0`: All checks passed
 //! - `1`: One or more checks failed
 
+use crate::cache::ResultCache;
 use crate::checks::{group_checks, CheckToRun};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
@@ -72,7 +73,9 @@ pub async fn run_with_executor(
 /// Run checks in simple console mode (no TUI).
 ///
 /// Prints results directly to stdout with colored output. Exits with code 1
-/// if any check fails.
+/// if any check fails. Checks `cache` finds unchanged since their last pass
+/// print as cached (counted as passed) and do not run; finished runs are
+/// recorded in it.
 ///
 /// # Errors
 ///
@@ -82,6 +85,7 @@ pub async fn run(
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
+    mut cache: ResultCache,
 ) -> Result<()> {
     let start_time = Instant::now();
     let target = &config.runner;
@@ -114,7 +118,11 @@ pub async fn run(
 
         let parallel = group.is_some_and(|g| g.parallel);
 
-        let results = if parallel {
+        // Unchanged since their last pass: listed first as cached, not run
+        let (cached, group_checks) = cache.split_fresh(group_checks);
+        let mut results: Vec<CheckResult> =
+            cached.iter().map(|c| CheckResult::cached(c.id())).collect();
+        results.extend(if parallel {
             run_parallel(
                 group_checks,
                 &project_root,
@@ -133,10 +141,13 @@ pub async fn run(
                 max_output_lines,
             )
             .await
-        };
+        });
 
         for result in results {
             print_result(&result);
+            cache
+                .record_for(&checks, &result)
+                .unwrap_or_else(|e| eprintln!("Warning: result cache not saved: {e}"));
             has_failures |= result.status.is_failure();
             all_results.push(result);
         }
@@ -194,7 +205,8 @@ pub fn print_result(result: &CheckResult) {
 }
 
 /// One colored status line for a check result:
-/// - Passed: green checkmark with duration
+/// - Passed: green checkmark with duration ("cached" instead when served
+///   from the result cache)
 /// - Failed: red X with duration
 /// - TimedOut: magenta hourglass, "timed out" and duration
 /// - Cancelled: gray crossed circle, "cancelled" and duration
@@ -208,6 +220,9 @@ pub fn format_result(result: &CheckResult) -> String {
     let duration = time::format(result.duration_ms);
 
     match result.status {
+        CheckStatus::Passed if result.cached => {
+            format!("  \x1b[32m✓\x1b[0m {id} \x1b[90mcached\x1b[0m")
+        }
         CheckStatus::Passed => format!("  \x1b[32m✓\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
         CheckStatus::Failed => format!("  \x1b[31m✗\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
         CheckStatus::TimedOut => {
@@ -372,6 +387,7 @@ mod tests {
             files: CheckFiles::Files(vec![]),
             resolved_command: command.into(),
             resolved_fix_command: None,
+            cache_key: None,
         }
     }
 
@@ -396,6 +412,12 @@ mod tests {
             assert!(!plain.contains("\x1b["), "got: {plain:?}");
         }
         assert!(crate::color::paint(&lines[1], false).contains("error: boom"));
+    }
+
+    #[test]
+    fn test_cached_result_line() {
+        let line = format_result(&CheckResult::cached("c"));
+        assert_eq!(crate::color::paint(&line, false), "  ✓ c cached");
     }
 
     #[tokio::test]

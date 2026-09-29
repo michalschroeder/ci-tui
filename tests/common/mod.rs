@@ -27,6 +27,18 @@ pub fn isolated_git_command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Assert the process exit code, showing stdout / stderr on mismatch.
+#[allow(dead_code)]
+pub fn assert_code(out: &std::process::Output, code: i32) {
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Run the ci-tui binary in `dir` with [`OUTER_GIT_ENV`] cleared and git
 /// discovery capped at `dir`, so a run never resolves to an enclosing repo
 /// (e.g. local mode's repo root when the tempdir sits in a work tree).
@@ -167,6 +179,7 @@ pub fn make_check_with_options(
         } else {
             None
         },
+        cache_key: None,
     }
 }
 
@@ -224,6 +237,7 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,
+        cache_key: None,
     }
 }
 

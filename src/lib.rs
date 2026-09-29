@@ -5,6 +5,7 @@
 //!
 //! # Modules
 //!
+//! - `cache`: Result cache skipping checks unchanged since their last passing run
 //! - `checks`: Logic for determining which checks to run
 //! - `cli`: Command-line argument parsing
 //! - `commands`: `init` / `validate` subcommands (scaffold and check config)
@@ -22,6 +23,7 @@
 //! - `test_discovery`: Finding related test files for source changes
 //! - `ui`: Terminal UI using ratatui
 
+pub mod cache;
 pub mod checks;
 pub mod cli;
 pub mod color;
