@@ -32,6 +32,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::VecDeque;
+use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
@@ -557,27 +558,42 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
     ]))
 }
 
+/// Duration span beside a check name: final `duration_ms` once finished,
+/// " cached" for cached passes, live elapsed since
+/// [`CheckResult::live_since`] while running, nothing before start
+fn check_duration_span(result: &CheckResult, now: Instant) -> Span<'static> {
+    let done_style = Style::default().fg(Color::DarkGray);
+    if result.cached {
+        return Span::styled(" cached", done_style);
+    }
+    if let Some(since) = result.live_since() {
+        // Dimmed running icon color: still ticking, not a final duration
+        let live_style = get_status_display(Some(&CheckStatus::Running))
+            .1
+            .add_modifier(Modifier::DIM);
+        let elapsed = time::format(now.saturating_duration_since(since).as_millis() as u64);
+        return Span::styled(format!(" {elapsed}"), live_style);
+    }
+    if result.duration_ms > 0 {
+        Span::styled(format!(" {}", time::format(result.duration_ms)), done_style)
+    } else {
+        Span::default()
+    }
+}
+
 /// Render a check as a list item
 fn render_check_item(
     app: &App,
     check: &crate::checks::CheckToRun,
     area: Rect,
     is_selected: bool,
+    now: Instant,
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
 
-    // Cached passes did not run: "cached" instead of a duration
     let duration = result
-        .map(|r| {
-            if r.cached {
-                " cached".to_string()
-            } else if r.duration_ms > 0 {
-                format!(" {}", time::format(r.duration_ms))
-            } else {
-                String::new()
-            }
-        })
+        .map(|r| check_duration_span(r, now))
         .unwrap_or_default();
 
     let is_on_demand = result
@@ -624,7 +640,7 @@ fn render_check_item(
         Span::styled(icon, final_icon_style),
         Span::raw(" "),
         Span::styled(name, name_style),
-        Span::styled(duration, Style::default().fg(Color::DarkGray)),
+        duration,
     ]))
 }
 
@@ -660,6 +676,8 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
 /// (group headers included), so row index == item index and the list and
 /// the selection can never disagree.
 fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
+    // One clock read per frame: all live timers agree
+    let now = Instant::now();
     app.selectable_items()
         .enumerate()
         .map(|(idx, item)| {
@@ -667,7 +685,9 @@ fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
             match item {
                 SelectableItem::Group(group) => group_header_item(app, group, is_selected),
                 SelectableItem::PreCommand(pc) => render_pre_command_item(pc, is_selected),
-                SelectableItem::Check(check) => render_check_item(app, check, area, is_selected),
+                SelectableItem::Check(check) => {
+                    render_check_item(app, check, area, is_selected, now)
+                }
             }
         })
         .collect()
@@ -2075,6 +2095,69 @@ mod tests {
         result.status = CheckStatus::Passed;
         result.output = "\x1b[32mok\x1b[0m line\n".repeat(2000);
         app
+    }
+
+    /// Result with `status`, started `ago` before a fixed `now`
+    fn timed_result(status: CheckStatus, ago_ms: u64) -> (CheckResult, Instant) {
+        let now = Instant::now();
+        let mut result = CheckResult::pending("php-lint");
+        result.status = status;
+        result.running_since = now.checked_sub(std::time::Duration::from_millis(ago_ms));
+        (result, now)
+    }
+
+    /// #141: running row shows live elapsed, same format as final durations,
+    /// dimmed apart from them
+    #[test]
+    fn test_check_duration_running_shows_live_elapsed() {
+        let (result, now) = timed_result(CheckStatus::Running, 5_300);
+
+        let span = check_duration_span(&result, now);
+
+        assert_eq!(span.content, " 5.3s");
+        assert_eq!(
+            span.style,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM)
+        );
+    }
+
+    /// Finished rows keep `duration_ms`, not elapsed since start
+    #[rstest::rstest]
+    #[case::passed(CheckStatus::Passed)]
+    #[case::failed(CheckStatus::Failed)]
+    #[case::timed_out(CheckStatus::TimedOut)]
+    #[case::cancelled(CheckStatus::Cancelled)]
+    fn test_check_duration_finished_shows_duration_ms(#[case] status: CheckStatus) {
+        let (mut result, now) = timed_result(status, 60_000);
+        result.duration_ms = 2_000;
+
+        let span = check_duration_span(&result, now);
+
+        assert_eq!(span.content, " 2.0s");
+        assert_eq!(span.style, Style::default().fg(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_check_duration_cached_pass() {
+        let (mut result, now) = timed_result(CheckStatus::Passed, 0);
+        result.cached = true;
+
+        assert_eq!(check_duration_span(&result, now).content, " cached");
+    }
+
+    /// Not-started rows show no time (no `running_since`, or queued)
+    #[rstest::rstest]
+    #[case::pending(CheckStatus::Pending)]
+    #[case::queued(CheckStatus::Queued)]
+    #[case::on_demand(CheckStatus::OnDemand)]
+    #[case::running_without_start(CheckStatus::Running)]
+    fn test_check_duration_not_started_is_empty(#[case] status: CheckStatus) {
+        let mut result = CheckResult::pending("php-lint");
+        result.status = status;
+
+        assert_eq!(check_duration_span(&result, Instant::now()).content, "");
     }
 
     /// App with one check matching `files`; `expanded` toggles `e` view

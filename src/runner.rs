@@ -652,6 +652,9 @@ pub struct CheckResult {
     pub started_at: Option<DateTime<Local>>,
     /// When the check finished executing
     pub finished_at: Option<DateTime<Local>>,
+    /// Monotonic execution start, set by the TUI on
+    /// [`RunnerEvent::CheckStarted`] (live timer, see [`Self::live_since`])
+    pub running_since: Option<std::time::Instant>,
     /// Not executed: passed on an earlier run with identical inputs
     /// (`status` is `Passed`), see [`crate::cache`]
     pub cached: bool,
@@ -668,6 +671,7 @@ impl CheckResult {
             duration_ms: 0,
             started_at: None,
             finished_at: None,
+            running_since: None,
             cached: false,
         }
     }
@@ -681,17 +685,21 @@ impl CheckResult {
         }
     }
 
-    /// Create a cancelled check result (killed by the user after `started_at`)
-    pub fn cancelled(check_id: &str, started_at: DateTime<Local>) -> Self {
-        let finished_at = Local::now();
+    /// Create a cancelled check result (killed by the user). Untimed: the
+    /// TUI times it from the live start, so queue / setup waits don't count
+    pub fn cancelled(check_id: &str) -> Self {
         Self {
             status: CheckStatus::Cancelled,
             output: "cancelled by user".to_string(),
-            duration_ms: (finished_at - started_at).num_milliseconds().max(0) as u64,
-            started_at: Some(started_at),
-            finished_at: Some(finished_at),
+            finished_at: Some(Local::now()),
             ..Self::pending(check_id)
         }
+    }
+
+    /// Monotonic start while running, else `None`
+    pub fn live_since(&self) -> Option<std::time::Instant> {
+        self.running_since
+            .filter(|_| self.status == CheckStatus::Running)
     }
 
     /// Create a cached result: passed on an earlier run with identical
@@ -759,12 +767,11 @@ pub async fn run_check_cancellable<T: From<CheckResult>>(
     check_id: &str,
     run: impl Future<Output = T>,
 ) -> T {
-    let started_at = Local::now();
     let cancelled = cancels.register(check_id);
     tokio::select! {
         output = run => output,
         // Err = replaced by a newer run of the same id: keep running
-        Ok(()) = cancelled => CheckResult::cancelled(check_id, started_at).into(),
+        Ok(()) = cancelled => CheckResult::cancelled(check_id).into(),
     }
 }
 
