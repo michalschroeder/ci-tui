@@ -36,6 +36,9 @@ checks: {}
 
 # Optional: default max runtime for every check / pre-command (see `timeout` below)
 # timeout: 15m
+
+# Optional: TUI bell + desktop notification when a run finishes (default false)
+# notify: true
 ```
 
 ## Runner Mode
@@ -639,6 +642,10 @@ Full TUI interface with:
 - Interactive output viewing
 - Hotkeys for filtering, retrying, cancelling (`s`), expanding output
 - Color-coded file display
+
+End-of-run notification: `notify: true` (top-level config key) or `--notify` rings the terminal bell and sends an OSC 9 desktop notification with the run summary (e.g. `ci-tui: ✗ 12/13 passed, 1 failed in 1m 5s`) when a full run finishes — the initial run, `R` and `a`; single-check reruns (`r`, `t`) and fixes don't notify. Terminals without OSC 9 support ignore it. Inside tmux or GNU screen the notification is sent through DCS passthrough (tmux needs `set -g allow-passthrough on`). It waits while `$PAGER` / `$EDITOR` is open, and while a single rerun, fix or `R` refresh started during the run is still going. Toggling `notify` doesn't invalidate cached results.
+
+`--exit-on-finish` quits the TUI when the run finishes (after the notification, if enabled) and exits `0` if all run checks passed, `1` if any check or group pre-command failed. Not with `--simple`, `--list` or `--fix`.
 
 ### Simple Mode
 

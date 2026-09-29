@@ -55,8 +55,11 @@ pub struct CiConfig {
     /// Cap on concurrent checks per `parallel: true` group (`--jobs` overrides
     /// in main). `None` = CPU count; see [`parallel_limit`].
     pub max_parallel: Option<NonZeroUsize>,
-    /// Hash of the config file text, set by [`load_config`] (0 otherwise); a
-    /// result cache key input, see [`crate::cache`]
+    /// TUI end-of-run bell + desktop notification (or `--notify`); see
+    /// [`crate::ui::notify`]
+    pub notify: bool,
+    /// Hash of the config file content, set by [`load_config`] (0 otherwise);
+    /// a result cache key input, see [`crate::cache`] and [`cache_text`]
     pub(crate) source_hash: u64,
     /// Compiled ignore patterns. Populated eagerly in `load_config`; lazy fallback for
     /// test-built/cloned configs panics on invalid patterns.
@@ -113,6 +116,10 @@ pub(crate) struct RawCiConfig {
     /// CPU count; `--jobs` overrides)
     #[serde(default)]
     max_parallel: Option<NonZeroUsize>,
+    /// TUI: ring the bell and send a desktop notification (OSC 9) when a full
+    /// run finishes (default false; `--notify` also enables it)
+    #[serde(default)]
+    notify: bool,
 }
 
 impl TryFrom<RawCiConfig> for CiConfig {
@@ -144,6 +151,7 @@ impl TryFrom<RawCiConfig> for CiConfig {
             ignore_patterns: raw.ignore_patterns,
             max_output_lines: raw.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_parallel: raw.max_parallel,
+            notify: raw.notify,
             source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -281,6 +289,7 @@ impl Clone for CiConfig {
             ignore_patterns: self.ignore_patterns.clone(),
             max_output_lines: self.max_output_lines,
             max_parallel: self.max_parallel,
+            notify: self.notify,
             source_hash: self.source_hash,
             // Reset caches on clone — repopulated via load_config or lazy fallback
             compiled_ignore_patterns: OnceLock::new(),
@@ -760,8 +769,21 @@ pub fn load_config(path: &Path) -> Result<CiConfig> {
         .validate_and_compile()
         .with_context(|| format!("Invalid config file: {}", path.display()))
         .map_err(ConfigError)?;
-    config.source_hash = crate::cache::hash_bytes(content.as_bytes());
+    config.source_hash = crate::cache::hash_bytes(cache_text(&content).as_bytes());
     Ok(config)
+}
+
+/// Config content the result cache key covers: the YAML re-serialized
+/// without the UI-only `notify` key (toggling it keeps cached passes;
+/// comments and formatting don't count either). Raw text if not a mapping.
+fn cache_text(content: &str) -> String {
+    match serde_yaml::from_str::<serde_yaml::Value>(content) {
+        Ok(serde_yaml::Value::Mapping(mut map)) => {
+            map.remove("notify");
+            serde_yaml::to_string(&map).unwrap_or_else(|_| content.to_string())
+        }
+        _ => content.to_string(),
+    }
 }
 
 impl CiConfig {
@@ -787,6 +809,7 @@ impl CiConfig {
             ignore_patterns,
             max_output_lines: DEFAULT_MAX_OUTPUT_LINES,
             max_parallel: None,
+            notify: false,
             source_hash: 0,
             compiled_ignore_patterns: OnceLock::new(),
             compiled_file_patterns: OnceLock::new(),
@@ -1161,6 +1184,7 @@ mod tests {
                 ignore_patterns: self.ignore_patterns,
                 max_output_lines: self.max_output_lines,
                 max_parallel: None,
+                notify: false,
                 source_hash: 0,
                 compiled_ignore_patterns: OnceLock::new(),
                 compiled_file_patterns: OnceLock::new(),
@@ -2863,6 +2887,32 @@ checks:
         fn custom_value_is_applied() {
             let config: CiConfig = serde_yaml::from_str(&yaml(Some(500))).unwrap();
             assert_eq!(config.max_output_lines, 500);
+        }
+    }
+
+    mod test_notify {
+        use super::*;
+
+        const YAML: &str = "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+
+        #[test]
+        fn off_when_omitted() {
+            let config: CiConfig = serde_yaml::from_str(YAML).unwrap();
+            assert!(!config.notify);
+        }
+
+        #[test]
+        fn on_when_set() {
+            let config: CiConfig = serde_yaml::from_str(&format!("{YAML}notify: true\n")).unwrap();
+            assert!(config.notify);
+        }
+
+        #[test]
+        fn not_in_cache_text() {
+            let with_notify = format!("{YAML}notify: true\n");
+            assert_eq!(cache_text(&with_notify), cache_text(YAML));
+            let jobs = format!("{YAML}max_parallel: 2\n");
+            assert_ne!(cache_text(&jobs), cache_text(YAML));
         }
     }
 

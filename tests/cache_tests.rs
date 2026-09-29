@@ -155,13 +155,16 @@ fn different_matched_files_rerun() {
     assert_eq!(runs(tmp.path(), "lint"), 2);
 }
 
-#[test]
-fn config_change_reruns() {
+#[rstest::rstest]
+#[case::setting("max_output_lines: 500\n", 2)]
+#[case::comment_only("# edited\n", 1)]
+#[case::ui_only_notify("notify: true\n", 1)]
+fn config_change_reruns_unless_irrelevant(#[case] added: &str, #[case] lint_runs: usize) {
     let tmp = project(CONFIG, true);
     run(tmp.path(), &[]);
-    write(tmp.path(), "ci-tui.yaml", &format!("{CONFIG}# edited\n"));
+    write(tmp.path(), "ci-tui.yaml", &format!("{CONFIG}{added}"));
     run(tmp.path(), &[]);
-    assert_eq!(runs(tmp.path(), "lint"), 2);
+    assert_eq!(runs(tmp.path(), "lint"), lint_runs);
 }
 
 #[test]

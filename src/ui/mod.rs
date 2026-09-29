@@ -18,10 +18,12 @@
 //! - [`app`]: Application state management
 //! - [`dashboard`]: Rendering logic using ratatui widgets
 //! - [`external`]: Output in `$PAGER` / `$EDITOR` (`o` / `O`) and log saving (`w`)
+//! - [`notify`]: End-of-run bell + desktop notification (`notify` / `--notify`)
 
 pub mod app;
 pub mod dashboard;
 pub mod external;
+pub mod notify;
 
 use crate::cache::{stamp_keys, ResultCache};
 use crate::checks::{select_checks, CheckToRun, Selected};
@@ -1218,16 +1220,77 @@ pub struct TuiOptions {
     pub show_stats: bool,
     /// Result cache: skips unchanged checks at start, records finished runs
     pub cache: ResultCache,
+    /// Bell + desktop notification when a full run finishes (config
+    /// `notify` or `--notify`)
+    pub notify: bool,
+    /// Quit when the run finishes (`--exit-on-finish`); exit code as for `q`
+    pub exit_on_finish: bool,
 }
 
 impl TuiOptions {
-    pub fn new(filter_notice: Option<String>, show_stats: bool, cache: ResultCache) -> Self {
+    /// From the CLI flags; `notify` also from config
+    pub fn new(
+        cli: &crate::cli::Cli,
+        config: &CiConfig,
+        filter_notice: Option<String>,
+        cache: ResultCache,
+    ) -> Self {
         Self {
             filter_notice,
-            show_stats,
+            show_stats: !cli.no_stats,
             cache,
+            notify: cli.notify || config.notify,
+            exit_on_finish: cli.exit_on_finish,
         }
     }
+}
+
+/// App state for the TUI on the current branch, with `options` applied
+fn new_app(
+    config: &CiConfig,
+    changed_files: ChangedFiles,
+    checks: &[CheckToRun],
+    project_root: &Path,
+    options: &TuiOptions,
+) -> App {
+    let branch_name = current_branch(project_root).unwrap_or_else(|_| "unknown".to_string());
+    let mut app = App::new(config.clone(), changed_files, checks.to_vec(), branch_name);
+    app.filter_notice = options.filter_notice.clone();
+    app.color = crate::color::enabled();
+    app.view.stats_visible = options.show_stats;
+    app
+}
+
+/// The run is over and nothing else changes its outcome: the runner sent
+/// `AllFinished` (full runs only: initial, 'R', 'a'; a restart resets it),
+/// no retry / on-demand run / fix / 'R' refresh is in flight ([`App::busy`])
+/// and no viewer owns the terminal
+fn run_settled(app: &App, viewer_open: bool) -> bool {
+    app.run.all_finished && !app.busy() && !viewer_open
+}
+
+/// Once per run, when it settled: the end-of-run notification to the TUI's
+/// terminal if `notify` is on (best effort)
+fn report_run_end(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    notify: bool,
+    viewer_open: bool,
+) {
+    if app.run.end_reported || !run_settled(app, viewer_open) {
+        return;
+    }
+    app.run.end_reported = true;
+    if notify {
+        let message = format!("ci-tui: {}", finished_text(app, &app.count_by_status()));
+        let _ = notify::emit(terminal.backend_mut(), &message);
+    }
+}
+
+/// `--exit-on-finish` quit due: the run settled (checked each loop turn, so
+/// it quits once a viewer exits or in-flight work ends)
+fn exit_due(app: &App, exit_on_finish: bool, viewer_open: bool) -> bool {
+    exit_on_finish && run_settled(app, viewer_open)
 }
 
 /// Run the TUI; returns the process exit code (1 if any check failed).
@@ -1263,14 +1326,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get current branch name
-    let branch_name = current_branch(&project_root).unwrap_or_else(|_| "unknown".to_string());
-
-    // Create app state
-    let mut app = App::new(config.clone(), changed_files, checks.clone(), branch_name);
-    app.filter_notice = options.filter_notice;
-    app.color = crate::color::enabled();
-    app.view.stats_visible = options.show_stats;
+    let mut app = new_app(&config, changed_files, &checks, &project_root, &options);
     app.show_warnings(&startup_warnings);
     let checks = skip_cached(&mut app, &options.cache, checks);
 
@@ -1288,6 +1344,7 @@ pub async fn run(
         key_root: options.cache.key_root().map(Arc::from),
     });
     let recorder = Recorder::start(options.cache);
+    let notify = options.notify;
 
     // Start background stats worker - runs sysinfo queries without blocking UI
     let (stats_tx, mut stats_rx) = mpsc::channel::<SystemStats>(STATS_CHANNEL_CAPACITY);
@@ -1308,7 +1365,9 @@ pub async fn run(
     // 2. Each channel becomes a select! branch - wakes on any event
     // 3. All state transitions go through handle_message with explicit Message enum
     // 4. Render only if state changed (dirty flag)
-    loop {
+    // Ends early with `--exit-on-finish` once the run finished (deferred
+    // while a viewer runs)
+    while !exit_due(&app, options.exit_on_finish, viewer_task.is_some()) {
         // Status message auto-dismiss deadline (disabled branch when None)
         let status_deadline = app.status_message_deadline();
 
@@ -1387,6 +1446,8 @@ pub async fn run(
             },
             Action::Continue => {}
         }
+        // Before the `--exit-on-finish` check in the loop condition
+        report_run_end(&mut terminal, &mut app, notify, viewer_task.is_some());
 
         // Render if state changed (not while a viewer owns the terminal)
         if app.needs_redraw && viewer_task.is_none() {
@@ -1419,16 +1480,21 @@ pub async fn run(
     Ok(app.exit_code())
 }
 
+/// Run outcome line: same wording as the finished dashboard header
+fn finished_text(app: &App, counts: &app::StatusCounts) -> String {
+    let elapsed = dashboard::format_elapsed(app.elapsed_time());
+    dashboard::finished_status_text(counts, &elapsed)
+}
+
 /// Print the final summary: same wording as the dashboard header, colored
-/// green (all passed), yellow (some cancelled) or red (any failed); plain
-/// with color off
+/// green (all passed), yellow (some cancelled / pending) or red (exit code
+/// 1: a check or group pre-command failed); plain with color off
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
-    let elapsed_str = dashboard::format_elapsed(app.elapsed_time());
-    let text = dashboard::finished_status_text(&counts, counts.completed(), &elapsed_str);
-    let color = if counts.failed > 0 {
+    let text = finished_text(app, &counts);
+    let color = if app.exit_code() != crate::exit::SUCCESS {
         31
-    } else if counts.cancelled > 0 {
+    } else if counts.cancelled > 0 || counts.pending > 0 {
         33
     } else {
         32
@@ -1953,6 +2019,122 @@ checks:
 
         assert!(matches!(action, Action::Continue));
         assert!(app.run.all_finished);
+    }
+
+    /// Feed `app` through `handle_message`: `check_id` finished with
+    /// `status` (if any), then the runner's AllFinished
+    fn finish_run(app: &mut App, config: &CiConfig, finished: Option<(&str, CheckStatus)>) {
+        let (mut tasks, _rx) = make_test_tasks(config);
+        if let Some((id, status)) = finished {
+            let result = CheckResult {
+                status,
+                ..CheckResult::pending(id)
+            };
+            let msg = Message::RunnerEvent(RunnerEvent::CheckFinished { result });
+            handle_message(app, msg, &mut tasks);
+        }
+        let msg = Message::RunnerEvent(RunnerEvent::AllFinished);
+        handle_message(app, msg, &mut tasks);
+    }
+
+    #[rstest::rstest]
+    #[case::passed(CheckStatus::Passed, crate::exit::SUCCESS)]
+    #[case::failed(CheckStatus::Failed, crate::exit::CHECKS_FAILED)]
+    #[case::timed_out(CheckStatus::TimedOut, crate::exit::CHECKS_FAILED)]
+    fn test_exit_on_finish_exit_code(#[case] status: CheckStatus, #[case] code: i32) {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        finish_run(&mut app, &config, Some(("php-lint", status)));
+        assert!(exit_due(&app, true, false));
+        assert_eq!(app.exit_code(), code);
+    }
+
+    #[test]
+    fn test_exit_on_finish_ignores_skipped_and_on_demand() {
+        let config = test_config();
+        let mut on_demand = make_test_check("behat", "fast");
+        on_demand.files = crate::checks::CheckFiles::OnDemand;
+        let mut skipped = make_test_check("phpcs", "fast");
+        skipped.files = crate::checks::CheckFiles::SkippedNoMatch;
+        let mut app = make_test_app_with_checks(&config, vec![on_demand, skipped]);
+        finish_run(&mut app, &config, None);
+        assert!(exit_due(&app, true, false));
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    #[test]
+    fn test_exit_on_finish_fails_when_group_setup_failed() {
+        // A failed group pre-command stops the run: its checks never run
+        let config = setup_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("lint", "db")]);
+        app.handle_runner_event(RunnerEvent::PreCommandFinished {
+            group: "db".to_string(),
+            name: "seed".to_string(),
+            success: false,
+            output: String::new(),
+            duration_ms: 1,
+        });
+        finish_run(&mut app, &config, None);
+        assert!(exit_due(&app, true, false));
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(
+            text.starts_with("0/1 passed, 0 failed, 1 pending in "),
+            "{text}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::finished(true, true, false, true)]
+    #[case::flag_off(true, false, false, false)]
+    #[case::viewer_open(true, true, true, false)]
+    #[case::not_finished(false, true, false, false)]
+    fn test_exit_due(
+        #[case] all_finished: bool,
+        #[case] exit_on_finish: bool,
+        #[case] viewer_open: bool,
+        #[case] expected: bool,
+    ) {
+        let mut app = make_test_app(&test_config());
+        app.run.all_finished = all_finished;
+        assert_eq!(exit_due(&app, exit_on_finish, viewer_open), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::retry_running(CheckStatus::Running)]
+    #[case::waiting_for_setup(CheckStatus::Queued)]
+    fn test_exit_due_waits_for_single_run(#[case] status: CheckStatus) {
+        let config = test_config();
+        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
+        finish_run(&mut app, &config, Some(("php-lint", CheckStatus::Failed)));
+        app.results.get_mut("php-lint").unwrap().status = status;
+        assert!(!exit_due(&app, true, false));
+    }
+
+    #[test]
+    fn test_exit_due_waits_for_fix_and_refresh() {
+        let mut app = make_test_app(&test_config());
+        app.run.all_finished = true;
+        app.fix.running = true;
+        assert!(!exit_due(&app, true, false), "fix in flight");
+        app.fix.running = false;
+        app.run.refresh_pending = true;
+        assert!(!exit_due(&app, true, false), "'R' refresh replaces the run");
+    }
+
+    #[test]
+    fn test_finished_text_total_excludes_skipped_and_on_demand() {
+        let config = test_config();
+        let mut on_demand = make_test_check("behat", "fast");
+        on_demand.files = crate::checks::CheckFiles::OnDemand;
+        let mut skipped = make_test_check("phpcs", "fast");
+        skipped.files = crate::checks::CheckFiles::SkippedNoMatch;
+        let checks = vec![make_test_check("php-lint", "fast"), on_demand, skipped];
+        let mut app = make_test_app_with_checks(&config, checks);
+        finish_run(&mut app, &config, Some(("php-lint", CheckStatus::Passed)));
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(text.starts_with("✓ All 1 checks passed in "), "{text}");
+        assert!(text.ends_with(" +1 on-demand"), "{text}");
     }
 
     #[test]

@@ -61,6 +61,11 @@
       "default": null,
       "minimum": 1
     },
+    "notify": {
+      "description": "TUI: ring the bell and send a desktop notification (OSC 9) when a full\nrun finishes (default false; `--notify` also enables it)",
+      "type": "boolean",
+      "default": false
+    },
     "runner": {
       "description": "Where checks run: `docker` (default) or `local` (on the host)",
       "$ref": "#/$defs/RunnerMode"
