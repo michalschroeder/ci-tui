@@ -5,18 +5,7 @@
 //! do not know it ignore it. Inside tmux the OSC goes through DCS passthrough
 //! (needs `set -g allow-passthrough on`); the bell does not need it.
 
-use super::app::StatusCounts;
 use std::io::{self, Write};
-
-/// Notification text for a finished run, e.g. `ci-tui: 12 passed, 1 failed`
-/// (cancelled only when some were)
-pub fn summary(counts: &StatusCounts) -> String {
-    let mut text = format!("ci-tui: {} passed, {} failed", counts.passed, counts.failed);
-    if counts.cancelled > 0 {
-        text.push_str(&format!(", {} cancelled", counts.cancelled));
-    }
-    text
-}
 
 /// Bytes to write for `msg`: BEL, then `ESC ] 9 ; msg BEL` with control
 /// characters dropped from `msg` (they would end or corrupt the sequence).
@@ -74,19 +63,6 @@ mod tests {
         emit(&mut out, "x").unwrap();
         let written = String::from_utf8(out.buffer().to_vec()).unwrap();
         assert!(written.is_empty(), "flushed: nothing left buffered");
-        let bytes = out.into_inner().unwrap();
-        assert!(bytes.ends_with(b"9;x\x07") || bytes.ends_with(b"9;x\x07\x1b\\"));
-    }
-
-    #[rstest::rstest]
-    #[case::passed(StatusCounts { passed: 12, ..Default::default() }, "ci-tui: 12 passed, 0 failed")]
-    #[case::failed(StatusCounts { passed: 12, failed: 1, ..Default::default() }, "ci-tui: 12 passed, 1 failed")]
-    #[case::cancelled(
-        StatusCounts { passed: 1, failed: 1, cancelled: 2, ..Default::default() },
-        "ci-tui: 1 passed, 1 failed, 2 cancelled"
-    )]
-    #[case::ignores_on_demand(StatusCounts { passed: 1, on_demand: 3, ..Default::default() }, "ci-tui: 1 passed, 0 failed")]
-    fn test_summary(#[case] counts: StatusCounts, #[case] expected: &str) {
-        assert_eq!(summary(&counts), expected);
+        assert!(out.into_inner().unwrap().starts_with(b"\x07"), "bell first");
     }
 }

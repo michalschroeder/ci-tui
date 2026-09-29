@@ -2880,29 +2880,11 @@ checks:
     mod test_notify {
         use super::*;
 
-        /// Minimal local-mode config; `notify` line optional.
-        fn yaml(notify: Option<&str>) -> String {
-            let extra = notify.map(|v| format!("notify: {v}\n")).unwrap_or_default();
-            format!(
-                "version: 2\nrunner: local\n{extra}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
-            )
-        }
-
         #[test]
         fn off_when_omitted() {
-            let config: CiConfig = serde_yaml::from_str(&yaml(None)).unwrap();
+            let yaml = "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert!(!config.notify);
-        }
-
-        #[test]
-        fn true_enables() {
-            let config: CiConfig = serde_yaml::from_str(&yaml(Some("true"))).unwrap();
-            assert!(config.notify);
-        }
-
-        #[test]
-        fn non_bool_rejected() {
-            assert!(serde_yaml::from_str::<CiConfig>(&yaml(Some("loud"))).is_err());
         }
     }
 

@@ -399,11 +399,6 @@ pub struct App {
     pub filter_notice: Option<String>,
     /// Render colors; off with `--no-color` / `NO_COLOR` (text modifiers stay)
     pub color: bool,
-    /// `--exit-on-finish`: quit when the run finishes (see [`App::exit_code`])
-    pub exit_on_finish: bool,
-    /// End-of-run notification text (config `notify`) not yet sent; the
-    /// main loop takes it ([`App::take_notification`])
-    notification: Option<String>,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -493,8 +488,6 @@ impl App {
             current_branch,
             filter_notice: None,
             color: true,
-            exit_on_finish: false,
-            notification: None,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),
@@ -980,20 +973,10 @@ impl App {
                 self.run.current_group = None;
                 self.run.finished_at = Some(Instant::now());
                 self.auto_select_first_failed();
-                self.queue_notification();
             }
         }
         self.needs_redraw |= redraw;
         self.clamp_selection();
-    }
-
-    /// Queue the end-of-run notification if config `notify` is on. Only the
-    /// runner sends [`RunnerEvent::AllFinished`] (full runs): single runs
-    /// never notify.
-    fn queue_notification(&mut self) {
-        if self.config.notify {
-            self.notification = Some(super::notify::summary(&self.count_by_status()));
-        }
     }
 
     fn on_check_queued(&mut self, check_id: &str) {
@@ -1457,12 +1440,6 @@ impl App {
         } else {
             crate::exit::SUCCESS
         }
-    }
-
-    /// Take the end-of-run notification queued by the last
-    /// [`RunnerEvent::AllFinished`] (`None` if `notify` is off or already taken)
-    pub fn take_notification(&mut self) -> Option<String> {
-        self.notification.take()
     }
 
     /// Groups that have checks, in config (YAML) order
@@ -2190,30 +2167,6 @@ checks:
 
         assert!(app.run.all_finished);
         assert!(app.run.finished_at.is_some());
-    }
-
-    #[test]
-    fn test_all_finished_no_notification_when_disabled() {
-        let mut app = make_app();
-        finish(&mut app, "php-lint", CheckStatus::Passed, "");
-        app.handle_runner_event(RunnerEvent::AllFinished);
-        assert_eq!(app.take_notification(), None, "notify is off by default");
-    }
-
-    #[test]
-    fn test_all_finished_queues_notification_once_when_enabled() {
-        let mut app = make_app();
-        app.config.notify = true;
-        finish(&mut app, "php-lint", CheckStatus::Passed, "");
-        finish(&mut app, "phpunit", CheckStatus::Failed, "");
-        assert_eq!(app.take_notification(), None, "not before the run ends");
-
-        app.handle_runner_event(RunnerEvent::AllFinished);
-
-        // On-demand behat did not run: not counted
-        let message = app.take_notification();
-        assert_eq!(message.as_deref(), Some("ci-tui: 1 passed, 1 failed"));
-        assert_eq!(app.take_notification(), None, "emitted once");
     }
 
     /// Feed a finished result for `id` with `status` and stdout `output`

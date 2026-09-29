@@ -643,7 +643,7 @@ Full TUI interface with:
 - Hotkeys for filtering, retrying, cancelling (`s`), expanding output
 - Color-coded file display
 
-End-of-run notification: `notify: true` (top-level config key) or `--notify` rings the terminal bell and sends an OSC 9 desktop notification (`ci-tui: 12 passed, 1 failed`) when a full run finishes — the initial run, `R` and `a`; single-check reruns (`r`, `t`) and fixes don't notify. Terminals without OSC 9 support ignore it. Inside tmux the notification is sent through DCS passthrough, which needs `set -g allow-passthrough on`.
+End-of-run notification: `notify: true` (top-level config key) or `--notify` rings the terminal bell and sends an OSC 9 desktop notification with the run summary (e.g. `ci-tui: ✗ 12/13 passed, 1 failed in 1m 5s`) when a full run finishes — the initial run, `R` and `a`; single-check reruns (`r`, `t`) and fixes don't notify. Terminals without OSC 9 support ignore it. Inside tmux the notification is sent through DCS passthrough, which needs `set -g allow-passthrough on`.
 
 `--exit-on-finish` quits the TUI when the run finishes (after the notification, if enabled) and exits `0` if all run checks passed, `1` if any failed. Not with `--simple`, `--list` or `--fix`.
 

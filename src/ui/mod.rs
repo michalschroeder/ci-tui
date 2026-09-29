@@ -86,8 +86,6 @@ enum Message {
     KeyPress(KeyEvent),
     /// Terminal resized - redraw with the new layout
     Resize,
-    /// `$PAGER` / `$EDITOR` exited and the TUI is back
-    ViewerClosed,
     Mouse(MouseEvent),
     RunnerEvent(RunnerEvent),
     SystemStats(SystemStats),
@@ -1196,24 +1194,9 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             app.needs_redraw = true;
             Action::Continue
         }
-        // Repaint as after a resize (the terminal may have been resized
-        // meanwhile); quit if `--exit-on-finish` was deferred for the viewer
-        Message::ViewerClosed => {
-            app.needs_redraw = true;
-            match app.exit_on_finish && app.run.all_finished {
-                true => Action::Quit,
-                false => Action::Continue,
-            }
-        }
         Message::Mouse(mouse) => handle_mouse_event(app, mouse),
         Message::RunnerEvent(event) => {
-            let finished = matches!(event, RunnerEvent::AllFinished);
             app.handle_runner_event(event);
-            // `--exit-on-finish`: only the runner sends AllFinished, so this
-            // is the first full run (initial or restarted by 'R' / 'a')
-            if finished && app.exit_on_finish {
-                return Action::Quit;
-            }
             Action::Continue
         }
         Message::SystemStats(stats) => {
@@ -1258,30 +1241,42 @@ impl TuiOptions {
 }
 
 /// App state for the TUI on the current branch, with `options` applied
-/// (takes its filter notice)
 fn new_app(
     config: &CiConfig,
     changed_files: ChangedFiles,
     checks: &[CheckToRun],
     project_root: &Path,
-    options: &mut TuiOptions,
+    options: &TuiOptions,
 ) -> App {
     let branch_name = current_branch(project_root).unwrap_or_else(|_| "unknown".to_string());
     let mut app = App::new(config.clone(), changed_files, checks.to_vec(), branch_name);
-    app.filter_notice = options.filter_notice.take();
+    app.filter_notice = options.filter_notice.clone();
     app.color = crate::color::enabled();
     app.view.stats_visible = options.show_stats;
-    app.exit_on_finish = options.exit_on_finish;
     app
 }
 
-/// Send the end-of-run notification `app` queued (config `notify`) to the
-/// TUI's terminal. Best effort; also while a viewer runs (BEL / OSC print
-/// nothing).
-fn send_notification(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
-    if let Some(message) = app.take_notification() {
+/// End-of-run notification to the TUI's terminal when config `notify` is on
+/// and the message just handled was the runner's `AllFinished` (full runs
+/// only; single runs never send it). Best effort; also while a viewer runs
+/// (BEL / OSC print nothing).
+fn notify_run_end(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &App,
+    run_finished: bool,
+) {
+    if run_finished && app.config.notify {
+        let message = format!("ci-tui: {}", finished_text(app, &app.count_by_status()));
         let _ = notify::emit(terminal.backend_mut(), &message);
     }
+}
+
+/// `--exit-on-finish` quit due: the run finished and no viewer owns the
+/// terminal (checked each loop turn, so it quits once the viewer exits).
+/// Only the runner finishes a run (initial, 'R', 'a'); a restart resets
+/// `run.all_finished`.
+fn exit_due(app: &App, exit_on_finish: bool, viewer_open: bool) -> bool {
+    exit_on_finish && app.run.all_finished && !viewer_open
 }
 
 /// Run the TUI; returns the process exit code (1 if any check failed).
@@ -1298,7 +1293,7 @@ pub async fn run(
     project_root: PathBuf,
     exec_root: PathBuf,
     startup_warnings: Vec<String>,
-    mut options: TuiOptions,
+    options: TuiOptions,
 ) -> Result<i32> {
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -1317,7 +1312,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = new_app(&config, changed_files, &checks, &project_root, &mut options);
+    let mut app = new_app(&config, changed_files, &checks, &project_root, &options);
     app.show_warnings(&startup_warnings);
     let checks = skip_cached(&mut app, &options.cache, checks);
 
@@ -1355,7 +1350,9 @@ pub async fn run(
     // 2. Each channel becomes a select! branch - wakes on any event
     // 3. All state transitions go through handle_message with explicit Message enum
     // 4. Render only if state changed (dirty flag)
-    loop {
+    // Ends early with `--exit-on-finish` once the run finished (deferred
+    // while a viewer runs)
+    while !exit_due(&app, options.exit_on_finish, viewer_task.is_some()) {
         // Status message auto-dismiss deadline (disabled branch when None)
         let status_deadline = app.status_message_deadline();
 
@@ -1372,14 +1369,15 @@ pub async fn run(
                 _ => Message::Resize,
             },
 
-            // Viewer exited: restore the TUI, read keys again
+            // Viewer exited: restore the TUI, read keys again, repaint as
+            // after a resize (the terminal may have been resized meanwhile)
             outcome = async { (&mut viewer_task.as_mut().expect("guarded").1).await },
                 if viewer_task.is_some() =>
             {
                 let (viewer, _) = viewer_task.take().expect("guarded");
                 finish_viewer(&mut terminal, &mut app, viewer, outcome)?;
                 (keyboard, input_rx) = KeyboardThread::start();
-                Message::ViewerClosed
+                Message::Resize
             }
 
             // Status message TTL (ahead of busy channels so it cannot starve)
@@ -1401,14 +1399,9 @@ pub async fn run(
         };
 
         // Handle the message and get the action
+        let run_finished = matches!(msg, Message::RunnerEvent(RunnerEvent::AllFinished));
         recorder.record(&mut app, &msg);
-        let action = handle_message(&mut app, msg, &mut tasks);
-        // Before an `--exit-on-finish` quit
-        send_notification(&mut terminal, &mut app);
-        match action {
-            // Only `--exit-on-finish` quits while a viewer runs (keys go to
-            // the viewer): deferred to `Message::ViewerClosed`
-            Action::Quit if viewer_task.is_some() => {}
+        match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
             Action::RestartRunner {
                 new_changed_files,
@@ -1439,6 +1432,8 @@ pub async fn run(
             },
             Action::Continue => {}
         }
+        // Before the `--exit-on-finish` check in the loop condition
+        notify_run_end(&mut terminal, &app, run_finished);
 
         // Render if state changed (not while a viewer owns the terminal)
         if app.needs_redraw && viewer_task.is_none() {
@@ -1471,13 +1466,18 @@ pub async fn run(
     Ok(app.exit_code())
 }
 
+/// Run outcome line: same wording as the finished dashboard header
+fn finished_text(app: &App, counts: &app::StatusCounts) -> String {
+    let elapsed = dashboard::format_elapsed(app.elapsed_time());
+    dashboard::finished_status_text(counts, counts.completed(), &elapsed)
+}
+
 /// Print the final summary: same wording as the dashboard header, colored
 /// green (all passed), yellow (some cancelled) or red (any failed); plain
 /// with color off
 fn print_summary(app: &App) {
     let counts = app.count_by_status();
-    let elapsed_str = dashboard::format_elapsed(app.elapsed_time());
-    let text = dashboard::finished_status_text(&counts, counts.completed(), &elapsed_str);
+    let text = finished_text(app, &counts);
     let color = if counts.failed > 0 {
         31
     } else if counts.cancelled > 0 {
@@ -2007,35 +2007,31 @@ checks:
         assert!(app.run.all_finished);
     }
 
+    /// Feed `app` through `handle_message`: `check_id` finished with
+    /// `status` (if any), then the runner's AllFinished
+    fn finish_run(app: &mut App, config: &CiConfig, finished: Option<(&str, CheckStatus)>) {
+        let (mut tasks, _rx) = make_test_tasks(config);
+        if let Some((id, status)) = finished {
+            let result = CheckResult {
+                status,
+                ..CheckResult::pending(id)
+            };
+            let msg = Message::RunnerEvent(RunnerEvent::CheckFinished { result });
+            handle_message(app, msg, &mut tasks);
+        }
+        let msg = Message::RunnerEvent(RunnerEvent::AllFinished);
+        handle_message(app, msg, &mut tasks);
+    }
+
     #[rstest::rstest]
-    #[case::passed(crate::runner::CheckStatus::Passed, crate::exit::SUCCESS)]
-    #[case::failed(crate::runner::CheckStatus::Failed, crate::exit::CHECKS_FAILED)]
-    #[case::timed_out(crate::runner::CheckStatus::TimedOut, crate::exit::CHECKS_FAILED)]
-    fn test_exit_on_finish_quits_with_run_outcome(
-        #[case] status: crate::runner::CheckStatus,
-        #[case] code: i32,
-    ) {
+    #[case::passed(CheckStatus::Passed, crate::exit::SUCCESS)]
+    #[case::failed(CheckStatus::Failed, crate::exit::CHECKS_FAILED)]
+    #[case::timed_out(CheckStatus::TimedOut, crate::exit::CHECKS_FAILED)]
+    fn test_exit_on_finish_exit_code(#[case] status: CheckStatus, #[case] code: i32) {
         let config = test_config();
         let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
-        app.exit_on_finish = true;
-        let (mut tasks, _rx) = make_test_tasks(&config);
-        let result = CheckResult {
-            status,
-            ..CheckResult::pending("php-lint")
-        };
-        let finished = Message::RunnerEvent(RunnerEvent::CheckFinished { result });
-        assert!(matches!(
-            handle_message(&mut app, finished, &mut tasks),
-            Action::Continue
-        ));
-
-        let action = handle_message(
-            &mut app,
-            Message::RunnerEvent(RunnerEvent::AllFinished),
-            &mut tasks,
-        );
-
-        assert!(matches!(action, Action::Quit));
+        finish_run(&mut app, &config, Some(("php-lint", status)));
+        assert!(exit_due(&app, true, false));
         assert_eq!(app.exit_code(), code);
     }
 
@@ -2044,57 +2040,28 @@ checks:
         let config = test_config();
         let mut on_demand = make_test_check("behat", "fast");
         on_demand.files = crate::checks::CheckFiles::OnDemand;
-        let mut app = make_test_app_with_checks(&config, vec![on_demand]);
-        app.exit_on_finish = true;
-        let (mut tasks, _rx) = make_test_tasks(&config);
-
-        let action = handle_message(
-            &mut app,
-            Message::RunnerEvent(RunnerEvent::AllFinished),
-            &mut tasks,
-        );
-
-        assert!(matches!(action, Action::Quit));
+        let mut skipped = make_test_check("phpcs", "fast");
+        skipped.files = crate::checks::CheckFiles::SkippedNoMatch;
+        let mut app = make_test_app_with_checks(&config, vec![on_demand, skipped]);
+        finish_run(&mut app, &config, None);
+        assert!(exit_due(&app, true, false));
         assert_eq!(app.exit_code(), crate::exit::SUCCESS);
     }
 
     #[rstest::rstest]
-    #[case::run_finished(true, true)]
-    #[case::run_going(false, false)]
-    fn test_viewer_closed_runs_deferred_exit_on_finish(
+    #[case::finished(true, true, false, true)]
+    #[case::flag_off(true, false, false, false)]
+    #[case::viewer_open(true, true, true, false)]
+    #[case::not_finished(false, true, false, false)]
+    fn test_exit_due(
         #[case] all_finished: bool,
-        #[case] quits: bool,
+        #[case] exit_on_finish: bool,
+        #[case] viewer_open: bool,
+        #[case] expected: bool,
     ) {
-        let config = test_config();
-        let mut app = make_test_app(&config);
-        app.exit_on_finish = true;
+        let mut app = make_test_app(&test_config());
         app.run.all_finished = all_finished;
-        let (mut tasks, _rx) = make_test_tasks(&config);
-
-        let action = handle_message(&mut app, Message::ViewerClosed, &mut tasks);
-
-        assert_eq!(matches!(action, Action::Quit), quits);
-        assert!(app.needs_redraw);
-    }
-
-    #[test]
-    fn test_retry_result_does_not_notify() {
-        let mut config = test_config();
-        config.notify = true;
-        let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
-        let (mut tasks, _rx) = make_test_tasks(&config);
-        let result = CheckResult {
-            status: crate::runner::CheckStatus::Failed,
-            ..CheckResult::pending("php-lint")
-        };
-
-        handle_message(
-            &mut app,
-            Message::Task(TaskEvent::RetryResult(result)),
-            &mut tasks,
-        );
-
-        assert_eq!(app.take_notification(), None, "single runs never notify");
+        assert_eq!(exit_due(&app, exit_on_finish, viewer_open), expected);
     }
 
     #[test]
