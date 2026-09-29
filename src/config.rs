@@ -596,10 +596,19 @@ pub struct CheckTriggers {
     pub test_discovery: Option<TestDiscoveryConfig>,
     /// Inline regex every `{files}` path must match: file_pattern matches and
     /// discovered tests that don't are dropped (e.g. `Test\.php$` keeps test
-    /// fixtures away from the test runner). All dropped = no match.
+    /// fixtures away from the test runner). All dropped: no-tests fallback
+    /// (on_demand / full command without `{files}` / skip). Needs
+    /// `file_pattern` or `test_discovery`.
     #[serde(default, deserialize_with = "deserialize_files_filter")]
     #[schemars(with = "Option<String>")]
     pub files_filter: Option<Regex>,
+}
+
+impl CheckTriggers {
+    /// `files_filter` without `file_pattern` / `test_discovery` to filter
+    fn files_filter_alone(&self) -> bool {
+        self.files_filter.is_some() && self.file_pattern.is_none() && self.test_discovery.is_none()
+    }
 }
 
 /// Inline test discovery configuration for a check
@@ -820,6 +829,7 @@ impl CiConfig {
             }
         }
         self.check_pattern_references()?;
+        self.check_files_filter_scope()?;
         self.check_unique_ids()?;
         let _ = self
             .compiled_file_patterns
@@ -846,6 +856,24 @@ impl CiConfig {
             });
         match dangling {
             Some(msg) => bail!(msg),
+            None => Ok(()),
+        }
+    }
+
+    /// `files_filter` filters `file_pattern` / `test_discovery` files: alone it
+    /// would silently drop the check (empty triggers block).
+    fn check_files_filter_scope(&self) -> Result<()> {
+        let orphan = self
+            .checks
+            .iter()
+            .flat_map(|(g, group)| group.checks.iter().map(move |(c, check)| (g, c, check)))
+            .find(|(_, _, check)| {
+                (check.triggers.as_ref()).is_some_and(CheckTriggers::files_filter_alone)
+            });
+        match orphan {
+            Some((g, c, _)) => bail!(
+                "checks.{g}.checks.{c}.triggers.files_filter: needs `file_pattern` or `test_discovery` (it filters their files)"
+            ),
             None => Ok(()),
         }
     }
@@ -2796,6 +2824,18 @@ checks:
             assert!(
                 msg.contains("`files_filter`") && msg.contains("[invalid"),
                 "names field + pattern: {msg}"
+            );
+        }
+
+        #[test]
+        fn without_file_pattern_or_test_discovery_rejected_at_load() {
+            let yaml = yaml(Some("'Test'")).replace("          file_pattern: src\n", "");
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(yaml.as_bytes()).unwrap();
+            let msg = format!("{:#}", load_config(tmp.path()).unwrap_err());
+            assert!(
+                msg.contains("checks.g.checks.c.triggers.files_filter: needs"),
+                "got: {msg}"
             );
         }
     }

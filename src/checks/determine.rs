@@ -105,12 +105,12 @@ pub(super) fn run_test_discovery<'a>(
             tests.into_iter().partition(|test| keeps(filter, test));
         let outcome = if !related_tests.is_empty() {
             DiscoveryOutcome::TestsFound(related_tests)
-        } else if check.on_demand {
-            DiscoveryOutcome::NoTestsOnDemand
-        } else if check.command.contains("{files}") {
-            DiscoveryOutcome::NoTestsSkip
         } else {
-            DiscoveryOutcome::NoTestsRunAll
+            match no_files_fallback(check) {
+                CheckFiles::OnDemand => DiscoveryOutcome::NoTestsOnDemand,
+                CheckFiles::RunAll => DiscoveryOutcome::NoTestsRunAll,
+                _ => DiscoveryOutcome::NoTestsSkip,
+            }
         };
         (outcome, warnings, filtered_out)
     };
@@ -124,8 +124,20 @@ pub(super) fn run_test_discovery<'a>(
 }
 
 /// True when `path` passes `triggers.files_filter` (always without one)
-fn keeps(filter: Option<&Regex>, path: &str) -> bool {
+pub(crate) fn keeps(filter: Option<&Regex>, path: &str) -> bool {
     filter.is_none_or(|re| re.is_match(path))
+}
+
+/// Files state of a check whose trigger fired but left no files for
+/// `{files}`: on_demand → manual trigger; no `{files}` → full command; else skip.
+fn no_files_fallback(check: &CheckDefinition) -> CheckFiles {
+    if check.on_demand {
+        CheckFiles::OnDemand
+    } else if check.command.contains("{files}") {
+        CheckFiles::SkippedNoMatch
+    } else {
+        CheckFiles::RunAll
+    }
 }
 
 /// How a check is selected. Single evaluation shared by `determine_checks`
@@ -186,6 +198,8 @@ pub(crate) struct TriggerEval<'a> {
     pub discovery: Option<DiscoveryEval<'a>>,
     /// `files_filter` regex, if configured: `{files}` keeps only matching paths
     pub files_filter: Option<&'a Regex>,
+    /// The evaluated check (its no-files fallback)
+    check: &'a CheckDefinition,
 }
 
 /// Evaluation of a `file_pattern` trigger.
@@ -193,12 +207,32 @@ pub(crate) struct TriggerEval<'a> {
 pub(crate) struct FilePatternEval<'a> {
     /// The `file_patterns` key
     pub key: &'a str,
-    /// Changed files matching the pattern
-    pub matched: Vec<&'a str>,
-    /// `matched` files `files_filter` keeps: the ones that go into `{files}`
+    /// Changed files matching the pattern that `files_filter` keeps: the
+    /// ones that go into `{files}`
     pub kept: Vec<&'a str>,
-    /// `matched` files `files_filter` dropped
+    /// Changed files matching the pattern that `files_filter` dropped
     pub dropped: Vec<&'a str>,
+}
+
+impl<'a> FilePatternEval<'a> {
+    /// Match changed files against file pattern `key`, split by `filter`.
+    /// Shared by check selection and `--fix`.
+    pub(crate) fn evaluate(
+        config: &CiConfig,
+        changed_files: &'a ChangedFiles,
+        key: &'a str,
+        filter: Option<&Regex>,
+    ) -> Self {
+        let (kept, dropped) = match_file_pattern(config, changed_files, key)
+            .into_iter()
+            .partition(|f| keeps(filter, f));
+        Self { key, kept, dropped }
+    }
+
+    /// True when no changed file matched the pattern
+    pub(crate) fn is_empty(&self) -> bool {
+        self.kept.is_empty() && self.dropped.is_empty()
+    }
 }
 
 /// Evaluation of a `test_discovery` trigger.
@@ -221,23 +255,14 @@ impl<'a> TriggerEval<'a> {
         changed_files: &'a ChangedFiles,
         project_root: &Path,
         triggers: &'a CheckTriggers,
-        check: &CheckDefinition,
+        check: &'a CheckDefinition,
     ) -> Self {
         let files_filter = triggers.files_filter.as_ref();
         Self {
-            file_pattern: triggers.file_pattern.as_deref().map(|key| {
-                let matched = match_file_pattern(config, changed_files, key);
-                let (kept, dropped) = matched
-                    .iter()
-                    .copied()
-                    .partition(|f| keeps(files_filter, f));
-                FilePatternEval {
-                    key,
-                    matched,
-                    kept,
-                    dropped,
-                }
-            }),
+            file_pattern: triggers
+                .file_pattern
+                .as_deref()
+                .map(|key| FilePatternEval::evaluate(config, changed_files, key, files_filter)),
             discovery: triggers.test_discovery.as_ref().map(|discovery| {
                 run_test_discovery(
                     config,
@@ -249,7 +274,24 @@ impl<'a> TriggerEval<'a> {
                 )
             }),
             files_filter,
+            check,
         }
+    }
+
+    /// Fallback files state when `files_filter` dropped every `file_pattern`
+    /// match and `test_discovery` (if any) had no changed source: the trigger
+    /// fired but left nothing for `{files}` (see [`no_files_fallback`]).
+    /// `None` otherwise. Discovery without tests applies the same fallback.
+    pub(crate) fn filter_fallback(&self) -> Option<CheckFiles> {
+        let emptied = self
+            .file_pattern
+            .as_ref()
+            .is_some_and(|fp| fp.kept.is_empty() && !fp.dropped.is_empty());
+        let no_sources = self
+            .discovery
+            .as_ref()
+            .is_none_or(|d| d.outcome == DiscoveryOutcome::NoSources);
+        (emptied && no_sources).then(|| no_files_fallback(self.check))
     }
 
     /// True when the `file_pattern` trigger kept at least one file.
@@ -279,6 +321,9 @@ impl<'a> TriggerEval<'a> {
     fn into_check_files(self) -> Option<CheckFiles> {
         if self.file_pattern.is_none() && self.discovery.is_none() {
             return None;
+        }
+        if let Some(files) = self.filter_fallback() {
+            return Some(files);
         }
         let mut matched_files: Vec<String> = self
             .file_pattern

@@ -14,6 +14,7 @@
 //! - `0`: All fix commands passed
 //! - `1`: One or more fix commands failed
 
+use crate::checks::{keeps, FilePatternEval};
 use crate::color::cprintln;
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
@@ -201,22 +202,23 @@ async fn run_group_fixes_with_executor(
     (fix_count, pass_count, fail_count, has_failures)
 }
 
-/// Determine which changed files a check applies to based on its triggers
+/// Determine which changed files a check applies to based on its triggers:
+/// `file_pattern` matches (all changed files without one), minus the ones
+/// `files_filter` drops
 fn resolve_matching_files<'a>(
     config: &CiConfig,
-    check: &crate::config::CheckDefinition,
+    check: &'a crate::config::CheckDefinition,
     changed_files: &'a ChangedFiles,
 ) -> Vec<&'a str> {
+    let all = || changed_files.files.iter().map(String::as_str);
     let Some(triggers) = &check.triggers else {
-        return changed_files.files.iter().map(|s| s.as_str()).collect();
+        return all().collect();
     };
-    let Some(pattern_key) = &triggers.file_pattern else {
-        return changed_files.files.iter().map(|s| s.as_str()).collect();
-    };
-    config
-        .get_compiled_file_pattern(pattern_key)
-        .map(|re| changed_files.filter_by_pattern(re))
-        .unwrap_or_default()
+    let filter = triggers.files_filter.as_ref();
+    match triggers.file_pattern.as_deref() {
+        Some(key) => FilePatternEval::evaluate(config, changed_files, key, filter).kept,
+        None => all().filter(|f| keeps(filter, f)).collect(),
+    }
 }
 
 /// Print the result of a fix command execution, returns true if successful
@@ -459,6 +461,26 @@ mod tests {
             let files = resolve_matching_files(&cfg, &check, &cf);
             assert!(files.is_empty());
         }
+
+        #[test]
+        fn files_filter_drops_non_matching_files() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let filter = Some(regex::Regex::new(r"_test\.rs$").unwrap());
+            let with_pattern = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                files_filter: filter.clone(),
+                ..Default::default()
+            }));
+            let without_pattern = mk_check_with_triggers(Some(CheckTriggers {
+                files_filter: filter,
+                ..Default::default()
+            }));
+            let cf = changed(&["tests/a_test.rs", "tests/fixtures/case.rs", "README.md"]);
+            for check in [&with_pattern, &without_pattern] {
+                let files = resolve_matching_files(&cfg, check, &cf);
+                assert_eq!(files, vec!["tests/a_test.rs"]);
+            }
+        }
     }
 
     mod resolve_check_fix_tests {
@@ -481,6 +503,18 @@ mod tests {
                 ..Default::default()
             }));
             let cf = changed(&["README.md"]);
+            assert!(resolve_check_fix(&cfg, &check, &cf).is_none());
+        }
+
+        #[test]
+        fn returns_none_when_files_filter_drops_every_match() {
+            let cfg = cfg_with_pattern("rust", r"\.rs$");
+            let check = mk_check_with_triggers(Some(CheckTriggers {
+                file_pattern: Some("rust".into()),
+                files_filter: Some(regex::Regex::new(r"_test\.rs$").unwrap()),
+                ..Default::default()
+            }));
+            let cf = changed(&["tests/fixtures/case.rs"]);
             assert!(resolve_check_fix(&cfg, &check, &cf).is_none());
         }
 

@@ -201,7 +201,7 @@
           "default": null
         },
         "files_filter": {
-          "description": "Inline regex every `{files}` path must match: file_pattern matches and\ndiscovered tests that don't are dropped (e.g. `Test\\.php$` keeps test\nfixtures away from the test runner). All dropped = no match.",
+          "description": "Inline regex every `{files}` path must match: file_pattern matches and\ndiscovered tests that don't are dropped (e.g. `Test\\.php$` keeps test\nfixtures away from the test runner). All dropped: no-tests fallback\n(on_demand / full command without `{files}` / skip). Needs\n`file_pattern` or `test_discovery`.",
           "type": [
             "string",
             "null"

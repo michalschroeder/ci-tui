@@ -6,7 +6,9 @@
 
 use crate::cache::{stamp_keys, ResultCache};
 pub use crate::checks::Decision;
-use crate::checks::{process_check, CheckToRun, DiscoveryOutcome, FilePatternEval, Selection};
+use crate::checks::{
+    process_check, CheckFiles, CheckToRun, DiscoveryOutcome, FilePatternEval, Selection,
+};
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::{self, ChangedFiles};
 use std::fmt::Write;
@@ -124,11 +126,21 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
     };
     let mut reasons = Vec::new();
 
-    if let Some(FilePatternEval { key, matched, .. }) = &eval.file_pattern {
-        reasons.push(if matched.is_empty() {
+    if let Some(fp @ FilePatternEval { key, kept, .. }) = &eval.file_pattern {
+        reasons.push(if fp.is_empty() {
             format!("file_pattern `{key}`: no changed file matched")
+        } else if kept.is_empty() {
+            let fallback = eval.filter_fallback().map(|files| match files {
+                CheckFiles::OnDemand => "; on_demand",
+                CheckFiles::RunAll => "; runs full command (no {files})",
+                _ => "; command needs {files}",
+            });
+            format!(
+                "file_pattern `{key}`: every match dropped by files_filter{}",
+                fallback.unwrap_or_default()
+            )
         } else {
-            format!("file_pattern `{key}` matched: {}", matched.join(", "))
+            format!("file_pattern `{key}` matched: {}", kept.join(", "))
         });
     }
 

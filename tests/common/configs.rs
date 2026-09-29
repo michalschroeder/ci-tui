@@ -600,19 +600,14 @@ pub fn php_files_filter_config() -> CiConfig {
     };
     let check = |name, command| {
         CheckBuilder::new(name, command)
+            .with_file_pattern_trigger("linter_tests")
             .with_test_discovery(discovery())
             .with_files_filter(r"Test\.php$")
     };
     ConfigBuilder::new()
         .with_file_pattern("linter_src", r"^tools/linter/src/.*\.php$", None)
         .with_file_pattern("linter_tests", r"^tools/linter/tests/.*\.php$", None)
-        .with_check(
-            "tests",
-            "unit",
-            check("Unit", "phpunit {files}")
-                .with_file_pattern_trigger("linter_tests")
-                .build(),
-        )
+        .with_check("tests", "unit", check("Unit", "phpunit {files}").build())
         .with_check(
             "tests",
             "slow",

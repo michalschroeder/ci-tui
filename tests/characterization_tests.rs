@@ -464,17 +464,16 @@ fn test_files_filter_drops_fixtures_from_files() {
         root.path(),
     );
 
+    // grep also found both fixtures: filter keeps only the test
     let unit = assert_check_exists(&checks, "unit");
     assert_eq!(unit.files, CheckFiles::Files(vec![FOO_TEST.to_string()]));
     assert_eq!(unit.resolved_command, format!("phpunit {FOO_TEST}"));
-    // Discovery-only: grep found the test and both fixtures, filter keeps the test
-    let slow = assert_check_exists(&checks, "slow");
-    assert_eq!(slow.files, CheckFiles::Files(vec![FOO_TEST.to_string()]));
 }
 
 #[test]
-fn test_files_filter_dropping_file_pattern_matches_is_no_match() {
-    // Only fixtures changed: `file_pattern` matched them, filter drops all
+fn test_files_filter_dropping_every_file_pattern_match_applies_no_files_fallback() {
+    // Only fixtures changed: `file_pattern` matched them, filter drops all,
+    // so the trigger fired with nothing for `{files}` (skip / on_demand / run all)
     let root = linter_root(&FOO_FIXTURES);
     let checks = determine_checks(
         &php_files_filter_config(),
@@ -485,6 +484,13 @@ fn test_files_filter_dropping_file_pattern_matches_is_no_match() {
     let unit = assert_check_exists(&checks, "unit");
     assert_eq!(unit.files, CheckFiles::SkippedNoMatch);
     assert!(unit.is_skipped_no_files());
+    assert_eq!(
+        assert_check_exists(&checks, "slow").files,
+        CheckFiles::OnDemand
+    );
+    let suite = assert_check_exists(&checks, "suite");
+    assert_eq!(suite.files, CheckFiles::RunAll);
+    assert_eq!(suite.resolved_command, "phpunit");
 }
 
 #[test]

@@ -376,9 +376,11 @@ triggers:
 **`files_filter`** (optional)
 - Inline regex (not a `file_patterns` key) every path in `{files}` must match
 - Applies to both `file_pattern` matches and discovered tests; non-matching paths are dropped
-- If every path is dropped, the check is treated as if nothing matched (skipped, `on_demand`, or full command per [Handling No Tests Found](#handling-no-tests-found))
+- If every path is dropped, the trigger still fired: the check is skipped, `on_demand`, or runs its full command per [Handling No Tests Found](#handling-no-tests-found)
+- Also filters `{files}` of `fix_command` (TUI and `--fix`)
+- Dropped paths still count for the result cache: editing only a fixture re-runs the check
 - `--list` shows the dropped paths as a `files_filter` reason
-- Invalid regex fails config load (exit 2)
+- Needs `file_pattern` or `test_discovery`; invalid regex or `files_filter` alone fails config load (exit 2)
 
 **Pitfall: fixtures under `tests/`.** A pattern like `tools/linter/tests/.*\.php$` also matches fixture files (e.g. `tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php`), and a `grep_search` for the class name finds them too. Test runners such as phpunit fail when given non-test files. Keep only test files with `files_filter`:
 
@@ -388,7 +390,7 @@ triggers:
   files_filter: 'Test\.php$'          # phpunit gets only *Test.php
 ```
 
-Changing only a fixture then does not run its test (the fixture is dropped, nothing is left).
+Changing only a fixture then leaves nothing for `{files}`: `on_demand` checks become manual, checks without `{files}` run their full command, others are skipped. To run the test that uses the fixture, add a `grep_search` strategy whose `source_pattern` matches fixtures (e.g. pattern `{filename}`, if the test references the fixture by name).
 
 ## Test Discovery
 

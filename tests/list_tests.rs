@@ -9,7 +9,7 @@ use std::path::Path;
 mod common;
 use common::configs::{
     checks_test_config, php_files_filter_config, rust_discovery_config, rust_grep_discovery_config,
-    rust_project_config, CheckBuilder, ConfigBuilder, FOO_FIXTURES,
+    rust_project_config, CheckBuilder, ConfigBuilder, FOO_FIXTURES, FOO_TEST,
 };
 use common::{git, run_ci_tui};
 
@@ -238,21 +238,46 @@ fn files_filter_dropping_every_match_is_explained() {
         &changed(&fixtures, "main"),
         tmp.path(),
     );
-    let e = find(&explained, "unit");
-    assert_eq!(e.decision, Some(Decision::Skipped));
-    assert_eq!(
-        e.reasons,
+    let dropped = format!(
+        "files_filter `Test\\.php$` dropped: {}",
+        fixtures.join(", ")
+    );
+    let reasons = |fallback: &str| {
         vec![
-            format!(
-                "file_pattern `linter_tests` matched: {}",
-                fixtures.join(", ")
-            ),
+            format!("file_pattern `linter_tests`: every match dropped by files_filter; {fallback}"),
             "test_discovery `linter_src`: no changed file matched".to_string(),
-            format!(
-                "files_filter `Test\\.php$` dropped: {}",
-                fixtures.join(", ")
-            ),
+            dropped.clone(),
         ]
+    };
+    let unit = find(&explained, "unit");
+    assert_eq!(unit.decision, Some(Decision::Skipped));
+    assert_eq!(unit.reasons, reasons("command needs {files}"));
+    let suite = find(&explained, "suite");
+    assert_eq!(suite.decision, Some(Decision::Run));
+    assert_eq!(suite.reasons, reasons("runs full command (no {files})"));
+    let slow = find(&explained, "slow");
+    assert_eq!(slow.decision, Some(Decision::OnDemand));
+    let mut on_demand = reasons("on_demand");
+    on_demand.push("manual trigger only ('t' in TUI)".to_string());
+    assert_eq!(slow.reasons, on_demand);
+}
+
+#[test]
+fn files_filter_reason_lists_only_kept_matches() {
+    // Test and fixtures changed: `matched` shows only the kept test
+    let mut changed_paths = vec![FOO_TEST];
+    changed_paths.extend(FOO_FIXTURES);
+    let tmp = tempfile::TempDir::new().unwrap();
+    let explained = explain_checks(
+        &php_files_filter_config(),
+        &changed(&changed_paths, "main"),
+        tmp.path(),
+    );
+    let e = find(&explained, "unit");
+    assert_eq!(e.decision, Some(Decision::Run));
+    assert_eq!(
+        e.reasons[0],
+        format!("file_pattern `linter_tests` matched: {FOO_TEST}")
     );
 }
 

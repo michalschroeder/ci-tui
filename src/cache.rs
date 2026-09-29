@@ -2,9 +2,10 @@
 //! passing run (shown as "cached ✓"; `--no-cache` turns reads off).
 //!
 //! Key per check ([`stamp_keys`], run by `select_checks`): check id +
-//! resolved command + content of its matched files (plus the changed source
+//! resolved command + content of its `{files}` (plus the changed source
 //! files behind its test discovery, so editing only the source re-runs its
-//! tests) + hash of the config file text. Changed files are read under the
+//! tests, and the `file_pattern` matches `files_filter` dropped, so editing
+//! only a fixture re-runs its tests) + hash of the config file text. Changed files are read under the
 //! key root, where their paths resolve (repo root for git paths, execution
 //! root for `--files`); discovered tests under the execution root, where
 //! test discovery found them. Checks without concrete files (always-run,
@@ -29,7 +30,7 @@
 //! runs): no extra dependency. A toolchain changing the algorithm only costs
 //! one cache miss per check; 64 bits make a false hit negligible.
 
-use crate::checks::{match_file_pattern, CheckToRun};
+use crate::checks::{keeps, match_file_pattern, CheckToRun};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{CheckResult, CheckStatus};
@@ -52,8 +53,8 @@ const LOCK_FILE: &str = "results.lock";
 pub struct CacheKey {
     /// Hash of all inputs; stored for a pass
     value: u64,
-    /// Input files, resolved: the check's files, then the changed
-    /// test-discovery sources
+    /// Input files, resolved: the check's files, then its other changed
+    /// trigger files ([`trigger_sources`])
     inputs: Vec<PathBuf>,
     /// Config file hash the value covers
     config_hash: u64,
@@ -97,7 +98,7 @@ pub(crate) fn stamp_keys(
             .or_insert_with(|| file_hash(path))
     };
     for check in checks {
-        let sources = discovery_sources(config, changed_files, check);
+        let sources = trigger_sources(config, changed_files, check);
         let inputs: Vec<PathBuf> = check
             .files
             .paths()
@@ -115,21 +116,32 @@ pub(crate) fn stamp_keys(
     }
 }
 
-/// Changed files matching the check's `test_discovery.source_pattern`
-fn discovery_sources<'a>(
+/// Changed files behind the check's triggers that are not in its `{files}`:
+/// `test_discovery.source_pattern` matches, then `file_pattern` matches
+/// `files_filter` dropped (deduplicated)
+fn trigger_sources<'a>(
     config: &CiConfig,
     changed_files: &'a ChangedFiles,
     check: &CheckToRun,
 ) -> Vec<&'a str> {
-    let Some(discovery) = check
-        .definition
-        .triggers
-        .as_ref()
-        .and_then(|t| t.test_discovery.as_ref())
-    else {
+    let Some(triggers) = &check.definition.triggers else {
         return Vec::new();
     };
-    match_file_pattern(config, changed_files, &discovery.source_pattern)
+    let matches = |key: &str| match_file_pattern(config, changed_files, key);
+    let mut sources: Vec<&str> = triggers
+        .test_discovery
+        .iter()
+        .flat_map(|d| matches(&d.source_pattern))
+        .collect();
+    let filter = triggers.files_filter.as_ref();
+    let dropped: Vec<&str> = triggers
+        .file_pattern
+        .iter()
+        .flat_map(|key| matches(key))
+        .filter(|f| !keeps(filter, f) && !sources.contains(f))
+        .collect();
+    sources.extend(dropped);
+    sources
 }
 
 /// Content hash of `path`; `None` when missing or unreadable (directory,
@@ -507,9 +519,9 @@ checks:
     }
 
     #[test]
-    fn stamp_keys_skips_files_dropped_by_files_filter() {
+    fn stamp_keys_covers_files_dropped_by_files_filter() {
         // Edge case: `files_filter` drops a changed fixture from `{files}`;
-        // the key covers only the kept test
+        // the key still covers it, so editing only the fixture re-runs
         let config: CiConfig = serde_yaml::from_str(
             r#"
 version: 2
@@ -543,9 +555,12 @@ checks:
             checks[0].cache_key.clone().expect("keyed")
         };
         let before = stamped();
-        assert_eq!(before.inputs, vec![dir.path().join("tests/a_test.rs")]);
+        assert_eq!(
+            before.inputs,
+            vec![dir.path().join("tests/a_test.rs"), fixture.clone()]
+        );
         std::fs::write(&fixture, "f changed").unwrap();
-        assert_eq!(stamped(), before, "dropped fixture is not an input");
+        assert_ne!(stamped().value, before.value, "dropped fixture is an input");
     }
 
     #[test]
