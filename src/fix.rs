@@ -441,8 +441,7 @@ mod tests {
             let cfg = cfg_with_pattern("rust", r"\.rs$");
             let check = mk_check_with_triggers(Some(CheckTriggers {
                 file_pattern: Some("rust".into()),
-                test_discovery: None,
-                files_filter: None,
+                ..Default::default()
             }));
             let cf = changed(&["src/main.rs", "README.md", "lib/a.rs"]);
             let files = resolve_matching_files(&cfg, &check, &cf);
@@ -454,8 +453,7 @@ mod tests {
             let cfg = cfg_with_pattern("rust", r"\.rs$");
             let check = mk_check_with_triggers(Some(CheckTriggers {
                 file_pattern: Some("nonexistent".into()),
-                test_discovery: None,
-                files_filter: None,
+                ..Default::default()
             }));
             let cf = changed(&["src/main.rs"]);
             let files = resolve_matching_files(&cfg, &check, &cf);
@@ -480,8 +478,7 @@ mod tests {
             let cfg = cfg_with_pattern("rust", r"\.rs$");
             let check = mk_check_with_triggers(Some(CheckTriggers {
                 file_pattern: Some("rust".into()),
-                test_discovery: None,
-                files_filter: None,
+                ..Default::default()
             }));
             let cf = changed(&["README.md"]);
             assert!(resolve_check_fix(&cfg, &check, &cf).is_none());
@@ -492,8 +489,7 @@ mod tests {
             let cfg = cfg_with_pattern("rust", r"\.rs$");
             let check = mk_check_with_triggers(Some(CheckTriggers {
                 file_pattern: Some("rust".into()),
-                test_discovery: None,
-                files_filter: None,
+                ..Default::default()
             }));
             let cf = changed(&["src/main.rs", "README.md"]);
             let out = resolve_check_fix(&cfg, &check, &cf).unwrap();
@@ -505,8 +501,7 @@ mod tests {
             let cfg = cfg_with_pattern("rust", r"\.rs$");
             let mut check = mk_check_with_triggers(Some(CheckTriggers {
                 file_pattern: Some("rust".into()),
-                test_discovery: None,
-                files_filter: None,
+                ..Default::default()
             }));
             check.fix_command = Some("fmt-all".into());
             let cf = changed(&["README.md"]);

@@ -18,7 +18,9 @@ use crate::git::ChangedFiles;
 use std::path::Path;
 
 mod determine;
-pub(crate) use determine::{match_file_pattern, process_check, DiscoveryOutcome, Selection};
+pub(crate) use determine::{
+    match_file_pattern, process_check, DiscoveryOutcome, FilePatternEval, Selection,
+};
 
 /// File context for a check — concrete paths or an explicit no-files state.
 ///
@@ -344,8 +346,7 @@ mod tests {
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
-                    test_discovery: None,
-                    files_filter: None,
+                    ..Default::default()
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -363,8 +364,7 @@ mod tests {
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("yaml".to_string()),
-                    test_discovery: None,
-                    files_filter: None,
+                    ..Default::default()
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -393,8 +393,7 @@ mod tests {
                 fix_command: Some("phpstan fix {files}".to_string()),
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
-                    test_discovery: None,
-                    files_filter: None,
+                    ..Default::default()
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -423,8 +422,7 @@ mod tests {
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("tests".to_string()),
-                    test_discovery: None,
-                    files_filter: None,
+                    ..Default::default()
                 }),
                 on_demand: false,
                 env: HashMap::new(),

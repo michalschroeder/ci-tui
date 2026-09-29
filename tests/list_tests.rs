@@ -9,7 +9,7 @@ use std::path::Path;
 mod common;
 use common::configs::{
     checks_test_config, php_files_filter_config, rust_discovery_config, rust_grep_discovery_config,
-    rust_project_config, CheckBuilder, ConfigBuilder,
+    rust_project_config, CheckBuilder, ConfigBuilder, FOO_FIXTURES,
 };
 use common::{git, run_ci_tui};
 
@@ -231,10 +231,7 @@ fn test_discovery_no_sources_reason() {
 #[test]
 fn files_filter_dropping_every_match_is_explained() {
     // Only fixtures changed: `file_pattern` matched them, files_filter drops all
-    let fixtures = [
-        "tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php",
-        "tools/linter/tests/Rule/Fixtures/FooRule/invalid_case.php",
-    ];
+    let fixtures = FOO_FIXTURES;
     let tmp = tempfile::TempDir::new().unwrap();
     let explained = explain_checks(
         &php_files_filter_config(),

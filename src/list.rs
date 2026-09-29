@@ -6,7 +6,7 @@
 
 use crate::cache::{stamp_keys, ResultCache};
 pub use crate::checks::Decision;
-use crate::checks::{process_check, CheckToRun, DiscoveryOutcome, Selection};
+use crate::checks::{process_check, CheckToRun, DiscoveryOutcome, FilePatternEval, Selection};
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::{self, ChangedFiles};
 use std::fmt::Write;
@@ -124,7 +124,7 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
     };
     let mut reasons = Vec::new();
 
-    if let Some((key, matched)) = &eval.file_pattern {
+    if let Some(FilePatternEval { key, matched, .. }) = &eval.file_pattern {
         reasons.push(if matched.is_empty() {
             format!("file_pattern `{key}`: no changed file matched")
         } else {
@@ -143,7 +143,7 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
     }
 
     let dropped = eval.filtered_out();
-    if let (Some(filter), false) = (eval.files_filter, dropped.is_empty()) {
+    if let Some(filter) = eval.files_filter.filter(|_| !dropped.is_empty()) {
         reasons.push(format!(
             "files_filter `{}` dropped: {}",
             filter.as_str(),

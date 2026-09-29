@@ -572,6 +572,16 @@ pub fn rust_discovery_config() -> CiConfig {
         .build()
 }
 
+/// Test file for [`php_files_filter_config`]
+#[allow(dead_code)]
+pub const FOO_TEST: &str = "tools/linter/tests/Rule/FooRuleTest.php";
+/// Fixtures for [`php_files_filter_config`]: match `linter_tests`, not `files_filter`
+#[allow(dead_code)]
+pub const FOO_FIXTURES: [&str; 2] = [
+    "tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php",
+    "tools/linter/tests/Rule/Fixtures/FooRule/invalid_case.php",
+];
+
 /// PHP linter layout (#210): tests and their fixtures both live under
 /// `tools/linter/tests/`; every check has `files_filter: Test\.php$`.
 /// Discovery greps `tools/linter/tests` for `{basename}` of changed

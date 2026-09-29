@@ -11,7 +11,7 @@ use std::path::PathBuf;
 mod common;
 use common::configs::{
     checks_test_config, php_files_filter_config, rust_grep_discovery_config, CheckBuilder,
-    ConfigBuilder,
+    ConfigBuilder, FOO_FIXTURES, FOO_TEST,
 };
 
 // ============================================================================
@@ -439,12 +439,6 @@ fn test_no_discovery_warnings_when_grep_succeeds() {
 // ============================================================================
 // triggers.files_filter (#210)
 // ============================================================================
-
-const FOO_TEST: &str = "tools/linter/tests/Rule/FooRuleTest.php";
-const FOO_FIXTURES: [&str; 2] = [
-    "tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php",
-    "tools/linter/tests/Rule/Fixtures/FooRule/invalid_case.php",
-];
 
 /// Tempdir holding `paths`, each mentioning `FooRule` (grep discovery finds them)
 fn linter_root(paths: &[&str]) -> tempfile::TempDir {
