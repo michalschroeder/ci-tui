@@ -66,6 +66,19 @@ pub enum PreCommandStatus {
     Failed,
 }
 
+/// What a single check run (retry, on-demand, all files) does about its
+/// group's pre-commands, see [`App::claim_group_setup`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupSetup {
+    /// Nothing to run: no pre-commands, or all passed
+    Ready,
+    /// Run them first: not (all) passed, and the runner will not run them
+    /// (e.g. a group served fully from the result cache)
+    Run,
+    /// Wait: the runner will run them, or they are running now
+    Busy,
+}
+
 /// State of a pre-command for UI display
 #[derive(Debug, Clone)]
 pub struct PreCommandState {
@@ -256,9 +269,9 @@ pub struct RunState {
     /// User pressed a key / clicked / scrolled during this run: skip the
     /// end-of-run auto-select of the first failed check
     pub user_interacted: bool,
-    /// Groups whose pre-commands a single check run took over (see
-    /// [`App::claim_group_setup`])
-    pub setup_claimed: HashSet<String>,
+    /// Group -> check id whose single run took over the group's
+    /// pre-commands, until its result arrives (see [`App::claim_group_setup`])
+    pub setup_claims: HashMap<String, String>,
 }
 
 impl RunState {
@@ -272,7 +285,7 @@ impl RunState {
             current_pre_command: None,
             refresh_pending: false,
             user_interacted: false,
-            setup_claimed: HashSet::new(),
+            setup_claims: HashMap::new(),
         }
     }
 }
@@ -699,18 +712,13 @@ impl App {
         self.clamp_selection();
     }
 
-    /// Claim `group`'s pre-commands for a single check run (retry, on-demand,
-    /// all files): true when none ran yet and the runner will not run them
-    /// (run over, or no check of the group waits for it), e.g. a group
-    /// served fully from the result cache. Once per group and run.
-    pub fn claim_group_setup(&mut self, group: &str) -> bool {
-        let mut rows = self
-            .pre_commands
-            .iter()
-            .filter(|p| p.group == group)
-            .peekable();
-        let never_ran =
-            rows.peek().is_some() && rows.all(|p| p.status == PreCommandStatus::Pending);
+    /// State of `group`'s pre-commands for a single check run
+    pub fn group_setup(&self, group: &str) -> GroupSetup {
+        let mut rows = self.pre_commands.iter().filter(|p| p.group == group);
+        if rows.clone().all(|p| p.status == PreCommandStatus::Passed) {
+            return GroupSetup::Ready;
+        }
+        let running = rows.any(|p| p.status == PreCommandStatus::Running);
         let runner_will = !self.run.all_finished
             && self.checks.iter().any(|c| {
                 c.group() == group
@@ -719,7 +727,46 @@ impl App {
                         .get(c.id())
                         .is_some_and(|r| r.status == CheckStatus::Pending)
             });
-        never_ran && !runner_will && self.run.setup_claimed.insert(group.to_string())
+        match running || runner_will || self.run.setup_claims.contains_key(group) {
+            true => GroupSetup::Busy,
+            false => GroupSetup::Run,
+        }
+    }
+
+    /// [`Self::group_setup`] for a single run of `check_id`; on
+    /// [`GroupSetup::Run`] the run owns the pre-commands (others in the
+    /// group wait) until its result arrives
+    pub fn claim_group_setup(&mut self, group: &str, check_id: &str) -> GroupSetup {
+        let setup = self.group_setup(group);
+        if setup == GroupSetup::Run {
+            let (group, check_id) = (group.to_string(), check_id.to_string());
+            self.run.setup_claims.insert(group, check_id);
+        }
+        setup
+    }
+
+    /// Drop the pre-commands claim of `check_id`'s run (its result arrived).
+    /// Rows it left running (cancelled mid-setup) go back to pending, so the
+    /// next single run starts the setup over.
+    fn release_group_setup(&mut self, check_id: &str) {
+        let Some(group) = self
+            .run
+            .setup_claims
+            .iter()
+            .find_map(|(group, id)| (id == check_id).then(|| group.clone()))
+        else {
+            return;
+        };
+        self.run.setup_claims.remove(&group);
+        let running =
+            |row: &PreCommandState| row.group == group && row.status == PreCommandStatus::Running;
+        let current = self.run.current_pre_command;
+        if current.is_some_and(|idx| self.pre_commands.get(idx).is_some_and(running)) {
+            self.run.current_pre_command = None;
+        }
+        for row in self.pre_commands.iter_mut().filter(|row| running(row)) {
+            row.status = PreCommandStatus::Pending;
+        }
     }
 
     /// Mark an on-demand check as running (preparing to execute)
@@ -737,8 +784,10 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Store a finished check result (runner, retry or run-all-files)
+    /// Store a finished check result (runner, retry or run-all-files),
+    /// releasing its pre-commands claim
     pub fn set_retry_result(&mut self, result: CheckResult) {
+        self.release_group_setup(&result.check_id);
         self.insert_result(result);
         self.clamp_selection();
         self.needs_redraw = true;

@@ -4,8 +4,9 @@
 //! Evaluates each check once via [`Selection`] — the same evaluation
 //! `determine_checks` uses — and derives both decision and reasons from it.
 
+use crate::cache::{stamp_keys, ResultCache};
 pub use crate::checks::Decision;
-use crate::checks::{DiscoveryOutcome, Selection};
+use crate::checks::{process_check, CheckToRun, DiscoveryOutcome, Selection};
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::{self, ChangedFiles};
 use std::fmt::Write;
@@ -40,21 +41,49 @@ pub fn explain_checks(
     changed_files: &ChangedFiles,
     project_root: &Path,
 ) -> Vec<CheckExplanation> {
-    config
+    explain_checks_cached(
+        config,
+        changed_files,
+        project_root,
+        &ResultCache::disabled(),
+    )
+}
+
+/// [`explain_checks`] with the `Run` checks `cache` finds unchanged since
+/// their last pass marked cached, keyed from the same evaluation (test
+/// discovery runs once per check)
+pub fn explain_checks_cached(
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    project_root: &Path,
+    cache: &ResultCache,
+) -> Vec<CheckExplanation> {
+    let mut checks = Vec::new();
+    let mut explained: Vec<CheckExplanation> = config
         .groups()
         .flat_map(|(group, g)| g.checks.iter().map(move |(id, check)| (group, id, check)))
         .map(|(group, id, check)| {
-            let (decision, reasons) = explain(config, changed_files, project_root, check);
-            CheckExplanation {
+            let (reasons, to_run) =
+                explain(config, changed_files, project_root, (group, id), check);
+            let explanation = CheckExplanation {
                 group: group.to_string(),
                 id: id.clone(),
                 name: check.name.clone(),
-                decision,
+                decision: to_run.as_ref().map(CheckToRun::decision),
                 reasons,
                 cached: false,
-            }
+            };
+            checks.extend(to_run);
+            explanation
         })
-        .collect()
+        .collect();
+    if let Some(root) = cache.key_root() {
+        stamp_keys(&mut checks, config, changed_files, root, project_root);
+        let (fresh, _) = cache.split_fresh(&checks);
+        let ids: Vec<&str> = fresh.iter().map(|c| c.id()).collect();
+        mark_cached(&mut explained, &ids);
+    }
+    explained
 }
 
 /// Mark the `Run` checks among `ids` (fresh in the result cache) as cached,
@@ -70,22 +99,22 @@ pub fn mark_cached(explained: &mut [CheckExplanation], ids: &[&str]) {
     }
 }
 
-/// Decision plus one reason per configured trigger.
+/// One reason per configured trigger, plus the check a run would get
+/// (`None`: excluded) for the `(group, id)` check
 fn explain(
     config: &CiConfig,
     changed_files: &ChangedFiles,
     project_root: &Path,
+    (group, id): (&str, &str),
     check: &CheckDefinition,
-) -> (Option<Decision>, Vec<String>) {
+) -> (Vec<String>, Option<CheckToRun>) {
     let selection = Selection::evaluate(config, changed_files, project_root, check);
     let mut reasons = selection_reasons(&selection);
-    let decision = selection
-        .into_check_files()
-        .map(|files| files.decision(check));
-    if decision == Some(Decision::OnDemand) {
+    let to_run = process_check(selection, group, id, check, config.default_service());
+    if to_run.as_ref().map(CheckToRun::decision) == Some(Decision::OnDemand) {
         reasons.push("manual trigger only ('t' in TUI)".to_string());
     }
-    (decision, reasons)
+    (reasons, to_run)
 }
 
 /// One reason per evaluated trigger.

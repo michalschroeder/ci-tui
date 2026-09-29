@@ -42,7 +42,7 @@ pub(super) fn new_check_to_run(
 
 /// Build a CheckToRun from an evaluated [`Selection`]; `None` drops the
 /// check (empty `triggers` block). The caller reads `selection.warnings()` first.
-pub(super) fn process_check(
+pub(crate) fn process_check(
     selection: Selection,
     group_name: &str,
     check_id: &str,

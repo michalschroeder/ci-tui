@@ -18,8 +18,7 @@ use crate::git::ChangedFiles;
 use std::path::Path;
 
 mod determine;
-use determine::*;
-pub(crate) use determine::{match_file_pattern, DiscoveryOutcome, Selection};
+pub(crate) use determine::{match_file_pattern, process_check, DiscoveryOutcome, Selection};
 
 /// File context for a check — concrete paths or an explicit no-files state.
 ///
@@ -180,7 +179,7 @@ pub struct Selected {
 
 /// [`determine_checks`], also returning discovery warnings. With `key_root`
 /// ([`crate::cache::ResultCache::key_root`]) every check gets its result
-/// cache key from the files there (blocking reads).
+/// cache key from the current file contents (blocking reads).
 pub fn select_checks(
     config: &CiConfig,
     changed_files: &ChangedFiles,
@@ -206,7 +205,13 @@ pub fn select_checks(
     }
 
     if let Some(root) = key_root {
-        crate::cache::stamp_keys(&mut checks_to_run, config, changed_files, root);
+        crate::cache::stamp_keys(
+            &mut checks_to_run,
+            config,
+            changed_files,
+            root,
+            project_root,
+        );
     }
     let mut seen = std::collections::HashSet::new();
     warnings.retain(|w| seen.insert(w.clone()));

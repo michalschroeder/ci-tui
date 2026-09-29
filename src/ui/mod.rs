@@ -32,7 +32,7 @@ use crate::runner::{
     CheckRunner, CheckStatus, OutputSink, RealCommandExecutor, RunnerEvent,
 };
 use anyhow::Result;
-use app::{App, StatusKind};
+use app::{App, GroupSetup, StatusKind};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -110,8 +110,11 @@ enum TaskEvent {
     CheckNotApplicable(CheckResult),
     /// Git refresh failed; the retry runs with the previous file list
     GitRefreshFailed,
-    /// Retry / on-demand / run-all-files result
+    /// Retry / on-demand result
     RetryResult(CheckResult),
+    /// Run-all-files result: not recorded in the result cache (its command
+    /// is not the one the check's key covers)
+    AllFilesResult(CheckResult),
     /// Live output chunk ([`RunnerEvent::CheckOutput`]) of a task-run check
     Output(RunnerEvent),
     /// Git refresh for retry-all finished; restart the runner
@@ -292,7 +295,7 @@ impl TaskCtx {
     /// [`Self::run`], streaming live output to `tx` as [`TaskEvent::Output`]
     /// (all chunks are sent before this returns, so before the result).
     /// With `setup`, the group's pre-commands run first (see
-    /// [`App::claim_group_setup`]); if one fails, so does the check.
+    /// [`GroupSetup::Run`]); if one fails, so does the check.
     async fn run_streaming(
         &self,
         check: &CheckToRun,
@@ -428,11 +431,17 @@ impl Tasks {
 
     /// Spawn a task running `command` as `check` (after its group's
     /// pre-commands with `setup`), streaming its output, cancellable with
-    /// 's'; reports [`TaskEvent::RetryResult`].
-    fn spawn_check(&mut self, check: CheckToRun, command: String, setup: bool) {
+    /// 's'; reports the result as `done(result)`.
+    fn spawn_check(
+        &mut self,
+        check: CheckToRun,
+        command: String,
+        setup: bool,
+        done: fn(CheckResult) -> TaskEvent,
+    ) {
         self.spawn(|ctx, tx| async move {
             let result = ctx.run_cancellable(&check, &command, setup, &tx).await;
-            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+            let _ = tx.send(done(result)).await;
         });
     }
 }
@@ -691,7 +700,9 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
-    let setup = app.claim_group_setup(check.group());
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
@@ -709,10 +720,12 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     };
     let check = check.clone();
-    let setup = app.claim_group_setup(check.group());
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
     app.trigger_on_demand_check(check.id());
     let command = check.resolved_command.clone();
-    tasks.spawn_check(check, command, setup);
+    tasks.spawn_check(check, command, setup, TaskEvent::RetryResult);
     Action::Continue
 }
 
@@ -726,14 +739,31 @@ fn handle_run_all_files(app: &mut App, tasks: &mut Tasks) -> Action {
     };
     let check = check.clone();
     let all_files_cmd = check.get_command_for_all_files();
-    let setup = app.claim_group_setup(check.group());
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
     app.reset_check_for_retry(check.id());
     app.set_status_message(
         StatusKind::progress_for(check.id()),
         "Running for all files...",
     );
-    tasks.spawn_check(check, all_files_cmd, setup);
+    tasks.spawn_check(check, all_files_cmd, setup, TaskEvent::AllFilesResult);
     Action::Continue
+}
+
+/// Claim the group's pre-commands for a single run of `check`: `Some(true)`
+/// runs them first. `None` while the runner is due to run them or they are
+/// running (the footer says so): the check must not run before its setup.
+fn claim_setup(app: &mut App, check: &CheckToRun) -> Option<bool> {
+    match app.claim_group_setup(check.group(), check.id()) {
+        GroupSetup::Busy => {
+            let group = check.group();
+            let text = format!("Pre-commands of group `{group}` pending: try again once they ran");
+            app.set_status_message(StatusKind::info(), text);
+            None
+        }
+        setup => Some(setup == GroupSetup::Run),
+    }
 }
 
 /// Handle 's' key: cancel the selected running check. Its runner or retry
@@ -993,7 +1023,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
             "Git refresh failed - retrying with previous file list",
         ),
         TaskEvent::Output(event) => app.handle_runner_event(event),
-        TaskEvent::RetryResult(result) => {
+        TaskEvent::RetryResult(result) | TaskEvent::AllFilesResult(result) => {
             let check_id = result.check_id.clone();
             app.set_retry_result(result);
             app.finish_progress(&check_id);
@@ -1013,17 +1043,59 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
     Action::Continue
 }
 
-/// Record a finished check (runner, or retry / on-demand task) in the
-/// result cache. A write error shows once in the footer (the cache is then
-/// off for the session); it never stops the run.
-fn record_result(cache: &mut ResultCache, app: &mut App, msg: &Message) {
-    let (Message::RunnerEvent(RunnerEvent::CheckFinished { result })
-    | Message::Task(TaskEvent::RetryResult(result))) = msg
-    else {
-        return;
-    };
-    if let Err(e) = cache.record_for(&app.checks, result) {
-        app.set_status_message(StatusKind::Error, format!("Result cache not saved: {e}"));
+/// Records finished checks in the result cache on its own thread, in
+/// arrival order: file hashing and the write stay off the event loop.
+/// Dropping it waits until every queued result is recorded.
+struct Recorder {
+    /// Queue; `None` once dropped, ending the thread
+    tx: Option<std::sync::mpsc::Sender<(CheckToRun, CheckResult)>>,
+    thread: Option<thread::JoinHandle<()>>,
+    /// Write error (at most one: the cache is then off)
+    errors: std::sync::mpsc::Receiver<io::Error>,
+}
+
+impl Recorder {
+    fn start(mut cache: ResultCache) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(CheckToRun, CheckResult)>();
+        let (error_tx, errors) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            rx.into_iter()
+                .filter_map(|(check, result)| cache.record(&check, &result).err())
+                .for_each(|e| drop(error_tx.send(e)));
+        });
+        Self {
+            tx: Some(tx),
+            thread: Some(thread),
+            errors,
+        }
+    }
+
+    /// Queue the check result in `msg` (runner, retry or on-demand; not a
+    /// run-all-files one), with the check as `app` has it now. A write
+    /// error of an earlier result shows in the footer; it never stops the
+    /// run.
+    fn record(&self, app: &mut App, msg: &Message) {
+        if let Ok(e) = self.errors.try_recv() {
+            app.set_status_message(StatusKind::Error, format!("Result cache not saved: {e}"));
+        }
+        let (Message::RunnerEvent(RunnerEvent::CheckFinished { result })
+        | Message::Task(TaskEvent::RetryResult(result))) = msg
+        else {
+            return;
+        };
+        let check = app.checks.iter().find(|c| c.id() == result.check_id);
+        if let (Some(tx), Some(check)) = (&self.tx, check) {
+            let _ = tx.send((check.clone(), result.clone()));
+        }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -1148,8 +1220,7 @@ pub async fn run(
     app.color = crate::color::enabled();
     app.view.stats_visible = options.show_stats;
     app.show_warnings(&startup_warnings);
-    let mut cache = options.cache;
-    let checks = skip_cached(&mut app, &cache, checks);
+    let checks = skip_cached(&mut app, &options.cache, checks);
 
     // Start the runner in background ('s' cancels through `cancels`)
     let cancels = CancelRegistry::default();
@@ -1162,8 +1233,9 @@ pub async fn run(
         exec_root: Arc::new(exec_root.clone()),
         config: Arc::new(config.clone()),
         cancels: cancels.clone(),
-        key_root: cache.key_root().map(Arc::from),
+        key_root: options.cache.key_root().map(Arc::from),
     });
+    let recorder = Recorder::start(options.cache);
 
     // Start background stats worker - runs sysinfo queries without blocking UI
     let (stats_tx, mut stats_rx) = mpsc::channel::<SystemStats>(STATS_CHANNEL_CAPACITY);
@@ -1231,7 +1303,7 @@ pub async fn run(
         };
 
         // Handle the message and get the action
-        record_result(&mut cache, &mut app, &msg);
+        recorder.record(&mut app, &msg);
         match handle_message(&mut app, msg, &mut tasks) {
             Action::Quit => break,
             Action::RestartRunner {
@@ -1870,18 +1942,22 @@ checks:
     fn keyed_check(config: &CiConfig, id: &str, root: &Path) -> CheckToRun {
         let mut check = make_test_check(id, "fast");
         let changed = make_test_app(config).changed_files;
-        crate::cache::stamp_keys(std::slice::from_mut(&mut check), config, &changed, root);
+        let checks = std::slice::from_mut(&mut check);
+        crate::cache::stamp_keys(checks, config, &changed, root, root);
         assert!(check.cache_key.is_some());
         check
     }
 
-    fn finished(id: &str, status: crate::runner::CheckStatus) -> Message {
-        Message::RunnerEvent(RunnerEvent::CheckFinished {
-            result: CheckResult {
-                status,
-                ..CheckResult::pending(id)
-            },
-        })
+    fn with_status(id: &str, status: CheckStatus) -> CheckResult {
+        CheckResult {
+            status,
+            ..CheckResult::pending(id)
+        }
+    }
+
+    fn finished(id: &str, status: CheckStatus) -> Message {
+        let result = with_status(id, status);
+        Message::RunnerEvent(RunnerEvent::CheckFinished { result })
     }
 
     #[test]
@@ -1891,11 +1967,8 @@ checks:
         let lint = keyed_check(&config, "php-lint", dir.path());
         let unit = keyed_check(&config, "phpunit", dir.path());
         let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
-        record_result(
-            &mut cache,
-            &mut app,
-            &finished("php-lint", CheckStatus::Passed),
-        );
+        let pass = with_status("php-lint", CheckStatus::Passed);
+        cache.record(&lint, &pass).unwrap();
 
         let runnable = skip_cached(&mut app, &cache, vec![lint, unit]);
 
@@ -1906,40 +1979,51 @@ checks:
     }
 
     #[test]
-    fn test_record_result_from_runner_and_retry() {
+    fn test_recorder_records_runner_and_retry_results_not_all_files_runs() {
         let config = test_config();
-        let (dir, mut cache) = cache_in_tempdir("results.json");
+        let (dir, cache) = cache_in_tempdir("results.json");
         let lint = keyed_check(&config, "php-lint", dir.path());
-        let mut app = make_test_app_with_checks(&config, vec![lint.clone()]);
+        let unit = keyed_check(&config, "phpunit", dir.path());
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone(), unit.clone()]);
+        let recorder = Recorder::start(cache);
 
-        record_result(
-            &mut cache,
+        recorder.record(&mut app, &finished("php-lint", CheckStatus::Passed));
+        recorder.record(&mut app, &finished("phpunit", CheckStatus::Passed));
+        let retry_failed = with_status("phpunit", CheckStatus::Failed);
+        recorder.record(
             &mut app,
-            &finished("php-lint", CheckStatus::Passed),
+            &Message::Task(TaskEvent::RetryResult(retry_failed)),
         );
-        assert!(cache.is_fresh(&lint), "runner pass recorded");
+        let all_files = with_status("phpunit", CheckStatus::Passed);
+        recorder.record(
+            &mut app,
+            &Message::Task(TaskEvent::AllFilesResult(all_files)),
+        );
+        drop(recorder);
 
-        let retry_failed = Message::Task(TaskEvent::RetryResult(CheckResult {
-            status: CheckStatus::Failed,
-            ..CheckResult::pending("php-lint")
-        }));
-        record_result(&mut cache, &mut app, &retry_failed);
-        assert!(!cache.is_fresh(&lint), "retry failure drops the entry");
+        let root = dir.path().to_path_buf();
+        let reopened = ResultCache::at(dir.path().join("results.json"), root, true);
+        assert!(reopened.is_fresh(&lint), "runner pass recorded");
+        assert!(
+            !reopened.is_fresh(&unit),
+            "retry failure dropped it; the all-files pass is not stored"
+        );
     }
 
     #[test]
-    fn test_record_result_write_error_sets_status_message() {
+    fn test_recorder_write_error_sets_status_message() {
         let config = test_config();
-        let (dir, mut cache) = cache_in_tempdir("ci-tui/results.json");
+        let (dir, cache) = cache_in_tempdir("ci-tui/results.json");
         std::fs::write(dir.path().join("ci-tui"), "").unwrap();
         let lint = keyed_check(&config, "php-lint", dir.path());
         let mut app = make_test_app_with_checks(&config, vec![lint]);
+        let mut recorder = Recorder::start(cache);
 
-        record_result(
-            &mut cache,
-            &mut app,
-            &finished("php-lint", CheckStatus::Passed),
-        );
+        recorder.record(&mut app, &finished("php-lint", CheckStatus::Passed));
+        // Wait for the write, then any message shows its error
+        recorder.tx = None;
+        recorder.thread.take().unwrap().join().unwrap();
+        recorder.record(&mut app, &Message::Task(TaskEvent::FixAllDone));
 
         let message = app.view.status_message.as_ref().expect("status message");
         assert!(message.text.contains("Result cache"), "{}", message.text);
@@ -1967,16 +2051,64 @@ checks:
     }
 
     #[test]
-    fn test_group_setup_claimed_once_when_the_runner_skips_it() {
+    fn test_group_setup_claimed_by_one_run_until_its_result() {
         let config = setup_config();
-        let mut app = make_test_app_with_checks(&config, vec![make_test_check("lint", "db")]);
-        assert!(
-            !app.claim_group_setup("db"),
-            "lint waits for the runner, which runs the pre-commands"
+        let checks = vec![make_test_check("lint", "db"), make_test_check("unit", "db")];
+        let mut app = make_test_app_with_checks(&config, checks);
+        assert_eq!(
+            app.claim_group_setup("db", "lint"),
+            GroupSetup::Busy,
+            "pending checks: the runner runs the pre-commands"
         );
+        app.mark_cached(["lint", "unit"]);
+        assert_eq!(app.claim_group_setup("db", "lint"), GroupSetup::Run);
+        assert_eq!(
+            app.claim_group_setup("db", "unit"),
+            GroupSetup::Busy,
+            "lint's run owns them"
+        );
+
+        // Cancelled mid-setup: claim and running row released
+        let (group, name) = ("db".to_string(), "seed".to_string());
+        let started = RunnerEvent::PreCommandStarted {
+            group: group.clone(),
+            name: name.clone(),
+        };
+        app.handle_runner_event(started);
+        app.set_retry_result(CheckResult::cancelled("lint", chrono::Local::now()));
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Pending);
+        assert_eq!(app.run.current_pre_command, None);
+        assert_eq!(app.claim_group_setup("db", "unit"), GroupSetup::Run);
+
+        let finished = RunnerEvent::PreCommandFinished {
+            group,
+            name,
+            success: true,
+            output: String::new(),
+            duration_ms: 1,
+        };
+        app.handle_runner_event(finished);
+        app.set_retry_result(with_status("unit", CheckStatus::Passed));
+        assert_eq!(app.claim_group_setup("db", "lint"), GroupSetup::Ready);
+    }
+
+    /// 'r' on a cached check while the runner still owes its group's
+    /// pre-commands (a sibling is pending) does not start it
+    #[test]
+    fn test_retry_waits_for_group_setup_the_runner_owes() {
+        let config = setup_config();
+        let checks = vec![make_test_check("unit", "db"), make_test_check("lint", "db")];
+        let mut app = make_test_app_with_checks(&config, checks);
         app.mark_cached(["lint"]);
-        assert!(app.claim_group_setup("db"));
-        assert!(!app.claim_group_setup("db"), "once per run");
+        app.select_last();
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_retry_selected(&mut app, &mut tasks);
+
+        assert!(app.results["lint"].cached, "not started");
+        assert!(tasks.set.is_empty());
+        let message = app.view.status_message.as_ref().expect("status message");
+        assert!(message.text.contains("pending"), "{}", message.text);
     }
 
     /// 'r' on a cached check whose group was skipped (setup never ran) runs
