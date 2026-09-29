@@ -142,6 +142,15 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
         reasons.extend(discovery.warnings.iter().map(|w| format!("warning: {w}")));
     }
 
+    let dropped = eval.filtered_out();
+    if let (Some(filter), false) = (eval.files_filter, dropped.is_empty()) {
+        reasons.push(format!(
+            "files_filter `{}` dropped: {}",
+            filter.as_str(),
+            dropped.join(", ")
+        ));
+    }
+
     if reasons.is_empty() {
         reasons.push(
             "empty triggers block (no file_pattern / test_discovery): never runs".to_string(),

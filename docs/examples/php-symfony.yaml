@@ -173,6 +173,9 @@ checks:
         triggers:
           # Always run when test files change
           file_pattern: php_tests
+          # php_tests also matches fixtures and helpers under tests/
+          # (e.g. tests/Fixtures/valid_case.php); pass only *Test.php to phpunit
+          files_filter: 'Test\.php$'
 
           # Discover related tests when source files change
           test_discovery:

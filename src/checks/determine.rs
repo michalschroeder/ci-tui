@@ -8,6 +8,7 @@
 use crate::config::{CheckDefinition, CheckTriggers, CiConfig, TestDiscoveryConfig};
 use crate::git::ChangedFiles;
 use crate::test_discovery;
+use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -84,23 +85,31 @@ pub(crate) enum DiscoveryOutcome {
 }
 
 /// Evaluate a test_discovery trigger: matched source files, outcome, and
-/// discovery warnings (e.g. a failed `grep_search`).
+/// discovery warnings (e.g. a failed `grep_search`). Discovered tests
+/// `filter` rejects are dropped before the outcome is decided.
 pub(super) fn run_test_discovery<'a>(
     config: &CiConfig,
     changed_files: &'a ChangedFiles,
     project_root: &Path,
-    discovery: &TestDiscoveryConfig,
+    discovery: &'a TestDiscoveryConfig,
     check: &CheckDefinition,
-) -> (Vec<&'a str>, DiscoveryOutcome, Vec<String>) {
+    filter: Option<&Regex>,
+) -> DiscoveryEval<'a> {
     let sources = match_file_pattern(config, changed_files, &discovery.source_pattern);
     if sources.is_empty() {
-        return (sources, DiscoveryOutcome::NoSources, Vec::new());
+        return DiscoveryEval {
+            config: discovery,
+            sources,
+            outcome: DiscoveryOutcome::NoSources,
+            warnings: Vec::new(),
+            filtered_out: Vec::new(),
+        };
     }
 
-    let test_discovery::DiscoveredTests {
-        tests: related_tests,
-        warnings,
-    } = test_discovery::find_related_tests(&discovery.strategies, &sources, project_root);
+    let test_discovery::DiscoveredTests { tests, warnings } =
+        test_discovery::find_related_tests(&discovery.strategies, &sources, project_root);
+    let (related_tests, filtered_out): (Vec<String>, Vec<String>) =
+        tests.into_iter().partition(|test| keeps(filter, test));
     let outcome = if !related_tests.is_empty() {
         DiscoveryOutcome::TestsFound(related_tests)
     } else if check.on_demand {
@@ -110,7 +119,18 @@ pub(super) fn run_test_discovery<'a>(
     } else {
         DiscoveryOutcome::NoTestsRunAll
     };
-    (sources, outcome, warnings)
+    DiscoveryEval {
+        config: discovery,
+        sources,
+        outcome,
+        warnings,
+        filtered_out,
+    }
+}
+
+/// True when `path` passes `triggers.files_filter` (always without one)
+fn keeps(filter: Option<&Regex>, path: &str) -> bool {
+    filter.is_none_or(|re| re.is_match(path))
 }
 
 /// How a check is selected. Single evaluation shared by `determine_checks`
@@ -169,6 +189,8 @@ pub(crate) struct TriggerEval<'a> {
     pub file_pattern: Option<(&'a str, Vec<&'a str>)>,
     /// `test_discovery` evaluation, if configured
     pub discovery: Option<DiscoveryEval<'a>>,
+    /// `files_filter` regex, if configured: `{files}` keeps only matching paths
+    pub files_filter: Option<&'a Regex>,
 }
 
 /// Evaluation of a `test_discovery` trigger.
@@ -181,6 +203,8 @@ pub(crate) struct DiscoveryEval<'a> {
     pub outcome: DiscoveryOutcome,
     /// Non-fatal warnings (e.g. a failed `grep_search`)
     pub warnings: Vec<String>,
+    /// Discovered tests `files_filter` dropped (not in `outcome`)
+    pub filtered_out: Vec<String>,
 }
 
 impl<'a> TriggerEval<'a> {
@@ -197,23 +221,42 @@ impl<'a> TriggerEval<'a> {
                 .as_deref()
                 .map(|key| (key, match_file_pattern(config, changed_files, key))),
             discovery: triggers.test_discovery.as_ref().map(|discovery| {
-                let (sources, outcome, warnings) =
-                    run_test_discovery(config, changed_files, project_root, discovery, check);
-                DiscoveryEval {
-                    config: discovery,
-                    sources,
-                    outcome,
-                    warnings,
-                }
+                let filter = triggers.files_filter.as_ref();
+                run_test_discovery(
+                    config,
+                    changed_files,
+                    project_root,
+                    discovery,
+                    check,
+                    filter,
+                )
             }),
+            files_filter: triggers.files_filter.as_ref(),
         }
     }
 
-    /// True when the `file_pattern` trigger matched at least one file.
+    /// True when the `file_pattern` trigger matched at least one file that
+    /// `files_filter` keeps.
     pub(crate) fn file_pattern_matched(&self) -> bool {
         self.file_pattern
             .as_ref()
-            .is_some_and(|(_, matched)| !matched.is_empty())
+            .is_some_and(|(_, matched)| matched.iter().any(|f| keeps(self.files_filter, f)))
+    }
+
+    /// Paths `files_filter` dropped from `{files}`, deduplicated:
+    /// `file_pattern` matches, then discovered tests.
+    pub(crate) fn filtered_out(&self) -> Vec<&str> {
+        let matches = self
+            .file_pattern
+            .iter()
+            .flat_map(|(_, matched)| matched.iter().copied())
+            .filter(|f| !keeps(self.files_filter, f));
+        let tests = self
+            .discovery
+            .iter()
+            .flat_map(|d| d.filtered_out.iter().map(String::as_str));
+        let mut seen = HashSet::new();
+        matches.chain(tests).filter(|f| seen.insert(*f)).collect()
     }
 
     /// Files state implied by the evaluation; `None` for an empty `triggers`
@@ -222,10 +265,12 @@ impl<'a> TriggerEval<'a> {
         if self.file_pattern.is_none() && self.discovery.is_none() {
             return None;
         }
+        let filter = self.files_filter;
         let mut matched_files: Vec<String> = self
             .file_pattern
             .into_iter()
             .flat_map(|(_, matched)| matched)
+            .filter(|f| keeps(filter, f))
             .map(String::from)
             .collect();
 
@@ -400,8 +445,15 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["README.md"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let out =
-                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &discovery_cfg(), &check).1;
+            let out = run_test_discovery(
+                &cfg,
+                &cf,
+                &PathBuf::from("/tmp"),
+                &discovery_cfg(),
+                &check,
+                None,
+            )
+            .outcome;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -414,7 +466,8 @@ mod tests {
                 source_pattern: "nonexistent".to_string(),
                 strategies: vec![],
             };
-            let out = run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoSources);
         }
 
@@ -424,7 +477,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsOnDemand);
         }
 
@@ -434,7 +488,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("run-all-tests", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsRunAll);
         }
 
@@ -444,7 +499,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("test {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoTestsSkip);
         }
 
@@ -458,7 +514,8 @@ mod tests {
             let cfg = base_config();
             let cf = changed(&["src/foo.rs"]);
             let check = mk_check("cmd {files}", None, None, false);
-            let out = run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check).1;
+            let out =
+                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
             assert_eq!(
                 out,
                 DiscoveryOutcome::TestsFound(vec!["tests/foo_test.rs".to_string()])
@@ -642,6 +699,7 @@ mod tests {
             CheckTriggers {
                 file_pattern: Some(key.to_string()),
                 test_discovery: None,
+                files_filter: None,
             }
         }
 
@@ -781,6 +839,7 @@ mod tests {
                         }],
                     }],
                 }),
+                files_filter: None,
             };
             let def = mk_check(
                 "slow {files}",

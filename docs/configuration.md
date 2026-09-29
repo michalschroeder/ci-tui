@@ -373,6 +373,23 @@ triggers:
 - Advanced test discovery configuration
 - See [Test Discovery](#test-discovery) section
 
+**`files_filter`** (optional)
+- Inline regex (not a `file_patterns` key) every path in `{files}` must match
+- Applies to both `file_pattern` matches and discovered tests; non-matching paths are dropped
+- If every path is dropped, the check is treated as if nothing matched (skipped, `on_demand`, or full command per [Handling No Tests Found](#handling-no-tests-found))
+- `--list` shows the dropped paths as a `files_filter` reason
+- Invalid regex fails config load (exit 2)
+
+**Pitfall: fixtures under `tests/`.** A pattern like `tools/linter/tests/.*\.php$` also matches fixture files (e.g. `tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php`), and a `grep_search` for the class name finds them too. Test runners such as phpunit fail when given non-test files. Keep only test files with `files_filter`:
+
+```yaml
+triggers:
+  file_pattern: linter_tests          # tools/linter/tests/.*\.php$
+  files_filter: 'Test\.php$'          # phpunit gets only *Test.php
+```
+
+Changing only a fixture then does not run its test (the fixture is dropped, nothing is left).
+
 ## Test Discovery
 
 Test discovery automatically finds related test files when source code changes. This enables running only relevant tests instead of the full suite.
@@ -699,7 +716,7 @@ Restricts the run to a subset of checks for fast iteration:
 ci-tui --config ci-tui.yaml --list      # alias: --dry-run
 ```
 
-Prints the base ref used (or that `--files` bypassed git / `--staged` read the git index), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files`, `--base` and `--staged`; cannot be combined with `--simple`, `--fix`, or a subcommand.
+Prints the base ref used (or that `--files` bypassed git / `--staged` read the git index), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, paths dropped by `files_filter`, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files`, `--base` and `--staged`; cannot be combined with `--simple`, `--fix`, or a subcommand.
 
 ## Best Practices
 

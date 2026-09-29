@@ -8,8 +8,8 @@ use std::path::Path;
 
 mod common;
 use common::configs::{
-    checks_test_config, rust_discovery_config, rust_grep_discovery_config, rust_project_config,
-    CheckBuilder, ConfigBuilder,
+    checks_test_config, php_files_filter_config, rust_discovery_config, rust_grep_discovery_config,
+    rust_project_config, CheckBuilder, ConfigBuilder,
 };
 use common::{git, run_ci_tui};
 
@@ -225,6 +225,37 @@ fn test_discovery_no_sources_reason() {
     assert_eq!(
         e.reasons,
         vec!["test_discovery `rust_src`: no changed file matched"]
+    );
+}
+
+#[test]
+fn files_filter_dropping_every_match_is_explained() {
+    // Only fixtures changed: `file_pattern` matched them, files_filter drops all
+    let fixtures = [
+        "tools/linter/tests/Rule/Fixtures/FooRule/valid_case.php",
+        "tools/linter/tests/Rule/Fixtures/FooRule/invalid_case.php",
+    ];
+    let tmp = tempfile::TempDir::new().unwrap();
+    let explained = explain_checks(
+        &php_files_filter_config(),
+        &changed(&fixtures, "main"),
+        tmp.path(),
+    );
+    let e = find(&explained, "unit");
+    assert_eq!(e.decision, Some(Decision::Skipped));
+    assert_eq!(
+        e.reasons,
+        vec![
+            format!(
+                "file_pattern `linter_tests` matched: {}",
+                fixtures.join(", ")
+            ),
+            "test_discovery `linter_src`: no changed file matched".to_string(),
+            format!(
+                "files_filter `Test\\.php$` dropped: {}",
+                fixtures.join(", ")
+            ),
+        ]
     );
 }
 

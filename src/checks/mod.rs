@@ -345,6 +345,7 @@ mod tests {
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
                     test_discovery: None,
+                    files_filter: None,
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -363,6 +364,7 @@ mod tests {
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("yaml".to_string()),
                     test_discovery: None,
+                    files_filter: None,
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -392,6 +394,7 @@ mod tests {
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
                     test_discovery: None,
+                    files_filter: None,
                 }),
                 on_demand: false,
                 env: HashMap::new(),
@@ -421,6 +424,7 @@ mod tests {
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("tests".to_string()),
                     test_discovery: None,
+                    files_filter: None,
                 }),
                 on_demand: false,
                 env: HashMap::new(),

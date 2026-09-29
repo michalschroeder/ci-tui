@@ -507,6 +507,48 @@ checks:
     }
 
     #[test]
+    fn stamp_keys_skips_files_dropped_by_files_filter() {
+        // Edge case: `files_filter` drops a changed fixture from `{files}`;
+        // the key covers only the kept test
+        let config: CiConfig = serde_yaml::from_str(
+            r#"
+version: 2
+runner: local
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns:
+  tests: { pattern: '^tests/' }
+checks:
+  g:
+    checks:
+      unit:
+        name: Unit
+        command: t {files}
+        triggers: { file_pattern: tests, files_filter: '_test\.rs$' }
+"#,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("tests/fixtures")).unwrap();
+        let fixture = dir.path().join("tests/fixtures/case.rs");
+        std::fs::write(dir.path().join("tests/a_test.rs"), "t").unwrap();
+        std::fs::write(&fixture, "f").unwrap();
+        let changed = ChangedFiles {
+            files: vec!["tests/a_test.rs".into(), "tests/fixtures/case.rs".into()],
+            base_ref: "main".into(),
+        };
+        let stamped = || {
+            let root = Some(dir.path());
+            let checks = crate::checks::select_checks(&config, &changed, dir.path(), root).checks;
+            assert_eq!(checks[0].files, files(&["tests/a_test.rs"]));
+            checks[0].cache_key.clone().expect("keyed")
+        };
+        let before = stamped();
+        assert_eq!(before.inputs, vec![dir.path().join("tests/a_test.rs")]);
+        std::fs::write(&fixture, "f changed").unwrap();
+        assert_eq!(stamped(), before, "dropped fixture is not an input");
+    }
+
+    #[test]
     fn select_checks_without_key_root_stamps_nothing() {
         let (config, changed, dir) = discovery_setup();
         let checks = crate::checks::select_checks(&config, &changed, dir.path(), None).checks;
