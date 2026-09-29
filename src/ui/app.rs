@@ -757,9 +757,10 @@ impl App {
     /// Reset a check's result to Running and clear previous output/timing
     fn reset_result_to_running(&mut self, check_id: &str) {
         if let Some(result) = self.results.get_mut(check_id) {
+            // Untimed until the command starts (`CheckStarted`): refresh
+            // and pre-commands don't count
             *result = CheckResult {
                 status: CheckStatus::Running,
-                started_at: Some(chrono::Local::now()),
                 ..CheckResult::pending(check_id)
             };
         }
@@ -836,13 +837,17 @@ impl App {
 
     /// Store a finished result. A timeout or cancel result carries no
     /// output (the command was killed), so a running check's streamed
-    /// output is kept with the result's message appended. A group that is
+    /// output is kept with the result's message appended; a cancel is timed
+    /// from the live start (none if cancelled before it). A group that is
     /// now fully passed auto-collapses; the selection stays on its row. A
     /// failure of the selected check arms the jump to its first error line.
     fn insert_result(&mut self, mut result: CheckResult) {
         // Captured before the insert: under the Failed filter a status
         // change adds/removes rows, shifting the selected index
         let selected = self.selected_item().map(|item| ItemKey::of(&item));
+        if result.status == CheckStatus::Cancelled {
+            self.time_cancel(&mut result);
+        }
         let killed = matches!(
             result.status,
             CheckStatus::TimedOut | CheckStatus::Cancelled
@@ -861,6 +866,17 @@ impl App {
         self.auto_collapse_keeping_selection(selected);
         if selected_failed {
             self.view.pending_error_jump = true;
+        }
+    }
+
+    /// Time a cancel from the live start (none if cancelled before it)
+    fn time_cancel(&self, result: &mut CheckResult) {
+        let Some(running) = self.results.get(&result.check_id) else {
+            return;
+        };
+        if let Some(since) = running.live_since() {
+            result.duration_ms = since.elapsed().as_millis() as u64;
+            result.started_at = running.started_at;
         }
     }
 
@@ -1009,7 +1025,13 @@ impl App {
         if let Some(result) = self.results.get_mut(check_id) {
             result.status = CheckStatus::Running;
             result.started_at = Some(chrono::Local::now());
+            result.running_since = Some(Instant::now());
         }
+    }
+
+    /// Any check running with a live timer (drives the redraw tick)
+    pub fn has_live_timers(&self) -> bool {
+        self.results.values().any(|r| r.live_since().is_some())
     }
 
     /// Append a streamed chunk to a running check's result, capped at
@@ -3123,7 +3145,7 @@ checks:
         let mut app = make_streamed_app();
 
         app.handle_runner_event(RunnerEvent::CheckFinished {
-            result: CheckResult::cancelled("php-lint", chrono::Local::now()),
+            result: CheckResult::cancelled("php-lint"),
         });
 
         let result = &app.results["php-lint"];
@@ -3139,8 +3161,59 @@ checks:
         assert_eq!(app.results["php-lint"].output, "partial\n");
 
         let mut app = make_streamed_app();
-        app.set_retry_result(CheckResult::cancelled("php-lint", chrono::Local::now()));
+        app.set_retry_result(CheckResult::cancelled("php-lint"));
         assert_eq!(app.results["php-lint"].output, "partial\ncancelled by user");
+    }
+
+    /// #141: a cancel is timed from the live start, not the queue / setup
+    /// wait before it
+    #[test]
+    fn test_cancel_timed_from_live_start() {
+        let mut app = make_streamed_app();
+        let running = app.results.get_mut("php-lint").unwrap();
+        running.running_since = Instant::now().checked_sub(std::time::Duration::from_secs(2));
+
+        app.set_retry_result(CheckResult::cancelled("php-lint"));
+
+        let result = &app.results["php-lint"];
+        assert!(
+            (2_000..10_000).contains(&result.duration_ms),
+            "{}",
+            result.duration_ms
+        );
+        assert!(result.started_at.is_some());
+    }
+
+    /// Cancelled while queued: never ran, so no time
+    #[test]
+    fn test_cancel_while_queued_is_untimed() {
+        let mut app = make_app();
+        app.handle_runner_event(RunnerEvent::CheckQueued {
+            check_id: "php-lint".to_string(),
+        });
+
+        app.handle_runner_event(RunnerEvent::CheckFinished {
+            result: CheckResult::cancelled("php-lint"),
+        });
+
+        let result = &app.results["php-lint"];
+        assert_eq!(result.duration_ms, 0);
+        assert_eq!(result.started_at, None);
+    }
+
+    /// #141: a retry shows running but is untimed until its command starts
+    #[test]
+    fn test_retry_untimed_until_started() {
+        let mut app = make_app();
+
+        app.reset_check_for_retry("php-lint");
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert!(!app.has_live_timers());
+
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        });
+        assert!(app.has_live_timers());
     }
 
     #[test]

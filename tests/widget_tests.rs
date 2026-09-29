@@ -774,9 +774,7 @@ fn test_footer_shows_cancel_only_for_running_check() {
 fn test_cancelled_check_shows_label() {
     let mut app = make_test_app();
     // clippy is selected by default
-    let started_at = chrono::Local::now();
-    *app.results.get_mut("clippy").unwrap() =
-        ci_tui::runner::CheckResult::cancelled("clippy", started_at);
+    *app.results.get_mut("clippy").unwrap() = ci_tui::runner::CheckResult::cancelled("clippy");
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();

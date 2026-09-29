@@ -59,6 +59,8 @@ use tokio::task::{JoinHandle, JoinSet};
 // Constants for timing and performance tuning
 /// Interval between system stats updates (CPU, memory)
 const STATS_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+/// Redraw tick for running checks' live elapsed timers (tenths resolution)
+const LIVE_TIMER_INTERVAL: Duration = Duration::from_millis(100);
 /// Keyboard poll timeout - responsive enough for shutdown, not too CPU intensive
 const KEYBOARD_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 /// Channel capacity for system stats
@@ -92,6 +94,8 @@ enum Message {
     Task(TaskEvent),
     /// Status message auto-dismiss deadline reached
     StatusExpired,
+    /// Live elapsed timers advanced
+    Tick,
 }
 
 /// Events from spawned background tasks (fix, fix-all, retry, refresh)
@@ -243,6 +247,14 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
     })
 }
 
+/// Redraw tick for live elapsed timers. Own, not the stats worker's:
+/// sysinfo stalls under high CPU load
+fn live_timer_tick() -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(LIVE_TIMER_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick
+}
+
 /// Action result from handle_message
 enum Action {
     Continue,
@@ -319,13 +331,18 @@ impl TaskCtx {
     }
 
     /// [`Self::run`], streaming live output to `tx` as [`TaskEvent::Output`]
-    /// (all chunks are sent before this returns, so before the result)
+    /// (all chunks are sent before this returns, so before the result),
+    /// after a `CheckStarted` that starts the live timer
     async fn run_streaming(
         &self,
         check: &CheckToRun,
         command: &str,
         tx: &mpsc::Sender<TaskEvent>,
     ) -> CheckResult {
+        let started = RunnerEvent::CheckStarted {
+            check_id: check.id().to_string(),
+        };
+        let _ = tx.send(TaskEvent::Output(started)).await;
         let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
         let run = async move {
             // Sink dropped at the end of this block, ending `forward`
@@ -1208,6 +1225,10 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             app.expire_status_message(std::time::Instant::now());
             Action::Continue
         }
+        Message::Tick => {
+            app.needs_redraw = true;
+            Action::Continue
+        }
     }
 }
 
@@ -1357,6 +1378,7 @@ pub async fn run(
     // `o` / `O`: the running viewer (TUI suspended) and its temp dir
     let mut viewer_task: Option<ViewerTask> = None;
     let mut viewer_dir: Option<tempfile::TempDir> = None;
+    let mut live_tick = live_timer_tick();
 
     // Main event loop - uses tokio::select! for event-driven responsiveness
     //
@@ -1399,6 +1421,9 @@ pub async fn run(
             _ = tokio::time::sleep_until(
                 status_deadline.unwrap_or_else(std::time::Instant::now).into()
             ), if status_deadline.is_some() => Message::StatusExpired,
+
+            // Live elapsed timers, only while a check runs
+            _ = live_tick.tick(), if app.has_live_timers() => Message::Tick,
 
             // Runner lifecycle/status events
             Some(event) = event_rx.recv() => Message::RunnerEvent(event),
@@ -1914,6 +1939,19 @@ checks:
         );
     }
 
+    /// #141: the live timer tick redraws
+    #[tokio::test]
+    async fn test_tick_redraws() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.needs_redraw = false;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        handle_message(&mut app, Message::Tick, &mut tasks);
+
+        assert!(app.needs_redraw);
+    }
+
     /// Spawn a task holding a cancellable registration for `check_id`; it
     /// reports a cancelled result once cancelled
     fn spawn_cancellable(tasks: &mut Tasks, check_id: &'static str) {
@@ -2312,7 +2350,7 @@ checks:
             name: name.clone(),
         };
         app.handle_runner_event(started);
-        app.set_retry_result(CheckResult::cancelled("lint", chrono::Local::now()));
+        app.set_retry_result(CheckResult::cancelled("lint"));
         assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Skipped);
         assert_eq!(app.run.current_pre_command, None);
         assert_eq!(app.claim_group_setup("db", "unit"), GroupSetup::Run);
@@ -2355,9 +2393,10 @@ checks:
     }
 
     /// 'r' on the cached `lint` of [`setup_config_with`] `seed` (group setup
-    /// never ran), in a tempdir: the app after the task's final result, and
-    /// whether that result is one the result cache records
-    async fn retry_cached_lint(seed: &str) -> (App, bool) {
+    /// never ran), in a tempdir: the app after the task's final result,
+    /// whether that result is one the result cache records, and whether the
+    /// check's live timer started after the setup passed
+    async fn retry_cached_lint(seed: &str) -> (App, bool, bool) {
         let config = setup_config_with(seed);
         let dir = tempfile::tempdir().unwrap();
         let mut check = make_test_check("lint", "db");
@@ -2374,6 +2413,8 @@ checks:
         });
 
         handle_retry_selected(&mut app, &mut tasks);
+        let mut timed_after_setup = false;
+        let mut started = false;
         loop {
             let event = rx.recv().await.expect("task event");
             let recorded = match &event {
@@ -2381,9 +2422,18 @@ checks:
                 TaskEvent::UnrecordedResult(_) => Some(false),
                 _ => None,
             };
+            let starts = matches!(&event, TaskEvent::Output(RunnerEvent::CheckStarted { .. }));
+            if !started {
+                assert!(app.results["lint"].live_since().is_none(), "timed early");
+            }
             handle_task_event(&mut app, event);
+            if starts {
+                started = true;
+                timed_after_setup = app.pre_commands[0].status == app::PreCommandStatus::Passed
+                    && app.results["lint"].live_since().is_some();
+            }
             if let Some(recorded) = recorded {
-                return (app, recorded);
+                return (app, recorded, timed_after_setup);
             }
         }
     }
@@ -2392,9 +2442,10 @@ checks:
     /// pre-commands first
     #[tokio::test]
     async fn test_retry_runs_group_setup_that_never_ran() {
-        let (app, recorded) = retry_cached_lint("echo seeded > seeded").await;
+        let (app, recorded, timed_after_setup) = retry_cached_lint("echo seeded > seeded").await;
 
         assert!(recorded);
+        assert!(timed_after_setup, "#141: live timer excludes the setup");
         assert_eq!(app.results["lint"].status, CheckStatus::Passed);
         assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Passed);
     }
@@ -2403,7 +2454,7 @@ checks:
     /// recorded, so its cached pass stays; the next run retries the setup
     #[tokio::test]
     async fn test_failed_group_setup_is_not_recorded() {
-        let (app, recorded) = retry_cached_lint("exit 1").await;
+        let (app, recorded, _) = retry_cached_lint("exit 1").await;
 
         assert!(!recorded);
         assert_eq!(app.results["lint"].status, CheckStatus::Failed);

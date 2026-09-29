@@ -21,7 +21,6 @@ use crate::checks::CheckFiles;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
 use ansi_to_tui::IntoText;
-use chrono::{DateTime, Local};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -33,6 +32,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::VecDeque;
+use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
@@ -559,19 +559,19 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
 }
 
 /// Duration span beside a check name: final `duration_ms` once finished,
-/// " cached" for cached passes, live elapsed since `started_at` while
-/// running, nothing before start
-fn check_duration_span(result: &CheckResult, now: DateTime<Local>) -> Span<'static> {
+/// " cached" for cached passes, live elapsed since
+/// [`CheckResult::live_since`] while running, nothing before start
+fn check_duration_span(result: &CheckResult, now: Instant) -> Span<'static> {
     let done_style = Style::default().fg(Color::DarkGray);
     if result.cached {
         return Span::styled(" cached", done_style);
     }
-    if let (CheckStatus::Running, Some(started)) = (&result.status, result.started_at) {
+    if let Some(since) = result.live_since() {
         // Dimmed running icon color: still ticking, not a final duration
         let live_style = get_status_display(Some(&CheckStatus::Running))
             .1
             .add_modifier(Modifier::DIM);
-        let elapsed = time::format(time::ms_between(started, now));
+        let elapsed = time::format(now.saturating_duration_since(since).as_millis() as u64);
         return Span::styled(format!(" {elapsed}"), live_style);
     }
     if result.duration_ms > 0 {
@@ -587,7 +587,7 @@ fn render_check_item(
     check: &crate::checks::CheckToRun,
     area: Rect,
     is_selected: bool,
-    now: DateTime<Local>,
+    now: Instant,
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
     let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
@@ -677,7 +677,7 @@ fn render_checks_list(app: &mut App, frame: &mut Frame, area: Rect) {
 /// the selection can never disagree.
 fn build_checks_list_items(app: &App, area: Rect) -> Vec<ListItem<'static>> {
     // One clock read per frame: all live timers agree
-    let now = Local::now();
+    let now = Instant::now();
     app.selectable_items()
         .enumerate()
         .map(|(idx, item)| {
@@ -2098,11 +2098,11 @@ mod tests {
     }
 
     /// Result with `status`, started `ago` before a fixed `now`
-    fn timed_result(status: CheckStatus, ago_ms: i64) -> (CheckResult, DateTime<Local>) {
-        let now = Local::now();
+    fn timed_result(status: CheckStatus, ago_ms: u64) -> (CheckResult, Instant) {
+        let now = Instant::now();
         let mut result = CheckResult::pending("php-lint");
         result.status = status;
-        result.started_at = Some(now - chrono::Duration::milliseconds(ago_ms));
+        result.running_since = now.checked_sub(std::time::Duration::from_millis(ago_ms));
         (result, now)
     }
 
@@ -2147,7 +2147,7 @@ mod tests {
         assert_eq!(check_duration_span(&result, now).content, " cached");
     }
 
-    /// Not-started rows show no time (no `started_at`, or queued)
+    /// Not-started rows show no time (no `running_since`, or queued)
     #[rstest::rstest]
     #[case::pending(CheckStatus::Pending)]
     #[case::queued(CheckStatus::Queued)]
@@ -2157,7 +2157,7 @@ mod tests {
         let mut result = CheckResult::pending("php-lint");
         result.status = status;
 
-        assert_eq!(check_duration_span(&result, Local::now()).content, "");
+        assert_eq!(check_duration_span(&result, Instant::now()).content, "");
     }
 
     /// App with one check matching `files`; `expanded` toggles `e` view
