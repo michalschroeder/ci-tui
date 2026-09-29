@@ -237,22 +237,20 @@ impl ResultCache {
     /// write error is returned once, then the cache is off for the rest of
     /// the run.
     pub fn record(&mut self, check: &CheckToRun, result: &CheckResult) -> io::Result<()> {
-        let Some(path) = self.path.clone() else {
+        let Some(path) = &self.path else {
             return Ok(());
         };
         if result.cached {
             return Ok(());
         }
+        let passed = result.status == CheckStatus::Passed;
         let pass = match &check.cache_key {
-            Some(key) if result.status == CheckStatus::Passed => match key.still_matches(check) {
-                true => Some(key.value),
-                false => return Ok(()),
-            },
+            Some(key) if passed && key.still_matches(check) => Some(key.value),
             _ if result.status.is_failure() => None,
             _ => return Ok(()),
         };
         let id = check.id();
-        let updated = self.update(&path, |entries| match pass {
+        let updated = update(path, &mut self.entries, |entries| match pass {
             Some(value) => entries.insert(id.to_string(), value) != Some(value),
             None => entries.remove(id).is_some(),
         });
@@ -261,26 +259,26 @@ impl ResultCache {
         }
         updated
     }
+}
 
-    /// Apply `change` (true when it changed something, then saved) to the
-    /// entries on disk under the lock: another run's changes since this one
-    /// loaded are kept, not overwritten
-    fn update(
-        &mut self,
-        path: &Path,
-        change: impl FnOnce(&mut HashMap<String, u64>) -> bool,
-    ) -> io::Result<()> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        // Released on drop
-        let lock = std::fs::File::create(dir.join(LOCK_FILE))?;
-        lock.lock()?;
-        self.entries = read_entries(path);
-        if !change(&mut self.entries) {
-            return Ok(());
-        }
-        write_atomic(path, &serde_json::to_vec(&self.entries)?)
+/// Apply `change` (true when it changed something, then saved) to the
+/// entries stored at `path`, re-read into `entries` under the lock: another
+/// run's changes since this one loaded are kept, not overwritten
+fn update(
+    path: &Path,
+    entries: &mut HashMap<String, u64>,
+    change: impl FnOnce(&mut HashMap<String, u64>) -> bool,
+) -> io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // Released on drop
+    let lock = std::fs::File::create(dir.join(LOCK_FILE))?;
+    lock.lock()?;
+    *entries = read_entries(path);
+    if !change(entries) {
+        return Ok(());
     }
+    write_atomic(path, &serde_json::to_vec(entries)?)
 }
 
 /// Entries stored at `path`; empty when missing, unreadable or corrupt

@@ -241,12 +241,13 @@ async fn run() -> Result<i32> {
 
     // Docker preflight, fatal if commands would run in docker mode but it is
     // down: on-demand checks only run on request, fix mode runs its own
-    // commands. Cached checks count too ('r' in the TUI runs them). Non-fatal
-    // warnings (failed test discovery, then Docker ones): console modes
-    // print now, the TUI shows them in-app.
+    // commands, cached checks only in the TUI ('r'). Non-fatal warnings
+    // (failed test discovery, then Docker ones): console modes print now,
+    // the TUI shows them in-app.
+    let runs = |c: &&checks::CheckToRun| !(c.is_on_demand() || simple_mode && cache.is_fresh(c));
     let docker_needed = match cli.fix {
         true => fix::has_fixes(&config, &changed_files),
-        false => checks_to_run.iter().any(|c| !c.is_on_demand()),
+        false => checks_to_run.iter().any(|c| runs(&c)),
     };
     let (target, files) = (&config.runner, &changed_files.files);
     let preflight = preflight::run(target, docker_needed, &exec_root, &checks_to_run, files);

@@ -64,6 +64,9 @@ pub enum PreCommandStatus {
     Running,
     Passed,
     Failed,
+    /// Not run: no check of the group runs (served from the result cache,
+    /// or on-demand only); a single run of one of them runs it first
+    Skipped,
 }
 
 /// What a single check run (retry, on-demand, all files) does about its
@@ -494,6 +497,7 @@ impl App {
             sys: SysStats::default(),
             needs_redraw: true, // Initial render needed
         };
+        app.skip_unowed_setups();
         app.select_initial_item();
         app
     }
@@ -542,6 +546,7 @@ impl App {
         };
         self.select_initial_item();
         self.run = RunState::started_now();
+        self.skip_unowed_setups();
         self.fix = FixState::default();
         // sys stats deliberately survive retries
         self.output_cache = None;
@@ -549,12 +554,41 @@ impl App {
     }
 
     /// Show checks served from the result cache as passed without running
-    /// (see [`CheckResult::cached`])
+    /// (see [`CheckResult::cached`]). Pre-commands of groups left without a
+    /// pending check show as skipped: the runner does not run them.
     pub fn mark_cached<'a>(&mut self, check_ids: impl IntoIterator<Item = &'a str>) {
         for id in check_ids {
             self.results.insert(id.to_string(), CheckResult::cached(id));
         }
+        self.skip_unowed_setups();
         self.needs_redraw = true;
+    }
+
+    /// True while the runner will still run `group`'s pre-commands: the run
+    /// is on and a check of the group waits for it
+    fn runner_owes_setup(&self, group: &str) -> bool {
+        let pending = |c: &&CheckToRun| {
+            self.results
+                .get(c.id())
+                .is_some_and(|r| r.status == CheckStatus::Pending)
+        };
+        !self.run.all_finished && self.checks_in_group(group).iter().any(pending)
+    }
+
+    /// Show pending pre-commands the runner will not run as skipped
+    fn skip_unowed_setups(&mut self) {
+        let unowed: HashSet<String> = self
+            .pre_commands
+            .iter()
+            .filter(|p| !self.runner_owes_setup(&p.group))
+            .map(|p| p.group.clone())
+            .collect();
+        let idle = |row: &&mut PreCommandState| {
+            row.status == PreCommandStatus::Pending && unowed.contains(&row.group)
+        };
+        for row in self.pre_commands.iter_mut().filter(idle) {
+            row.status = PreCommandStatus::Skipped;
+        }
     }
 
     /// Show non-fatal warnings (test discovery, docker preflight) in the
@@ -719,15 +753,8 @@ impl App {
             return GroupSetup::Ready;
         }
         let running = rows.any(|p| p.status == PreCommandStatus::Running);
-        let runner_will = !self.run.all_finished
-            && self.checks.iter().any(|c| {
-                c.group() == group
-                    && self
-                        .results
-                        .get(c.id())
-                        .is_some_and(|r| r.status == CheckStatus::Pending)
-            });
-        match running || runner_will || self.run.setup_claims.contains_key(group) {
+        let busy = running || self.runner_owes_setup(group);
+        match busy || self.run.setup_claims.contains_key(group) {
             true => GroupSetup::Busy,
             false => GroupSetup::Run,
         }
@@ -746,7 +773,7 @@ impl App {
     }
 
     /// Drop the pre-commands claim of `check_id`'s run (its result arrived).
-    /// Rows it left running (cancelled mid-setup) go back to pending, so the
+    /// Rows it left running (cancelled mid-setup) go back to skipped, so the
     /// next single run starts the setup over.
     fn release_group_setup(&mut self, check_id: &str) {
         let Some(group) = self
@@ -765,7 +792,7 @@ impl App {
             self.run.current_pre_command = None;
         }
         for row in self.pre_commands.iter_mut().filter(|row| running(row)) {
-            row.status = PreCommandStatus::Pending;
+            row.status = PreCommandStatus::Skipped;
         }
     }
 
