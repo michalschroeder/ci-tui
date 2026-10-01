@@ -258,9 +258,11 @@ async fn run() -> Result<i32> {
         }
     }
 
-    // Run fix mode if requested
+    // Run fix mode if requested; passing fixes are verified against the
+    // selected checks
     if cli.fix {
-        return interruptible(fix::run(config, changed_files, exec_root)).await;
+        let verify = (!cli.no_verify).then_some(checks_to_run);
+        return interruptible(fix::run(config, changed_files, exec_root, verify)).await;
     }
 
     if simple_mode {

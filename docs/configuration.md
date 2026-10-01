@@ -300,7 +300,7 @@ checks:
 
 **`fix_command`** (optional)
 - Command that automatically fixes issues
-- Runs when CI-TUI is invoked with `--fix` flag
+- Runs when CI-TUI is invoked with `--fix` flag (or `x` / `X` in the TUI); the check is then re-run to verify the fix unless `--no-verify`
 - Typically used for formatters and auto-fixable linters
 
 **`triggers`** (optional)
@@ -665,11 +665,13 @@ Non-interactive mode for CI pipelines:
 ci-tui --config ci-tui.yaml --fix
 ```
 
-Runs only `fix_command` entries:
+Runs `fix_command` entries, verifying each fix:
 - Executes auto-fixers (formatters, auto-fixable linters)
 - Skips checks without fix_command
 - Useful before committing to auto-format code
-- Returns after fixes complete
+- Once all fixes ran, re-runs the checks whose fix passed (so a later fix cannot undo an earlier verification) and prints `verified` or `still failing` with the check's output. Only checks the run would select are re-run; on-demand / skipped ones print `not verified`. Re-runs go like a normal run: group order, `pre_commands` once per group, `parallel` / `max_parallel`; if a pre-command fails, the remaining re-runs count as failed
+- Summary lists fixes and verifications; exit `1` if a fix or a verification failed, else `0`
+- `--no-verify` skips the re-runs (fix commands only). It also applies to `x` / `X` in the TUI, which otherwise re-run each check whose fix passed, one at a time and without `r`'s git refresh (output streams, `s` cancels). Not with `--list`
 
 **Workflow:**
 ```bash

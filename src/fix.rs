@@ -7,79 +7,98 @@
 //! # Usage
 //!
 //! Invoked via `--fix` CLI flag. Runs fix commands sequentially and reports
-//! success/failure for each.
+//! success/failure for each. Once all fixes ran, the checks of passing fixes
+//! are verified by re-running them (unless `--no-verify`): only checks the
+//! run selected (not on-demand / skipped), through [`CheckRunner`] like a
+//! normal run (group order, pre-commands, parallel limits).
 //!
 //! # Exit Codes
 //!
-//! - `0`: All fix commands passed
-//! - `1`: One or more fix commands failed
+//! - `0`: All fix commands (and verifications) passed
+//! - `1`: One or more fix commands or verifications failed
 
-use crate::checks::{keeps, FilePatternEval};
-use crate::color::cprintln;
+use crate::checks::{keeps, CheckToRun, Decision, FilePatternEval};
+use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::runner::ExecTarget;
+use crate::runner::{
+    CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget, RunnerEvent,
+};
 use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Summary of a fix run — consumed by `run` (prints + exits) or by tests.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FixSummary {
     pub fix_count: usize,
     pub pass_count: usize,
     pub fail_count: usize,
+    /// Verification on (not `--no-verify`)
+    pub verify: bool,
+    /// Passed fixes whose check was re-run and passed / failed (or whose
+    /// group setup failed)
+    pub verify_pass_count: usize,
+    pub verify_fail_count: usize,
+    /// Passed fixes not verified: check not selected, or on-demand
+    pub unverified_count: usize,
+    /// A fix or a verification failed
     pub has_failures: bool,
     pub elapsed: std::time::Duration,
 }
 
+impl FixSummary {
+    /// Passed fixes whose check was re-run (or whose group setup failed)
+    pub fn verify_count(&self) -> usize {
+        self.verify_pass_count + self.verify_fail_count
+    }
+}
+
 /// Run fix commands for all checks using the supplied executor (test-facing).
+///
+/// `verify`: the checks the run selected ([`crate::checks::select_checks`]),
+/// to verify passing fixes against; `None` skips verification.
 pub async fn run_with_executor(
     config: CiConfig,
     changed_files: ChangedFiles,
     project_root: PathBuf,
-    executor: &dyn crate::runner::CommandExecutor,
+    verify: Option<Vec<CheckToRun>>,
+    executor: Arc<dyn CommandExecutor>,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
+    let ctx = FixCtx {
+        config: &config,
+        changed_files: &changed_files,
+        project_root: &project_root,
+        executor: executor.as_ref(),
+    };
+    let mut summary = FixSummary {
+        verify: verify.is_some(),
+        ..FixSummary::default()
+    };
 
-    let mut fix_count = 0;
-    let mut pass_count = 0;
-    let mut fail_count = 0;
-    let mut has_failures = false;
-
+    let mut fixed = Vec::new();
     for (group_name, group_config) in config.groups() {
-        let display_name = group_config.display_name(group_name);
-        let (fc, pc, flc, hf) = run_group_fixes_with_executor(
-            &config,
-            group_config,
-            display_name,
-            &changed_files,
-            &project_root,
-            &config.runner,
-            executor,
-        )
-        .await;
-        fix_count += fc;
-        pass_count += pc;
-        fail_count += flc;
-        has_failures |= hf;
+        run_group_fixes(&ctx, group_name, group_config, &mut summary, &mut fixed).await;
+    }
+    if let Some(selected) = verify {
+        let runner = CheckRunner::with_executor(config, &project_root, executor);
+        verify_fixes(&runner, &selected, &fixed, &mut summary).await;
     }
 
-    Ok(FixSummary {
-        fix_count,
-        pass_count,
-        fail_count,
-        has_failures,
-        elapsed: start_time.elapsed(),
-    })
+    summary.elapsed = start_time.elapsed();
+    Ok(summary)
 }
 
-/// Run fix commands for all checks with fix_command defined
+/// Run fix commands for all checks with fix_command defined, verifying
+/// passing ones against `verify` (see [`run_with_executor`])
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
     project_root: PathBuf,
+    verify: Option<Vec<CheckToRun>>,
 ) -> Result<()> {
     cprintln!(
         "\x1b[1mFix Mode\x1b[0m - {} files changed vs {}",
@@ -88,39 +107,48 @@ pub async fn run(
     );
     cprintln!();
 
-    let summary = run_with_executor(
-        config,
-        changed_files,
-        project_root,
-        &crate::runner::RealCommandExecutor,
-    )
-    .await?;
+    let executor = Arc::new(crate::runner::RealCommandExecutor);
+    let summary = run_with_executor(config, changed_files, project_root, verify, executor).await?;
 
-    let elapsed_str = time::format_from_duration(summary.elapsed);
     if summary.fix_count == 0 {
         cprintln!("\x1b[33mNo fix commands found in config.\x1b[0m");
         return Ok(());
     }
 
     cprintln!("\x1b[1m── Summary ──\x1b[0m");
+    cprintln!("{}", format_summary(&summary));
     if summary.has_failures {
-        cprintln!(
-            "\x1b[31m✗ {}/{} fixes passed, {} failed in {}\x1b[0m",
-            summary.pass_count,
-            summary.fix_count,
-            summary.fail_count,
-            elapsed_str
-        );
         std::process::exit(crate::exit::CHECKS_FAILED);
-    } else {
-        cprintln!(
-            "\x1b[32m✓ All {} fixes passed in {}\x1b[0m",
-            summary.fix_count,
-            elapsed_str
-        );
     }
 
     Ok(())
+}
+
+/// Colored summary line: fix counts, then verification counts when on
+fn format_summary(summary: &FixSummary) -> String {
+    let elapsed = time::format_from_duration(summary.elapsed);
+    let mut verified = String::new();
+    if summary.verify {
+        verified = format!(
+            ", {}/{} verified",
+            summary.verify_pass_count,
+            summary.verify_count()
+        );
+        if summary.unverified_count > 0 {
+            verified += &format!(", {} not verified", summary.unverified_count);
+        }
+    }
+    if summary.has_failures {
+        format!(
+            "\x1b[31m✗ {}/{} fixes passed, {} failed{verified} in {elapsed}\x1b[0m",
+            summary.pass_count, summary.fix_count, summary.fail_count,
+        )
+    } else {
+        format!(
+            "\x1b[32m✓ All {} fixes passed{verified} in {elapsed}\x1b[0m",
+            summary.fix_count
+        )
+    }
 }
 
 /// Resolve whether a check's fix command should run and return the resolved command
@@ -147,28 +175,33 @@ pub fn has_fixes(config: &CiConfig, changed_files: &ChangedFiles) -> bool {
     })
 }
 
-/// Run fix commands for a single group, returns (fix_count, pass_count, fail_count, has_failures)
-async fn run_group_fixes_with_executor(
-    config: &CiConfig,
+/// Shared inputs of one fix run
+struct FixCtx<'a> {
+    config: &'a CiConfig,
+    changed_files: &'a ChangedFiles,
+    project_root: &'a Path,
+    executor: &'a dyn CommandExecutor,
+}
+
+/// Run fix commands for a single group, counting into `summary`; the ids of
+/// passing ones go to `fixed`
+async fn run_group_fixes(
+    ctx: &FixCtx<'_>,
+    group_name: &str,
     group_config: &crate::config::GroupConfig,
-    display_name: &str,
-    changed_files: &ChangedFiles,
-    project_root: &Path,
-    target: &ExecTarget,
-    executor: &dyn crate::runner::CommandExecutor,
-) -> (usize, usize, usize, bool) {
-    let mut fix_count = 0;
-    let mut pass_count = 0;
-    let mut fail_count = 0;
-    let mut has_failures = false;
+    summary: &mut FixSummary,
+    fixed: &mut Vec<String>,
+) {
+    let target: &ExecTarget = &ctx.config.runner;
     let mut group_has_fixes = false;
 
     for (check_id, check) in &group_config.checks {
-        let Some(resolved_command) = resolve_check_fix(config, check, changed_files) else {
+        let Some(resolved_command) = resolve_check_fix(ctx.config, check, ctx.changed_files) else {
             continue;
         };
 
         if !group_has_fixes {
+            let display_name = group_config.display_name(group_name);
             cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
             group_has_fixes = true;
         }
@@ -181,25 +214,133 @@ async fn run_group_fixes_with_executor(
         let result = run_fix_command_with_executor(
             &resolved_command,
             check_id,
-            project_root,
+            ctx.project_root,
             target,
             check.container.as_deref(),
-            executor,
+            ctx.executor,
         )
         .await;
 
-        fix_count += 1;
+        summary.fix_count += 1;
         let success = print_fix_result(check_id, &result);
-        pass_count += usize::from(success);
-        fail_count += usize::from(!success);
-        has_failures |= !success;
+        summary.pass_count += usize::from(success);
+        summary.fail_count += usize::from(!success);
+        summary.has_failures |= !success;
+        if success {
+            fixed.push(check_id.clone());
+        }
     }
 
     if group_has_fixes {
         cprintln!();
     }
+}
 
-    (fix_count, pass_count, fail_count, has_failures)
+/// Re-run the checks of the `fixed` ids the run `selected` (not on-demand)
+/// with `runner`, counting into `summary`; the others are only reported as
+/// not verified. Checks the runner did not reach (a pre-command
+/// failed) fail.
+async fn verify_fixes(
+    runner: &CheckRunner,
+    selected: &[CheckToRun],
+    fixed: &[String],
+    summary: &mut FixSummary,
+) {
+    if fixed.is_empty() {
+        return;
+    }
+    cprintln!("\x1b[1;36m── VERIFY ──\x1b[0m");
+    let mut checks = Vec::new();
+    for id in fixed {
+        let check = selected.iter().find(|c| c.id() == id);
+        match check.map(|c| (c, c.decision())) {
+            Some((check, Decision::Run)) => checks.push(check.clone()),
+            Some((_, Decision::OnDemand)) => unverified(id, "on-demand", summary),
+            _ => unverified(id, "not selected", summary),
+        }
+    }
+
+    let mut not_run: Vec<String> = checks.iter().map(|c| c.id().to_string()).collect();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    // `tx` dropped when the run ends, ending `report`
+    let run = async move {
+        let _ = runner.run_checks(checks, tx).await;
+    };
+    let report = async {
+        while let Some(event) = rx.recv().await {
+            on_verify_event(event, &mut not_run, summary);
+        }
+    };
+    tokio::join!(run, report);
+
+    for id in not_run {
+        let result = CheckResult {
+            status: CheckStatus::Failed,
+            output: "Not run: a group pre-command failed".into(),
+            ..CheckResult::pending(&id)
+        };
+        count_verification(&result, summary);
+        cprint!("{}", format_verify_result(&result));
+    }
+    cprintln!();
+}
+
+/// Count a verification `result` into `summary`
+fn count_verification(result: &CheckResult, summary: &mut FixSummary) {
+    let passed = result.status == CheckStatus::Passed;
+    summary.verify_pass_count += usize::from(passed);
+    summary.verify_fail_count += usize::from(!passed);
+    summary.has_failures |= !passed;
+}
+
+/// Count and print a passing fix not verified, with the `reason`
+fn unverified(check_id: &str, reason: &str, summary: &mut FixSummary) {
+    cprintln!("{}", format_unverified(check_id, reason));
+    summary.unverified_count += 1;
+}
+
+/// Print a verification run event (check started / finished, failed
+/// pre-command with its output; others are ignored), counting a finished
+/// check into `summary` and dropping it from `not_run`
+fn on_verify_event(event: RunnerEvent, not_run: &mut Vec<String>, summary: &mut FixSummary) {
+    match event {
+        RunnerEvent::CheckStarted { check_id } => {
+            cprintln!("  \x1b[33m●\x1b[0m {check_id} \x1b[90m(verifying...)\x1b[0m");
+        }
+        RunnerEvent::CheckFinished { result } => {
+            not_run.retain(|id| *id != result.check_id);
+            count_verification(&result, summary);
+            cprint!("{}", format_verify_result(&result));
+        }
+        RunnerEvent::PreCommandFinished {
+            name,
+            success: false,
+            output,
+            ..
+        } => {
+            let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
+            cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
+        }
+        _ => {}
+    }
+}
+
+/// Line for a passing fix that is not verified, with the `reason`
+fn format_unverified(check_id: &str, reason: &str) -> String {
+    format!("  \x1b[90m○ {check_id} not verified ({reason})\x1b[0m")
+}
+
+/// Verification result: green "verified", or red "still failing" plus the
+/// check's output
+fn format_verify_result(result: &CheckResult) -> String {
+    let (id, duration) = (&result.check_id, time::format(result.duration_ms));
+    if result.status == CheckStatus::Passed {
+        return format!("  \x1b[32m✓\x1b[0m {id} \x1b[90mverified {duration}\x1b[0m\n");
+    }
+    let failed = crate::simple::format_failed_check(result, None);
+    format!(
+        "  \x1b[31m✗\x1b[0m {id} \x1b[31mstill failing\x1b[0m \x1b[90m{duration}\x1b[0m\n{failed}"
+    )
 }
 
 /// Determine which changed files a check applies to based on its triggers:
@@ -334,6 +475,54 @@ mod tests {
             assert!(!plain.contains("\x1b["), "got: {plain:?}");
             assert!(plain.contains("fmt"));
         }
+    }
+
+    #[test]
+    fn test_verify_result_lines() {
+        let paint = |line: &str| crate::color::paint(line, false).into_owned();
+        let passed = CheckResult {
+            status: CheckStatus::Passed,
+            ..CheckResult::pending("fmt")
+        };
+        assert!(paint(&format_verify_result(&passed)).starts_with("  ✓ fmt verified "));
+
+        let failed = CheckResult {
+            status: CheckStatus::Failed,
+            output: "diff in src/main.rs".into(),
+            ..CheckResult::pending("fmt")
+        };
+        let text = paint(&format_verify_result(&failed));
+        assert!(text.starts_with("  ✗ fmt still failing "), "{text}");
+        assert!(text.contains("diff in src/main.rs"), "output shown: {text}");
+
+        let line = paint(&format_unverified("fmt", "on-demand"));
+        assert_eq!(line, "  ○ fmt not verified (on-demand)");
+    }
+
+    #[rstest::rstest]
+    #[case::no_verify(false, (0, 0, 0), false, "✓ All 2 fixes passed in 0s")]
+    #[case::verified(true, (2, 0, 0), false, "✓ All 2 fixes passed, 2/2 verified in 0s")]
+    #[case::unverified(true, (1, 0, 1), false, "✓ All 2 fixes passed, 1/1 verified, 1 not verified in 0s")]
+    #[case::still_failing(true, (1, 1, 0), true, "✗ 2/2 fixes passed, 0 failed, 1/2 verified in 0s")]
+    fn test_summary_line(
+        #[case] verify: bool,
+        #[case] (verify_pass_count, verify_fail_count, unverified_count): (usize, usize, usize),
+        #[case] has_failures: bool,
+        #[case] expected: &str,
+    ) {
+        let summary = FixSummary {
+            fix_count: 2,
+            pass_count: 2,
+            verify,
+            verify_pass_count,
+            verify_fail_count,
+            unverified_count,
+            has_failures,
+            ..FixSummary::default()
+        };
+        let line = format_summary(&summary);
+        let line = crate::color::paint(&line, false);
+        assert_eq!(line, expected);
     }
 
     fn cfg_with_pattern(key: &str, pattern: &str) -> CiConfig {

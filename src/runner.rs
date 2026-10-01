@@ -696,6 +696,16 @@ impl CheckResult {
         }
     }
 
+    /// Create a failed result for a check whose group pre-commands failed
+    /// (the check did not run)
+    pub fn setup_failed(check_id: &str, group: &str) -> Self {
+        Self {
+            status: CheckStatus::Failed,
+            output: format!("Pre-command of group `{group}` failed"),
+            ..Self::pending(check_id)
+        }
+    }
+
     /// Monotonic start while running, else `None`
     pub fn live_since(&self) -> Option<std::time::Instant> {
         self.running_since

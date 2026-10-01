@@ -93,8 +93,10 @@ async fn uses_docker_run_when_container_not_running() {
         .unwrap();
 }
 
+use ci_tui::checks::{determine_checks, CheckFiles, CheckToRun};
 use ci_tui::fix::{run_with_executor, FixSummary};
 use ci_tui::git::ChangedFiles;
+use std::sync::{Arc, Mutex};
 
 fn rust_fmt_with_fix_config() -> ci_tui::config::CiConfig {
     common::configs::ConfigBuilder::new()
@@ -127,7 +129,7 @@ async fn all_fixes_pass_summary_is_clean() {
     };
 
     let summary: FixSummary =
-        run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+        run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
             .await
             .unwrap();
 
@@ -153,7 +155,7 @@ async fn failing_fix_recorded_in_summary() {
         base_ref: "main".into(),
     };
 
-    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+    let summary = run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
         .await
         .unwrap();
 
@@ -185,7 +187,7 @@ async fn skips_check_without_fix_command() {
         base_ref: "main".into(),
     };
 
-    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+    let summary = run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
         .await
         .unwrap();
 
@@ -203,9 +205,167 @@ async fn skips_fix_when_files_placeholder_has_no_matches() {
         base_ref: "main".into(),
     };
 
-    let summary = run_with_executor(config, changed, std::path::PathBuf::from("/app"), &mock)
+    let summary = run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
         .await
         .unwrap();
 
     assert_eq!(summary.fix_count, 0);
+}
+
+/// `src/main.rs` changed
+fn main_rs_changed() -> ChangedFiles {
+    ChangedFiles {
+        files: vec!["src/main.rs".into()],
+        base_ref: "main".into(),
+    }
+}
+
+/// Kind of a command run by the fixtures here: group setup (`init-db`),
+/// the check (`--check`) or its fix
+fn kind(command: &str) -> &'static str {
+    if command.contains("init-db") {
+        "setup"
+    } else if command.contains("--check") {
+        "check"
+    } else {
+        "fix"
+    }
+}
+
+/// Mock executor logging the [`kind`] of every command; commands of the
+/// kinds in `failing` fail with `diff found` on stdout
+fn logging_mock(
+    failing: &'static [&'static str],
+) -> (MockCommandExecutor, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&log);
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_execute().returning(move |cmd, _, _| {
+        seen.lock().unwrap().push(kind(cmd).to_string());
+        let success = !failing.contains(&kind(cmd));
+        CommandOutput {
+            success,
+            stdout: if success {
+                String::new()
+            } else {
+                "diff found".into()
+            },
+            stderr: String::new(),
+        }
+    });
+    (mock, log)
+}
+
+/// Fix run of `config` with `src/main.rs` changed, verifying against
+/// `checks` (`None`: --no-verify); the summary and the command kinds run
+async fn fix_run(
+    config: ci_tui::config::CiConfig,
+    checks: Option<Vec<CheckToRun>>,
+    failing: &'static [&'static str],
+) -> (FixSummary, Vec<String>) {
+    let (mock, log) = logging_mock(failing);
+    let summary = run_with_executor(
+        config,
+        main_rs_changed(),
+        "/app".into(),
+        checks,
+        Arc::new(mock),
+    )
+    .await
+    .unwrap();
+    let log = log.lock().unwrap().clone();
+    (summary, log)
+}
+
+/// Checks `select_checks` picks for `config` with `src/main.rs` changed
+fn selected(config: &ci_tui::config::CiConfig) -> Vec<CheckToRun> {
+    determine_checks(config, &main_rs_changed(), std::path::Path::new("/app"))
+}
+
+/// A passing fix re-runs its check (a failed re-run fails the run); a
+/// failed fix is not verified
+#[rstest::rstest]
+#[case::verified(&[], &["fix", "check"], (0, 1, 0), false)]
+#[case::still_failing(&["check"], &["fix", "check"], (0, 0, 1), true)]
+#[case::failed_fix(&["fix"], &["fix"], (1, 0, 0), true)]
+#[tokio::test]
+async fn verify_after_fix(
+    #[case] failing: &'static [&'static str],
+    #[case] expected_log: &[&str],
+    #[case] counts: (usize, usize, usize),
+    #[case] has_failures: bool,
+) {
+    let config = rust_fmt_with_fix_config();
+    let checks = selected(&config);
+
+    let (summary, log) = fix_run(config, Some(checks), failing).await;
+
+    assert_eq!(log, expected_log);
+    // (fix failures, verified, still failing)
+    let actual = (summary.fail_count, summary.verify_pass_count);
+    assert_eq!((actual.0, actual.1, summary.verify_fail_count), counts);
+    assert_eq!(summary.unverified_count, 0);
+    assert_eq!(summary.has_failures, has_failures);
+}
+
+#[tokio::test]
+async fn unselected_or_on_demand_check_is_not_verified() {
+    let config = rust_fmt_with_fix_config();
+    let mut on_demand = selected(&config);
+    on_demand[0].files = CheckFiles::OnDemand;
+
+    for checks in [vec![], on_demand] {
+        let (summary, log) = fix_run(config.clone(), Some(checks), &["check"]).await;
+
+        assert_eq!(log, ["fix"]);
+        assert_eq!((summary.verify_count(), summary.unverified_count), (0, 1));
+        assert!(!summary.has_failures);
+    }
+}
+
+#[tokio::test]
+async fn no_verify_runs_fixes_only() {
+    let (summary, log) = fix_run(rust_fmt_with_fix_config(), None, &["check"]).await;
+
+    assert_eq!(log, ["fix"]);
+    assert_eq!((summary.verify_count(), summary.unverified_count), (0, 0));
+    assert!(!summary.verify && !summary.has_failures);
+}
+
+#[tokio::test]
+async fn verifications_follow_all_fixes_with_group_setup_once() {
+    let config = common::configs::fixable_group_with_setup_config();
+    let checks = selected(&config);
+
+    let (summary, log) = fix_run(config, Some(checks), &[]).await;
+
+    assert_eq!(log, ["fix", "fix", "setup", "check", "check"]);
+    assert_eq!((summary.verify_count(), summary.verify_pass_count), (2, 2));
+}
+
+#[tokio::test]
+async fn failed_group_setup_fails_its_verifications() {
+    let config = common::configs::fixable_group_with_setup_config();
+    let checks = selected(&config);
+
+    let (summary, log) = fix_run(config, Some(checks), &["setup"]).await;
+
+    assert_eq!(
+        log,
+        ["fix", "fix", "setup"],
+        "setup not retried, checks not run"
+    );
+    assert_eq!((summary.verify_count(), summary.verify_fail_count), (2, 2));
+    assert_eq!(summary.fail_count, 0, "the fixes passed");
+    assert!(summary.has_failures);
+}
+
+#[tokio::test]
+async fn no_setup_without_verification() {
+    let config = common::configs::fixable_group_with_setup_config();
+
+    let (_, log) = fix_run(config, None, &[]).await;
+
+    assert_eq!(log, ["fix", "fix"]);
 }

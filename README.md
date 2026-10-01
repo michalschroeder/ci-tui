@@ -21,7 +21,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init)
 - Test discovery via `path_mapping` and `grep_search` strategies
 - On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests
-- `--fix` mode runs each check's `fix_command` (formatters, etc.)
+- `--fix` mode runs each check's `fix_command` (formatters, etc.), then re-runs each check whose fix passed to confirm it passes now (`--no-verify` skips this; also for `x` / `X` in the TUI)
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
 - `--files` to bypass git detection and check specific paths
 - `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
@@ -137,8 +137,8 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `R` | Re-detect changes and rerun all |
 | `t` | Trigger on-demand check |
 | `A` | Run selected check on all files |
-| `x` | Fix selected check |
-| `X` | Fix all checks |
+| `x` | Fix selected check, then re-run it (unless `--no-verify`) |
+| `X` | Fix all failed checks, then re-run those whose fix passed (unless `--no-verify`) |
 | `c` | Copy check command to clipboard (OSC 52 terminals) |
 | `e` | Toggle full command display |
 | `o` | Open selected check's output in `$PAGER` (default `less`; TUI suspended until it exits) |
@@ -154,7 +154,8 @@ Info messages (e.g. "Command copied") auto-dismiss after 3s; errors stay until a
 
 ```bash
 ci-tui --simple            # plain console output, exit code reflects results
-ci-tui --fix               # run fix commands only
+ci-tui --fix               # run fix commands, re-run fixed checks to verify
+ci-tui --fix --no-verify   # run fix commands only
 ci-tui --files src/a.rs    # bypass git detection
 ci-tui --base v1.2.0       # diff against a ref instead of git.base_branch
 ci-tui --staged -s         # staged files only (pre-commit hook)
@@ -171,7 +172,7 @@ The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
 | Code | Meaning |
 |------|---------|
 | `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
-| `1` | A check failed (TUI, `--simple`; in the TUI also a group pre-command), or a fix command failed (`--fix`) |
+| `1` | A check failed (TUI, `--simple`; in the TUI also a group pre-command), or a fix command or its verification re-run failed (`--fix`) |
 | `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), `ci-tui init` refusing to overwrite, bad flag value (e.g. unknown `--only` id) |
 | `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, other runtime errors |
 | `130` | Interrupted (Ctrl-C) |
