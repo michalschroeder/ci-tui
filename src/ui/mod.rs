@@ -319,11 +319,7 @@ impl TaskCtx {
         tx: &mpsc::Sender<TaskEvent>,
     ) -> Option<CheckResult> {
         if setup && !self.run_setup(check.group(), tx).await {
-            let result = CheckResult {
-                status: CheckStatus::Failed,
-                output: format!("Pre-command of group `{}` failed", check.group()),
-                ..CheckResult::pending(check.id())
-            };
+            let result = CheckResult::setup_failed(check.id(), check.group());
             let _ = tx.send(TaskEvent::UnrecordedResult(result)).await;
             return None;
         }
@@ -773,9 +769,10 @@ fn retry_check(app: &mut App, tasks: &mut Tasks, check: CheckToRun, verify: bool
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
-    match verify {
-        true => app.start_verify(check.id()),
-        false => app.reset_check_for_retry(check.id()),
+    if verify {
+        app.mark_running(check.id());
+    } else {
+        app.reset_check_for_retry(check.id());
     }
     tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup));
 }
@@ -783,9 +780,12 @@ fn retry_check(app: &mut App, tasks: &mut Tasks, check: CheckToRun, verify: bool
 /// Checks whose fix passed in `event`, to verify ([`app::FixState::verify`]):
 /// a single fix ('x') at its result, fix-all ('X') once done
 fn fixes_to_verify(app: &App, event: &TaskEvent) -> Vec<String> {
+    if !app.fix.verify {
+        return Vec::new();
+    }
     let results = match event {
-        TaskEvent::FixResult(result) if app.fix.verify => std::slice::from_ref(result),
-        TaskEvent::FixAllDone if app.fix.verify => &app.fix.all_results,
+        TaskEvent::FixResult(result) => std::slice::from_ref(result),
+        TaskEvent::FixAllDone => &app.fix.all_results,
         _ => return Vec::new(),
     };
     results
@@ -803,7 +803,7 @@ fn verify_fix(app: &mut App, tasks: &mut Tasks, check_id: &str) {
         .get(check_id)
         .is_some_and(|r| r.status.is_finished());
     let check = app.checks.iter().find(|c| c.id() == check_id);
-    if let (true, Some(check)) = (finished, check) {
+    if let Some(check) = check.filter(|_| finished) {
         retry_check(app, tasks, check.clone(), true);
     }
 }
@@ -820,7 +820,7 @@ fn handle_trigger_on_demand(app: &mut App, tasks: &mut Tasks) -> Action {
     let Some(setup) = claim_setup(app, &check) else {
         return Action::Continue;
     };
-    app.trigger_on_demand_check(check.id());
+    app.mark_running(check.id());
     let command = check.resolved_command.clone();
     tasks.spawn_check(check, command, setup, TaskEvent::RetryResult);
     Action::Continue
@@ -2692,16 +2692,12 @@ checks:
         assert!(app.busy() && !exit_due(&app, true, false), "exit waits");
         assert!(app.fix.result.is_some(), "fix result still shown");
 
-        let event = loop {
-            match rx.recv().await.expect("task event") {
-                TaskEvent::RetryResult(r) => break TaskEvent::RetryResult(r),
-                TaskEvent::UnrecordedResult(_) => panic!("verify result must be recorded"),
-                event => {
-                    handle_message(&mut app, Message::Task(event), &mut tasks);
-                }
-            }
-        };
-        handle_message(&mut app, Message::Task(event), &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            let unrecorded = matches!(e, TaskEvent::UnrecordedResult(_));
+            assert!(!unrecorded, "verify result must be recorded");
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
         assert!(app.results["php-lint"].output.contains("verified"));
         assert!(app.fix.result.is_some(), "fix result still shown");

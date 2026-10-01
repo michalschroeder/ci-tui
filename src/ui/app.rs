@@ -813,26 +813,18 @@ impl App {
         }
     }
 
-    /// Mark an on-demand check as running (preparing to execute)
-    pub fn trigger_on_demand_check(&mut self, check_id: &str) {
+    /// Mark a check as running (preparing to execute): on-demand 't', or
+    /// a fix verification re-run (fix results stay shown)
+    pub fn mark_running(&mut self, check_id: &str) {
         self.reset_result_to_running(check_id);
         self.needs_redraw = true;
     }
 
-    /// Reset a single check to running for retry
+    /// Reset a single check to running for retry, clearing fix results
     pub fn reset_check_for_retry(&mut self, check_id: &str) {
-        self.reset_result_to_running(check_id);
-        // Clear any fix results
+        self.mark_running(check_id);
         self.fix.result = None;
         self.fix.all_results.clear();
-        self.needs_redraw = true;
-    }
-
-    /// Mark a fixed check running for its verification re-run; the fix
-    /// result stays shown
-    pub fn start_verify(&mut self, check_id: &str) {
-        self.reset_result_to_running(check_id);
-        self.needs_redraw = true;
     }
 
     /// Store a finished check result (runner, retry or run-all-files),
@@ -2458,7 +2450,7 @@ checks:
     }
 
     #[test]
-    fn test_trigger_on_demand_check() {
+    fn test_mark_running() {
         let mut app = make_app();
 
         // behat is on-demand
@@ -2467,7 +2459,7 @@ checks:
             CheckStatus::OnDemand
         );
 
-        app.trigger_on_demand_check("behat");
+        app.mark_running("behat");
 
         assert_eq!(
             app.results.get("behat").unwrap().status,
@@ -3315,9 +3307,7 @@ checks:
                         ..CheckResult::pending("phpunit")
                     })
                 }),
-                ("trigger_on_demand_check", |a| {
-                    a.trigger_on_demand_check("behat")
-                }),
+                ("mark_running", |a| a.mark_running("behat")),
                 ("reset_check_for_retry", |a| {
                     a.reset_check_for_retry("phpunit")
                 }),

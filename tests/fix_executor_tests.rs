@@ -283,42 +283,30 @@ fn selected(config: &ci_tui::config::CiConfig) -> Vec<CheckToRun> {
     determine_checks(config, &main_rs_changed(), std::path::Path::new("/app"))
 }
 
+/// A passing fix re-runs its check (a failed re-run fails the run); a
+/// failed fix is not verified
+#[rstest::rstest]
+#[case::verified(&[], &["fix", "check"], (0, 1, 0), false)]
+#[case::still_failing(&["check"], &["fix", "check"], (0, 0, 1), true)]
+#[case::failed_fix(&["fix"], &["fix"], (1, 0, 0), true)]
 #[tokio::test]
-async fn verify_reruns_check_after_fix() {
+async fn verify_after_fix(
+    #[case] failing: &'static [&'static str],
+    #[case] expected_log: &[&str],
+    #[case] counts: (usize, usize, usize),
+    #[case] has_failures: bool,
+) {
     let config = rust_fmt_with_fix_config();
     let checks = selected(&config);
 
-    let (summary, log) = fix_run(config, Some(checks), &[]).await;
+    let (summary, log) = fix_run(config, Some(checks), failing).await;
 
-    assert_eq!(log, ["fix", "check"]);
-    assert_eq!((summary.verify_count, summary.verify_pass_count), (1, 1));
-    assert!(!summary.has_failures);
-}
-
-#[tokio::test]
-async fn verify_still_failing_fails_the_run() {
-    let config = rust_fmt_with_fix_config();
-    let checks = selected(&config);
-
-    let (summary, log) = fix_run(config, Some(checks), &["check"]).await;
-
-    assert_eq!(log, ["fix", "check"]);
-    assert_eq!((summary.pass_count, summary.fail_count), (1, 0));
-    assert_eq!((summary.verify_count, summary.verify_fail_count), (1, 1));
-    assert!(summary.has_failures, "a failed verification fails the run");
-}
-
-#[tokio::test]
-async fn failed_fix_is_not_verified() {
-    let config = rust_fmt_with_fix_config();
-    let checks = selected(&config);
-
-    let (summary, log) = fix_run(config, Some(checks), &["fix"]).await;
-
-    assert_eq!(log, ["fix"]);
-    assert_eq!(summary.fail_count, 1);
-    assert_eq!((summary.verify_count, summary.unverified_count), (0, 0));
-    assert!(summary.has_failures);
+    assert_eq!(log, expected_log);
+    // (fix failures, verified, still failing)
+    let actual = (summary.fail_count, summary.verify_pass_count);
+    assert_eq!((actual.0, actual.1, summary.verify_fail_count), counts);
+    assert_eq!(summary.unverified_count, 0);
+    assert_eq!(summary.has_failures, has_failures);
 }
 
 #[tokio::test]
@@ -331,7 +319,7 @@ async fn unselected_or_on_demand_check_is_not_verified() {
         let (summary, log) = fix_run(config.clone(), Some(checks), &["check"]).await;
 
         assert_eq!(log, ["fix"]);
-        assert_eq!((summary.verify_count, summary.unverified_count), (0, 1));
+        assert_eq!((summary.verify_count(), summary.unverified_count), (0, 1));
         assert!(!summary.has_failures);
     }
 }
@@ -341,7 +329,7 @@ async fn no_verify_runs_fixes_only() {
     let (summary, log) = fix_run(rust_fmt_with_fix_config(), None, &["check"]).await;
 
     assert_eq!(log, ["fix"]);
-    assert_eq!((summary.verify_count, summary.unverified_count), (0, 0));
+    assert_eq!((summary.verify_count(), summary.unverified_count), (0, 0));
     assert!(!summary.verify && !summary.has_failures);
 }
 
@@ -378,7 +366,7 @@ async fn group_setup_runs_once_before_first_verification() {
     let (summary, log) = fix_run(config, Some(checks), &[]).await;
 
     assert_eq!(log, ["fix", "setup", "check", "fix", "check"]);
-    assert_eq!((summary.verify_count, summary.verify_pass_count), (2, 2));
+    assert_eq!((summary.verify_count(), summary.verify_pass_count), (2, 2));
 }
 
 #[tokio::test]
@@ -393,7 +381,7 @@ async fn failed_group_setup_fails_its_verifications() {
         ["fix", "setup", "fix"],
         "setup not retried, checks not run"
     );
-    assert_eq!((summary.verify_count, summary.verify_fail_count), (2, 2));
+    assert_eq!((summary.verify_count(), summary.verify_fail_count), (2, 2));
     assert_eq!(summary.fail_count, 0, "the fixes passed");
     assert!(summary.has_failures);
 }

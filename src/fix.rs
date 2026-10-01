@@ -35,8 +35,8 @@ pub struct FixSummary {
     pub fail_count: usize,
     /// Verification on (not `--no-verify`)
     pub verify: bool,
-    /// Passed fixes whose check was re-run (or whose group setup failed)
-    pub verify_count: usize,
+    /// Passed fixes whose check was re-run and passed / failed (or whose
+    /// group setup failed)
     pub verify_pass_count: usize,
     pub verify_fail_count: usize,
     /// Passed fixes not verified: check not selected, or on-demand
@@ -44,6 +44,13 @@ pub struct FixSummary {
     /// A fix or a verification failed
     pub has_failures: bool,
     pub elapsed: std::time::Duration,
+}
+
+impl FixSummary {
+    /// Passed fixes whose check was re-run (or whose group setup failed)
+    pub fn verify_count(&self) -> usize {
+        self.verify_pass_count + self.verify_fail_count
+    }
 }
 
 /// Run fix commands for all checks using the supplied executor (test-facing).
@@ -120,7 +127,8 @@ fn format_summary(summary: &FixSummary) -> String {
     if summary.verify {
         verified = format!(
             ", {}/{} verified",
-            summary.verify_pass_count, summary.verify_count
+            summary.verify_pass_count,
+            summary.verify_count()
         );
         if summary.unverified_count > 0 {
             verified += &format!(", {} not verified", summary.unverified_count);
@@ -220,7 +228,7 @@ async fn run_group_fixes(
         summary.fail_count += usize::from(!success);
         summary.has_failures |= !success;
 
-        if let (true, Some(checks)) = (success, ctx.verify) {
+        if let Some(checks) = ctx.verify.filter(|_| success) {
             let selected = checks
                 .iter()
                 .find(|c| c.group() == group_name && c.id() == check_id);
@@ -243,19 +251,12 @@ async fn verify_fix(
     setup: &mut Option<bool>,
     summary: &mut FixSummary,
 ) {
-    let Some(check) = selected.filter(|c| c.decision() == Decision::Run) else {
-        let on_demand = selected.is_some_and(|c| c.decision() == Decision::OnDemand);
-        let reason = if on_demand {
-            "on-demand"
-        } else {
-            "not selected"
-        };
-        cprintln!("{}", format_unverified(check_id, reason));
-        summary.unverified_count += 1;
-        return;
+    let check = match selected.map(|c| (c, c.decision())) {
+        Some((check, Decision::Run)) => check,
+        Some((_, Decision::OnDemand)) => return unverified(check_id, "on-demand", summary),
+        _ => return unverified(check_id, "not selected", summary),
     };
 
-    summary.verify_count += 1;
     if setup.is_none() {
         *setup = Some(run_group_setup(ctx, check.group()).await);
     }
@@ -273,11 +274,7 @@ async fn verify_fix(
         )
         .await
     } else {
-        CheckResult {
-            status: CheckStatus::Failed,
-            output: format!("Pre-command of group `{}` failed", check.group()),
-            ..CheckResult::pending(check_id)
-        }
+        CheckResult::setup_failed(check_id, check.group())
     };
 
     let passed = result.status == CheckStatus::Passed;
@@ -287,27 +284,39 @@ async fn verify_fix(
     cprint!("{}", format_verify_result(&result));
 }
 
+/// Count and print a passing fix not verified, with the `reason`
+fn unverified(check_id: &str, reason: &str, summary: &mut FixSummary) {
+    cprintln!("{}", format_unverified(check_id, reason));
+    summary.unverified_count += 1;
+}
+
 /// Run `group`'s pre-commands; false when one failed (its output printed)
 async fn run_group_setup(ctx: &FixCtx<'_>, group: &str) -> bool {
-    use crate::runner::RunnerEvent;
-    // Room for every pre-command's started + finished event: none is
-    // received until the setup is done
-    let capacity = 2 * ctx.config.pre_commands(group).len() + 1;
-    let (tx, mut rx) = tokio::sync::mpsc::channel(capacity);
-    let ok = ctx.runner.run_group_setup(group, &tx).await;
-    while let Ok(event) = rx.try_recv() {
-        if let RunnerEvent::PreCommandFinished {
-            name,
-            success: false,
-            output,
-            ..
-        } = event
-        {
-            let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
-            cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    // `tx` dropped at the end of this block, ending `print`
+    let setup = async move { ctx.runner.run_group_setup(group, &tx).await };
+    let print = async {
+        while let Some(event) = rx.recv().await {
+            print_setup_failure(event);
         }
-    }
+    };
+    let (ok, ()) = tokio::join!(setup, print);
     ok
+}
+
+/// Print a failed pre-command's output; other setup events are ignored
+fn print_setup_failure(event: crate::runner::RunnerEvent) {
+    let crate::runner::RunnerEvent::PreCommandFinished {
+        name,
+        success: false,
+        output,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
+    cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
 }
 
 /// Line for a passing fix that is not verified, with the `reason`
@@ -486,12 +495,12 @@ mod tests {
 
     #[rstest::rstest]
     #[case::no_verify(false, (0, 0, 0), false, "✓ All 2 fixes passed in 0s")]
-    #[case::verified(true, (2, 2, 0), false, "✓ All 2 fixes passed, 2/2 verified in 0s")]
-    #[case::unverified(true, (1, 1, 1), false, "✓ All 2 fixes passed, 1/1 verified, 1 not verified in 0s")]
-    #[case::still_failing(true, (2, 1, 0), true, "✗ 2/2 fixes passed, 0 failed, 1/2 verified in 0s")]
+    #[case::verified(true, (2, 0, 0), false, "✓ All 2 fixes passed, 2/2 verified in 0s")]
+    #[case::unverified(true, (1, 0, 1), false, "✓ All 2 fixes passed, 1/1 verified, 1 not verified in 0s")]
+    #[case::still_failing(true, (1, 1, 0), true, "✗ 2/2 fixes passed, 0 failed, 1/2 verified in 0s")]
     fn test_summary_line(
         #[case] verify: bool,
-        #[case] (verify_count, verify_pass_count, unverified_count): (usize, usize, usize),
+        #[case] (verify_pass_count, verify_fail_count, unverified_count): (usize, usize, usize),
         #[case] has_failures: bool,
         #[case] expected: &str,
     ) {
@@ -499,8 +508,8 @@ mod tests {
             fix_count: 2,
             pass_count: 2,
             verify,
-            verify_count,
             verify_pass_count,
+            verify_fail_count,
             unverified_count,
             has_failures,
             ..FixSummary::default()
