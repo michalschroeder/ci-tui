@@ -669,9 +669,9 @@ Runs `fix_command` entries, verifying each fix:
 - Executes auto-fixers (formatters, auto-fixable linters)
 - Skips checks without fix_command
 - Useful before committing to auto-format code
-- After a fix passes, re-runs its check's own command and prints `verified` or `still failing` with the check's output. Only checks the run would select are re-run; on-demand / skipped ones print `not verified`. A group's `pre_commands` run once, before its first re-run; if one fails, the group's re-runs count as failed
+- Once all fixes ran, re-runs the checks whose fix passed (so a later fix cannot undo an earlier verification) and prints `verified` or `still failing` with the check's output. Only checks the run would select are re-run; on-demand / skipped ones print `not verified`. Re-runs go like a normal run: group order, `pre_commands` once per group, `parallel` / `max_parallel`; if a pre-command fails, the remaining re-runs count as failed
 - Summary lists fixes and verifications; exit `1` if a fix or a verification failed, else `0`
-- `--no-verify` skips the re-runs (fix commands only). It also applies to `x` / `X` in the TUI, which otherwise re-run each check whose fix passed like `r` does (output streams, `s` cancels). Not with `--simple` or `--list`
+- `--no-verify` skips the re-runs (fix commands only). It also applies to `x` / `X` in the TUI, which otherwise re-run each check whose fix passed, one at a time and without `r`'s git refresh (output streams, `s` cancels). Not with `--list`
 
 **Workflow:**
 ```bash

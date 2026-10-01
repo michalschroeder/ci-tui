@@ -45,6 +45,7 @@ use crossterm::{
 };
 use external::Viewer;
 use ratatui::prelude::*;
+use std::collections::HashSet;
 use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -747,16 +748,10 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.selected_capabilities().can_retry {
         return Action::Continue;
     }
-    if let Some(check) = app.selected_check() {
-        retry_check(app, tasks, check.clone(), false);
-    }
-    Action::Continue
-}
-
-/// Retry `check` with git refresh: 'r', or with `verify` the re-run
-/// confirming its passed fix (the fix result stays shown). Not started
-/// while its group setup is busy ([`claim_setup`]).
-fn retry_check(app: &mut App, tasks: &mut Tasks, check: CheckToRun, verify: bool) {
+    let Some(check) = app.selected_check() else {
+        return Action::Continue;
+    };
+    let check = check.clone();
     let previous = app
         .results
         .get(check.id())
@@ -764,17 +759,14 @@ fn retry_check(app: &mut App, tasks: &mut Tasks, check: CheckToRun, verify: bool
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
     let Some(setup) = claim_setup(app, &check) else {
-        return;
+        return Action::Continue;
     };
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
-    if verify {
-        app.mark_running(check.id());
-    } else {
-        app.reset_check_for_retry(check.id());
-    }
+    app.reset_check_for_retry(check.id());
     tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup));
+    Action::Continue
 }
 
 /// Checks whose fix passed in `event`, to verify ([`app::FixState::verify`]):
@@ -795,17 +787,96 @@ fn fixes_to_verify(app: &App, event: &TaskEvent) -> Vec<String> {
         .collect()
 }
 
-/// Re-run fixed check `check_id` like 'r' (see [`retry_check`]), unless it
-/// is already running again
-fn verify_fix(app: &mut App, tasks: &mut Tasks, check_id: &str) {
-    let finished = app
-        .results
-        .get(check_id)
-        .is_some_and(|r| r.status.is_finished());
-    let check = app.checks.iter().find(|c| c.id() == check_id);
-    if let Some(check) = check.filter(|_| finished) {
-        retry_check(app, tasks, check.clone(), true);
+/// Re-run the fixed checks `check_ids` that are not running again: marked
+/// running now (the fix result stays shown), run by [`run_verifications`],
+/// results recorded like 'r'. No git refresh: a fix does not change which
+/// checks apply. The first check of a group whose pre-commands are due runs
+/// them for the group; skipped while they are busy ([`claim_setup`]).
+fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
+    let mut jobs = Vec::new();
+    let mut setup_groups = HashSet::new();
+    for id in check_ids {
+        let finished = app.results.get(&id).is_some_and(|r| r.status.is_finished());
+        let check = app.checks.iter().find(|c| c.id() == id);
+        let Some(check) = check.filter(|_| finished).cloned() else {
+            continue;
+        };
+        let setup = match setup_groups.contains(check.group()) {
+            true => Some(false),
+            false => claim_setup(app, &check),
+        };
+        let Some(setup) = setup else {
+            continue;
+        };
+        if setup {
+            setup_groups.insert(check.group().to_string());
+        }
+        app.mark_running(check.id());
+        jobs.push((check, setup));
     }
+    if !jobs.is_empty() {
+        tasks.spawn(|ctx, tx| run_verifications(ctx, tx, jobs));
+    }
+}
+
+/// [`verify_fixes`] task: one check at a time in `jobs` order, so groups'
+/// `parallel: false` / `max_parallel` hold. All are cancellable with 's'
+/// from the start (waiting too).
+async fn run_verifications(
+    ctx: TaskCtx,
+    tx: mpsc::Sender<TaskEvent>,
+    jobs: Vec<(CheckToRun, bool)>,
+) {
+    let turn = tokio::sync::Semaphore::new(1);
+    let no_setup = std::sync::Mutex::new(HashSet::new());
+    let mut runs: Vec<_> = jobs
+        .iter()
+        .map(|(check, setup)| Box::pin(verify_one(&ctx, &tx, check, *setup, &turn, &no_setup)))
+        .collect();
+    // Join all; first polled in `jobs` order, so queued in that order on the
+    // fair `turn`
+    std::future::poll_fn(|cx| {
+        runs.retain_mut(|run| std::future::Future::poll(run.as_mut(), cx).is_pending());
+        match runs.is_empty() {
+            true => std::task::Poll::Ready(()),
+            false => std::task::Poll::Pending,
+        }
+    })
+    .await;
+}
+
+/// One verification of [`run_verifications`]: once it has the `turn`, its
+/// group's pre-commands with `setup`, then `check`. When those failed or
+/// were cancelled, the group is in `no_setup`: its later checks fail
+/// without running.
+async fn verify_one(
+    ctx: &TaskCtx,
+    tx: &mpsc::Sender<TaskEvent>,
+    check: &CheckToRun,
+    setup: bool,
+    turn: &tokio::sync::Semaphore,
+    no_setup: &std::sync::Mutex<HashSet<String>>,
+) {
+    let group = check.group();
+    let mut set_up = !setup;
+    let run = async {
+        let _turn = turn.acquire().await;
+        let broken = no_setup.lock().unwrap().contains(group);
+        if broken || (setup && !ctx.run_setup(group, tx).await) {
+            return None;
+        }
+        set_up = true;
+        Some(ctx.run_streaming(check, &check.resolved_command, tx).await)
+    };
+    let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
+    if !set_up {
+        no_setup.lock().unwrap().insert(group.to_string());
+    }
+    let event = match result {
+        Some(result) => TaskEvent::RetryResult(result),
+        None => TaskEvent::UnrecordedResult(CheckResult::setup_failed(check.id(), group)),
+    };
+    let _ = tx.send(event).await;
 }
 
 /// Handle 't' key: trigger on-demand test
@@ -1259,9 +1330,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
         Message::Task(event) => {
             let fixed = fixes_to_verify(app, &event);
             let action = handle_task_event(app, event);
-            for check_id in fixed {
-                verify_fix(app, tasks, &check_id);
-            }
+            verify_fixes(app, tasks, fixed);
             action
         }
         Message::StatusExpired => {
@@ -2748,6 +2817,70 @@ checks:
         .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
         assert_eq!(app.results["phpstan"].status, CheckStatus::Failed);
+    }
+
+    /// 'X' with two fixed checks of a group whose setup is due: the group's
+    /// pre-commands run once, then the checks one at a time; no git refresh
+    #[tokio::test]
+    async fn test_fix_all_verifies_one_at_a_time_after_setup_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = setup_config();
+        let checks = ["lint", "unit"].map(|id| {
+            let mut check = make_test_check(id, "db");
+            check.resolved_command = "test -e seeded".to_string();
+            check.resolved_fix_command = Some("true".to_string());
+            check
+        });
+        let mut app = make_test_app_with_checks(&config, checks.to_vec());
+        finish_run(&mut app, &config, None);
+        for id in ["lint", "unit"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Failed;
+        }
+        app.fix.verify = true;
+        let (mut tasks, mut rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(dir.path().to_path_buf()),
+            exec_root: Arc::new(dir.path().to_path_buf()),
+            config: Arc::new(config),
+            cancels: CancelRegistry::default(),
+            key_root: None,
+        });
+
+        handle_fix_all(&mut app, &mut tasks);
+        let mut seen = Vec::new();
+        while seen
+            .iter()
+            .filter(|s: &&String| s.starts_with("done"))
+            .count()
+            < 2
+        {
+            let event = rx.recv().await.expect("task event");
+            match &event {
+                TaskEvent::Output(RunnerEvent::PreCommandStarted { name, .. }) => {
+                    seen.push(format!("setup {name}"))
+                }
+                TaskEvent::Output(RunnerEvent::CheckStarted { check_id }) => {
+                    seen.push(format!("start {check_id}"))
+                }
+                TaskEvent::RetryResult(r) => seen.push(format!("done {}", r.check_id)),
+                TaskEvent::UnrecordedResult(r) | TaskEvent::CheckNotApplicable(r) => {
+                    panic!("unexpected {r:?}")
+                }
+                TaskEvent::CheckRefreshed { .. } => panic!("no git refresh"),
+                _ => {}
+            }
+            handle_message(&mut app, Message::Task(event), &mut tasks);
+        }
+
+        let expected = [
+            "setup seed",
+            "start lint",
+            "done lint",
+            "start unit",
+            "done unit",
+        ];
+        assert_eq!(seen, expected);
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.results["unit"].status, CheckStatus::Passed);
     }
 
     /// The verification claims the group setup like a single run: it waits

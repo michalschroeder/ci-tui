@@ -333,52 +333,27 @@ async fn no_verify_runs_fixes_only() {
     assert!(!summary.verify && !summary.has_failures);
 }
 
-/// [`rust_fmt_with_fix_config`] plus a second fixable check `fmt2` in
-/// group `lint`, which has pre-command `init-db`
-fn fix_config_with_setup() -> ci_tui::config::CiConfig {
-    common::configs::ConfigBuilder::new()
-        .with_file_pattern("rust", r"\.rs$", None)
-        .with_pre_command("lint", "db", "init-db")
-        .with_check(
-            "lint",
-            "fmt",
-            common::configs::CheckBuilder::new("Format", "cargo fmt --check {files}")
-                .with_fix_command("cargo fmt {files}")
-                .with_file_pattern_trigger("rust")
-                .build(),
-        )
-        .with_check(
-            "lint",
-            "fmt2",
-            common::configs::CheckBuilder::new("Format 2", "rustfmt --check {files}")
-                .with_fix_command("rustfmt {files}")
-                .with_file_pattern_trigger("rust")
-                .build(),
-        )
-        .build()
-}
-
 #[tokio::test]
-async fn group_setup_runs_once_before_first_verification() {
-    let config = fix_config_with_setup();
+async fn verifications_follow_all_fixes_with_group_setup_once() {
+    let config = common::configs::fixable_group_with_setup_config();
     let checks = selected(&config);
 
     let (summary, log) = fix_run(config, Some(checks), &[]).await;
 
-    assert_eq!(log, ["fix", "setup", "check", "fix", "check"]);
+    assert_eq!(log, ["fix", "fix", "setup", "check", "check"]);
     assert_eq!((summary.verify_count(), summary.verify_pass_count), (2, 2));
 }
 
 #[tokio::test]
 async fn failed_group_setup_fails_its_verifications() {
-    let config = fix_config_with_setup();
+    let config = common::configs::fixable_group_with_setup_config();
     let checks = selected(&config);
 
     let (summary, log) = fix_run(config, Some(checks), &["setup"]).await;
 
     assert_eq!(
         log,
-        ["fix", "setup", "fix"],
+        ["fix", "fix", "setup"],
         "setup not retried, checks not run"
     );
     assert_eq!((summary.verify_count(), summary.verify_fail_count), (2, 2));
@@ -388,7 +363,7 @@ async fn failed_group_setup_fails_its_verifications() {
 
 #[tokio::test]
 async fn no_setup_without_verification() {
-    let config = fix_config_with_setup();
+    let config = common::configs::fixable_group_with_setup_config();
 
     let (_, log) = fix_run(config, None, &[]).await;
 

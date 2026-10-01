@@ -7,9 +7,10 @@
 //! # Usage
 //!
 //! Invoked via `--fix` CLI flag. Runs fix commands sequentially and reports
-//! success/failure for each. A passing fix is verified by re-running its
-//! check (unless `--no-verify`): only checks the run selected (not
-//! on-demand / skipped), after the group's pre-commands (once per group).
+//! success/failure for each. Once all fixes ran, the checks of passing fixes
+//! are verified by re-running them (unless `--no-verify`): only checks the
+//! run selected (not on-demand / skipped), through [`CheckRunner`] like a
+//! normal run (group order, pre-commands, parallel limits).
 //!
 //! # Exit Codes
 //!
@@ -20,7 +21,9 @@ use crate::checks::{keeps, CheckToRun, Decision, FilePatternEval};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::runner::{CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget};
+use crate::runner::{
+    CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget, RunnerEvent,
+};
 use crate::utils::time;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -65,23 +68,24 @@ pub async fn run_with_executor(
     executor: Arc<dyn CommandExecutor>,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
-    let config = Arc::new(config);
-    let runner = CheckRunner::with_executor(Arc::clone(&config), &project_root, executor.clone());
     let ctx = FixCtx {
         config: &config,
         changed_files: &changed_files,
         project_root: &project_root,
         executor: executor.as_ref(),
-        verify: verify.as_deref(),
-        runner: &runner,
     };
     let mut summary = FixSummary {
         verify: verify.is_some(),
         ..FixSummary::default()
     };
 
+    let mut fixed = Vec::new();
     for (group_name, group_config) in config.groups() {
-        run_group_fixes(&ctx, group_name, group_config, &mut summary).await;
+        run_group_fixes(&ctx, group_name, group_config, &mut summary, &mut fixed).await;
+    }
+    if let Some(selected) = verify {
+        let runner = CheckRunner::with_executor(config, &project_root, executor);
+        verify_fixes(&runner, &selected, &fixed, &mut summary).await;
     }
 
     summary.elapsed = start_time.elapsed();
@@ -177,24 +181,19 @@ struct FixCtx<'a> {
     changed_files: &'a ChangedFiles,
     project_root: &'a Path,
     executor: &'a dyn CommandExecutor,
-    /// Selected checks to verify against; `None` with `--no-verify`
-    verify: Option<&'a [CheckToRun]>,
-    /// Runs group pre-commands before the first verification
-    runner: &'a CheckRunner,
 }
 
-/// Run fix commands for a single group (each passing one verified right
-/// after), counting into `summary`
+/// Run fix commands for a single group, counting into `summary`; the ids of
+/// passing ones go to `fixed`
 async fn run_group_fixes(
     ctx: &FixCtx<'_>,
     group_name: &str,
     group_config: &crate::config::GroupConfig,
     summary: &mut FixSummary,
+    fixed: &mut Vec<String>,
 ) {
     let target: &ExecTarget = &ctx.config.runner;
     let mut group_has_fixes = false;
-    // Group pre-commands outcome, once run (before the first verification)
-    let mut setup: Option<bool> = None;
 
     for (check_id, check) in &group_config.checks {
         let Some(resolved_command) = resolve_check_fix(ctx.config, check, ctx.changed_files) else {
@@ -227,12 +226,8 @@ async fn run_group_fixes(
         summary.pass_count += usize::from(success);
         summary.fail_count += usize::from(!success);
         summary.has_failures |= !success;
-
-        if let Some(checks) = ctx.verify.filter(|_| success) {
-            let selected = checks
-                .iter()
-                .find(|c| c.group() == group_name && c.id() == check_id);
-            verify_fix(ctx, check_id, selected, &mut setup, summary).await;
+        if success {
+            fixed.push(check_id.clone());
         }
     }
 
@@ -241,47 +236,61 @@ async fn run_group_fixes(
     }
 }
 
-/// Re-run the `selected` check of a passing fix, after its group's
-/// pre-commands (run once: `setup`), counting into `summary`. Not selected
-/// or on-demand checks are only reported as not verified.
-async fn verify_fix(
-    ctx: &FixCtx<'_>,
-    check_id: &str,
-    selected: Option<&CheckToRun>,
-    setup: &mut Option<bool>,
+/// Re-run the checks of the `fixed` ids the run `selected` (not on-demand)
+/// with `runner`, counting into `summary`; the others are only reported as
+/// not verified. Checks the runner did not reach (a pre-command
+/// failed) fail.
+async fn verify_fixes(
+    runner: &CheckRunner,
+    selected: &[CheckToRun],
+    fixed: &[String],
     summary: &mut FixSummary,
 ) {
-    let check = match selected.map(|c| (c, c.decision())) {
-        Some((check, Decision::Run)) => check,
-        Some((_, Decision::OnDemand)) => return unverified(check_id, "on-demand", summary),
-        _ => return unverified(check_id, "not selected", summary),
-    };
-
-    if setup.is_none() {
-        *setup = Some(run_group_setup(ctx, check.group()).await);
+    if fixed.is_empty() {
+        return;
     }
-    let result = if *setup == Some(true) {
-        cprintln!(
-            "  \x1b[33m●\x1b[0m {} \x1b[90m(verifying...)\x1b[0m",
-            check_id
-        );
-        crate::runner::run_single_check_with_executor(
-            check,
-            ctx.project_root,
-            &ctx.config.runner,
-            ctx.executor,
-            ctx.config.max_output_lines,
-        )
-        .await
-    } else {
-        CheckResult::setup_failed(check_id, check.group())
-    };
+    cprintln!("\x1b[1;36m── VERIFY ──\x1b[0m");
+    let mut checks = Vec::new();
+    for id in fixed {
+        let check = selected.iter().find(|c| c.id() == id);
+        match check.map(|c| (c, c.decision())) {
+            Some((check, Decision::Run)) => checks.push(check.clone()),
+            Some((_, Decision::OnDemand)) => unverified(id, "on-demand", summary),
+            _ => unverified(id, "not selected", summary),
+        }
+    }
 
+    let mut not_run: Vec<String> = checks.iter().map(|c| c.id().to_string()).collect();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    // `tx` dropped when the run ends, ending `report`
+    let run = async move {
+        let _ = runner.run_checks(checks, tx).await;
+    };
+    let report = async {
+        while let Some(event) = rx.recv().await {
+            on_verify_event(event, &mut not_run, summary);
+        }
+    };
+    tokio::join!(run, report);
+
+    for id in not_run {
+        let result = CheckResult {
+            status: CheckStatus::Failed,
+            output: "Not run: a group pre-command failed".into(),
+            ..CheckResult::pending(&id)
+        };
+        count_verification(&result, summary);
+        cprint!("{}", format_verify_result(&result));
+    }
+    cprintln!();
+}
+
+/// Count a verification `result` into `summary`
+fn count_verification(result: &CheckResult, summary: &mut FixSummary) {
     let passed = result.status == CheckStatus::Passed;
     summary.verify_pass_count += usize::from(passed);
     summary.verify_fail_count += usize::from(!passed);
     summary.has_failures |= !passed;
-    cprint!("{}", format_verify_result(&result));
 }
 
 /// Count and print a passing fix not verified, with the `reason`
@@ -290,33 +299,30 @@ fn unverified(check_id: &str, reason: &str, summary: &mut FixSummary) {
     summary.unverified_count += 1;
 }
 
-/// Run `group`'s pre-commands; false when one failed (its output printed)
-async fn run_group_setup(ctx: &FixCtx<'_>, group: &str) -> bool {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    // `tx` dropped at the end of this block, ending `print`
-    let setup = async move { ctx.runner.run_group_setup(group, &tx).await };
-    let print = async {
-        while let Some(event) = rx.recv().await {
-            print_setup_failure(event);
+/// Print a verification run event (check started / finished, failed
+/// pre-command with its output; others are ignored), counting a finished
+/// check into `summary` and dropping it from `not_run`
+fn on_verify_event(event: RunnerEvent, not_run: &mut Vec<String>, summary: &mut FixSummary) {
+    match event {
+        RunnerEvent::CheckStarted { check_id } => {
+            cprintln!("  \x1b[33m●\x1b[0m {check_id} \x1b[90m(verifying...)\x1b[0m");
         }
-    };
-    let (ok, ()) = tokio::join!(setup, print);
-    ok
-}
-
-/// Print a failed pre-command's output; other setup events are ignored
-fn print_setup_failure(event: crate::runner::RunnerEvent) {
-    let crate::runner::RunnerEvent::PreCommandFinished {
-        name,
-        success: false,
-        output,
-        ..
-    } = event
-    else {
-        return;
-    };
-    let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
-    cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
+        RunnerEvent::CheckFinished { result } => {
+            not_run.retain(|id| *id != result.check_id);
+            count_verification(&result, summary);
+            cprint!("{}", format_verify_result(&result));
+        }
+        RunnerEvent::PreCommandFinished {
+            name,
+            success: false,
+            output,
+            ..
+        } => {
+            let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
+            cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
+        }
+        _ => {}
+    }
 }
 
 /// Line for a passing fix that is not verified, with the `reason`

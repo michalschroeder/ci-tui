@@ -424,6 +424,32 @@ pub fn rust_project_config() -> CiConfig {
         .build()
 }
 
+/// Group `lint` (pre-command `init-db`) with two fixable checks on `.rs`
+/// files: `fmt` (`cargo fmt --check`) and `fmt2` (`rustfmt --check`)
+#[allow(dead_code)]
+pub fn fixable_group_with_setup_config() -> CiConfig {
+    let fixable = |name, check: &str, fix: &str| {
+        CheckBuilder::new(name, &format!("{check} {{files}}"))
+            .with_fix_command(&format!("{fix} {{files}}"))
+            .with_file_pattern_trigger("rust")
+            .build()
+    };
+    ConfigBuilder::new()
+        .with_file_pattern("rust", r"\.rs$", None)
+        .with_pre_command("lint", "db", "init-db")
+        .with_check(
+            "lint",
+            "fmt",
+            fixable("Format", "cargo fmt --check", "cargo fmt"),
+        )
+        .with_check(
+            "lint",
+            "fmt2",
+            fixable("Format 2", "rustfmt --check", "rustfmt"),
+        )
+        .build()
+}
+
 /// Config with common ignore patterns (\.md$, \.github/) - matches test expectations
 pub fn config_with_ignore_patterns() -> CiConfig {
     ConfigBuilder::new()
