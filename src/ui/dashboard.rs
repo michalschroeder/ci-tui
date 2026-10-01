@@ -356,20 +356,23 @@ fn render_help_overlay(frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
-/// Header title: branch, changed files vs base, elapsed, and the active
-/// `--only` / `--group` filter (persistent, unlike the dismissable footer).
+/// Header title: branch, changed files vs base, elapsed, `--watch` and the
+/// active `--only` / `--group` filter (persistent, unlike the dismissable
+/// footer).
 fn header_title(app: &App, elapsed: &str) -> String {
+    let watch = if app.watching { " │ watching" } else { "" };
     let filter = app
         .filter_notice
         .as_deref()
         .map(|notice| format!(" │ {notice}"))
         .unwrap_or_default();
     format!(
-        " {} │ {} files vs {} │ {}{} ",
+        " {} │ {} files vs {} │ {}{}{} ",
         app.current_branch,
         app.changed_files.len(),
         app.changed_files.base_ref,
         elapsed,
+        watch,
         filter
     )
 }
@@ -2299,6 +2302,19 @@ mod tests {
         ] {
             assert!(screen.contains(text), "missing {text:?}:\n{screen}");
         }
+    }
+
+    #[test]
+    fn test_header_title_shows_watch_mode() {
+        let mut app = make_test_app();
+        assert!(!header_title(&app, "1s").contains("watching"));
+        app.watching = true;
+        app.filter_notice = Some("Filtered: --only php-lint".to_string());
+        let title = header_title(&app, "1s");
+        assert!(
+            title.ends_with(" │ 1s │ watching │ Filtered: --only php-lint "),
+            "{title}"
+        );
     }
 
     #[test]

@@ -89,6 +89,12 @@ pub struct Cli {
     /// TUI only: quit when the run finishes; exit 1 if any check failed, else 0
     #[arg(long, conflicts_with_all = ["simple", "list", "fix"])]
     pub exit_on_finish: bool,
+
+    /// TUI only: re-run the checks a file save affects (like `r`), until you
+    /// quit. Watches the repo root; skips `ignore_patterns`, gitignored
+    /// files, `.git/` and `.ci-tui/`
+    #[arg(long, conflicts_with_all = ["simple", "list", "fix", "exit_on_finish"])]
+    pub watch: bool,
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -286,6 +292,13 @@ mod tests {
     #[case::exit_on_finish_with_fix(&["ci-tui", "--exit-on-finish", "--fix"])]
     #[case::list_then_no_verify(&["ci-tui", "--list", "--no-verify"])]
     #[case::no_verify_before_validate(&["ci-tui", "--no-verify", "validate"])]
+    #[case::watch_with_simple(&["ci-tui", "--watch", "-s"])]
+    #[case::watch_with_list(&["ci-tui", "--watch", "--list"])]
+    #[case::dry_run_then_watch(&["ci-tui", "--dry-run", "--watch"])]
+    #[case::watch_with_fix(&["ci-tui", "--watch", "--fix"])]
+    #[case::watch_with_exit_on_finish(&["ci-tui", "--watch", "--exit-on-finish"])]
+    #[case::exit_on_finish_then_watch(&["ci-tui", "--exit-on-finish", "--watch"])]
+    #[case::watch_before_validate(&["ci-tui", "--watch", "validate"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -420,6 +433,14 @@ mod tests {
     #[case::tui(&["ci-tui", "--no-verify", "-f", "a.rs"], true)]
     fn test_no_verify_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
         assert_eq!(Cli::try_parse_checked(args).unwrap().no_verify, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false)]
+    #[case::set(&["ci-tui", "--watch"], true)]
+    #[case::with_tui_flags(&["ci-tui", "--watch", "--notify", "-f", "a.rs", "--only", "x"], true)]
+    fn test_watch_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().watch, expected);
     }
 
     #[test]

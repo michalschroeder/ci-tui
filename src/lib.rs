@@ -22,6 +22,7 @@
 //! - `simple`: Simple console output mode (no TUI)
 //! - `test_discovery`: Finding related test files for source changes
 //! - `ui`: Terminal UI using ratatui
+//! - `watch`: `--watch` file watcher re-running checks affected by saves
 
 pub mod cache;
 pub mod checks;
@@ -41,6 +42,7 @@ pub mod simple;
 pub mod test_discovery;
 pub mod ui;
 mod utils;
+pub mod watch;
 
 // Re-export commonly used types for convenience
 pub use checks::{determine_checks, CheckToRun};

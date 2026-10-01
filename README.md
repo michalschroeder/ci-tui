@@ -33,6 +33,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `--no-color` (or a non-empty `NO_COLOR` env var, per [no-color.org](https://no-color.org)) disables color in the TUI, `--simple` and `--fix` output
 - `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
+- `--watch` (TUI only) keeps the TUI running and re-runs the checks a file save affects, like `r` (git refresh first; a running one restarts, one the current run still runs is left to it). Watches the repo root; saves are debounced (300 ms quiet), and files matching `ignore_patterns`, gitignored files, `.git/` and `.ci-tui/` are skipped. A save selects checks like a run on just the saved files, so always-run checks (no `triggers`) re-run on every save
 - `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
@@ -164,6 +165,7 @@ ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups
 ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
 ci-tui -s --no-cache       # run every check, even ones cached as unchanged
 ci-tui --notify --exit-on-finish  # TUI: notify when done, quit with the exit code
+ci-tui --watch             # TUI: re-run affected checks on every file save
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)
 ```
 
@@ -174,7 +176,7 @@ The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
 | `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
 | `1` | A check failed (TUI, `--simple`; in the TUI also a group pre-command), or a fix command or its verification re-run failed (`--fix`) |
 | `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), `ci-tui init` refusing to overwrite, bad flag value (e.g. unknown `--only` id) |
-| `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, other runtime errors |
+| `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, `--watch` file watcher failed to start (e.g. inotify watch limit), other runtime errors |
 | `130` | Interrupted (Ctrl-C) |
 
 In the TUI, checks still pending when you quit don't count as failures.

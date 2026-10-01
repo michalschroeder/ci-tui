@@ -125,7 +125,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 **On-Demand Checks**: Checks marked `on_demand: true` don't run automatically - user triggers with 't' key. Used for expensive tests when no specific test files are found.
 
-**Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/input/stats/task channels (plus a live-timer tick while a check runs), redrawing when `needs_redraw` is set.
+**Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/input/stats/task channels (plus a live-timer tick while a check runs, and `--watch` batches), redrawing when `needs_redraw` is set.
 
 ### Module Responsibilities
 
@@ -139,6 +139,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **cache.rs**: Result cache (#150) — `select_checks(.., key_root)` sets `CheckToRun::cache_key` (id + command + matched/discovery-source file contents + config hash; `None` without concrete files or with a missing / unreadable one; discovered tests read under the exec root). `ResultCache` in `<git dir>/ci-tui/results.json`: latest pass per check, stored only if the key still matches at finish. Each change re-reads the file under a lock (concurrent runs). Initial run serves `CheckResult::cached`; TUI records on a background thread (`Recorder`, not for `a` all-files runs); single runs of a skipped group run its `pre_commands` first, wait while the runner owes them (`App::claim_group_setup`). Details in module doc
 - **color.rs**: `--no-color` / non-empty `NO_COLOR` decision (`should_color`); console modes print via `cprintln!` (strips ANSI when off, process-wide switch set in main); TUI resets cell fg/bg after drawing (`App::color`)
 - **ui/notify.rs**: End-of-run notification (`TuiOptions::notify` = config `notify` or `--notify`; `notify` is left out of the cache config hash): BEL + OSC 9 (DCS passthrough under tmux `$TMUX` / screen `$STY`) with the dashboard's finished-status text. The main loop sends it once per full run (`report_run_end`) when the run settled (`run_settled`: runner's `AllFinished`, not `App::busy` with retries / fixes / `R` refresh, no viewer open), then `--exit-on-finish` quits (`exit_due`; exit code `App::exit_code`, 1 also for a failed pre-command)
+- **watch.rs**: `--watch` (TUI only; conflicts with `--simple` / `--list` / `--fix` / `--exit-on-finish`) — `notify` watcher on the repo root (canonical; cwd outside a repo), started in `ui::run` before the terminal (failure → exit 3). Its thread debounces saves (`next_batch`: 300 ms quiet, 2 s cap), keeps repo-relative paths (`keep_paths`: drops `.git/`, `.ci-tui/`, dirs, `ignore_patterns`, `git check-ignore`), sends `affected_checks` (`select_checks` on the saved set, `Decision::Run` only). Main loop: `Message::Watch` → `App::queue_watch`; `start_watch_runs` after every message: pending (run not finished) / queued dropped, running cancelled and kept queued until its result lands (no stale overwrite), setup-busy kept queued, else `retry_with_refresh(.., auto_only)` like `r` (refreshed on-demand / skipped → shown, not run); unlisted check added (`App::add_check`). Header shows `watching`
 - **cli.rs**: clap `Cli` / `Command` definitions, `init`/`validate` config-path resolution (main.rs stays thin)
 - **commands.rs**: `init` / `validate` subcommands — starter config template (round-trip tested against `load_config`; first line links the versioned release schema)
 - **schema.rs**: `ci-tui schema` — config JSON Schema via `schemars` (root `RawCiConfig`); committed at `schema/ci-tui.schema.json`, drift-guarded by a test (`make schema` regenerates), uploaded as a release asset
@@ -164,3 +165,4 @@ The tool expects a YAML config with:
 - `max_parallel`: Cap on concurrent checks in `parallel: true` groups (top-level and per group, >= 1; group can only lower it; default CPU count)
 - `--jobs N` / `-j N`: CLI override of top-level `max_parallel`
 - `notify`: TUI bell + OSC 9 desktop notification when a full run finishes (default false; `--notify` also enables). `--exit-on-finish`: TUI quits after the run, exit 0 / 1
+- `--watch` (CLI only, no config key): TUI re-runs checks affected by file saves until quit (see watch.rs)

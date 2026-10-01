@@ -279,6 +279,8 @@ pub struct RunState {
     pub setup_claims: HashMap<String, String>,
     /// The main loop handled this run's end (notification sent if enabled)
     pub end_reported: bool,
+    /// `--watch` re-runs waiting to start (see [`App::queue_watch`])
+    pub watch_queue: Vec<CheckToRun>,
 }
 
 impl RunState {
@@ -294,6 +296,7 @@ impl RunState {
             user_interacted: false,
             setup_claims: HashMap::new(),
             end_reported: false,
+            watch_queue: Vec::new(),
         }
     }
 }
@@ -354,7 +357,7 @@ impl ItemKey {
 }
 
 /// Build initial CheckResult for a check based on its state
-fn initial_result_for_check(check: &CheckToRun) -> CheckResult {
+pub(crate) fn initial_result_for_check(check: &CheckToRun) -> CheckResult {
     match check.decision() {
         Decision::Skipped => CheckResult::skipped(check.id()),
         Decision::OnDemand => CheckResult::on_demand(check.id()),
@@ -404,6 +407,8 @@ pub struct App {
     pub filter_notice: Option<String>,
     /// Render colors; off with `--no-color` / `NO_COLOR` (text modifiers stay)
     pub color: bool,
+    /// `--watch` is on: saves re-run affected checks (shown in the header)
+    pub watching: bool,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -498,6 +503,7 @@ impl App {
             current_branch,
             filter_notice: None,
             color: true,
+            watching: false,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),
@@ -618,6 +624,37 @@ impl App {
         // resolved_command is part of OutputCacheKey::Check, so a changed
         // command line invalidates the cache on the next read without a
         // manual clear here.
+        self.needs_redraw = true;
+    }
+
+    /// Queue `--watch` re-runs of `checks` (as the saves selected them),
+    /// replacing queued ones of the same id; the main loop starts them
+    pub fn queue_watch(&mut self, checks: Vec<CheckToRun>) {
+        let queue = &mut self.run.watch_queue;
+        queue.retain(|queued| !checks.iter().any(|c| c.id() == queued.id()));
+        queue.extend(checks);
+    }
+
+    /// Add `check` if not listed (a `--watch` save selected a check this run
+    /// does not show), as skipped until it runs; a new group's pre-commands
+    /// show as skipped, so its first single run runs them
+    pub fn add_check(&mut self, check: CheckToRun) {
+        if self.checks.iter().any(|c| c.id() == check.id()) {
+            return;
+        }
+        let group = check.group().to_string();
+        if !self.checks.iter().any(|c| c.group() == group) {
+            let groups = HashSet::from([group.as_str()]);
+            let rows = build_pre_commands(&self.config, &groups);
+            self.pre_commands
+                .extend(rows.into_iter().map(|row| PreCommandState {
+                    status: PreCommandStatus::Skipped,
+                    ..row
+                }));
+        }
+        let id = check.id().to_string();
+        self.results.insert(id.clone(), CheckResult::skipped(&id));
+        self.checks.push(check);
         self.needs_redraw = true;
     }
 
