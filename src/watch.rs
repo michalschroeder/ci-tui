@@ -10,26 +10,28 @@
 use crate::checks::{select_checks, CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::{ChangedFiles, CLI_FILES_BASE_REF};
+use crate::test_discovery::run_with_timeout;
 use anyhow::{Context, Result};
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecursiveMode, Watcher};
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Quiet window closing a batch: saves within it re-run checks once
-pub const DEBOUNCE: Duration = Duration::from_millis(300);
+const DEBOUNCE: Duration = Duration::from_millis(300);
 /// Longest a batch waits for quiet, so constant writes elsewhere (a build
 /// into a gitignored dir) cannot hold back saves
-pub const MAX_BATCH_WAIT: Duration = Duration::from_secs(2);
+const MAX_BATCH_WAIT: Duration = Duration::from_secs(2);
 /// Repo-relative dirs never watched for saves: git's own writes and
 /// ci-tui's (result cache under `.git/`, logs) would re-trigger checks
 const ALWAYS_IGNORED: [&str; 2] = [".git/", ".ci-tui/"];
+/// Longest `git check-ignore` may take before the batch counts as not ignored
+const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Running watcher; dropping it stops watching (and its batch thread)
 pub struct Watch {
@@ -76,7 +78,7 @@ fn watch_loop(
     tx: &UnboundedSender<Vec<CheckToRun>>,
 ) {
     while let Some(batch) = next_batch(paths, DEBOUNCE, MAX_BATCH_WAIT) {
-        let files = keep_paths(root, batch, config, |files| gitignored(root, files));
+        let files = keep_paths(root, batch, config);
         let checks = affected_checks(config, files, exec_root);
         if !checks.is_empty() && tx.send(checks).is_err() {
             return;
@@ -96,7 +98,7 @@ fn is_save(kind: &EventKind) -> bool {
 /// Next batch from `rx`: blocks for a first item, then takes items until
 /// none came for `quiet` (or `max_wait` passed since the first). `None`
 /// once `rx` is disconnected and drained.
-pub fn next_batch<T>(rx: &Receiver<T>, quiet: Duration, max_wait: Duration) -> Option<Vec<T>> {
+fn next_batch<T>(rx: &Receiver<T>, quiet: Duration, max_wait: Duration) -> Option<Vec<T>> {
     let mut batch = vec![rx.recv().ok()?];
     let deadline = Instant::now() + max_wait;
     loop {
@@ -109,64 +111,43 @@ pub fn next_batch<T>(rx: &Receiver<T>, quiet: Duration, max_wait: Duration) -> O
 }
 
 /// Saved `paths` as sorted, deduped repo-relative files worth checking:
-/// under `root`, not directories, not in `.git/` / `.ci-tui/`, not matched
-/// by `ignore_patterns`, and not in `ignored(candidates)` (gitignore)
-pub fn keep_paths(
-    root: &Path,
-    paths: Vec<PathBuf>,
-    config: &CiConfig,
-    ignored: impl FnOnce(&[String]) -> HashSet<String>,
-) -> Vec<String> {
+/// under `root`, not in `.git/` / `.ci-tui/`, not matched by
+/// `ignore_patterns`, not directories, and not gitignored. Cheap filters
+/// first: a build can save thousands of paths per batch.
+fn keep_paths(root: &Path, paths: Vec<PathBuf>, config: &CiConfig) -> Vec<String> {
     let mut files: Vec<String> = paths
         .into_iter()
-        .filter(|path| !path.is_dir())
         .filter_map(|path| Some(path.strip_prefix(root).ok()?.to_string_lossy().into_owned()))
         .filter(|file| !file.is_empty() && !ALWAYS_IGNORED.iter().any(|d| file.starts_with(d)))
-        .filter(|file| !config.should_ignore_file(file))
         .collect();
     files.sort();
     files.dedup();
+    files.retain(|file| !config.should_ignore_file(file) && !root.join(file).is_dir());
     if files.is_empty() {
         return files;
     }
-    let ignored = ignored(&files);
+    let ignored = gitignored(root, &files);
     files.retain(|file| !ignored.contains(file));
     files
 }
 
 /// `files` (repo-relative) that git ignores in the repo at `root`; tracked
-/// files never are. Empty when git fails (e.g. not a repo).
-pub fn gitignored(root: &Path, files: &[String]) -> HashSet<String> {
-    let child = crate::utils::own_process_group(&mut Command::new("git"))
+/// files never are. Empty when git fails (e.g. not a repo) or times out.
+fn gitignored(root: &Path, files: &[String]) -> HashSet<String> {
+    let mut command = Command::new("git");
+    crate::utils::own_process_group(&mut command)
         .args(["check-ignore", "--stdin", "-z"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return HashSet::new();
-    };
-    let mut input = Vec::new();
-    for file in files {
-        input.extend_from_slice(file.as_bytes());
-        input.push(0);
-    }
-    // Written on its own thread: git answers while reading, so a large
-    // batch would otherwise fill both pipes. Dropping stdin ends the input.
-    let stdin = child.stdin.take();
-    let writer = std::thread::spawn(move || stdin.map(|mut s| s.write_all(&input)));
+        .current_dir(root);
+    let input: String = files.iter().map(|file| format!("{file}\0")).collect();
     // Exit 1 = none ignored; output is empty then
-    let output = child.wait_with_output();
-    let _ = writer.join();
-    let Ok(output) = output else {
+    let Ok(output) = run_with_timeout(command, &input, GIT_TIMEOUT) else {
         return HashSet::new();
     };
     output
         .stdout
-        .split(|b| *b == 0)
+        .split('\0')
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .map(str::to_string)
         .collect()
 }
 
@@ -211,15 +192,11 @@ checks:
         .unwrap()
     }
 
-    fn none_ignored(_: &[String]) -> HashSet<String> {
-        HashSet::new()
-    }
-
-    /// `keep_paths` of `paths` under a fake root, nothing gitignored
+    /// `keep_paths` of `paths` under a fake root (no git: nothing gitignored)
     fn kept(paths: &[&str]) -> Vec<String> {
         let root = Path::new("/nonexistent-ci-tui-watch");
         let paths = paths.iter().map(|p| root.join(p)).collect();
-        keep_paths(root, paths, &config(), none_ignored)
+        keep_paths(root, paths, &config())
     }
 
     #[test]
@@ -301,7 +278,7 @@ checks:
     fn test_keep_paths_drops_paths_outside_root() {
         let root = Path::new("/nonexistent-ci-tui-watch");
         let paths = vec![PathBuf::from("/elsewhere/a.php"), root.join("a.php")];
-        assert_eq!(keep_paths(root, paths, &config(), none_ignored), ["a.php"]);
+        assert_eq!(keep_paths(root, paths, &config()), ["a.php"]);
     }
 
     #[rstest::rstest]
@@ -327,25 +304,11 @@ checks:
     }
 
     #[test]
-    fn test_keep_paths_drops_gitignored() {
-        let root = Path::new("/nonexistent-ci-tui-watch");
-        let paths = vec![root.join("build/out.php"), root.join("src/A.php")];
-        let ignored = |files: &[String]| {
-            assert_eq!(files, ["build/out.php", "src/A.php"], "candidates");
-            HashSet::from(["build/out.php".to_string()])
-        };
-        assert_eq!(keep_paths(root, paths, &config(), ignored), ["src/A.php"]);
-    }
-
-    #[test]
     fn test_keep_paths_drops_directories() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         let paths = vec![dir.path().join("src"), dir.path().join("src/A.php")];
-        assert_eq!(
-            keep_paths(dir.path(), paths, &config(), none_ignored),
-            ["src/A.php"]
-        );
+        assert_eq!(keep_paths(dir.path(), paths, &config()), ["src/A.php"]);
     }
 
     /// Git env vars set by hooks (e.g. pre-commit) that redirect git to the
@@ -377,6 +340,11 @@ checks:
 
         let expected = HashSet::from(["build/out.php".to_string(), "a.log".to_string()]);
         assert_eq!(ignored, expected);
+        let paths = files.iter().map(|f| repo.path().join(f)).collect();
+        assert_eq!(
+            keep_paths(repo.path(), paths, &config()),
+            ["src/A.php", "tracked.log"]
+        );
     }
 
     #[test]

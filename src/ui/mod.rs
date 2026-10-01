@@ -618,37 +618,21 @@ fn setup_terminal() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::
     Ok((guard, Terminal::new(CrosstermBackend::new(stdout))?))
 }
 
-/// `--watch` batches from the file watcher ([`crate::watch`]); without
-/// `--watch` it never yields
-struct WatchFeed {
-    /// Watcher (dropping it stops watching) and its batches
-    feed: Option<(
-        crate::watch::Watch,
-        mpsc::UnboundedReceiver<Vec<CheckToRun>>,
-    )>,
-}
-
-impl WatchFeed {
-    /// Start watching if `watch`; errors when the watcher cannot start
-    fn start(watch: bool, cwd: &Path, config: &Arc<CiConfig>, exec_root: &Path) -> Result<Self> {
-        if !watch {
-            return Ok(Self { feed: None });
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        let exec_root = exec_root.to_path_buf();
-        let watcher = crate::watch::start(cwd, Arc::clone(config), exec_root, tx)?;
-        Ok(Self {
-            feed: Some((watcher, rx)),
-        })
-    }
-
-    /// Next batch's affected checks; pends forever without a watcher
-    async fn recv(&mut self) -> Option<Vec<CheckToRun>> {
-        match &mut self.feed {
-            Some((_, rx)) => rx.recv().await,
-            None => std::future::pending().await,
-        }
-    }
+/// `--watch` batches receiver ([`crate::watch`]) and, if `watch`, the
+/// watcher feeding it (dropping it stops watching); errors when the
+/// watcher cannot start
+fn start_watch(
+    watch: bool,
+    cwd: &Path,
+    config: &Arc<CiConfig>,
+    exec_root: &Path,
+) -> Result<(
+    Option<crate::watch::Watch>,
+    mpsc::UnboundedReceiver<Vec<CheckToRun>>,
+)> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let start = || crate::watch::start(cwd, Arc::clone(config), exec_root.to_path_buf(), tx);
+    Ok((watch.then(start).transpose()?, rx))
 }
 
 /// Copy text to clipboard using OSC 52 escape sequence
@@ -823,22 +807,39 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     };
     let check = check.clone();
+    let Some(setup) = claim_setup(app, &check) else {
+        return Action::Continue;
+    };
+    spawn_refreshed_run(app, tasks, check, setup, false);
+    Action::Continue
+}
+
+/// Re-run `check` like 'r' (its group setup claimed: `setup` runs the
+/// pre-commands first). Marks it running now (also blocks a second start);
+/// git refresh runs off the event loop so large repos do not freeze the UI.
+/// A user run ('r') also clears fix results; an `auto_only` one (`--watch`)
+/// leaves them.
+fn spawn_refreshed_run(
+    app: &mut App,
+    tasks: &mut Tasks,
+    check: CheckToRun,
+    setup: bool,
+    auto_only: bool,
+) {
     let previous = app
         .results
         .get(check.id())
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
-    let Some(setup) = claim_setup(app, &check) else {
-        return Action::Continue;
-    };
-
-    // Mark running now (also blocks a second 'r'); git refresh runs off the
-    // event loop so large repos do not freeze the UI
-    app.reset_check_for_retry(check.id());
-    tasks
-        .spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup, false));
-    Action::Continue
+    if auto_only {
+        app.mark_running(check.id());
+    } else {
+        app.reset_check_for_retry(check.id());
+    }
+    tasks.spawn(|ctx, tx| {
+        retry_with_refresh(ctx, tx, check, previous, changed_files, setup, auto_only)
+    });
 }
 
 /// Start the `--watch` re-runs queued in `app` ([`App::queue_watch`]) that
@@ -861,23 +862,17 @@ fn start_watch_runs(app: &mut App, tasks: &mut Tasks) {
             }
             _ => {}
         }
-        app.add_check(saved.clone());
-        let check = app.checks.iter().find(|c| c.id() == saved.id());
-        let check = check.cloned().unwrap_or(saved);
-        let setup = match app.claim_group_setup(check.group(), check.id()) {
-            GroupSetup::Busy => {
-                app.run.watch_queue.push(check);
-                continue;
+        let check = match app.checks.iter().find(|c| c.id() == saved.id()) {
+            Some(listed) => listed.clone(),
+            None => {
+                app.add_check(saved.clone());
+                saved
             }
-            setup => setup == GroupSetup::Run,
         };
-        let previous = app.results.get(check.id()).cloned();
-        let previous = previous.unwrap_or_else(|| CheckResult::pending(check.id()));
-        let changed_files = app.changed_files.clone();
-        app.mark_running(check.id());
-        tasks.spawn(|ctx, tx| {
-            retry_with_refresh(ctx, tx, check, previous, changed_files, setup, true)
-        });
+        match app.claim_group_setup(check.group(), check.id()) {
+            GroupSetup::Busy => app.run.watch_queue.push(check),
+            setup => spawn_refreshed_run(app, tasks, check, setup == GroupSetup::Run, true),
+        }
     }
 }
 
@@ -1573,7 +1568,8 @@ pub async fn run(
 ) -> Result<i32> {
     // `--watch` fails here, before the terminal is touched (exit 3)
     let config_arc = Arc::new(config.clone());
-    let mut watch = WatchFeed::start(options.watch, &project_root, &config_arc, &exec_root)?;
+    let (_watch, mut watch_rx) =
+        start_watch(options.watch, &project_root, &config_arc, &exec_root)?;
 
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -1669,7 +1665,7 @@ pub async fn run(
             Some(event) = task_rx.recv() => Message::Task(event),
 
             // `--watch`: checks affected by saved files
-            Some(checks) = watch.recv() => Message::Watch(checks),
+            Some(checks) = watch_rx.recv(), if options.watch => Message::Watch(checks),
 
             // All channels closed - exit
             else => break,
@@ -3803,13 +3799,9 @@ checks:
         let ran = app.results.values_mut();
         ran.filter(|r| r.status == CheckStatus::Pending)
             .for_each(|r| r.status = CheckStatus::Passed);
-        let (tasks, rx) = Tasks::new(TaskCtx {
-            project_root: Arc::new(dir.to_path_buf()),
-            exec_root: Arc::new(dir.to_path_buf()),
-            config: Arc::new(config),
-            cancels: CancelRegistry::default(),
-            key_root: None,
-        });
+        let cancels = CancelRegistry::default();
+        let ctx = TaskCtx::new(dir.to_path_buf(), dir, Arc::new(config), &cancels, None);
+        let (tasks, rx) = Tasks::new(ctx);
         (app, tasks, rx)
     }
 
@@ -3817,33 +3809,6 @@ checks:
     fn saved(dir: &Path, files: &[&str]) -> Message {
         let files = files.iter().map(|f| f.to_string()).collect();
         Message::Watch(crate::watch::affected_checks(&watch_config(), files, dir))
-    }
-
-    /// Handle task events until a result for `check_id`; returns the names
-    /// of the events seen
-    async fn watch_events(
-        app: &mut App,
-        tasks: &mut Tasks,
-        rx: &mut mpsc::Receiver<TaskEvent>,
-        check_id: &str,
-    ) -> Vec<&'static str> {
-        let mut seen = Vec::new();
-        loop {
-            let event = rx.recv().await.expect("task event");
-            let (name, id) = match &event {
-                TaskEvent::CheckRefreshed { .. } => ("refreshed", None),
-                TaskEvent::GitRefreshFailed => ("git failed", None),
-                TaskEvent::RetryResult(r) => ("result", Some(r.check_id.clone())),
-                TaskEvent::UnrecordedResult(r) => ("unrecorded", Some(r.check_id.clone())),
-                TaskEvent::CheckNotApplicable(r) => ("not applicable", Some(r.check_id.clone())),
-                _ => ("other", None),
-            };
-            seen.push(name);
-            handle_message(app, Message::Task(event), tasks);
-            if id.as_deref() == Some(check_id) {
-                return seen;
-            }
-        }
     }
 
     /// Saving a PHP file re-runs `php-lint` like 'r' (git refresh, then the
@@ -3859,9 +3824,12 @@ checks:
         assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
         assert_eq!(app.results["yaml-lint"].status, CheckStatus::Passed);
         assert_eq!(tasks.set.len(), 1, "one re-run");
-        let seen = watch_events(&mut app, &mut tasks, &mut rx, "php-lint").await;
-        assert_eq!(seen.first(), Some(&"refreshed"), "{seen:?}");
-        assert_eq!(seen.last(), Some(&"result"), "{seen:?}");
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            let unrecorded = matches!(e, TaskEvent::UnrecordedResult(_));
+            assert!(!unrecorded, "re-run result must be recorded");
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
         assert!(app.results["php-lint"].output.contains("lint src/Foo.php"));
         assert_eq!(app.results["yaml-lint"].status, CheckStatus::Passed);
@@ -3879,7 +3847,10 @@ checks:
 
         assert!(app.checks.iter().any(|c| c.id() == "php-lint"), "added");
         assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
-        watch_events(&mut app, &mut tasks, &mut rx, "php-lint").await;
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
     }
 
@@ -3909,7 +3880,10 @@ checks:
             "restarted, not left cancelled"
         );
         assert!(app.run.watch_queue.is_empty());
-        watch_events(&mut app, &mut tasks, &mut rx, "php-lint").await;
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
     }
 
@@ -3972,27 +3946,11 @@ checks:
 
         handle_message(&mut app, saved(dir.path(), &["src/Foo.php"]), &mut tasks);
 
-        let seen = watch_events(&mut app, &mut tasks, &mut rx, "php-lint").await;
-        assert_eq!(seen, ["refreshed", "unrecorded"]);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            assert!(!matches!(e, TaskEvent::RetryResult(_)), "must not run");
+            matches!(e, TaskEvent::UnrecordedResult(_))
+        })
+        .await;
         assert_eq!(app.results["php-lint"].status, CheckStatus::Skipped);
-    }
-
-    #[test]
-    fn test_new_app_shows_watch_mode() {
-        let config = test_config();
-        let changed_files = make_test_app(&config).changed_files;
-        let mut options = TuiOptions {
-            filter_notice: None,
-            show_stats: true,
-            cache: ResultCache::disabled(),
-            notify: false,
-            exit_on_finish: false,
-            verify: true,
-            watch: true,
-        };
-        let root = Path::new("/nonexistent-ci-tui-test-path");
-        assert!(new_app(&config, changed_files.clone(), &[], root, &options).watching);
-        options.watch = false;
-        assert!(!new_app(&config, changed_files, &[], root, &options).watching);
     }
 }

@@ -72,7 +72,7 @@ impl ProcessRunner for RealProcessRunner {
 ///
 /// Sync (discovery runs in blocking contexts), no wait-timeout crate: waits
 /// for stdout EOF with `recv_timeout`, which arrives as soon as the child exits.
-fn run_with_timeout(
+pub(crate) fn run_with_timeout(
     mut command: Command,
     stdin: &str,
     timeout: Duration,
