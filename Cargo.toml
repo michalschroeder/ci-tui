@@ -46,6 +46,8 @@ regex = "1"
 chrono = "0.4"
 base64 = "0.23"
 tempfile = "3"                # Private temp dir for `o` / `O` viewer files
+notify = "8"                  # File watcher for --watch
+ignore = "0.4"                # --watch: walk dirs to watch, honoring .gitignore
 
 # System monitoring
 sysinfo = "0.39"
