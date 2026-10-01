@@ -91,8 +91,8 @@ pub struct Cli {
     pub exit_on_finish: bool,
 
     /// TUI only: re-run the checks a file save affects (like `r`), until you
-    /// quit. Watches the repo root; skips `ignore_patterns`, gitignored
-    /// files, `.git/` and `.ci-tui/`
+    /// quit. Watches the repo; skips `ignore_patterns`, gitignored files,
+    /// editor temp files, `.git/`, `.ci-tui/` and nested repos
     #[arg(long, conflicts_with_all = ["simple", "list", "fix", "exit_on_finish"])]
     pub watch: bool,
 }

@@ -14,6 +14,7 @@ use crate::checks::{CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
+use crate::watch::WatchBatch;
 use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -116,6 +117,8 @@ pub struct FixState {
     pub all_total: usize,
     /// Re-run a check after its fix passed (off with `--no-verify`)
     pub verify: bool,
+    /// Checks whose fix verification is running or waits for its turn
+    pub verifying: HashSet<String>,
 }
 
 /// System monitoring history (updated by background stats worker)
@@ -280,7 +283,9 @@ pub struct RunState {
     /// The main loop handled this run's end (notification sent if enabled)
     pub end_reported: bool,
     /// `--watch` re-runs waiting to start (see [`App::queue_watch`])
-    pub watch_queue: Vec<CheckToRun>,
+    pub watch_queue: Vec<WatchRun>,
+    /// Check id -> its latest run's span (see [`App::queue_watch`])
+    pub run_spans: HashMap<String, RunSpan>,
 }
 
 impl RunState {
@@ -297,9 +302,44 @@ impl RunState {
             setup_claims: HashMap::new(),
             end_reported: false,
             watch_queue: Vec::new(),
+            run_spans: HashMap::new(),
         }
     }
 }
+
+/// A `--watch` re-run waiting to start ([`App::queue_watch`])
+#[derive(Debug)]
+pub struct WatchRun {
+    /// The check as the saves selected it
+    pub check: CheckToRun,
+    /// The runner still owed the check (pending / queued) when last seen:
+    /// once it ran it, this is dropped (that run saw the save)
+    pub runner_owed: bool,
+    /// The check's running run was cancelled for this re-run (sent once)
+    pub cancel_sent: bool,
+}
+
+impl WatchRun {
+    pub fn new(check: CheckToRun) -> Self {
+        Self {
+            check,
+            runner_owed: false,
+            cancel_sent: false,
+        }
+    }
+}
+
+/// When a check's latest run started (shown running) and, once its result
+/// landed, ended
+#[derive(Debug, Clone, Copy)]
+pub struct RunSpan {
+    pub started: Instant,
+    pub finished: Option<Instant>,
+}
+
+/// How long after a check's result saves still count as its own writes
+/// ([`App::queue_watch`])
+const OWN_WRITES_GRACE: Duration = Duration::from_secs(1);
 
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
@@ -627,35 +667,59 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Queue `--watch` re-runs of `checks` (as the saves selected them),
-    /// replacing queued ones of the same id; the main loop starts them
-    pub fn queue_watch(&mut self, checks: Vec<CheckToRun>) {
+    /// Queue `--watch` re-runs of `batch`'s checks (as the saves selected
+    /// them), replacing queued ones of the same id; the main loop starts
+    /// them. A check no longer running whose saves all fell in its latest
+    /// run (from its start until [`OWN_WRITES_GRACE`] after its result) is
+    /// left out: they are its own writes (a formatter, generated files).
+    /// One still running is queued (restarted).
+    pub fn queue_watch(&mut self, batch: WatchBatch) {
+        let WatchBatch {
+            checks,
+            first,
+            last,
+        } = batch;
+        let saved = |c: &CheckToRun| !self.own_writes(c.id(), first, last);
+        let checks: Vec<CheckToRun> = checks.into_iter().filter(saved).collect();
         let queue = &mut self.run.watch_queue;
-        queue.retain(|queued| !checks.iter().any(|c| c.id() == queued.id()));
-        queue.extend(checks);
+        queue.retain(|queued| !checks.iter().any(|c| c.id() == queued.check.id()));
+        queue.extend(checks.into_iter().map(WatchRun::new));
     }
 
-    /// Add `check` if not listed (a `--watch` save selected a check this run
-    /// does not show), as skipped until it runs; a new group's pre-commands
-    /// show as skipped, so its first single run runs them
-    pub fn add_check(&mut self, check: CheckToRun) {
-        if self.checks.iter().any(|c| c.id() == check.id()) {
-            return;
-        }
-        let group = check.group().to_string();
-        if !self.checks.iter().any(|c| c.group() == group) {
-            let groups = HashSet::from([group.as_str()]);
-            let rows = build_pre_commands(&self.config, &groups);
-            self.pre_commands
-                .extend(rows.into_iter().map(|row| PreCommandState {
-                    status: PreCommandStatus::Skipped,
-                    ..row
-                }));
-        }
-        let id = check.id().to_string();
-        self.results.insert(id.clone(), CheckResult::skipped(&id));
-        self.checks.push(check);
-        self.needs_redraw = true;
+    /// Saves from `first` to `last` all fell in `check_id`'s finished
+    /// latest run, grace included
+    fn own_writes(&self, check_id: &str, first: Instant, last: Instant) -> bool {
+        let Some(span) = self.run.run_spans.get(check_id) else {
+            return false;
+        };
+        let ran = |end: Instant| span.started <= first && last <= end + OWN_WRITES_GRACE;
+        span.finished.is_some_and(ran)
+    }
+
+    /// A fix or fix-all runs, or a fix verification runs / waits: `--watch`
+    /// re-runs wait (fixes edit files; verifications are not cancelled)
+    pub fn fixing(&self) -> bool {
+        self.fix.running || self.fix.all_running || !self.fix.verifying.is_empty()
+    }
+
+    /// A single run of a check in `group` may start without exceeding the
+    /// group's concurrency: one at a time for `parallel: false`, else its
+    /// `max_parallel`
+    pub fn group_slot_free(&self, group: &str) -> bool {
+        let limit = match self.config.get_group(group) {
+            Some(config) if config.parallel => self.config.group_parallel_limit(Some(config)),
+            _ => 1,
+        };
+        let running = |c: &&CheckToRun| {
+            self.results
+                .get(c.id())
+                .is_some_and(|r| r.status == CheckStatus::Running)
+        };
+        self.checks_in_group(group)
+            .into_iter()
+            .filter(running)
+            .count()
+            < limit
     }
 
     /// Get total elapsed time
@@ -795,6 +859,7 @@ impl App {
 
     /// Reset a check's result to Running and clear previous output/timing
     fn reset_result_to_running(&mut self, check_id: &str) {
+        self.start_span(check_id);
         if let Some(result) = self.results.get_mut(check_id) {
             // Untimed until the command starts (`CheckStarted`): refresh
             // and pre-commands don't count
@@ -850,11 +915,30 @@ impl App {
         }
     }
 
+    /// Start `check_id`'s run span now, unless it is already running
+    fn start_span(&mut self, check_id: &str) {
+        let status = self.results.get(check_id).map(|r| &r.status);
+        if status.is_some_and(|s| *s != CheckStatus::Running) {
+            let span = RunSpan {
+                started: Instant::now(),
+                finished: None,
+            };
+            self.run.run_spans.insert(check_id.to_string(), span);
+        }
+    }
+
     /// Mark a check as running (preparing to execute): on-demand 't', or
     /// a fix verification re-run (fix results stay shown)
     pub fn mark_running(&mut self, check_id: &str) {
         self.reset_result_to_running(check_id);
         self.needs_redraw = true;
+    }
+
+    /// [`Self::mark_running`] for a fix verification, which holds back
+    /// `--watch` re-runs until its result ([`Self::fixing`])
+    pub fn mark_verifying(&mut self, check_id: &str) {
+        self.mark_running(check_id);
+        self.fix.verifying.insert(check_id.to_string());
     }
 
     /// Reset a single check to running for retry, clearing fix results
@@ -868,6 +952,7 @@ impl App {
     /// releasing its pre-commands claim
     pub fn set_retry_result(&mut self, result: CheckResult) {
         self.release_group_setup(&result.check_id);
+        self.fix.verifying.remove(&result.check_id);
         self.insert_result(result);
         self.clamp_selection();
         self.needs_redraw = true;
@@ -900,6 +985,9 @@ impl App {
         }
         let selected_failed = result.status.is_failure()
             && matches!(&selected, Some(ItemKey::Check { id, .. }) if *id == result.check_id);
+        if let Some(span) = self.run.run_spans.get_mut(&result.check_id) {
+            span.finished.get_or_insert_with(Instant::now);
+        }
         self.results.insert(result.check_id.clone(), result);
         self.auto_collapse_keeping_selection(selected);
         if selected_failed {
@@ -1060,6 +1148,7 @@ impl App {
     }
 
     fn on_check_started(&mut self, check_id: &str) {
+        self.start_span(check_id);
         if let Some(result) = self.results.get_mut(check_id) {
             result.status = CheckStatus::Running;
             result.started_at = Some(chrono::Local::now());
