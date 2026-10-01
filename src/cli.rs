@@ -26,9 +26,14 @@ pub struct Cli {
     #[arg(short, long)]
     pub simple: bool,
 
-    /// Run only fix commands (skip checks)
+    /// Run only fix commands; each passing fix re-runs its check to verify it
+    /// passes now (skip with --no-verify)
     #[arg(long)]
     pub fix: bool,
+
+    /// Do not re-run a check after its fix passed (--fix and TUI `x` / `X`)
+    #[arg(long, conflicts_with_all = ["simple", "list"])]
+    pub no_verify: bool,
 
     /// Run checks on specific files instead of git-detected changes
     #[arg(short, long, num_args = 1.., value_parser = parse_file_arg)]
@@ -279,6 +284,9 @@ mod tests {
     #[case::exit_on_finish_with_list(&["ci-tui", "--exit-on-finish", "--list"])]
     #[case::dry_run_then_exit_on_finish(&["ci-tui", "--dry-run", "--exit-on-finish"])]
     #[case::exit_on_finish_with_fix(&["ci-tui", "--exit-on-finish", "--fix"])]
+    #[case::no_verify_with_simple(&["ci-tui", "--no-verify", "-s"])]
+    #[case::list_then_no_verify(&["ci-tui", "--list", "--no-verify"])]
+    #[case::no_verify_before_validate(&["ci-tui", "--no-verify", "validate"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -404,6 +412,14 @@ mod tests {
     ) {
         let cli = Cli::try_parse_checked(args).unwrap();
         assert_eq!((cli.notify, cli.exit_on_finish), (notify, exit_on_finish));
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], false)]
+    #[case::fix(&["ci-tui", "--fix", "--no-verify"], true)]
+    #[case::tui(&["ci-tui", "--no-verify", "-f", "a.rs"], true)]
+    fn test_no_verify_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().no_verify, expected);
     }
 
     #[test]

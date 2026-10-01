@@ -114,6 +114,8 @@ pub struct FixState {
     pub all_results: Vec<CheckResult>,
     /// Total number of fixes in fix-all
     pub all_total: usize,
+    /// Re-run a check after its fix passed (off with `--no-verify`)
+    pub verify: bool,
 }
 
 /// System monitoring history (updated by background stats worker)
@@ -823,6 +825,13 @@ impl App {
         // Clear any fix results
         self.fix.result = None;
         self.fix.all_results.clear();
+        self.needs_redraw = true;
+    }
+
+    /// Mark a fixed check running for its verification re-run; the fix
+    /// result stays shown
+    pub fn start_verify(&mut self, check_id: &str) {
+        self.reset_result_to_running(check_id);
         self.needs_redraw = true;
     }
 

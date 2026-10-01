@@ -751,10 +751,16 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.selected_capabilities().can_retry {
         return Action::Continue;
     }
-    let Some(check) = app.selected_check() else {
-        return Action::Continue;
-    };
-    let check = check.clone();
+    if let Some(check) = app.selected_check() {
+        retry_check(app, tasks, check.clone(), false);
+    }
+    Action::Continue
+}
+
+/// Retry `check` with git refresh: 'r', or with `verify` the re-run
+/// confirming its passed fix (the fix result stays shown). Not started
+/// while its group setup is busy ([`claim_setup`]).
+fn retry_check(app: &mut App, tasks: &mut Tasks, check: CheckToRun, verify: bool) {
     let previous = app
         .results
         .get(check.id())
@@ -762,14 +768,44 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
     let Some(setup) = claim_setup(app, &check) else {
-        return Action::Continue;
+        return;
     };
 
     // Mark running now (also blocks a second 'r'); git refresh runs off the
     // event loop so large repos do not freeze the UI
-    app.reset_check_for_retry(check.id());
+    match verify {
+        true => app.start_verify(check.id()),
+        false => app.reset_check_for_retry(check.id()),
+    }
     tasks.spawn(|ctx, tx| retry_with_refresh(ctx, tx, check, previous, changed_files, setup));
-    Action::Continue
+}
+
+/// Checks whose fix passed in `event`, to verify ([`app::FixState::verify`]):
+/// a single fix ('x') at its result, fix-all ('X') once done
+fn fixes_to_verify(app: &App, event: &TaskEvent) -> Vec<String> {
+    let results = match event {
+        TaskEvent::FixResult(result) if app.fix.verify => std::slice::from_ref(result),
+        TaskEvent::FixAllDone if app.fix.verify => &app.fix.all_results,
+        _ => return Vec::new(),
+    };
+    results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Passed)
+        .map(|r| r.check_id.clone())
+        .collect()
+}
+
+/// Re-run fixed check `check_id` like 'r' (see [`retry_check`]), unless it
+/// is already running again
+fn verify_fix(app: &mut App, tasks: &mut Tasks, check_id: &str) {
+    let finished = app
+        .results
+        .get(check_id)
+        .is_some_and(|r| r.status.is_finished());
+    let check = app.checks.iter().find(|c| c.id() == check_id);
+    if let (true, Some(check)) = (finished, check) {
+        retry_check(app, tasks, check.clone(), true);
+    }
 }
 
 /// Handle 't' key: trigger on-demand test
@@ -1220,7 +1256,14 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
             app.update_stats(stats.cpu_usage, stats.mem_used, stats.mem_total);
             Action::Continue
         }
-        Message::Task(event) => handle_task_event(app, event),
+        Message::Task(event) => {
+            let fixed = fixes_to_verify(app, &event);
+            let action = handle_task_event(app, event);
+            for check_id in fixed {
+                verify_fix(app, tasks, &check_id);
+            }
+            action
+        }
         Message::StatusExpired => {
             app.expire_status_message(std::time::Instant::now());
             Action::Continue
@@ -1246,6 +1289,8 @@ pub struct TuiOptions {
     pub notify: bool,
     /// Quit when the run finishes (`--exit-on-finish`); exit code as for `q`
     pub exit_on_finish: bool,
+    /// Re-run a check after its fix ('x' / 'X') passed (off with `--no-verify`)
+    pub verify: bool,
 }
 
 impl TuiOptions {
@@ -1262,6 +1307,7 @@ impl TuiOptions {
             cache,
             notify: cli.notify || config.notify,
             exit_on_finish: cli.exit_on_finish,
+            verify: !cli.no_verify,
         }
     }
 }
@@ -1279,6 +1325,7 @@ fn new_app(
     app.filter_notice = options.filter_notice.clone();
     app.color = crate::color::enabled();
     app.view.stats_visible = options.show_stats;
+    app.fix.verify = options.verify;
     app
 }
 
@@ -2572,6 +2619,168 @@ checks:
             "intermediate results must not finish the run"
         );
         assert_eq!(app.fix.all_results.len(), 1);
+    }
+
+    /// Local-mode app (in `dir`, not a git repo: refreshes fail and keep
+    /// the check) whose failed checks `(id, fix command)` re-run `echo
+    /// verified`; fix verification `verify`
+    fn fixable_app(
+        dir: &Path,
+        fixes: &[(&str, &str)],
+        verify: bool,
+    ) -> (App, Tasks, mpsc::Receiver<TaskEvent>) {
+        let mut config = test_config();
+        config.runner = crate::config::ExecTarget::Local(crate::config::LocalConfig {
+            shell: "sh".to_string(),
+            ..Default::default()
+        });
+        let checks = fixes.iter().map(|(id, fix)| {
+            let mut check = make_test_check(id, "fast");
+            check.resolved_command = "echo verified".to_string();
+            check.resolved_fix_command = Some(fix.to_string());
+            check
+        });
+        let mut app = make_test_app_with_checks(&config, checks.collect());
+        finish_run(&mut app, &config, None);
+        for (id, _) in fixes {
+            app.results.get_mut(*id).unwrap().status = CheckStatus::Failed;
+        }
+        app.fix.verify = verify;
+        let (tasks, rx) = Tasks::new(TaskCtx {
+            project_root: Arc::new(dir.to_path_buf()),
+            exec_root: Arc::new(dir.to_path_buf()),
+            config: Arc::new(config),
+            cancels: CancelRegistry::default(),
+            key_root: None,
+        });
+        (app, tasks, rx)
+    }
+
+    /// Handle task events until (and including) the first `until` matches
+    async fn handle_until(
+        app: &mut App,
+        tasks: &mut Tasks,
+        rx: &mut mpsc::Receiver<TaskEvent>,
+        until: fn(&TaskEvent) -> bool,
+    ) {
+        loop {
+            let event = rx.recv().await.expect("task event");
+            let done = until(&event);
+            handle_message(app, Message::Task(event), tasks);
+            if done {
+                return;
+            }
+        }
+    }
+
+    /// 'x': a passed fix re-runs the check like 'r' (running, cancellable,
+    /// keeps `--exit-on-finish` waiting), result recorded like a retry's;
+    /// the fix result stays shown
+    #[tokio::test]
+    async fn test_fix_selected_verifies_by_rerunning_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = fixable_app(dir.path(), &[("php-lint", "true")], true);
+
+        handle_fix_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::FixResult(_))
+        })
+        .await;
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert!(app.selected_capabilities().can_cancel, "'s' cancels it");
+        assert!(app.busy() && !exit_due(&app, true, false), "exit waits");
+        assert!(app.fix.result.is_some(), "fix result still shown");
+
+        let event = loop {
+            match rx.recv().await.expect("task event") {
+                TaskEvent::RetryResult(r) => break TaskEvent::RetryResult(r),
+                TaskEvent::UnrecordedResult(_) => panic!("verify result must be recorded"),
+                event => {
+                    handle_message(&mut app, Message::Task(event), &mut tasks);
+                }
+            }
+        };
+        handle_message(&mut app, Message::Task(event), &mut tasks);
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+        assert!(app.results["php-lint"].output.contains("verified"));
+        assert!(app.fix.result.is_some(), "fix result still shown");
+        assert!(exit_due(&app, true, false));
+    }
+
+    /// 'x' without verification (`--no-verify`) or with a failed fix: no re-run
+    #[rstest::rstest]
+    #[case::no_verify("true", false)]
+    #[case::fix_failed("false", true)]
+    #[tokio::test]
+    async fn test_fix_selected_without_verification(#[case] fix: &str, #[case] verify: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = fixable_app(dir.path(), &[("php-lint", fix)], verify);
+
+        handle_fix_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::FixResult(_))
+        })
+        .await;
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Failed);
+        assert!(!app.busy());
+        while tasks.set.join_next().await.is_some() {}
+        assert!(rx.try_recv().is_err(), "nothing re-run");
+    }
+
+    /// 'X': once all fixes ran, each check whose fix passed re-runs; a
+    /// failed fix leaves its check failed
+    #[tokio::test]
+    async fn test_fix_all_verifies_passed_fixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixes = [("php-lint", "true"), ("phpstan", "false")];
+        let (mut app, mut tasks, mut rx) = fixable_app(dir.path(), &fixes, true);
+
+        handle_fix_all(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::FixAllDone)
+        })
+        .await;
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(app.results["phpstan"].status, CheckStatus::Failed);
+        assert_eq!(app.fix.all_results.len(), 2, "fix-all results still shown");
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+        assert_eq!(app.results["phpstan"].status, CheckStatus::Failed);
+    }
+
+    /// The verification claims the group setup like a single run: it waits
+    /// (not started) while the runner still owes the group's pre-commands
+    #[test]
+    fn test_fix_verification_waits_for_group_setup() {
+        let config = setup_config();
+        let mut lint = make_test_check("lint", "db");
+        lint.resolved_fix_command = Some("true".to_string());
+        let checks = vec![make_test_check("unit", "db"), lint];
+        let mut app = make_test_app_with_checks(&config, checks);
+        app.results.get_mut("lint").unwrap().status = CheckStatus::Failed;
+        app.fix.verify = true;
+        let (mut tasks, _rx) = make_test_tasks(&config);
+
+        let fixed = CheckResult {
+            status: CheckStatus::Passed,
+            ..CheckResult::pending("lint")
+        };
+        handle_message(
+            &mut app,
+            Message::Task(TaskEvent::FixResult(fixed)),
+            &mut tasks,
+        );
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Failed);
+        assert!(tasks.set.is_empty());
+        let message = app.view.status_message.as_ref().expect("status message");
+        assert!(message.text.contains("pending"), "{}", message.text);
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

@@ -130,6 +130,26 @@ fn fix_without_fix_commands_does_not_probe_docker() {
     assert_code(&out, exit::SUCCESS);
 }
 
+/// Local config whose check `c` fails even after its (passing) fix
+fn still_failing_after_fix() -> String {
+    format!("{}        fix_command: 'true'\n", local_config("'false'"))
+}
+
+#[test]
+fn fix_exits_1_when_verification_fails() {
+    let (_tmp, out) = run_with(&still_failing_after_fix(), &["--fix", "--files", "a.rs"]);
+    assert_code(&out, exit::CHECKS_FAILED);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("still failing"), "{stdout}");
+}
+
+#[test]
+fn fix_with_no_verify_exits_0() {
+    let args = ["--fix", "--no-verify", "--files", "a.rs"];
+    let (_tmp, out) = run_with(&still_failing_after_fix(), &args);
+    assert_code(&out, exit::SUCCESS);
+}
+
 #[test]
 fn init_over_existing_config_exits_2() {
     let (_tmp, out) = run_with(&local_config("'true'"), &["init"]);
