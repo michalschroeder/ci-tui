@@ -44,9 +44,22 @@ pub fn assert_code(out: &std::process::Output, code: i32) {
 /// (e.g. local mode's repo root when the tempdir sits in a work tree).
 #[allow(dead_code)]
 pub fn run_ci_tui(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    run_ci_tui_env(dir, args, &[])
+}
+
+/// [`run_ci_tui`] with `env` set; `GITHUB_ACTIONS` is cleared unless given,
+/// so output does not depend on running under GitHub Actions.
+#[allow(dead_code)]
+pub fn run_ci_tui_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
     isolated_git_command(env!("CARGO_BIN_EXE_ci-tui"))
         .current_dir(dir)
         .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .env_remove("GITHUB_ACTIONS")
+        .envs(env.iter().copied())
         .args(args)
         .output()
         .unwrap()

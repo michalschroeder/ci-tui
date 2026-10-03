@@ -598,8 +598,10 @@ fn merged_env(target: &ExecTarget, extra: &HashMap<String, String>) -> HashMap<S
     env
 }
 
-/// Status of a CI check during execution
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Status of a CI check during execution (serialized snake_case, e.g.
+/// `timed_out`, in `--format json` reports)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// Check has not started yet
     Pending,

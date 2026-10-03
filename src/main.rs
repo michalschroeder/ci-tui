@@ -3,7 +3,7 @@ use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Comm
 use ci_tui::exit;
 use ci_tui::runner::ExecTarget;
 use ci_tui::{
-    cache, checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui,
+    cache, checks, commands, config, filter, fix, git, list, preflight, report, schema, simple, ui,
 };
 use std::io::IsTerminal;
 
@@ -166,8 +166,10 @@ async fn run() -> Result<i32> {
         missing_config_error().exit();
     };
 
-    // Auto-detect TUI mode: use simple mode if stdout is not a terminal
-    let simple_mode = cli.simple || !std::io::stdout().is_terminal();
+    // Auto-detect TUI mode: use simple mode if stdout is not a terminal.
+    // A json / junit report implies it.
+    let simple_mode =
+        cli.simple || cli.format != report::Format::Text || !std::io::stdout().is_terminal();
 
     // Load configuration
     let mut config = config::load_config(&config_path)?;
@@ -267,12 +269,14 @@ async fn run() -> Result<i32> {
 
     if simple_mode {
         // Run in simple console mode
+        let report = report::ReportOptions::new(cli.format, cli.output);
         interruptible(simple::run(
             config,
             changed_files,
             checks_to_run,
             exec_root,
             cache,
+            report,
         ))
         .await
     } else {

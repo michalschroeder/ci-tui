@@ -23,6 +23,8 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests
 - `--fix` mode runs each check's `fix_command` (formatters, etc.), then re-runs each check whose fix passed to confirm it passes now (`--no-verify` skips this; also for `x` / `X` in the TUI)
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
+- `--format json|junit` (implies `--simple`) prints a JSON or JUnit XML report of the run on stdout instead of the text (warnings stay on stderr); `--output <file>` writes it to the file and keeps the text on stdout. JSON: `version: 1`, `base_ref`, `changed_files`, `duration_ms`, `summary` (`total` / `passed` / `failed` / `cached`) and `checks[]` (`id`, `name`, `group`, `status` e.g. `timed_out`, `duration_ms`, `cached`, ANSI-stripped `output` / `error_output`, `fix_command` or `null`). JUnit: one `<testsuite>` per group, one `<testcase>` per check (`<failure>` with the output for failed / timed out). Not with `--list` / `--fix` / `--watch` / `--exit-on-finish`
+- Under GitHub Actions (`GITHUB_ACTIONS=true`), text output folds each group into `::group::` / `::endgroup::` and annotates each failed check with `::error title=<id>::` plus its output (not when stdout holds a `--format` report)
 - `--files` to bypass git detection and check specific paths
 - `--base <ref>` to diff against any ref (stacked branch, tag) instead of `git.base_branch`
 - `--staged` checks only files staged in the git index (`git diff --cached`) — for pre-commit hooks; checks still read the working tree, so unstaged edits in staged files are included
@@ -164,6 +166,8 @@ ci-tui --list              # explain check selection, run nothing (alias --dry-r
 ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups)
 ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
 ci-tui -s --no-cache       # run every check, even ones cached as unchanged
+ci-tui --format json > report.json            # JSON report only on stdout
+ci-tui --format junit --output junit.xml      # JUnit file, text on stdout
 ci-tui --notify --exit-on-finish  # TUI: notify when done, quit with the exit code
 ci-tui --watch             # TUI: re-run affected checks on every file save
 ci-tui validate            # lint the config in CI (non-zero exit if invalid)

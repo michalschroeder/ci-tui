@@ -8,6 +8,9 @@
 //!
 //! Invoked via `--simple` CLI flag. Runs all checks sequentially or in parallel
 //! (per group config) and prints results with colored output.
+//! `--format json|junit` adds a report document ([`crate::report`]): on
+//! stdout instead of the text, or in `--output <file>`; under GitHub Actions
+//! the text output gets `::group::` / `::error` workflow commands.
 //!
 //! # Exit Codes
 //!
@@ -19,6 +22,7 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
+use crate::report::{self, Report, ReportOptions};
 use crate::runner::{CheckResult, CheckStatus, ExecTarget};
 use crate::utils::time;
 use anyhow::Result;
@@ -77,44 +81,52 @@ pub async fn run_with_executor(
 /// print as cached (counted as passed) and do not run; finished runs are
 /// recorded in it.
 ///
+/// `report` picks the outputs: a `--format json|junit` document (written
+/// before exiting, to stdout instead of the text or to `--output`), and
+/// GitHub Actions `::group::` / `::error` commands in the text output.
+///
 /// # Errors
 ///
-/// Returns an error if Docker operations fail.
+/// Returns an error if Docker operations fail or the report cannot be written.
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
     mut cache: ResultCache,
+    report: ReportOptions,
 ) -> Result<()> {
     let start_time = Instant::now();
     let target = &config.runner;
     let max_output_lines = config.max_output_lines;
+    let text = report.text_on_stdout();
 
-    cprintln!(
-        "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
-        changed_files.len(),
-        changed_files.base_ref
-    );
-    cprintln!();
-
-    if checks.is_empty() {
-        cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
-        return Ok(());
+    if text {
+        cprintln!(
+            "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
+            changed_files.len(),
+            changed_files.base_ref
+        );
+        cprintln!();
     }
 
     let executor: std::sync::Arc<dyn crate::runner::CommandExecutor> =
         std::sync::Arc::new(crate::runner::RealCommandExecutor);
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
-    let mut has_failures = false;
 
     for (group_name, group_checks) in grouped {
         let group = config.get_group(group_name);
         let display_name = group
             .map(|g| g.display_name(group_name))
-            .unwrap_or(group_name);
-        cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
+            .unwrap_or(group_name)
+            .to_uppercase();
+        if report.annotate() {
+            println!("{}", report::github_group(&display_name));
+        }
+        if text {
+            cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name);
+        }
 
         let parallel = group.is_some_and(|g| g.parallel);
 
@@ -143,57 +155,92 @@ pub async fn run(
             .await
         });
 
+        if text {
+            results.iter().for_each(print_result);
+        }
         for result in results {
-            print_result(&result);
             cache
                 .record_for(&checks, &result)
                 .unwrap_or_else(|e| eprintln!("Warning: result cache not saved: {e}"));
-            has_failures |= result.status.is_failure();
             all_results.push(result);
         }
-        cprintln!();
+        if text {
+            cprintln!();
+        }
+        if report.annotate() {
+            println!("{}", report::GITHUB_ENDGROUP);
+        }
     }
 
     let elapsed = start_time.elapsed();
+    if text {
+        print_summary(&checks, &all_results, elapsed, report.annotate());
+    }
+    report.write(&Report {
+        base_ref: &changed_files.base_ref,
+        changed_files: changed_files.len(),
+        duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        checks: &checks,
+        results: &all_results,
+    })?;
+
+    if all_results.iter().any(|r| r.status.is_failure()) {
+        std::process::exit(crate::exit::CHECKS_FAILED);
+    }
+    Ok(())
+}
+
+/// Text summary after all groups: pass count, or failure count plus each
+/// failed check's output and fix command (and its `::error` annotation with
+/// `annotate`). Without checks, says there was nothing to run.
+fn print_summary(
+    checks: &[CheckToRun],
+    results: &[CheckResult],
+    elapsed: std::time::Duration,
+    annotate: bool,
+) {
+    if checks.is_empty() {
+        cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
+        return;
+    }
     let elapsed_str = time::format_from_duration(elapsed);
-    let passed = all_results
+    let passed = results
         .iter()
         .filter(|r| r.status == CheckStatus::Passed)
         .count();
-    let failed = all_results.iter().filter(|r| r.status.is_failure()).count();
+    let failed = results.iter().filter(|r| r.status.is_failure()).count();
 
     cprintln!("\x1b[1m── Summary ──\x1b[0m");
-    if has_failures {
-        cprintln!(
-            "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
-            passed,
-            all_results.len(),
-            failed,
-            elapsed_str
-        );
-
-        cprintln!();
-        cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
-        for result in all_results.iter().filter(|r| r.status.is_failure()) {
-            let fix_cmd = checks
-                .iter()
-                .find(|c| c.id() == result.check_id)
-                .and_then(|c| c.resolved_fix_command.as_deref());
-            cprintln!();
-            let failed = format_failed_check(result, fix_cmd);
-            cprint!("{}", failed);
-        }
-
-        std::process::exit(crate::exit::CHECKS_FAILED);
-    } else {
+    if failed == 0 {
         cprintln!(
             "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
-            all_results.len(),
+            results.len(),
             elapsed_str
         );
+        return;
     }
+    cprintln!(
+        "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
+        passed,
+        results.len(),
+        failed,
+        elapsed_str
+    );
 
-    Ok(())
+    cprintln!();
+    cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
+    for result in results.iter().filter(|r| r.status.is_failure()) {
+        let fix_cmd = checks
+            .iter()
+            .find(|c| c.id() == result.check_id)
+            .and_then(|c| c.resolved_fix_command.as_deref());
+        cprintln!();
+        let failed = format_failed_check(result, fix_cmd);
+        cprint!("{}", failed);
+        if annotate {
+            println!("{}", report::github_error(result));
+        }
+    }
 }
 
 /// Print a check result to stdout with colored status indicator (plain

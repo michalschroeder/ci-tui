@@ -148,7 +148,8 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - **fix.rs**: Auto-fix mode (`--fix` flag) — runs fix commands for matched checks; after all fixes, passing fixes' checks that `select_checks` selected as non-on-demand re-run via `CheckRunner::run_checks` (`--no-verify` skips). TUI `x`/`X` verify one at a time, no git refresh (`verify_fixes` in ui/mod.rs)
 - **list.rs**: `--list` / `--dry-run` — per-check run/on-demand/skipped decision plus reason, from the same `Selection` evaluation `determine_checks` uses; executes nothing
 - **preflight.rs**: Docker startup checks. Fatal: `docker_reachable()` — `docker version` probe (10s timeout) when non-on-demand checks / fix commands would run in docker mode, Err → exit 3. Non-fatal: `docker_warnings()` when changed files won't resolve in the containers selected checks use (exec: repo-relative path vs container WORKDIR; `docker run` fallback without `volume_mount` or mounted away from `docker.work_dir`)
-- **simple.rs**: Non-TUI console output mode for CI pipelines
+- **simple.rs**: Non-TUI console output mode for CI pipelines; takes `report::ReportOptions`
+- **report.rs**: `--format text|json|junit` (json / junit imply simple; conflict with `--list` / `--fix` / `--watch` / `--exit-on-finish`, checked in `cli::report_flag_error`) and `--output <file>` (needs json / junit; then stdout keeps text). `Report::json` (`version: 1`, `CheckStatus` serialized snake_case) / `Report::junit` (hand-rolled XML, `xml()` escapes + drops invalid control chars), written by `ReportOptions::write` before simple mode exits 1. `GITHUB_ACTIONS=true` (`github_actions`) + text on stdout → `::group::` per group, `::error title=<id>::` per failed check in the summary
 - **utils/**: Shared helpers — `docker.rs` (Docker command building), `time.rs` (duration formatting)
 
 ## Config File Structure
@@ -165,4 +166,5 @@ The tool expects a YAML config with:
 - `max_parallel`: Cap on concurrent checks in `parallel: true` groups (top-level and per group, >= 1; group can only lower it; default CPU count)
 - `--jobs N` / `-j N`: CLI override of top-level `max_parallel`
 - `notify`: TUI bell + OSC 9 desktop notification when a full run finishes (default false; `--notify` also enables). `--exit-on-finish`: TUI quits after the run, exit 0 / 1
+- `--format json|junit` / `--output <file>` (CLI only): simple-mode reports (see report.rs)
 - `--watch` (CLI only, no config key): TUI re-runs checks affected by file saves until quit (see watch.rs)

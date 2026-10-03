@@ -17,6 +17,7 @@
 //! - `git`: Git operations for detecting changed files
 //! - `list`: `--list` / `--dry-run` report of which checks would run and why
 //! - `preflight`: Docker startup probe warning when changed files won't resolve in the container
+//! - `report`: `--format json|junit` reports and GitHub Actions annotations (simple mode)
 //! - `runner`: Check execution in Docker containers
 //! - `schema`: JSON Schema for the config file (`ci-tui schema`)
 //! - `simple`: Simple console output mode (no TUI)
@@ -36,6 +37,7 @@ pub mod fix;
 pub mod git;
 pub mod list;
 pub mod preflight;
+pub mod report;
 pub mod runner;
 pub mod schema;
 pub mod simple;
