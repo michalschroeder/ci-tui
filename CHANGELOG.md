@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/michalschroeder/ci-tui/compare/v0.5.0...v0.6.0) (2026-10-03)
+
+
+### Features
+
+* add --format json|junit reports and GitHub Actions annotations ([#218](https://github.com/michalschroeder/ci-tui/issues/218)) ([6b7210b](https://github.com/michalschroeder/ci-tui/commit/6b7210b26297190780fd28ff96742014e5e31fdc))
+* add --watch mode re-running checks affected by file saves ([#216](https://github.com/michalschroeder/ci-tui/issues/216)) ([c745dd3](https://github.com/michalschroeder/ci-tui/commit/c745dd3b5df12adf33280075dc9a3af2cf8c63c2))
+* add triggers.files_filter to drop non-test files from {files} ([#212](https://github.com/michalschroeder/ci-tui/issues/212)) ([7fde586](https://github.com/michalschroeder/ci-tui/commit/7fde58646ddad255500705772c8ba3ce51d89a4a))
+* skip checks unchanged since last green run ([#209](https://github.com/michalschroeder/ci-tui/issues/209)) ([dce5b77](https://github.com/michalschroeder/ci-tui/commit/dce5b77899cac01f3a05d6f521c68f0cc6b422a0))
+* **ui:** end-of-run notification and --exit-on-finish ([#213](https://github.com/michalschroeder/ci-tui/issues/213)) ([edc2627](https://github.com/michalschroeder/ci-tui/commit/edc26272b60f8c44390156ea5c1f4a15c48273ae))
+* **ui:** live elapsed time for running checks ([#214](https://github.com/michalschroeder/ci-tui/issues/214)) ([36eae3a](https://github.com/michalschroeder/ci-tui/commit/36eae3a08a168596f79e964a30e18c41b73966ef))
+* verify fixes by re-running the check ([#215](https://github.com/michalschroeder/ci-tui/issues/215)) ([8af2142](https://github.com/michalschroeder/ci-tui/commit/8af214296bbe29d7615edd4b9187759ce82b8217))
+
 ## [0.5.0](https://github.com/michalschroeder/ci-tui/compare/v0.4.0...v0.5.0) (2026-09-28)
 
 
