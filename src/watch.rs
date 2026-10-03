@@ -6,7 +6,7 @@
 //! saves into one batch ([`next_batch`]), keeps the repo-relative paths
 //! worth checking ([`keep_paths`]: also not editor temp files, not matched
 //! by `ignore_patterns`, not gitignored) and sends the checks they select
-//! to run automatically ([`affected_checks`]) with the saves' times
+//! to run automatically ([`affected_checks`]) with the saved paths
 //! ([`WatchBatch`]) to the TUI, which re-runs them like `r`.
 
 use crate::checks::{select_checks, CheckToRun, Decision};
@@ -45,11 +45,10 @@ pub struct Watch {
 #[derive(Debug)]
 pub struct WatchBatch {
     pub checks: Vec<CheckToRun>,
-    /// When the batch's first kept save happened
-    pub first: Instant,
-    /// When its last kept save happened (with `first`, tells a check's own
-    /// writes apart: [`crate::ui::app::App::queue_watch`])
-    pub last: Instant,
+    /// The batch's kept saved files, repo-relative (sorted, deduped): their
+    /// content tells a check's own writes apart
+    /// ([`crate::ui::app::App::queue_watch`])
+    pub saved: Vec<String>,
 }
 
 /// Watched tree: the repo root, else the cwd
@@ -80,11 +79,7 @@ pub fn start(
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         // Watch errors (e.g. a vanished dir) only lose those events
         if let Some(event) = event.ok().filter(|e| is_save(&e.kind)) {
-            let at = Instant::now();
-            event
-                .paths
-                .into_iter()
-                .for_each(|p| drop(event_tx.send((p, at))));
+            event.paths.into_iter().for_each(|p| drop(event_tx.send(p)));
         }
     })
     .context("--watch: failed to create file watcher")?;
@@ -106,7 +101,7 @@ pub fn start(
 /// Batch thread: until the watcher or the TUI is gone, watch new dirs and
 /// send each batch's affected checks
 fn watch_loop(
-    events: &Receiver<(PathBuf, Instant)>,
+    events: &Receiver<PathBuf>,
     root: &Root,
     watcher: &Weak<Mutex<RecommendedWatcher>>,
     config: &CiConfig,
@@ -120,21 +115,9 @@ fn watch_loop(
         let found = watch_new_dirs(&watcher, root, &batch);
         drop(watcher);
         batch.extend(found);
-        let paths = batch.iter().map(|(path, _)| path.clone()).collect();
-        let files = keep_paths(root, paths, config);
-        let Some((first, last)) = save_times(&root.path, &batch, &files) else {
-            continue;
-        };
-        let checks = affected_checks(config, files, exec_root);
-        if !checks.is_empty()
-            && tx
-                .send(WatchBatch {
-                    checks,
-                    first,
-                    last,
-                })
-                .is_err()
-        {
+        let saved = keep_paths(root, batch, config);
+        let checks = affected_checks(config, saved.clone(), exec_root);
+        if !checks.is_empty() && tx.send(WatchBatch { checks, saved }).is_err() {
             return;
         }
     }
@@ -208,11 +191,11 @@ fn add_watches(watcher: &mut RecommendedWatcher, dirs: &[PathBuf]) -> notify::Re
 fn watch_new_dirs(
     watcher: &Mutex<RecommendedWatcher>,
     root: &Root,
-    batch: &[(PathBuf, Instant)],
-) -> Vec<(PathBuf, Instant)> {
+    batch: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
-    for (dir, at) in batch {
+    for dir in batch {
         let new = dir.is_dir() && seen.insert(dir) && watchable(&root.path, dir);
         if !new || dir_gitignored(root, dir) {
             continue;
@@ -221,7 +204,7 @@ fn watch_new_dirs(
         let mut watcher = watcher.lock().unwrap_or_else(PoisonError::into_inner);
         // A failed watch (watch limit) only loses saves there
         let _ = add_watches(&mut watcher, &dirs);
-        found.extend(files.into_iter().map(|file| (file, *at)));
+        found.extend(files);
     }
     found
 }
@@ -322,26 +305,6 @@ fn gitignored(root: &Root, files: &[String]) -> Option<HashSet<String>> {
     }
     let ignored = output.stdout.split('\0').filter(|path| !path.is_empty());
     Some(ignored.map(str::to_string).collect())
-}
-
-/// First and last time a kept file (`files`) was saved in `batch`; `None`
-/// without kept files
-fn save_times(
-    root: &Path,
-    batch: &[(PathBuf, Instant)],
-    files: &[String],
-) -> Option<(Instant, Instant)> {
-    let kept: HashSet<&str> = files.iter().map(String::as_str).collect();
-    let is_kept = |path: &Path| {
-        let rel = path.strip_prefix(root).map(|r| r.to_string_lossy());
-        rel.is_ok_and(|rel| kept.contains(rel.as_ref()))
-    };
-    let mut times = batch
-        .iter()
-        .filter(|(path, _)| is_kept(path))
-        .map(|(_, at)| *at);
-    let first = times.next()?;
-    Some(times.fold((first, first), |(lo, hi), at| (lo.min(at), hi.max(at))))
 }
 
 /// Checks the saved `files` select to run automatically (not on-demand or
@@ -676,22 +639,6 @@ checks:
         assert_eq!(walked(&root(dir.path(), false)), expected);
     }
 
-    #[test]
-    fn test_save_times_span_kept_files_only() {
-        let root = Path::new("/r");
-        let t0 = Instant::now();
-        let (t1, t2) = (t0 + Duration::from_secs(1), t0 + Duration::from_secs(2));
-        let batch = [
-            (root.join("target/x"), t0),
-            (root.join("b.php"), t2),
-            (root.join("a.php"), t1),
-        ];
-        let files = ["a.php", "b.php"].map(String::from);
-
-        assert_eq!(save_times(root, &batch, &files), Some((t1, t2)));
-        assert_eq!(save_times(root, &batch, &[]), None);
-    }
-
     fn ids(checks: &[CheckToRun]) -> Vec<&str> {
         checks.iter().map(CheckToRun::id).collect()
     }
@@ -750,14 +697,12 @@ checks:
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let root = dir.path().to_path_buf();
         let _watch = start(&root, Arc::new(config()), root.clone(), tx).unwrap();
-        let before = Instant::now();
 
         std::fs::write(dir.path().join("A.php"), "<?php").unwrap();
 
         let batch = recv_batch(&mut rx);
         assert_eq!(batch_files(&batch), ["A.php"]);
-        assert!(before <= batch.first && batch.first <= batch.last);
-        assert!(batch.last <= Instant::now());
+        assert_eq!(batch.saved, ["A.php"]);
     }
 
     /// A dir created after start is watched, its subdirs too; files written
