@@ -20,18 +20,31 @@ make fmt
 
 This runs `cargo fmt` to fix formatting issues automatically.
 
-### Step 2: Validate
+### Step 2: Fast loop while iterating (dogfood)
+
+```bash
+HOST_PWD=$PWD ci-tui --simple --no-color
+```
+
+Runs this repo's own `ci-tui.yaml` (fmt, clippy, unit, integration, doc tests in the dev image) only for files changed vs `master` (incl. untracked), skipping checks unchanged since their last pass (`✓ cached`). Exit 0 pass, 1 checks failed, 2 config, 3 docker/git.
+- Narrow: `--group quality|tests`, `--only fmt,clippy,unit,integration,doctests`
+- `--list` shows what would run and why; `--no-cache` forces every selected check
+- `--fix` runs `cargo fmt` on changed files and re-runs fmt to verify
+- `--format json` for a machine-readable report (failed check output in `checks[].output`)
+- Needs `ci-tui` >= 0.6.0 on PATH (installed binary, not the code under change): `cargo install --path . --locked --target-dir /tmp/ci-tui-install` (repo `target/release` is root-owned). Not installed → skip to step 3
+
+### Step 3: Final gate
 
 ```bash
 make ci
 ```
 
-This runs all CI checks in Docker (using the dev image):
+This runs all CI checks in Docker (using the dev image), regardless of what changed:
 - `cargo fmt --check` - Code formatting check
 - `cargo clippy -- -D warnings` - Linter checks
 - `cargo nextest run` - Test suite
 
-**Workflow:** Run `make fmt` first, then `make ci` to validate. Both must pass before any commit or push.
+**Workflow:** `make fmt`, iterate with `ci-tui --simple`, then `make ci`. `make fmt` and `make ci` must pass before any commit or push (ci-tui runs nothing for docs-only changes, so it never replaces `make ci`).
 
 These are the ONLY commands Claude should use to validate code changes. Do not use `cargo test`, `cargo clippy`, or other commands directly.
 
