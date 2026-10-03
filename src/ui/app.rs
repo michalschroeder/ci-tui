@@ -445,7 +445,8 @@ pub struct App {
     pub(crate) current_branch: String,
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
-    /// Render colors; off with `--no-color` / `NO_COLOR` (text modifiers stay)
+    /// Render colors; off with `--color never` / `--no-color` / `NO_COLOR`
+    /// (text modifiers stay)
     pub color: bool,
     /// `--watch` is on: saves re-run affected checks (shown in the header)
     pub watching: bool,

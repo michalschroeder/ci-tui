@@ -9,7 +9,7 @@
 //! - `checks`: Logic for determining which checks to run
 //! - `cli`: Command-line argument parsing
 //! - `commands`: `init` / `validate` subcommands (scaffold and check config)
-//! - `color`: `--no-color` / `NO_COLOR` decision and ANSI stripping for console output
+//! - `color`: `--color` / `--no-color` / `NO_COLOR` decision and ANSI stripping for console output
 //! - `config`: Configuration loading and parsing from YAML
 //! - `exit`: Process exit codes (0 pass, 1 checks failed, 2 config, 3 git/env)
 //! - `filter`: `--only` / `--group` check subset selection

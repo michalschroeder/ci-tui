@@ -33,7 +33,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
 - Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
 - `runner: local` runs checks directly on the host when you don't use Docker
-- `--no-color` (or a non-empty `NO_COLOR` env var, per [no-color.org](https://no-color.org)) disables color in the TUI, `--simple` and `--fix` output
+- `--color auto|always|never` (TUI, `--simple`, `--fix`): `auto` (default) colors only when stdout is a terminal and `NO_COLOR` is unset or empty ([no-color.org](https://no-color.org)), so piped / redirected output carries no ANSI escapes; `always` colors even then (also with `NO_COLOR` set); `--no-color` is the same as `--color never`
 - `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
 - `--watch` (TUI only) keeps the TUI running and re-runs the checks a file save affects, like `r` (git refresh first; a running one restarts, one the current run still runs is left to it). Re-runs wait while a fix or its verification runs and keep a group's concurrency (`parallel: false` one at a time, else `max_parallel`); a check is not re-run for files it wrote itself (saves during its run, up to 1 s after). Watches the repo's dirs except gitignored ones, `.git/`, `.ci-tui/` and nested repos / submodules (new dirs are picked up); saves are debounced (300 ms quiet, 2 s cap), and files matching `ignore_patterns`, gitignored files and editor temp files (vim swap / `4913`, `*~`, emacs `.#*` / `#*#`) are skipped. A save selects checks like a run on just the saved files, so always-run checks (no `triggers`) re-run on every save
 - `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
@@ -164,7 +164,8 @@ ci-tui --base v1.2.0       # diff against a ref instead of git.base_branch
 ci-tui --staged -s         # staged files only (pre-commit hook)
 ci-tui --list              # explain check selection, run nothing (alias --dry-run)
 ci-tui --only fmt,clippy   # only these check ids (--group <id> for whole groups)
-ci-tui -s --no-color       # no ANSI escapes (same as NO_COLOR=1)
+ci-tui -s --color never    # no ANSI escapes (same as --no-color; piped output has none by default)
+ci-tui -s --color always | less -R  # keep colors when piping
 ci-tui -s --no-cache       # run every check, even ones cached as unchanged
 ci-tui --format json > report.json            # JSON report only on stdout
 ci-tui --format junit --output junit.xml      # JUnit file, text on stdout

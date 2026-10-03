@@ -1,5 +1,6 @@
 //! Command-line interface: argument parsing and config-path resolution.
 
+use crate::color::ColorChoice;
 use crate::report::Format;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -67,8 +68,18 @@ pub struct Cli {
     #[arg(short, long, value_name = "N")]
     pub jobs: Option<NonZeroUsize>,
 
-    /// Disable colored output (TUI and console); also set by a non-empty `NO_COLOR` env var
-    #[arg(long, global = true)]
+    /// When to color output (TUI and console)
+    #[arg(
+        long,
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = ColorChoice::Auto,
+        global = true
+    )]
+    pub color: ColorChoice,
+
+    /// Same as --color never
+    #[arg(long, global = true, conflicts_with = "color")]
     pub no_color: bool,
 
     /// TUI only: start with the CPU/MEM stats panel hidden (`m` toggles it);
@@ -184,6 +195,12 @@ impl Cli {
                 format!("--{name} cannot be used with a subcommand"),
             ));
         }
+        if color_with_no_color(&matches) {
+            return Err(command.error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--no-color cannot be used with --color",
+            ));
+        }
         let mut cli = Self::from_arg_matches(&matches).map_err(|e| e.format(&mut command))?;
         if let Some(message) = report_flag_error(&cli) {
             return Err(command.error(clap::error::ErrorKind::ArgumentConflict, message));
@@ -206,12 +223,31 @@ fn run_flag_with_subcommand(command: &clap::Command, matches: &clap::ArgMatches)
     Some(arg.get_long().unwrap_or(arg.get_id().as_str()).to_string())
 }
 
+/// `--color` and `--no-color` both given, one before and one after the
+/// subcommand: clap checks `conflicts_with` per command level, so global
+/// args split across levels slip through.
+fn color_with_no_color(matches: &clap::ArgMatches) -> bool {
+    let levels = || std::iter::once(matches).chain(matches.subcommand().map(|(_, m)| m));
+    let given = |id: &str| levels().any(|m| m.value_source(id) == Some(ValueSource::CommandLine));
+    given("color") && given("no_color")
+}
+
 impl Cli {
-    /// Color on unless `--no-color` or a non-empty `NO_COLOR` env var
-    /// (see [`crate::color::should_color`])
+    /// `--color` value; `--no-color` means `never`
+    pub fn color_choice(&self) -> ColorChoice {
+        match self.no_color {
+            true => ColorChoice::Never,
+            false => self.color,
+        }
+    }
+
+    /// Color decision for this process: [`Self::color_choice`], whether
+    /// stdout is a terminal and `NO_COLOR` (see [`crate::color::should_color`])
     pub fn color_enabled(&self) -> bool {
+        use std::io::IsTerminal;
         crate::color::should_color(
-            self.no_color,
+            self.color_choice(),
+            std::io::stdout().is_terminal(),
             std::env::var_os(crate::color::NO_COLOR_ENV).as_deref(),
         )
     }
@@ -438,6 +474,45 @@ mod tests {
     #[case::after_subcommand(&["ci-tui", "validate", "--no-color"], true)]
     fn test_no_color_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
         assert_eq!(Cli::try_parse_checked(args).unwrap().no_color, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::unset(&["ci-tui"], ColorChoice::Auto)]
+    #[case::never(&["ci-tui", "--color", "never", "-s"], ColorChoice::Never)]
+    #[case::always_eq(&["ci-tui", "--color=always"], ColorChoice::Always)]
+    #[case::auto(&["ci-tui", "--color", "auto"], ColorChoice::Auto)]
+    #[case::no_color(&["ci-tui", "--no-color"], ColorChoice::Never)]
+    #[case::before_subcommand(&["ci-tui", "--color", "always", "validate"], ColorChoice::Always)]
+    #[case::after_subcommand(&["ci-tui", "validate", "--color", "never"], ColorChoice::Never)]
+    #[case::no_color_after_subcommand(&["ci-tui", "schema", "--no-color"], ColorChoice::Never)]
+    fn test_color_flag_parsed(#[case] args: &[&str], #[case] expected: ColorChoice) {
+        assert_eq!(
+            Cli::try_parse_checked(args).unwrap().color_choice(),
+            expected
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::no_color_then_color(&["ci-tui", "--no-color", "--color", "always"])]
+    #[case::color_then_no_color(&["ci-tui", "--color=never", "--no-color"])]
+    #[case::after_subcommand(&["ci-tui", "validate", "--no-color", "--color", "auto"])]
+    #[case::split_around_subcommand(&["ci-tui", "--color", "always", "init", "--no-color"])]
+    fn test_color_conflicts_with_no_color(#[case] args: &[&str]) {
+        let err = Cli::try_parse_checked(args)
+            .err()
+            .expect("expected conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[rstest::rstest]
+    #[case::unknown("--color=yes")]
+    #[case::empty("--color=")]
+    fn test_color_rejects_invalid(#[case] arg: &str) {
+        let err = Cli::try_parse_checked(["ci-tui", arg])
+            .err()
+            .expect("expected error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+        assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
     }
 
     #[rstest::rstest]
