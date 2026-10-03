@@ -1,4 +1,11 @@
+# yaml-language-server: $schema=./schema/ci-tui.schema.json
 version: 2
+
+# Kill a hung check instead of blocking the run (agents wait on --simple)
+timeout: 15m
+
+# TUI: bell + desktop notification when a full run finishes
+notify: true
 
 docker:
   project_dir: .
@@ -7,6 +14,10 @@ docker:
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
   shell: bash
+  env:
+    # Keep the crate registry across `docker run --rm` containers (no
+    # re-download per check). Must match the Makefile, else deps rebuild.
+    CARGO_HOME: /build/target/cargo-home
 
 git:
   base_branch: master
@@ -16,8 +27,11 @@ file_patterns:
   rust:
     pattern: '\.rs$'
     color: yellow
-  toml:
-    pattern: '\.toml$'
+  # Everything the crate build reads: Rust sources, manifests, lint config,
+  # committed schema (drift test) and test fixtures. Also feeds the result
+  # cache key, so a Cargo.lock / clippy.toml edit re-runs clippy and tests.
+  crate:
+    pattern: '\.rs$|^(Cargo\.(toml|lock)|clippy\.toml)$|^(schema|tests)/'
     color: blue
   yaml:
     pattern: '\.ya?ml$'
@@ -25,8 +39,8 @@ file_patterns:
 
 ignore_patterns:
   - '\.md$'
-  - '\.github/'
-  - 'target/'
+  - '^\.github/'
+  - '^target/'
 
 checks:
   quality:
@@ -44,7 +58,7 @@ checks:
         name: Clippy Lints
         command: cargo clippy -- -D warnings
         triggers:
-          file_pattern: rust
+          file_pattern: crate
 
   tests:
     name: Tests
@@ -54,10 +68,16 @@ checks:
         name: Unit Tests
         command: script -q -c "cargo nextest run --lib --status-level all --color always" /dev/null
         triggers:
-          file_pattern: rust
+          file_pattern: crate
 
       integration:
         name: Integration Tests
         command: script -q -c "cargo nextest run --features test --test '*' --status-level all --color always" /dev/null
         triggers:
-          file_pattern: rust
+          file_pattern: crate
+
+      doctests:
+        name: Doc Tests
+        command: cargo test --doc --color always
+        triggers:
+          file_pattern: crate

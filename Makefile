@@ -13,27 +13,27 @@ help: ## Show this help
 # === Development (runs in Docker using dev image) ===
 
 test: ## Run tests with nextest
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo nextest run --lib --status-level all
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo nextest run --features test --test '*' --status-level all
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo nextest run --lib --status-level all
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo nextest run --features test --test '*' --status-level all
 
 fmt: ## Format code
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo fmt
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo fmt
 
 fmt-check: ## Check formatting without fixing
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo fmt -- --check
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo fmt -- --check
 
 clippy: ## Run clippy lints
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo clippy -- -D warnings
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo clippy -- -D warnings
 
 schema: ## Regenerate schema/ci-tui.schema.json from the config structs
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo run -q -- schema > schema/ci-tui.schema.json.tmp
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo run -q -- schema > schema/ci-tui.schema.json.tmp
 	mv schema/ci-tui.schema.json.tmp schema/ci-tui.schema.json
 
 coverage: ## Generate LCOV coverage report
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
 
 update-lock: ## Update Cargo.lock with latest compatible versions
-	docker run --rm -v $(PWD):/build -w /build $(DEV_IMAGE) cargo update
+	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo update
 
 # === CI (mirrors GitHub Actions) ===
 

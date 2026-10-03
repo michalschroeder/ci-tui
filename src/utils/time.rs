@@ -96,6 +96,7 @@ mod tests {
     #[case(59999, "59.9s")]
     #[case(60000, "1m 0s")]
     #[case(90000, "1m 30s")]
+    #[case(125000, "2m 5s")]
     #[case(3600000, "60m 0s")]
     fn test_format_duration(#[case] ms: u64, #[case] expected: &str) {
         assert_eq!(format(ms), expected);
