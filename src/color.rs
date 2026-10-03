@@ -1,5 +1,6 @@
-//! Color on/off: `--no-color` / `NO_COLOR` (<https://no-color.org>) decision
-//! and ANSI stripping for console output (`--simple`, `--fix`).
+//! Color on/off: `--color auto|always|never` / `--no-color` / `NO_COLOR`
+//! (<https://no-color.org>) decision and ANSI stripping for console output
+//! (`--simple`, `--fix`).
 //!
 //! Console modes keep their inline `\x1b[..m` escapes and print through
 //! [`cprintln!`], which strips them when color is off. A process-wide switch
@@ -16,10 +17,28 @@ pub const NO_COLOR_ENV: &str = "NO_COLOR";
 /// Console color switch; on by default (tests, library callers)
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// Whether to use color: off with `--no-color`, or when `NO_COLOR` is set
-/// and non-empty (an empty value does not disable color, per no-color.org).
-pub fn should_color(no_color_flag: bool, no_color_env: Option<&OsStr>) -> bool {
-    !no_color_flag && no_color_env.is_none_or(OsStr::is_empty)
+/// `--color` value
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ColorChoice {
+    /// On when stdout is a terminal and `NO_COLOR` is unset or empty
+    #[default]
+    Auto,
+    /// On, even when piped or with `NO_COLOR` set
+    Always,
+    /// Off
+    Never,
+}
+
+/// Whether to use color. `auto`: off when stdout is not a terminal
+/// (`stdout_tty`) or `NO_COLOR` is set and non-empty (an empty value does
+/// not disable color, per no-color.org). `always` beats `NO_COLOR`: an
+/// explicit flag wins over the env var.
+pub fn should_color(choice: ColorChoice, stdout_tty: bool, no_color_env: Option<&OsStr>) -> bool {
+    match choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => stdout_tty && no_color_env.is_none_or(OsStr::is_empty),
+    }
 }
 
 /// Set the console color switch read by [`cprintln!`]
@@ -103,15 +122,30 @@ pub(crate) use cprint;
 mod tests {
     use super::*;
 
+    use ColorChoice::{Always, Auto, Never};
+
     #[rstest::rstest]
-    #[case::default(false, None, true)]
-    #[case::flag(true, None, false)]
-    #[case::env_set(false, Some("1"), false)]
-    #[case::env_any_value(false, Some("false"), false)]
-    #[case::env_empty(false, Some(""), true)]
-    #[case::flag_and_empty_env(true, Some(""), false)]
-    fn test_should_color(#[case] flag: bool, #[case] env: Option<&str>, #[case] expected: bool) {
-        assert_eq!(should_color(flag, env.map(OsStr::new)), expected);
+    #[case::auto_tty(Auto, true, None, true)]
+    #[case::auto_piped(Auto, false, None, false)]
+    #[case::auto_tty_env_set(Auto, true, Some("1"), false)]
+    #[case::auto_tty_env_any_value(Auto, true, Some("false"), false)]
+    #[case::auto_tty_env_empty(Auto, true, Some(""), true)]
+    #[case::auto_piped_env_empty(Auto, false, Some(""), false)]
+    #[case::auto_piped_env_set(Auto, false, Some("1"), false)]
+    #[case::always_tty(Always, true, None, true)]
+    #[case::always_piped(Always, false, None, true)]
+    #[case::always_beats_env(Always, false, Some("1"), true)]
+    #[case::always_tty_env_set(Always, true, Some("1"), true)]
+    #[case::never_tty(Never, true, None, false)]
+    #[case::never_piped(Never, false, None, false)]
+    #[case::never_env_empty(Never, true, Some(""), false)]
+    fn test_should_color(
+        #[case] choice: ColorChoice,
+        #[case] tty: bool,
+        #[case] env: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(should_color(choice, tty, env.map(OsStr::new)), expected);
     }
 
     #[test]

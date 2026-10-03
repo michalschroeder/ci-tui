@@ -1505,7 +1505,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
 }
 
 /// TUI options from the CLI. Color follows the process-wide
-/// switch ([`crate::color::enabled`]) set from `--no-color` / `NO_COLOR`.
+/// switch ([`crate::color::enabled`]) set from `--color` / `--no-color` / `NO_COLOR`.
 pub struct TuiOptions {
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
