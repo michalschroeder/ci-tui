@@ -184,7 +184,12 @@ pub async fn run(
     if text {
         print_summary(&run, &summary, elapsed, annotate);
     }
-    report.write(&run)?;
+    // Failed checks decide the exit code over a failed report write
+    match report.write(&run) {
+        Err(e) if summary.failed == 0 => return Err(e),
+        Err(e) => eprintln!("Error: {e:#}"),
+        Ok(()) => {}
+    }
 
     Ok(match summary.failed {
         0 => crate::exit::SUCCESS,
@@ -350,6 +355,7 @@ async fn run_parallel(
             continue;
         }
         let check = check.clone();
+        let id = check.id().to_string();
         let project_root = project_root.to_path_buf();
         let target = target.clone();
         let executor = executor.clone();
@@ -367,16 +373,24 @@ async fn run_parallel(
             )
             .await
         });
-        handles.push(handle);
+        handles.push((id, handle));
     }
 
     let mut results = Vec::new();
-    for handle in handles {
-        if let Ok(result) = handle.await {
-            results.push(result);
-        }
+    for (id, handle) in handles {
+        results.push(handle.await.unwrap_or_else(|e| task_failed(&id, &e)));
     }
     results
+}
+
+/// Failed result for a check whose task panicked, so it is not dropped from
+/// the summary, the report and the exit code
+fn task_failed(id: &str, err: &tokio::task::JoinError) -> CheckResult {
+    CheckResult {
+        status: CheckStatus::Failed,
+        error_output: format!("ci-tui: check task failed: {err}"),
+        ..CheckResult::pending(id)
+    }
 }
 
 /// Execute a single check via the injected executor (test-facing).
@@ -456,6 +470,31 @@ mod tests {
     fn test_cached_result_line() {
         let line = format_result(&CheckResult::cached("c"));
         assert_eq!(crate::color::paint(&line, false), "  ✓ c cached");
+    }
+
+    #[tokio::test]
+    async fn panicked_parallel_check_counts_as_failed() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_execute()
+            .returning(|_, _, _| panic!("executor blew up"));
+        let target = ExecTarget::Local(LocalConfig::default());
+        let results = run_parallel(
+            vec![&check("ls")],
+            Path::new("."),
+            &target,
+            std::sync::Arc::new(mock),
+            DEFAULT_MAX_OUTPUT_LINES,
+            1,
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].check_id, "c");
+        assert_eq!(results[0].status, CheckStatus::Failed);
+        assert!(
+            results[0].error_output.contains("check task failed"),
+            "{}",
+            results[0].error_output
+        );
     }
 
     #[tokio::test]

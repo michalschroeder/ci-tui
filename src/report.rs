@@ -44,19 +44,33 @@ pub struct ReportOptions {
 
 impl ReportOptions {
     /// Options for `--format` / `--output`, annotating when the
-    /// `GITHUB_ACTIONS` env var is `true`
-    pub fn new(format: Format, output: Option<PathBuf>) -> Self {
+    /// `GITHUB_ACTIONS` env var is `true`. Removes an existing `--output`
+    /// file, so a run that stops before writing (error, Ctrl-C) leaves no
+    /// stale report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existing `--output` file cannot be removed.
+    pub fn new(format: Format, output: Option<PathBuf>) -> Result<Self> {
+        if let Some(path) = &output {
+            remove_stale(path)?;
+        }
         let github = std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true");
-        Self {
+        Ok(Self {
             format,
             output,
             github,
-        }
+        })
+    }
+
+    /// A json / junit report is asked for
+    pub fn writes_report(&self) -> bool {
+        self.format != Format::Text
     }
 
     /// Stdout carries the text output (not a report document)
     pub fn text_on_stdout(&self) -> bool {
-        self.format == Format::Text || self.output.is_some()
+        !self.writes_report() || self.output.is_some()
     }
 
     /// Emit `::group::` / `::error` workflow commands in the text output
@@ -85,6 +99,16 @@ impl ReportOptions {
                     .context("Failed to write report to stdout")
             }
         }
+    }
+}
+
+/// Remove an old report at `path` (absent is fine)
+fn remove_stale(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("Failed to remove old report {}", path.display()))
+        }
+        _ => Ok(()),
     }
 }
 

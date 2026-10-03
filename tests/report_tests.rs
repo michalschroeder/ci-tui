@@ -129,6 +129,28 @@ fn unwritable_output_file_is_an_error() {
 }
 
 #[test]
+fn failed_checks_exit_1_even_if_report_write_fails() {
+    let args = ["--format", "json", "--output", "no/such/dir/r.json"];
+    let (_tmp, out) = run(&failing(), &[&args[..], &["-f", "a.rs"]].concat(), &[]);
+    assert_code(&out, exit::CHECKS_FAILED);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Failed to write report"), "{stderr}");
+}
+
+#[test]
+fn stale_output_file_is_removed_when_run_stops_early() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let report = tmp.path().join("r.json");
+    std::fs::write(&report, "{\"stale\": true}").unwrap();
+    // Edge case: unparsable config, so the run stops before any check
+    std::fs::write(tmp.path().join("ci-tui.yaml"), "checks: [").unwrap();
+    let args = ["--format", "json", "--output", "r.json", "-f", "a.rs"];
+    let out = run_ci_tui_env(tmp.path(), &args, &[]);
+    assert_code(&out, exit::CONFIG_ERROR);
+    assert!(!report.exists(), "stale report left in place");
+}
+
+#[test]
 fn format_with_list_is_a_usage_error() {
     let (_tmp, out) = run(&failing(), &["--format", "json", "--list"], &[]);
     assert_code(&out, exit::CONFIG_ERROR);

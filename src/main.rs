@@ -162,6 +162,7 @@ async fn run() -> Result<i32> {
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);
     }
+    let report = report::ReportOptions::new(cli.format, cli.output.clone())?;
 
     // Use current working directory as project root
     let project_root = std::env::current_dir()?;
@@ -171,10 +172,8 @@ async fn run() -> Result<i32> {
         missing_config_error().exit();
     };
 
-    // Auto-detect TUI mode: use simple mode if stdout is not a terminal.
-    // A json / junit report implies it.
-    let simple_mode =
-        cli.simple || cli.format != report::Format::Text || !std::io::stdout().is_terminal();
+    // Simple mode if stdout is not a terminal; a json / junit report implies it
+    let simple_mode = cli.simple || report.writes_report() || !std::io::stdout().is_terminal();
 
     // Load configuration
     let mut config = config::load_config(&config_path)?;
@@ -281,7 +280,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             exec_root,
             cache,
-            report::ReportOptions::new(cli.format, cli.output),
+            report,
         ))
         .await
     } else {
