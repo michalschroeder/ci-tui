@@ -87,11 +87,6 @@ pub(crate) fn stamp_keys(
     key_root: &Path,
     exec_root: &Path,
 ) {
-    let changed: HashSet<&str> = changed_files.files.iter().map(String::as_str).collect();
-    let resolve = |path: &str| match changed.contains(path) {
-        true => key_root.join(path),
-        false => exec_root.join(path),
-    };
     let mut hashes: HashMap<PathBuf, Option<u64>> = HashMap::new();
     let mut hashed = |path: &Path| {
         *hashes
@@ -99,14 +94,7 @@ pub(crate) fn stamp_keys(
             .or_insert_with(|| file_hash(path))
     };
     for check in checks {
-        let sources = trigger_sources(config, changed_files, check);
-        let inputs: Vec<PathBuf> = check
-            .files
-            .paths()
-            .iter()
-            .map(|path| resolve(path))
-            .chain(sources.iter().map(|source| key_root.join(source)))
-            .collect();
+        let inputs = input_paths(check, config, changed_files, key_root, exec_root);
         let config_hash = config.source_hash;
         check.cache_key =
             key_value(check, &inputs, config_hash, &mut hashed).map(|value| CacheKey {
@@ -115,6 +103,29 @@ pub(crate) fn stamp_keys(
                 config_hash,
             });
     }
+}
+
+/// Input files `check`'s key covers, resolved: its files (changed ones
+/// under `key_root`, discovered tests under `exec_root`), then its other
+/// changed trigger files ([`trigger_sources`]) under `key_root`. Also what
+/// `--watch` snapshots at a run start ([`crate::ui::app::App::queue_watch`]).
+pub(crate) fn input_paths(
+    check: &CheckToRun,
+    config: &CiConfig,
+    changed_files: &ChangedFiles,
+    key_root: &Path,
+    exec_root: &Path,
+) -> Vec<PathBuf> {
+    let changed: HashSet<&str> = changed_files.files.iter().map(String::as_str).collect();
+    let resolve = |path: &str| match changed.contains(path) {
+        true => key_root.join(path),
+        false => exec_root.join(path),
+    };
+    let sources = trigger_sources(config, changed_files, check);
+    let files = check.files.paths().iter().map(|path| resolve(path));
+    files
+        .chain(sources.iter().map(|source| key_root.join(source)))
+        .collect()
 }
 
 /// Changed files behind the check's triggers that are not in its `{files}`:
@@ -149,7 +160,7 @@ fn trigger_sources<'a>(
 /// permissions): a path that does not resolve here must not key on a
 /// constant (changed files are never deleted ones: git detection skips
 /// deletions)
-fn file_hash(path: &Path) -> Option<u64> {
+pub(crate) fn file_hash(path: &Path) -> Option<u64> {
     std::fs::read(path).ok().map(|bytes| hash_bytes(&bytes))
 }
 

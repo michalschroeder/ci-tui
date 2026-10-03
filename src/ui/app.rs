@@ -10,6 +10,7 @@
 //! - [`StatusFilter`]: Filter for displaying checks by status
 //! - [`PreCommandState`]: State tracking for pre-commands
 
+use crate::cache::{file_hash, input_paths};
 use crate::checks::{CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
@@ -17,6 +18,7 @@ use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
 use crate::watch::WatchBatch;
 use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// True when `(col, row)` falls inside `area`. Shared by every mouse
@@ -284,8 +286,9 @@ pub struct RunState {
     pub end_reported: bool,
     /// `--watch` re-runs waiting to start (see [`App::queue_watch`])
     pub watch_queue: Vec<WatchRun>,
-    /// Check id -> its latest run's span (see [`App::queue_watch`])
-    pub run_spans: HashMap<String, RunSpan>,
+    /// Check id -> its latest run's start snapshot (`--watch` only, see
+    /// [`App::queue_watch`])
+    pub run_snapshots: HashMap<String, Snapshot>,
 }
 
 impl RunState {
@@ -302,7 +305,7 @@ impl RunState {
             setup_claims: HashMap::new(),
             end_reported: false,
             watch_queue: Vec::new(),
-            run_spans: HashMap::new(),
+            run_snapshots: HashMap::new(),
         }
     }
 }
@@ -312,6 +315,8 @@ impl RunState {
 pub struct WatchRun {
     /// The check as the saves selected it
     pub check: CheckToRun,
+    /// Saved files (repo-relative) of the batches that queued it
+    pub saved: Vec<String>,
     /// The runner still owed the check (pending / queued) when last seen:
     /// once it ran it, this is dropped (that run saw the save)
     pub runner_owed: bool,
@@ -320,26 +325,34 @@ pub struct WatchRun {
 }
 
 impl WatchRun {
-    pub fn new(check: CheckToRun) -> Self {
+    pub fn new(check: CheckToRun, saved: Vec<String>) -> Self {
         Self {
             check,
+            saved,
             runner_owed: false,
             cancel_sent: false,
         }
     }
 }
 
-/// When a check's latest run started (shown running) and, once its result
-/// landed, ended
-#[derive(Debug, Clone, Copy)]
-pub struct RunSpan {
-    pub started: Instant,
-    pub finished: Option<Instant>,
+/// Content hash per resolved file when a check run started; `None` =
+/// missing / unreadable ([`App::queue_watch`])
+pub type Snapshot = HashMap<PathBuf, Option<u64>>;
+
+/// Snapshot entry of `path`: its current content hash
+fn hashed(path: PathBuf) -> (PathBuf, Option<u64>) {
+    let hash = file_hash(&path);
+    (path, hash)
 }
 
-/// How long after a check's result saves still count as its own writes
-/// ([`App::queue_watch`])
-const OWN_WRITES_GRACE: Duration = Duration::from_secs(1);
+/// Where `--watch` snapshot paths resolve ([`App::queue_watch`])
+#[derive(Debug, Clone)]
+pub struct WatchRoots {
+    /// Changed and saved files (repo-relative): the result cache's key root
+    pub key_root: PathBuf,
+    /// Discovered tests: the execution root
+    pub exec_root: PathBuf,
+}
 
 /// Represents an item that can be selected in the checks list
 #[derive(Debug, Clone)]
@@ -450,6 +463,8 @@ pub struct App {
     pub color: bool,
     /// `--watch` is on: saves re-run affected checks (shown in the header)
     pub watching: bool,
+    /// `--watch` snapshot roots; `None` = no snapshots (no `--watch`)
+    pub watch_roots: Option<WatchRoots>,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -545,6 +560,7 @@ impl App {
             filter_notice: None,
             color: true,
             watching: false,
+            watch_roots: None,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),
@@ -669,32 +685,58 @@ impl App {
     }
 
     /// Queue `--watch` re-runs of `batch`'s checks (as the saves selected
-    /// them), replacing queued ones of the same id; the main loop starts
-    /// them. A check no longer running whose saves all fell in its latest
-    /// run (from its start until [`OWN_WRITES_GRACE`] after its result) is
-    /// left out: they are its own writes (a formatter, generated files).
-    /// One still running is queued (restarted).
+    /// them) with its saved files, replacing queued ones of the same id
+    /// (their saved files kept); the main loop starts them. Own writes are
+    /// told apart by content: each run start snapshots the check's input
+    /// files ([`input_paths`], plus the saved files of the `--watch` re-run
+    /// it is), and a re-run whose saved files all hash as in that snapshot
+    /// is dropped ([`Self::own_writes`]): a touch, or what the check (a
+    /// formatter, generated files) or its fix wrote, which its run saw.
     pub fn queue_watch(&mut self, batch: WatchBatch) {
-        let WatchBatch {
-            checks,
-            first,
-            last,
-        } = batch;
-        let saved = |c: &CheckToRun| !self.own_writes(c.id(), first, last);
-        let checks: Vec<CheckToRun> = checks.into_iter().filter(saved).collect();
+        let WatchBatch { checks, saved } = batch;
         let queue = &mut self.run.watch_queue;
-        queue.retain(|queued| !checks.iter().any(|c| c.id() == queued.check.id()));
-        queue.extend(checks.into_iter().map(WatchRun::new));
+        for check in checks {
+            let same = queue.iter().position(|q| q.check.id() == check.id());
+            let replaced = same.map(|idx| queue.remove(idx).saved);
+            let mut paths: Vec<String> = saved
+                .iter()
+                .cloned()
+                .chain(replaced.into_iter().flatten())
+                .collect();
+            paths.sort();
+            paths.dedup();
+            queue.push(WatchRun::new(check, paths));
+        }
     }
 
-    /// Saves from `first` to `last` all fell in `check_id`'s finished
-    /// latest run, grace included
-    fn own_writes(&self, check_id: &str, first: Instant, last: Instant) -> bool {
-        let Some(span) = self.run.run_spans.get(check_id) else {
+    /// Every saved file of `queued` hashes as in its check's latest run
+    /// start snapshot (a file the snapshot lacks differs): the run saw
+    /// them, nothing to re-run for. False without saved files or snapshot.
+    pub fn own_writes(&self, queued: &WatchRun) -> bool {
+        let (Some(roots), Some(snapshot)) = (
+            &self.watch_roots,
+            self.run.run_snapshots.get(queued.check.id()),
+        ) else {
             return false;
         };
-        let ran = |end: Instant| span.started <= first && last <= end + OWN_WRITES_GRACE;
-        span.finished.is_some_and(ran)
+        let unchanged = |file: &String| {
+            let path = roots.key_root.join(file);
+            snapshot.get(&path) == Some(&file_hash(&path))
+        };
+        !queued.saved.is_empty() && queued.saved.iter().all(unchanged)
+    }
+
+    /// Add the saved files of the `--watch` re-run that just started
+    /// `check_id` to its run start snapshot
+    pub fn snapshot_saved(&mut self, check_id: &str, saved: &[String]) {
+        let (Some(roots), Some(snapshot)) =
+            (&self.watch_roots, self.run.run_snapshots.get_mut(check_id))
+        else {
+            return;
+        };
+        let paths = saved.iter().map(|file| roots.key_root.join(file));
+        let new: Vec<PathBuf> = paths.filter(|p| !snapshot.contains_key(p)).collect();
+        snapshot.extend(new.into_iter().map(hashed));
     }
 
     /// A fix or fix-all runs, or a fix verification runs / waits: `--watch`
@@ -860,7 +902,7 @@ impl App {
 
     /// Reset a check's result to Running and clear previous output/timing
     fn reset_result_to_running(&mut self, check_id: &str) {
-        self.start_span(check_id);
+        self.snapshot_run_start(check_id);
         if let Some(result) = self.results.get_mut(check_id) {
             // Untimed until the command starts (`CheckStarted`): refresh
             // and pre-commands don't count
@@ -916,16 +958,32 @@ impl App {
         }
     }
 
-    /// Start `check_id`'s run span now, unless it is already running
-    fn start_span(&mut self, check_id: &str) {
+    /// Snapshot `check_id`'s input files as its run starts, unless it is
+    /// already running; `--watch` only (reads files: [`Self::queue_watch`])
+    fn snapshot_run_start(&mut self, check_id: &str) {
         let status = self.results.get(check_id).map(|r| &r.status);
-        if status.is_some_and(|s| *s != CheckStatus::Running) {
-            let span = RunSpan {
-                started: Instant::now(),
-                finished: None,
-            };
-            self.run.run_spans.insert(check_id.to_string(), span);
-        }
+        let Some(roots) = self
+            .watch_roots
+            .as_ref()
+            .filter(|_| status.is_some_and(|s| *s != CheckStatus::Running))
+        else {
+            return;
+        };
+        let Some(check) = self.checks.iter().find(|c| c.id() == check_id) else {
+            return;
+        };
+        let (key_root, exec_root) = (&roots.key_root, &roots.exec_root);
+        let paths = input_paths(
+            check,
+            &self.config,
+            &self.changed_files,
+            key_root,
+            exec_root,
+        );
+        let snapshot = paths.into_iter().map(hashed).collect();
+        self.run
+            .run_snapshots
+            .insert(check_id.to_string(), snapshot);
     }
 
     /// Mark a check as running (preparing to execute): on-demand 't', or
@@ -986,9 +1044,6 @@ impl App {
         }
         let selected_failed = result.status.is_failure()
             && matches!(&selected, Some(ItemKey::Check { id, .. }) if *id == result.check_id);
-        if let Some(span) = self.run.run_spans.get_mut(&result.check_id) {
-            span.finished.get_or_insert_with(Instant::now);
-        }
         self.results.insert(result.check_id.clone(), result);
         self.auto_collapse_keeping_selection(selected);
         if selected_failed {
@@ -1149,7 +1204,7 @@ impl App {
     }
 
     fn on_check_started(&mut self, check_id: &str) {
-        self.start_span(check_id);
+        self.snapshot_run_start(check_id);
         if let Some(result) = self.results.get_mut(check_id) {
             result.status = CheckStatus::Running;
             result.started_at = Some(chrono::Local::now());
@@ -1917,6 +1972,81 @@ checks:
             make_check("behat", "tests", "Behat", false, true),
         ];
         App::new(config, changed_files, checks, "main".to_string())
+    }
+
+    /// [`make_app`] with `--watch` roots at `dir`
+    fn watch_app(dir: &std::path::Path) -> App {
+        let mut app = make_app();
+        app.watch_roots = Some(WatchRoots {
+            key_root: dir.to_path_buf(),
+            exec_root: dir.to_path_buf(),
+        });
+        app
+    }
+
+    fn watch_run(app: &App, id: &str, saved: &[&str]) -> WatchRun {
+        let check = app.checks.iter().find(|c| c.id() == id).unwrap().clone();
+        WatchRun::new(check, saved.iter().map(|f| f.to_string()).collect())
+    }
+
+    /// Own writes: every saved file hashes as at the check's latest run
+    /// start (input files snapshotted when the runner starts it); a changed
+    /// file, one the snapshot lacks, or no saved file is not
+    #[test]
+    fn test_own_writes_compare_saved_files_with_run_start_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.php"), "a").unwrap();
+        let mut app = watch_app(dir.path());
+        let started = RunnerEvent::CheckStarted {
+            check_id: "php-lint".to_string(),
+        };
+        app.handle_runner_event(started);
+
+        assert!(app.own_writes(&watch_run(&app, "php-lint", &["test.php"])));
+        assert!(!app.own_writes(&watch_run(&app, "php-lint", &["other.php"])));
+        assert!(!app.own_writes(&watch_run(&app, "php-lint", &[])));
+        assert!(!app.own_writes(&watch_run(&app, "phpunit", &["test.php"])));
+        std::fs::write(dir.path().join("test.php"), "b").unwrap();
+        assert!(!app.own_writes(&watch_run(&app, "php-lint", &["test.php"])));
+    }
+
+    /// Saved files of a `--watch` re-run join its start snapshot; without
+    /// `--watch` roots nothing is snapshotted
+    #[test]
+    fn test_snapshot_saved_adds_watch_run_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Gen.php"), "g").unwrap();
+        let mut app = watch_app(dir.path());
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Passed;
+        app.mark_running("php-lint");
+        let queued = watch_run(&app, "php-lint", &["Gen.php"]);
+        assert!(!app.own_writes(&queued));
+
+        app.snapshot_saved("php-lint", &queued.saved);
+        assert!(app.own_writes(&queued));
+
+        let mut off = make_app();
+        off.mark_running("php-lint");
+        assert!(off.run.run_snapshots.is_empty());
+    }
+
+    /// A batch for a queued check replaces it, keeping both batches' saved
+    /// files
+    #[test]
+    fn test_queue_watch_unions_saved_files_of_same_check() {
+        let mut app = make_app();
+        let check = app.checks[0].clone();
+        let batch = |saved: &[&str]| WatchBatch {
+            checks: vec![check.clone()],
+            saved: saved.iter().map(|f| f.to_string()).collect(),
+        };
+
+        app.queue_watch(batch(&["b.php", "a.php"]));
+        app.queue_watch(batch(&["a.php", "c.php"]));
+
+        let queue = &app.run.watch_queue;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].saved, ["a.php", "b.php", "c.php"]);
     }
 
     #[test]
