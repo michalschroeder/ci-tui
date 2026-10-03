@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/michalschroeder/ci-tui/compare/v0.6.0...v0.7.0) (2026-10-03)
+
+
+### Features
+
+* add --color auto|always|never, no color when stdout is not a terminal ([#223](https://github.com/michalschroeder/ci-tui/issues/223)) ([22efe34](https://github.com/michalschroeder/ci-tui/commit/22efe349c6d5d783f53274cdb1a556e6fc2118db))
+
+
+### Bug Fixes
+
+* **watch:** tell own writes from user saves by content, not time ([#224](https://github.com/michalschroeder/ci-tui/issues/224)) ([2f87497](https://github.com/michalschroeder/ci-tui/commit/2f874972ff3eb7a411e5a05b9cd11ab0e689bb0b))
+
 ## [0.6.0](https://github.com/michalschroeder/ci-tui/compare/v0.5.0...v0.6.0) (2026-10-03)
 
 
