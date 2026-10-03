@@ -3,7 +3,7 @@ use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Comm
 use ci_tui::exit;
 use ci_tui::runner::ExecTarget;
 use ci_tui::{
-    cache, checks, commands, config, filter, fix, git, list, preflight, schema, simple, ui,
+    cache, checks, commands, config, filter, fix, git, list, preflight, report, schema, simple, ui,
 };
 use std::io::IsTerminal;
 
@@ -127,14 +127,19 @@ fn main() {
 /// Run `fut`, or stop at Ctrl-C. Commands run in their own process group,
 /// so the terminal's SIGINT no longer reaches them: dropping `fut` (and then
 /// the runtime) kills them instead.
-async fn interruptible(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
+async fn interruptible(fut: impl std::future::Future<Output = Result<i32>>) -> Result<i32> {
     tokio::select! {
-        result = fut => result.map(|()| exit::SUCCESS),
+        result = fut => result,
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nInterrupted");
             Ok(exit::INTERRUPTED)
         }
     }
+}
+
+/// Exit code 0 once `fut` succeeds
+async fn succeeded(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
+    fut.await.map(|()| exit::SUCCESS)
 }
 
 /// Set the console color switch and install color-eyre for better panic
@@ -157,6 +162,7 @@ async fn run() -> Result<i32> {
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);
     }
+    let report = report::ReportOptions::new(cli.format, cli.output.clone())?;
 
     // Use current working directory as project root
     let project_root = std::env::current_dir()?;
@@ -166,8 +172,8 @@ async fn run() -> Result<i32> {
         missing_config_error().exit();
     };
 
-    // Auto-detect TUI mode: use simple mode if stdout is not a terminal
-    let simple_mode = cli.simple || !std::io::stdout().is_terminal();
+    // Simple mode if stdout is not a terminal; a json / junit report implies it
+    let simple_mode = cli.simple || report.writes_report() || !std::io::stdout().is_terminal();
 
     // Load configuration
     let mut config = config::load_config(&config_path)?;
@@ -262,7 +268,8 @@ async fn run() -> Result<i32> {
     // selected checks
     if cli.fix {
         let verify = (!cli.no_verify).then_some(checks_to_run);
-        return interruptible(fix::run(config, changed_files, exec_root, verify)).await;
+        let fix = succeeded(fix::run(config, changed_files, exec_root, verify));
+        return interruptible(fix).await;
     }
 
     if simple_mode {
@@ -273,6 +280,7 @@ async fn run() -> Result<i32> {
             checks_to_run,
             exec_root,
             cache,
+            report,
         ))
         .await
     } else {

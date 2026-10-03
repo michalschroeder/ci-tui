@@ -8,6 +8,9 @@
 //!
 //! Invoked via `--simple` CLI flag. Runs all checks sequentially or in parallel
 //! (per group config) and prints results with colored output.
+//! `--format json|junit` adds a report document ([`crate::report`]): on
+//! stdout instead of the text, or in `--output <file>`; under GitHub Actions
+//! the text output gets `::group::` / `::error` workflow commands.
 //!
 //! # Exit Codes
 //!
@@ -19,6 +22,7 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
+use crate::report::{self, Report, ReportOptions, Summary};
 use crate::runner::{CheckResult, CheckStatus, ExecTarget};
 use crate::utils::time;
 use anyhow::Result;
@@ -72,49 +76,57 @@ pub async fn run_with_executor(
 
 /// Run checks in simple console mode (no TUI).
 ///
-/// Prints results directly to stdout with colored output. Exits with code 1
-/// if any check fails. Checks `cache` finds unchanged since their last pass
+/// Prints results directly to stdout with colored output. Returns exit code
+/// 1 if any check failed, else 0. Checks `cache` finds unchanged since their last pass
 /// print as cached (counted as passed) and do not run; finished runs are
 /// recorded in it.
 ///
+/// `report` picks the outputs: a `--format json|junit` document (written
+/// before exiting, to stdout instead of the text or to `--output`), and
+/// GitHub Actions `::group::` / `::error` commands in the text output.
+///
 /// # Errors
 ///
-/// Returns an error if Docker operations fail.
+/// Returns an error if Docker operations fail or the report cannot be written.
 pub async fn run(
     config: CiConfig,
     changed_files: ChangedFiles,
     checks: Vec<CheckToRun>,
     project_root: PathBuf,
     mut cache: ResultCache,
-) -> Result<()> {
+    report: ReportOptions,
+) -> Result<i32> {
     let start_time = Instant::now();
     let target = &config.runner;
     let max_output_lines = config.max_output_lines;
+    let (text, annotate) = (report.text_on_stdout(), report.annotate());
 
-    cprintln!(
-        "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
-        changed_files.len(),
-        changed_files.base_ref
-    );
-    cprintln!();
-
-    if checks.is_empty() {
-        cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
-        return Ok(());
+    if text {
+        cprintln!(
+            "\x1b[1mCI Checks\x1b[0m - {} files changed vs {}",
+            changed_files.len(),
+            changed_files.base_ref
+        );
+        cprintln!();
     }
 
     let executor: std::sync::Arc<dyn crate::runner::CommandExecutor> =
         std::sync::Arc::new(crate::runner::RealCommandExecutor);
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
-    let mut has_failures = false;
 
     for (group_name, group_checks) in grouped {
         let group = config.get_group(group_name);
         let display_name = group
             .map(|g| g.display_name(group_name))
-            .unwrap_or(group_name);
-        cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name.to_uppercase());
+            .unwrap_or(group_name)
+            .to_uppercase();
+        if annotate {
+            println!("{}", report::github_group(&display_name));
+        }
+        if text {
+            cprintln!("\x1b[1;36m── {} ──\x1b[0m", display_name);
+        }
 
         let parallel = group.is_some_and(|g| g.parallel);
 
@@ -143,57 +155,89 @@ pub async fn run(
             .await
         });
 
+        if text {
+            results.iter().for_each(print_result);
+        }
         for result in results {
-            print_result(&result);
             cache
                 .record_for(&checks, &result)
                 .unwrap_or_else(|e| eprintln!("Warning: result cache not saved: {e}"));
-            has_failures |= result.status.is_failure();
             all_results.push(result);
         }
-        cprintln!();
+        if text {
+            cprintln!();
+        }
+        if annotate {
+            println!("{}", report::GITHUB_ENDGROUP);
+        }
     }
 
     let elapsed = start_time.elapsed();
-    let elapsed_str = time::format_from_duration(elapsed);
-    let passed = all_results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Passed)
-        .count();
-    let failed = all_results.iter().filter(|r| r.status.is_failure()).count();
-
-    cprintln!("\x1b[1m── Summary ──\x1b[0m");
-    if has_failures {
-        cprintln!(
-            "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
-            passed,
-            all_results.len(),
-            failed,
-            elapsed_str
-        );
-
-        cprintln!();
-        cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
-        for result in all_results.iter().filter(|r| r.status.is_failure()) {
-            let fix_cmd = checks
-                .iter()
-                .find(|c| c.id() == result.check_id)
-                .and_then(|c| c.resolved_fix_command.as_deref());
-            cprintln!();
-            let failed = format_failed_check(result, fix_cmd);
-            cprint!("{}", failed);
-        }
-
-        std::process::exit(crate::exit::CHECKS_FAILED);
-    } else {
-        cprintln!(
-            "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
-            all_results.len(),
-            elapsed_str
-        );
+    let run = Report {
+        base_ref: &changed_files.base_ref,
+        changed_files: changed_files.len(),
+        duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        checks: &checks,
+        results: &all_results,
+        summary: Summary::of(&all_results),
+    };
+    if text {
+        print_summary(&run, elapsed, annotate);
+    }
+    // Failed checks decide the exit code over a failed report write
+    match report.write(&run) {
+        Err(e) if run.summary.failed == 0 => return Err(e),
+        Err(e) => eprintln!("Error: {e:#}"),
+        Ok(()) => {}
     }
 
-    Ok(())
+    Ok(match run.summary.failed {
+        0 => crate::exit::SUCCESS,
+        _ => crate::exit::CHECKS_FAILED,
+    })
+}
+
+/// Text summary after all groups: pass count, or failure count plus each
+/// failed check's output and fix command (and its `::error` annotation with
+/// `annotate`). Without checks, says there was nothing to run.
+fn print_summary(run: &Report, elapsed: std::time::Duration, annotate: bool) {
+    let summary = &run.summary;
+    if run.checks.is_empty() {
+        cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
+        return;
+    }
+    let elapsed_str = time::format_from_duration(elapsed);
+
+    cprintln!("\x1b[1m── Summary ──\x1b[0m");
+    if summary.failed == 0 {
+        cprintln!(
+            "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
+            summary.total,
+            elapsed_str
+        );
+        return;
+    }
+    cprintln!(
+        "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
+        summary.passed,
+        summary.total,
+        summary.failed,
+        elapsed_str
+    );
+
+    cprintln!();
+    cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
+    for result in run.results.iter().filter(|r| r.status.is_failure()) {
+        let fix_cmd = run
+            .check(result)
+            .and_then(|c| c.resolved_fix_command.as_deref());
+        cprintln!();
+        let failed = format_failed_check(result, fix_cmd);
+        cprint!("{}", failed);
+        if annotate {
+            println!("{}", report::github_error(result));
+        }
+    }
 }
 
 /// Print a check result to stdout with colored status indicator (plain
@@ -312,6 +356,7 @@ async fn run_parallel(
             continue;
         }
         let check = check.clone();
+        let id = check.id().to_string();
         let project_root = project_root.to_path_buf();
         let target = target.clone();
         let executor = executor.clone();
@@ -329,16 +374,24 @@ async fn run_parallel(
             )
             .await
         });
-        handles.push(handle);
+        handles.push((id, handle));
     }
 
     let mut results = Vec::new();
-    for handle in handles {
-        if let Ok(result) = handle.await {
-            results.push(result);
-        }
+    for (id, handle) in handles {
+        results.push(handle.await.unwrap_or_else(|e| task_failed(&id, &e)));
     }
     results
+}
+
+/// Failed result for a check whose task panicked, so it is not dropped from
+/// the summary, the report and the exit code
+fn task_failed(id: &str, err: &tokio::task::JoinError) -> CheckResult {
+    CheckResult {
+        status: CheckStatus::Failed,
+        error_output: format!("ci-tui: check task failed: {err}"),
+        ..CheckResult::pending(id)
+    }
 }
 
 /// Execute a single check via the injected executor (test-facing).
@@ -418,6 +471,31 @@ mod tests {
     fn test_cached_result_line() {
         let line = format_result(&CheckResult::cached("c"));
         assert_eq!(crate::color::paint(&line, false), "  ✓ c cached");
+    }
+
+    #[tokio::test]
+    async fn panicked_parallel_check_counts_as_failed() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_execute()
+            .returning(|_, _, _| panic!("executor blew up"));
+        let target = ExecTarget::Local(LocalConfig::default());
+        let results = run_parallel(
+            vec![&check("ls")],
+            Path::new("."),
+            &target,
+            std::sync::Arc::new(mock),
+            DEFAULT_MAX_OUTPUT_LINES,
+            1,
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].check_id, "c");
+        assert_eq!(results[0].status, CheckStatus::Failed);
+        assert!(
+            results[0].error_output.contains("check task failed"),
+            "{}",
+            results[0].error_output
+        );
     }
 
     #[tokio::test]

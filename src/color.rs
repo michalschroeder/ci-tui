@@ -34,8 +34,10 @@ pub fn enabled() -> bool {
 
 /// `s` as is with color on; with color off, without ANSI CSI sequences
 /// (`ESC [`, param/intermediate bytes `0x20..=0x3F`, final byte
-/// `0x40..=0x7E`), incl. escapes in check output. A truncated sequence ends
-/// at the first other char, which is kept as text.
+/// `0x40..=0x7E`) and OSC sequences (`ESC ]` up to BEL or `ESC \`, e.g.
+/// hyperlinks, window titles), incl. escapes in check output. A truncated
+/// CSI ends at the first other char, an unterminated OSC at a newline; both
+/// are kept as text.
 pub fn paint(s: &str, color: bool) -> Cow<'_, str> {
     if color || !s.contains('\x1b') {
         return Cow::Borrowed(s);
@@ -43,16 +45,33 @@ pub fn paint(s: &str, color: bool) -> Cow<'_, str> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c != '\x1b' || chars.peek() != Some(&'[') {
+        if c != '\x1b' {
             out.push(c);
-            continue;
+        } else if chars.next_if_eq(&'[').is_some() {
+            skip_csi(&mut chars);
+        } else if chars.next_if_eq(&']').is_some() {
+            skip_osc(&mut chars);
+        } else {
+            out.push(c);
         }
-        // Skip `[` and params / intermediates, then the final byte
-        chars.next();
-        while chars.next_if(|c| (' '..='?').contains(c)).is_some() {}
-        let _ = chars.next_if(|c| ('@'..='~').contains(c));
     }
     Cow::Owned(out)
+}
+
+/// Skip a CSI body after `ESC [`: params / intermediates, then the final byte
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.next_if(|c| (' '..='?').contains(c)).is_some() {}
+    let _ = chars.next_if(|c| ('@'..='~').contains(c));
+}
+
+/// Skip an OSC body after `ESC ]`: through BEL or `ESC \`, or up to (not
+/// incl.) a newline when unterminated
+fn skip_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(c) = chars.next_if(|&c| c != '\n') {
+        if c == '\x07' || c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+            return;
+        }
+    }
 }
 
 /// `println!` honoring the console color switch ([`enabled`])
@@ -100,6 +119,16 @@ mod tests {
         let s = "\x1b[1;31mred\x1b[0m plain \x1b[2Kx";
         assert_eq!(paint(s, false), "red plain x");
         assert_eq!(paint(s, true), s);
+    }
+
+    #[test]
+    fn test_paint_strips_osc_when_off() {
+        let link = "\x1b]8;;https://x\x1b\\file.rs\x1b]8;;\x1b\\:1";
+        assert_eq!(paint(link, false), "file.rs:1");
+        assert_eq!(paint("\x1b]0;title\x07ok", false), "ok");
+        // Unterminated: ends at the newline, which is kept
+        assert_eq!(paint("a\x1b]0;title\nb", false), "a\nb");
+        assert_eq!(paint(link, true), link);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Command-line interface: argument parsing and config-path resolution.
 
+use crate::report::Format;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::ffi::OsString;
@@ -95,6 +96,37 @@ pub struct Cli {
     /// editor temp files, `.git/`, `.ci-tui/` and nested repos
     #[arg(long, conflicts_with_all = ["simple", "list", "fix", "exit_on_finish"])]
     pub watch: bool,
+
+    /// Simple-mode output format; `json` / `junit` imply --simple and put only
+    /// the report on stdout (warnings stay on stderr) unless --output is given.
+    /// Not with --list, --fix, --watch or --exit-on-finish
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+
+    /// Write the --format json / junit report to FILE; stdout keeps the text output
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+}
+
+/// `--format` / `--output` misuse clap cannot express (`--format` has a
+/// default, so `conflicts_with` would also reject an explicit `--format text`)
+fn report_flag_error(cli: &Cli) -> Option<String> {
+    let format = match cli.format {
+        Format::Text if cli.output.is_some() => {
+            return Some("--output requires --format json or --format junit".to_string())
+        }
+        Format::Text => return None,
+        Format::Json => "json",
+        Format::Junit => "junit",
+    };
+    let modes = [
+        ("list", cli.list),
+        ("fix", cli.fix),
+        ("watch", cli.watch),
+        ("exit-on-finish", cli.exit_on_finish),
+    ];
+    let (mode, _) = modes.into_iter().find(|&(_, on)| on)?;
+    Some(format!("--format {format} cannot be used with --{mode}"))
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).
@@ -153,6 +185,9 @@ impl Cli {
             ));
         }
         let mut cli = Self::from_arg_matches(&matches).map_err(|e| e.format(&mut command))?;
+        if let Some(message) = report_flag_error(&cli) {
+            return Err(command.error(clap::error::ErrorKind::ArgumentConflict, message));
+        }
         cli.only = normalize_ids(cli.only);
         cli.groups = normalize_ids(cli.groups);
         Ok(cli)
@@ -299,6 +334,15 @@ mod tests {
     #[case::watch_with_exit_on_finish(&["ci-tui", "--watch", "--exit-on-finish"])]
     #[case::exit_on_finish_then_watch(&["ci-tui", "--exit-on-finish", "--watch"])]
     #[case::watch_before_validate(&["ci-tui", "--watch", "validate"])]
+    #[case::format_json_with_list(&["ci-tui", "--format", "json", "--list"])]
+    #[case::dry_run_then_format_junit(&["ci-tui", "--dry-run", "--format=junit"])]
+    #[case::format_json_with_fix(&["ci-tui", "--format", "json", "--fix"])]
+    #[case::format_junit_with_watch(&["ci-tui", "--format", "junit", "--watch"])]
+    #[case::exit_on_finish_then_format(&["ci-tui", "--exit-on-finish", "--format", "json"])]
+    #[case::output_without_format(&["ci-tui", "-s", "--output", "r.json"])]
+    #[case::output_with_text_format(&["ci-tui", "--format", "text", "--output", "r.txt"])]
+    #[case::format_before_validate(&["ci-tui", "--format", "json", "validate"])]
+    #[case::output_before_init(&["ci-tui", "--format", "json", "--output", "r", "init"])]
     fn test_conflicting_run_flags(#[case] args: &[&str]) {
         let err = Cli::try_parse_checked(args)
             .err()
@@ -441,6 +485,32 @@ mod tests {
     #[case::with_tui_flags(&["ci-tui", "--watch", "--notify", "-f", "a.rs", "--only", "x"], true)]
     fn test_watch_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
         assert_eq!(Cli::try_parse_checked(args).unwrap().watch, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::default(&["ci-tui"], Format::Text, None)]
+    #[case::text_with_list(&["ci-tui", "--format", "text", "--list"], Format::Text, None)]
+    #[case::text_with_watch(&["ci-tui", "--format=text", "--watch"], Format::Text, None)]
+    #[case::json(&["ci-tui", "--format", "json"], Format::Json, None)]
+    #[case::junit_simple(&["ci-tui", "-s", "--format", "junit"], Format::Junit, None)]
+    #[case::json_output(&["ci-tui", "--format", "json", "--output", "r.json"], Format::Json, Some("r.json"))]
+    fn test_format_output_flags_parsed(
+        #[case] args: &[&str],
+        #[case] format: Format,
+        #[case] output: Option<&str>,
+    ) {
+        let cli = Cli::try_parse_checked(args).unwrap();
+        assert_eq!(cli.format, format);
+        assert_eq!(cli.output, output.map(PathBuf::from));
+    }
+
+    #[test]
+    fn test_format_rejects_unknown_value() {
+        let err = Cli::try_parse_checked(["ci-tui", "--format", "xml"])
+            .err()
+            .expect("expected error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+        assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
     }
 
     #[test]
