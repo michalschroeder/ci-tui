@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{assert_code, git, run_ci_tui};
+use common::{assert_code, git, run_ci_tui, stdout};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config: `lint` (triggered by `.rs` files) appends to
@@ -98,10 +98,6 @@ fn runs(dir: &std::path::Path, id: &str) -> usize {
         .lines()
         .filter(|line| *line == id)
         .count()
-}
-
-fn stdout(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]

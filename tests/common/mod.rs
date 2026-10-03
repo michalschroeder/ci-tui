@@ -39,6 +39,12 @@ pub fn assert_code(out: &std::process::Output, code: i32) {
     );
 }
 
+/// Process stdout as text
+#[allow(dead_code)]
+pub fn stdout(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// Run the ci-tui binary in `dir` with [`OUTER_GIT_ENV`] cleared and git
 /// discovery capped at `dir`, so a run never resolves to an enclosing repo
 /// (e.g. local mode's repo root when the tempdir sits in a work tree).

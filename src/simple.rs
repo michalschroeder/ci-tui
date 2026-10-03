@@ -22,7 +22,7 @@ use crate::checks::{group_checks, CheckToRun};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::report::{self, Report, ReportOptions};
+use crate::report::{self, Report, ReportOptions, Summary};
 use crate::runner::{CheckResult, CheckStatus, ExecTarget};
 use crate::utils::time;
 use anyhow::Result;
@@ -76,8 +76,8 @@ pub async fn run_with_executor(
 
 /// Run checks in simple console mode (no TUI).
 ///
-/// Prints results directly to stdout with colored output. Exits with code 1
-/// if any check fails. Checks `cache` finds unchanged since their last pass
+/// Prints results directly to stdout with colored output. Returns exit code
+/// 1 if any check failed, else 0. Checks `cache` finds unchanged since their last pass
 /// print as cached (counted as passed) and do not run; finished runs are
 /// recorded in it.
 ///
@@ -95,11 +95,11 @@ pub async fn run(
     project_root: PathBuf,
     mut cache: ResultCache,
     report: ReportOptions,
-) -> Result<()> {
+) -> Result<i32> {
     let start_time = Instant::now();
     let target = &config.runner;
     let max_output_lines = config.max_output_lines;
-    let text = report.text_on_stdout();
+    let (text, annotate) = (report.text_on_stdout(), report.annotate());
 
     if text {
         cprintln!(
@@ -121,7 +121,7 @@ pub async fn run(
             .map(|g| g.display_name(group_name))
             .unwrap_or(group_name)
             .to_uppercase();
-        if report.annotate() {
+        if annotate {
             println!("{}", report::github_group(&display_name));
         }
         if text {
@@ -167,72 +167,63 @@ pub async fn run(
         if text {
             cprintln!();
         }
-        if report.annotate() {
+        if annotate {
             println!("{}", report::GITHUB_ENDGROUP);
         }
     }
 
     let elapsed = start_time.elapsed();
-    if text {
-        print_summary(&checks, &all_results, elapsed, report.annotate());
-    }
-    report.write(&Report {
+    let run = Report {
         base_ref: &changed_files.base_ref,
         changed_files: changed_files.len(),
         duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         checks: &checks,
         results: &all_results,
-    })?;
-
-    if all_results.iter().any(|r| r.status.is_failure()) {
-        std::process::exit(crate::exit::CHECKS_FAILED);
+    };
+    let summary = Summary::of(&all_results);
+    if text {
+        print_summary(&run, &summary, elapsed, annotate);
     }
-    Ok(())
+    report.write(&run)?;
+
+    Ok(match summary.failed {
+        0 => crate::exit::SUCCESS,
+        _ => crate::exit::CHECKS_FAILED,
+    })
 }
 
 /// Text summary after all groups: pass count, or failure count plus each
 /// failed check's output and fix command (and its `::error` annotation with
 /// `annotate`). Without checks, says there was nothing to run.
-fn print_summary(
-    checks: &[CheckToRun],
-    results: &[CheckResult],
-    elapsed: std::time::Duration,
-    annotate: bool,
-) {
-    if checks.is_empty() {
+fn print_summary(run: &Report, summary: &Summary, elapsed: std::time::Duration, annotate: bool) {
+    if run.checks.is_empty() {
         cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
         return;
     }
     let elapsed_str = time::format_from_duration(elapsed);
-    let passed = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Passed)
-        .count();
-    let failed = results.iter().filter(|r| r.status.is_failure()).count();
 
     cprintln!("\x1b[1m── Summary ──\x1b[0m");
-    if failed == 0 {
+    if summary.failed == 0 {
         cprintln!(
             "\x1b[32m✓ All {} checks passed in {}\x1b[0m",
-            results.len(),
+            summary.total,
             elapsed_str
         );
         return;
     }
     cprintln!(
         "\x1b[31m✗ {}/{} checks passed, {} failed in {}\x1b[0m",
-        passed,
-        results.len(),
-        failed,
+        summary.passed,
+        summary.total,
+        summary.failed,
         elapsed_str
     );
 
     cprintln!();
     cprintln!("\x1b[1;31mFailed checks:\x1b[0m");
-    for result in results.iter().filter(|r| r.status.is_failure()) {
-        let fix_cmd = checks
-            .iter()
-            .find(|c| c.id() == result.check_id)
+    for result in run.results.iter().filter(|r| r.status.is_failure()) {
+        let fix_cmd = run
+            .check(result)
             .and_then(|c| c.resolved_fix_command.as_deref());
         cprintln!();
         let failed = format_failed_check(result, fix_cmd);

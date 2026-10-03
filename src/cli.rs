@@ -111,22 +111,22 @@ pub struct Cli {
 /// `--format` / `--output` misuse clap cannot express (`--format` has a
 /// default, so `conflicts_with` would also reject an explicit `--format text`)
 fn report_flag_error(cli: &Cli) -> Option<String> {
-    let report = cli.format != Format::Text;
-    if cli.output.is_some() && !report {
-        return Some("--output requires --format json or --format junit".to_string());
-    }
+    let format = match cli.format {
+        Format::Text if cli.output.is_some() => {
+            return Some("--output requires --format json or --format junit".to_string())
+        }
+        Format::Text => return None,
+        Format::Json => "json",
+        Format::Junit => "junit",
+    };
     let modes = [
         ("list", cli.list),
         ("fix", cli.fix),
         ("watch", cli.watch),
         ("exit-on-finish", cli.exit_on_finish),
     ];
-    let (mode, _) = modes.into_iter().find(|&(_, on)| on && report)?;
-    let format = clap::ValueEnum::to_possible_value(&cli.format)?;
-    Some(format!(
-        "--format {} cannot be used with --{mode}",
-        format.get_name()
-    ))
+    let (mode, _) = modes.into_iter().find(|&(_, on)| on)?;
+    Some(format!("--format {format} cannot be used with --{mode}"))
 }
 
 /// `--base` value parser: rejects an empty ref (e.g. `--base=$UNSET_VAR`).

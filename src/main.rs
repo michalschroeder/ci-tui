@@ -127,14 +127,19 @@ fn main() {
 /// Run `fut`, or stop at Ctrl-C. Commands run in their own process group,
 /// so the terminal's SIGINT no longer reaches them: dropping `fut` (and then
 /// the runtime) kills them instead.
-async fn interruptible(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
+async fn interruptible(fut: impl std::future::Future<Output = Result<i32>>) -> Result<i32> {
     tokio::select! {
-        result = fut => result.map(|()| exit::SUCCESS),
+        result = fut => result,
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nInterrupted");
             Ok(exit::INTERRUPTED)
         }
     }
+}
+
+/// Exit code 0 once `fut` succeeds
+async fn succeeded(fut: impl std::future::Future<Output = Result<()>>) -> Result<i32> {
+    fut.await.map(|()| exit::SUCCESS)
 }
 
 /// Set the console color switch and install color-eyre for better panic
@@ -264,19 +269,19 @@ async fn run() -> Result<i32> {
     // selected checks
     if cli.fix {
         let verify = (!cli.no_verify).then_some(checks_to_run);
-        return interruptible(fix::run(config, changed_files, exec_root, verify)).await;
+        let fix = succeeded(fix::run(config, changed_files, exec_root, verify));
+        return interruptible(fix).await;
     }
 
     if simple_mode {
         // Run in simple console mode
-        let report = report::ReportOptions::new(cli.format, cli.output);
         interruptible(simple::run(
             config,
             changed_files,
             checks_to_run,
             exec_root,
             cache,
-            report,
+            report::ReportOptions::new(cli.format, cli.output),
         ))
         .await
     } else {

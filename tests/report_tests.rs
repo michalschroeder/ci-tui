@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{assert_code, run_ci_tui_env};
+use common::{assert_code, run_ci_tui_env, stdout};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config: group `lint` with passing `ok`, group `tests` with
@@ -54,10 +54,6 @@ fn run(
     std::fs::write(tmp.path().join("ci-tui.yaml"), config).unwrap();
     let out = run_ci_tui_env(tmp.path(), args, env);
     (tmp, out)
-}
-
-fn stdout(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]

@@ -11,13 +11,10 @@ use crate::checks::CheckToRun;
 use crate::runner::{CheckResult, CheckStatus};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::ffi::OsStr;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
-
-/// Env var GitHub Actions sets to `true` on its runners
-pub const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
 
 /// JSON report schema version, bumped on breaking changes
 const JSON_VERSION: u32 = 1;
@@ -34,11 +31,6 @@ pub enum Format {
     Junit,
 }
 
-/// Whether GitHub Actions annotations are on: `GITHUB_ACTIONS` is `true`
-pub fn github_actions(env: Option<&OsStr>) -> bool {
-    env == Some(OsStr::new("true"))
-}
-
 /// Where simple mode writes what
 #[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
@@ -46,7 +38,7 @@ pub struct ReportOptions {
     pub format: Format,
     /// Report file (`--output`); `None` puts the report on stdout instead of text
     pub output: Option<PathBuf>,
-    /// Running under GitHub Actions ([`github_actions`])
+    /// Running under GitHub Actions (`GITHUB_ACTIONS=true`)
     pub github: bool,
 }
 
@@ -54,7 +46,7 @@ impl ReportOptions {
     /// Options for `--format` / `--output`, annotating when the
     /// `GITHUB_ACTIONS` env var is `true`
     pub fn new(format: Format, output: Option<PathBuf>) -> Self {
-        let github = github_actions(std::env::var_os(GITHUB_ACTIONS_ENV).as_deref());
+        let github = std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true");
         Self {
             format,
             output,
@@ -87,7 +79,6 @@ impl ReportOptions {
             Some(path) => std::fs::write(path, doc)
                 .with_context(|| format!("Failed to write report to {}", path.display())),
             None => {
-                // Flushed here: simple mode may `process::exit` right after
                 let mut out = std::io::stdout().lock();
                 out.write_all(doc.as_bytes())
                     .and_then(|()| out.flush())
@@ -121,12 +112,25 @@ struct JsonReport<'a> {
     checks: Vec<JsonCheck<'a>>,
 }
 
+/// Result counts shared by the text summary and the reports
 #[derive(Serialize)]
-struct Summary {
-    total: usize,
-    passed: usize,
-    failed: usize,
-    cached: usize,
+pub struct Summary {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub cached: usize,
+}
+
+impl Summary {
+    pub fn of(results: &[CheckResult]) -> Self {
+        let count = |f: fn(&CheckResult) -> bool| results.iter().filter(|r| f(r)).count();
+        Self {
+            total: results.len(),
+            passed: count(|r| r.status == CheckStatus::Passed),
+            failed: count(|r| r.status.is_failure()),
+            cached: count(|r| r.cached),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -134,33 +138,23 @@ struct JsonCheck<'a> {
     id: &'a str,
     name: &'a str,
     group: &'a str,
-    status: &'a CheckStatus,
+    status: &'static str,
     duration_ms: u64,
     cached: bool,
-    output: String,
-    error_output: String,
+    output: Cow<'a, str>,
+    error_output: Cow<'a, str>,
     fix_command: Option<&'a str>,
 }
 
 impl Report<'_> {
     /// The selected check `result` belongs to
-    fn check(&self, result: &CheckResult) -> Option<&CheckToRun> {
+    pub fn check(&self, result: &CheckResult) -> Option<&CheckToRun> {
         self.checks.iter().find(|c| c.id() == result.check_id)
     }
 
     /// Group key of `result`'s check (empty if unknown)
     fn group(&self, result: &CheckResult) -> &str {
-        self.check(result).map_or("", |c| c.group())
-    }
-
-    fn summary(&self) -> Summary {
-        let count = |f: fn(&CheckResult) -> bool| self.results.iter().filter(|r| f(r)).count();
-        Summary {
-            total: self.results.len(),
-            passed: count(|r| r.status == CheckStatus::Passed),
-            failed: count(|r| r.status.is_failure()),
-            cached: count(|r| r.cached),
-        }
+        self.check(result).map_or("", CheckToRun::group)
     }
 
     /// Pretty-printed JSON document, newline-terminated
@@ -170,8 +164,8 @@ impl Report<'_> {
             JsonCheck {
                 id: &r.check_id,
                 name: check.map_or(&r.check_id, |c| c.name()),
-                group: self.group(r),
-                status: &r.status,
+                group: check.map_or("", CheckToRun::group),
+                status: status_name(&r.status),
                 duration_ms: r.duration_ms,
                 cached: r.cached,
                 output: plain(&r.output),
@@ -184,7 +178,7 @@ impl Report<'_> {
             base_ref: self.base_ref,
             changed_files: self.changed_files,
             duration_ms: self.duration_ms,
-            summary: self.summary(),
+            summary: Summary::of(self.results),
             checks: checks.collect(),
         };
         let mut doc = serde_json::to_string_pretty(&report).expect("report serializes");
@@ -196,11 +190,7 @@ impl Report<'_> {
     /// `<testcase>` per result; failures / timeouts carry `<failure>` with
     /// the output, cancelled checks `<skipped/>`
     pub fn junit(&self) -> String {
-        let mut groups: indexmap::IndexMap<&str, Vec<&CheckResult>> = indexmap::IndexMap::new();
-        for result in self.results {
-            groups.entry(self.group(result)).or_default().push(result);
-        }
-        let summary = self.summary();
+        let summary = Summary::of(self.results);
         let mut buf = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         let _ = writeln!(
             buf,
@@ -209,17 +199,54 @@ impl Report<'_> {
             summary.failed,
             secs(self.duration_ms)
         );
-        for (group, results) in groups {
-            write_testsuite(&mut buf, group, &results);
+        // Results arrive group by group
+        for results in self.results.chunk_by(|a, b| self.group(a) == self.group(b)) {
+            write_testsuite(&mut buf, self.group(&results[0]), results);
         }
         buf.push_str("</testsuites>\n");
         buf
     }
 }
 
+/// JSON `status` value (the report schema, independent of [`CheckStatus`]
+/// variant names)
+fn status_name(status: &CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Pending => "pending",
+        CheckStatus::Queued => "queued",
+        CheckStatus::Running => "running",
+        CheckStatus::Passed => "passed",
+        CheckStatus::Failed => "failed",
+        CheckStatus::Skipped => "skipped",
+        CheckStatus::OnDemand => "on_demand",
+        CheckStatus::TimedOut => "timed_out",
+        CheckStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Failure label of a failed / timed-out result, `None` otherwise
+fn failure_label(status: &CheckStatus) -> Option<&'static str> {
+    match status {
+        CheckStatus::Failed => Some("failed"),
+        CheckStatus::TimedOut => Some("timed out"),
+        _ => None,
+    }
+}
+
+/// `result`'s ANSI-stripped, trimmed stdout and stderr, empty parts skipped
+fn failure_body(result: &CheckResult) -> String {
+    let parts = [&result.output, &result.error_output].map(|s| plain(s));
+    let parts: Vec<&str> = parts
+        .iter()
+        .map(|s| s.trim_end())
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.join("\n")
+}
+
 /// One `<testsuite>` element for `group`'s `results`; `time` sums them
-fn write_testsuite(buf: &mut String, group: &str, results: &[&CheckResult]) {
-    let failures = results.iter().filter(|r| r.status.is_failure()).count();
+fn write_testsuite(buf: &mut String, group: &str, results: &[CheckResult]) {
+    let failures = Summary::of(results).failed;
     let time: u64 = results.iter().map(|r| r.duration_ms).sum();
     let _ = writeln!(
         buf,
@@ -243,25 +270,16 @@ fn write_testcase(buf: &mut String, group: &str, result: &CheckResult) {
         xml(group),
         secs(result.duration_ms)
     );
-    match result.status {
-        CheckStatus::Failed | CheckStatus::TimedOut => {
-            let message = match result.status {
-                CheckStatus::TimedOut => "timed out",
-                _ => "failed",
-            };
-            let body = [result.output.as_str(), result.error_output.as_str()]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let _ = writeln!(
-                buf,
-                ">\n      <failure message=\"{message}\">{}</failure>\n    </testcase>",
-                xml(&plain(&body))
-            );
-        }
-        CheckStatus::Cancelled => buf.push_str(">\n      <skipped/>\n    </testcase>\n"),
-        _ => buf.push_str("/>\n"),
+    if let Some(message) = failure_label(&result.status) {
+        let _ = writeln!(
+            buf,
+            ">\n      <failure message=\"{message}\">{}</failure>\n    </testcase>",
+            xml(&failure_body(result))
+        );
+    } else if result.status == CheckStatus::Cancelled {
+        buf.push_str(">\n      <skipped/>\n    </testcase>\n");
+    } else {
+        buf.push_str("/>\n");
     }
 }
 
@@ -271,8 +289,8 @@ fn secs(ms: u64) -> String {
 }
 
 /// `s` without ANSI escapes
-fn plain(s: &str) -> String {
-    crate::color::paint(s, false).into_owned()
+fn plain(s: &str) -> Cow<'_, str> {
+    crate::color::paint(s, false)
 }
 
 /// `s` escaped for XML text and attribute values; chars XML 1.0 forbids
@@ -305,18 +323,12 @@ pub const GITHUB_ENDGROUP: &str = "::endgroup::";
 /// `::error title=<id>::<message>` annotation for a failed check: status
 /// line plus its ANSI-stripped output
 pub fn github_error(result: &CheckResult) -> String {
-    let status = match result.status {
-        CheckStatus::TimedOut => "timed out",
-        _ => "failed",
-    };
+    let status = failure_label(&result.status).unwrap_or("failed");
     let mut message = format!("{} {status}", result.check_id);
-    for out in [&result.output, &result.error_output] {
-        let out = plain(out);
-        let out = out.trim_end();
-        if !out.is_empty() {
-            message.push('\n');
-            message.push_str(out);
-        }
+    let body = failure_body(result);
+    if !body.is_empty() {
+        message.push('\n');
+        message.push_str(&body);
     }
     format!(
         "::error title={}::{}",
@@ -515,15 +527,6 @@ mod tests {
     #[test]
     fn test_github_group() {
         assert_eq!(github_group("LINT 100%\n"), "::group::LINT 100%25%0A");
-    }
-
-    #[rstest::rstest]
-    #[case::unset(None, false)]
-    #[case::true_(Some("true"), true)]
-    #[case::other(Some("1"), false)]
-    #[case::empty(Some(""), false)]
-    fn test_github_actions(#[case] env: Option<&str>, #[case] expected: bool) {
-        assert_eq!(github_actions(env.map(OsStr::new)), expected);
     }
 
     #[rstest::rstest]
