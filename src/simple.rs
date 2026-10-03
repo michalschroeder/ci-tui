@@ -179,19 +179,19 @@ pub async fn run(
         duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         checks: &checks,
         results: &all_results,
+        summary: Summary::of(&all_results),
     };
-    let summary = Summary::of(&all_results);
     if text {
-        print_summary(&run, &summary, elapsed, annotate);
+        print_summary(&run, elapsed, annotate);
     }
     // Failed checks decide the exit code over a failed report write
     match report.write(&run) {
-        Err(e) if summary.failed == 0 => return Err(e),
+        Err(e) if run.summary.failed == 0 => return Err(e),
         Err(e) => eprintln!("Error: {e:#}"),
         Ok(()) => {}
     }
 
-    Ok(match summary.failed {
+    Ok(match run.summary.failed {
         0 => crate::exit::SUCCESS,
         _ => crate::exit::CHECKS_FAILED,
     })
@@ -200,7 +200,8 @@ pub async fn run(
 /// Text summary after all groups: pass count, or failure count plus each
 /// failed check's output and fix command (and its `::error` annotation with
 /// `annotate`). Without checks, says there was nothing to run.
-fn print_summary(run: &Report, summary: &Summary, elapsed: std::time::Duration, annotate: bool) {
+fn print_summary(run: &Report, elapsed: std::time::Duration, annotate: bool) {
+    let summary = &run.summary;
     if run.checks.is_empty() {
         cprintln!("\x1b[33mNo checks to run for changed files.\x1b[0m");
         return;

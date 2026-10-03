@@ -124,6 +124,8 @@ pub struct Report<'a> {
     pub checks: &'a [CheckToRun],
     /// Results in group order
     pub results: &'a [CheckResult],
+    /// Counts of `results` ([`Summary::of`])
+    pub summary: Summary,
 }
 
 #[derive(Serialize)]
@@ -132,7 +134,7 @@ struct JsonReport<'a> {
     base_ref: &'a str,
     changed_files: usize,
     duration_ms: u64,
-    summary: Summary,
+    summary: &'a Summary,
     checks: Vec<JsonCheck<'a>>,
 }
 
@@ -143,6 +145,9 @@ pub struct Summary {
     pub passed: usize,
     pub failed: usize,
     pub cached: usize,
+    /// JUnit `skipped`, not in the JSON summary
+    #[serde(skip)]
+    pub cancelled: usize,
 }
 
 impl Summary {
@@ -153,6 +158,7 @@ impl Summary {
             passed: count(|r| r.status == CheckStatus::Passed),
             failed: count(|r| r.status.is_failure()),
             cached: count(|r| r.cached),
+            cancelled: count(|r| r.status == CheckStatus::Cancelled),
         }
     }
 }
@@ -192,7 +198,11 @@ impl Report<'_> {
                 status: status_name(&r.status),
                 duration_ms: r.duration_ms,
                 cached: r.cached,
-                output: plain(&r.output),
+                // Not the TUI's "cached" hint: `cached` says it
+                output: match r.cached {
+                    true => Cow::Borrowed(""),
+                    false => plain(&r.output),
+                },
                 error_output: plain(&r.error_output),
                 fix_command: check.and_then(|c| c.resolved_fix_command.as_deref()),
             }
@@ -202,7 +212,7 @@ impl Report<'_> {
             base_ref: self.base_ref,
             changed_files: self.changed_files,
             duration_ms: self.duration_ms,
-            summary: Summary::of(self.results),
+            summary: &self.summary,
             checks: checks.collect(),
         };
         let mut doc = serde_json::to_string_pretty(&report).expect("report serializes");
@@ -214,13 +224,11 @@ impl Report<'_> {
     /// `<testcase>` per result; failures / timeouts carry `<failure>` with
     /// the output, cancelled checks `<skipped/>`
     pub fn junit(&self) -> String {
-        let summary = Summary::of(self.results);
         let mut buf = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         let _ = writeln!(
             buf,
-            "<testsuites name=\"ci-tui\" tests=\"{}\" failures=\"{}\" time=\"{}\">",
-            summary.total,
-            summary.failed,
+            "<testsuites name=\"ci-tui\" {} time=\"{}\">",
+            counts(&self.summary),
             secs(self.duration_ms)
         );
         // Results arrive group by group
@@ -270,13 +278,12 @@ fn failure_body(result: &CheckResult) -> String {
 
 /// One `<testsuite>` element for `group`'s `results`; `time` sums them
 fn write_testsuite(buf: &mut String, group: &str, results: &[CheckResult]) {
-    let failures = Summary::of(results).failed;
     let time: u64 = results.iter().map(|r| r.duration_ms).sum();
     let _ = writeln!(
         buf,
-        "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\" time=\"{}\">",
+        "  <testsuite name=\"{}\" {} time=\"{}\">",
         xml(group),
-        results.len(),
+        counts(&Summary::of(results)),
         secs(time)
     );
     for result in results {
@@ -305,6 +312,16 @@ fn write_testcase(buf: &mut String, group: &str, result: &CheckResult) {
     } else {
         buf.push_str("/>\n");
     }
+}
+
+/// JUnit `tests` / `failures` / `errors` / `skipped` attributes; no check
+/// counts as an error (that is for broken test harnesses), cancelled ones
+/// are skipped
+fn counts(summary: &Summary) -> String {
+    format!(
+        "tests=\"{}\" failures=\"{}\" errors=\"0\" skipped=\"{}\"",
+        summary.total, summary.failed, summary.cancelled
+    )
 }
 
 /// `ms` as JUnit seconds (`1.234`)
@@ -439,6 +456,7 @@ mod tests {
             duration_ms: 5000,
             checks,
             results,
+            summary: Summary::of(results),
         }
     }
 
@@ -466,6 +484,7 @@ mod tests {
         assert_eq!(lint["error_output"], "");
         assert_eq!(lint["fix_command"], "cargo fmt");
         assert_eq!(doc["checks"][1]["cached"], true);
+        assert_eq!(doc["checks"][1]["output"], "");
         assert_eq!(doc["checks"][1]["status"], "passed");
         assert_eq!(doc["checks"][1]["fix_command"], serde_json::Value::Null);
         assert_eq!(doc["checks"][2]["status"], "timed_out");
@@ -482,13 +501,13 @@ mod tests {
     fn test_junit_report() {
         let (checks, results) = fixture();
         let doc = report(&checks, &results).junit();
-        assert!(doc.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"ci-tui\" tests=\"3\" failures=\"2\" time=\"5.000\">\n"), "{doc}");
+        assert!(doc.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"ci-tui\" tests=\"3\" failures=\"2\" errors=\"0\" skipped=\"0\" time=\"5.000\">\n"), "{doc}");
         assert!(
-            doc.contains("<testsuite name=\"quality\" tests=\"2\" failures=\"1\" time=\"1.234\">"),
+            doc.contains("<testsuite name=\"quality\" tests=\"2\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"1.234\">"),
             "{doc}"
         );
         assert!(
-            doc.contains("<testsuite name=\"tests\" tests=\"1\" failures=\"1\" time=\"1.234\">"),
+            doc.contains("<testsuite name=\"tests\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"1.234\">"),
             "{doc}"
         );
         // Escaped, ANSI stripped, \x01 dropped
@@ -512,14 +531,17 @@ mod tests {
         let results = [result("c", CheckStatus::Cancelled, "")];
         let doc = report(&checks, &results).junit();
         assert!(doc.contains("<skipped/>"), "{doc}");
-        assert!(doc.contains("failures=\"0\""), "{doc}");
+        assert!(
+            doc.contains("tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"1\""),
+            "{doc}"
+        );
     }
 
     #[test]
     fn test_junit_report_empty() {
         assert_eq!(
             report(&[], &[]).junit(),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"ci-tui\" tests=\"0\" failures=\"0\" time=\"5.000\">\n</testsuites>\n"
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"ci-tui\" tests=\"0\" failures=\"0\" errors=\"0\" skipped=\"0\" time=\"5.000\">\n</testsuites>\n"
         );
     }
 
