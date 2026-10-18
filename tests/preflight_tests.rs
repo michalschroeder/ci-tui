@@ -430,3 +430,56 @@ async fn docker_probe_timeout_is_env_error() {
     assert_eq!(exit::code_for(&err), exit::ENV_ERROR);
     assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
 }
+
+#[tokio::test]
+async fn check_service_container_is_probed_instead_of_default() {
+    let target = ConfigBuilder::new().build().runner;
+    let php = container(&target).replace("-app-1", "-php-1");
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut mock = MockCommandExecutor::new();
+    let log = Arc::clone(&checked);
+    mock.expect_is_container_running().returning(move |name| {
+        log.lock().unwrap().push(name.to_string());
+        true
+    });
+    let log = Arc::clone(&seen);
+    mock.expect_execute().times(1).returning(move |cmd, _, _| {
+        log.lock().unwrap().push(cmd.to_string());
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    });
+    let mut check = make_exec_check("a", "true", None);
+    check.service = Some("php".into());
+
+    let warnings = docker_warnings(&target, &[check], &files(&["Cargo.toml"]), root(), &mock).await;
+
+    assert_eq!(*checked.lock().unwrap(), vec![php.clone()]);
+    let cmd = seen.lock().unwrap()[0].clone();
+    assert!(cmd.starts_with(&format!("docker exec {php} ")), "{cmd}");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(&php), "{warnings:?}");
+}
+
+#[tokio::test]
+async fn stopped_service_container_named_in_run_fallback_warning() {
+    let target = ConfigBuilder::new().build().runner;
+    let php = container(&target).replace("-app-1", "-php-1");
+    let mut check = make_exec_check("a", "true", None);
+    check.service = Some("php".into());
+
+    let warnings = docker_warnings(
+        &target,
+        &[check],
+        &files(&["Cargo.toml"]),
+        root(),
+        &stopped_mock(),
+    )
+    .await;
+
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(&php), "{warnings:?}");
+}

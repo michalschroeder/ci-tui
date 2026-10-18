@@ -369,3 +369,48 @@ async fn no_setup_without_verification() {
 
     assert_eq!(log, ["fix", "fix"]);
 }
+
+#[tokio::test]
+async fn fix_runs_in_check_service_container() {
+    let config = common::configs::ConfigBuilder::new()
+        .with_check(
+            "lint",
+            "fmt",
+            common::configs::CheckBuilder::new("Format", "cargo fmt --check")
+                .with_fix_command("cargo fmt")
+                .with_service("php")
+                .build(),
+        )
+        .build();
+    let ci_tui::runner::ExecTarget::Docker(docker) = &config.runner else {
+        unreachable!("docker target expected")
+    };
+    let expected = docker.container_name().replace("-app-1", "-php-1");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_execute().returning(move |cmd, _, _| {
+        log.lock().unwrap().push(cmd.to_string());
+        CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    });
+    let changed = ChangedFiles {
+        files: vec!["src/main.rs".into()],
+        base_ref: "main".into(),
+    };
+
+    run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
+        .await
+        .unwrap();
+
+    let cmds = seen.lock().unwrap();
+    assert_eq!(cmds.len(), 1, "{cmds:?}");
+    assert!(
+        cmds[0].starts_with(&format!("docker exec {expected} ")),
+        "{cmds:?}"
+    );
+}

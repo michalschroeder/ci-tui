@@ -381,6 +381,26 @@ impl DockerConfig {
         format!("{}-{}-1", project_name, self.service)
     }
 
+    /// Container for a check / pre-command with optional `container` /
+    /// `service` overrides.
+    ///
+    /// Precedence: explicit `container` > compose-convention name for a
+    /// non-default service > default container ([`Self::container_name`]).
+    ///
+    /// LIMITATION: assumes the Docker Compose v2 naming convention
+    /// `{project}-{service}-1` (see [`Self::compose_project_name`]).
+    /// Future work: resolve via `docker compose ps -q <service>` instead of
+    /// string construction.
+    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> String {
+        match (container, service) {
+            (Some(container), _) => container.to_string(),
+            (None, Some(service)) if service != self.service => {
+                format!("{}-{}-1", self.compose_project_name(), service)
+            }
+            _ => self.container_name(),
+        }
+    }
+
     /// Compose project name, in docker compose's own precedence order:
     /// 1. `COMPOSE_PROJECT_NAME` env var
     /// 2. top-level `name:` key in a compose file found in `project_dir`

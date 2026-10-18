@@ -548,6 +548,15 @@ impl ExecTarget {
         }
     }
 
+    /// Docker container for `container` / `service` overrides (see
+    /// [`crate::config::DockerConfig::container_for`]); `None` in local mode.
+    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> Option<String> {
+        match self {
+            Self::Docker(docker) => Some(docker.container_for(container, service)),
+            Self::Local(_) => None,
+        }
+    }
+
     /// Full shell command for `command`. `container` overrides the docker
     /// default container (`docker.container_name()`); ignored in local mode.
     /// Queries container state ONLY in docker mode.
@@ -1043,41 +1052,15 @@ impl CheckRunner {
     /// `service`/`container` (rejected at load) and runs on the host.
     fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> BuiltCommand {
         let env = merged_env(self.target(), &pre_cmd.env);
-        let container = match self.target() {
-            ExecTarget::Docker(docker) => Some(pre_command_container(docker, pre_cmd)),
-            ExecTarget::Local(_) => None,
-        };
+        let container = self
+            .target()
+            .container_for(pre_cmd.container.as_deref(), pre_cmd.service.as_deref());
         self.target().build_command(
             container.as_deref(),
             &env,
             &pre_cmd.command,
             self.executor.as_ref(),
         )
-    }
-}
-
-/// Resolve the container for a docker-mode pre-command.
-///
-/// Precedence: explicit `container:` > compose-convention name for a
-/// non-default service > default container.
-///
-/// LIMITATION: assumes the Docker Compose v2 naming convention
-/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` and a top-level `name:`
-/// key in the compose file are both honored (see `DockerConfig::compose_project_name`).
-/// Non-UTF8 project paths fall back to the literal project name "project".
-/// Future work: resolve via `docker compose ps -q <service>` instead of
-/// string construction.
-fn pre_command_container(
-    docker: &crate::config::DockerConfig,
-    pre_cmd: &crate::config::PreCommand,
-) -> String {
-    let service = pre_cmd.service.as_deref().unwrap_or(&docker.service);
-    match pre_cmd.container.as_deref() {
-        Some(container) => container.to_string(),
-        None if service != docker.service => {
-            format!("{}-{}-1", docker.compose_project_name(), service)
-        }
-        None => docker.container_name(),
     }
 }
 
@@ -1338,7 +1321,8 @@ pub async fn run_fix_command_with_executor(
 /// [`RunnerEvent::CheckOutput`] chunks while the command runs.
 ///
 /// Used e.g. when running a check for "all files" by removing the {files}
-/// placeholder from the command. Check container override and env apply.
+/// placeholder from the command. Check container (or service) override and
+/// env apply.
 pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
@@ -1348,11 +1332,15 @@ pub async fn run_check_with_command_with_executor(
     max_output_lines: usize,
     sink: &OutputSink,
 ) -> CheckResult {
+    let container = target.container_for(
+        check.definition.container.as_deref(),
+        check.service.as_deref(),
+    );
     execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        check.definition.container.as_deref(),
+        container.as_deref(),
         target,
         &check.definition.env,
         executor,
@@ -1563,6 +1551,108 @@ mod tests {
         let config: crate::config::CiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.runner, ExecTarget::Local(_)));
         assert_eq!(config.runner.env().get("A").unwrap(), "b");
+    }
+
+    /// Check `a` running `ls` with `container` / resolved `service` overrides
+    fn check_on(container: Option<&str>, service: Option<&str>) -> CheckToRun {
+        CheckToRun {
+            id: "a".into(),
+            group: "g".into(),
+            definition: crate::config::CheckDefinition {
+                name: "a".into(),
+                command: "ls".into(),
+                service: service.map(String::from),
+                container: container.map(String::from),
+                fix_command: None,
+                triggers: None,
+                on_demand: false,
+                env: HashMap::new(),
+                timeout: None,
+                error_pattern: None,
+            },
+            service: service.map(String::from),
+            files: crate::checks::CheckFiles::Files(vec![]),
+            resolved_command: "ls".into(),
+            resolved_fix_command: None,
+            cache_key: None,
+        }
+    }
+
+    /// Command `check` runs on `target` with every container running
+    async fn command_for(target: &ExecTarget, check: &CheckToRun) -> String {
+        let seen = Arc::new(Mutex::new(String::new()));
+        let log = Arc::clone(&seen);
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute().returning(move |cmd, _, _| {
+            *log.lock().unwrap() = cmd.to_string();
+            CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
+        });
+        let root = Path::new(".");
+        let sink = OutputSink::none();
+        run_check_with_command_with_executor(check, "ls", root, target, &mock, 100, &sink).await;
+        let cmd = seen.lock().unwrap().clone();
+        cmd
+    }
+
+    fn explicit_container_target() -> ExecTarget {
+        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
+        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_check_service_execs_into_service_container() {
+        let target = docker_target();
+        let ExecTarget::Docker(docker) = &target else {
+            unreachable!()
+        };
+        let expected = format!("docker exec {}-php-1 ", docker.compose_project_name());
+
+        let cmd = command_for(&target, &check_on(None, Some("php"))).await;
+
+        assert!(cmd.starts_with(&expected), "got: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn test_check_container_beats_service() {
+        let cmd = command_for(&docker_target(), &check_on(Some("custom-c"), Some("php"))).await;
+        assert!(cmd.starts_with("docker exec custom-c "), "got: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn test_check_default_or_no_service_uses_config_container() {
+        for service in [None, Some("app")] {
+            let check = check_on(None, service);
+            let cmd = command_for(&explicit_container_target(), &check).await;
+            assert!(
+                cmd.starts_with("docker exec explicit-c "),
+                "{service:?}: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_container_for_precedence() {
+        let target = explicit_container_target();
+        let ExecTarget::Docker(docker) = &target else {
+            unreachable!()
+        };
+        let php = format!("{}-php-1", docker.compose_project_name());
+        let cases = [
+            (None, Some("php"), php.as_str()),
+            (Some("c"), Some("php"), "c"),
+            (None, Some("app"), "explicit-c"),
+            (None, None, "explicit-c"),
+        ];
+        for (container, service, expected) in cases {
+            let got = target.container_for(container, service);
+            assert_eq!(got.as_deref(), Some(expected), "{container:?} {service:?}");
+        }
+        assert_eq!(local_target().container_for(Some("c"), Some("php")), None);
     }
 
     #[test]

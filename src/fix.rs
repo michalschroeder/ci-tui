@@ -211,12 +211,13 @@ async fn run_group_fixes(
             check_id
         );
 
+        let container = target.container_for(check.container.as_deref(), check.service.as_deref());
         let result = run_fix_command_with_executor(
             &resolved_command,
             check_id,
             ctx.project_root,
             target,
-            check.container.as_deref(),
+            container.as_deref(),
             ctx.executor,
         )
         .await;
