@@ -67,6 +67,11 @@ mod tests {
     #[case::php_example(
         std::fs::read_to_string(manifest_path("docs/examples/php-symfony.yaml")).unwrap()
     )]
+    #[case::plain_image_without_compose_keys(
+        "version: 2\ndocker: {image: img, shell: bash, volume_mount: '.:/app', work_dir: /app}\n\
+         git: {base_branch: main, fallback_branch: HEAD~1}\nfile_patterns: {}\nchecks: {}\n"
+            .to_string()
+    )]
     #[case::local_runner_without_docker(
         "version: 2\nrunner: local\ngit: {base_branch: main, fallback_branch: HEAD~1}\n\
          file_patterns: {}\nchecks: {}\n"
@@ -111,6 +116,22 @@ mod tests {
     #[case::docker_missing("docker: {project_dir: ., shell: bash}\n", "")]
     #[case::docker_null("docker: {project_dir: ., shell: bash}\n", "docker: ~\n")]
     #[case::unsupported_version("version: 2\n", "version: 3\n")]
+    #[case::compose_without_project_dir(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {shell: bash}\n"
+    )]
+    #[case::volume_mount_without_image(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {project_dir: ., shell: bash, volume_mount: '.:/app'}\n"
+    )]
+    #[case::work_dir_without_image(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {project_dir: ., shell: bash, work_dir: /app}\n"
+    )]
+    #[case::removed_docker_container(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {project_dir: ., shell: bash, container: c}\n"
+    )]
     fn test_replaced_field_fails_schema(#[case] from: &str, #[case] to: &str) {
         let yaml = MINIMAL.replace(from, to);
         assert!(

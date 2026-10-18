@@ -122,14 +122,6 @@
         "command": {
           "type": "string"
         },
-        "container": {
-          "description": "Explicit container name (overrides service-based derivation)",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
         "env": {
           "description": "Additional environment variables for this check (merged with global env)",
           "type": "object",
@@ -161,7 +153,7 @@
           "default": false
         },
         "service": {
-          "description": "Docker service to run this check in (overrides group/global default)",
+          "description": "Compose service to run this check in (default `docker.service`; not\nallowed with `docker.image` or `runner: local`)",
           "type": [
             "string",
             "null"
@@ -226,19 +218,11 @@
       "additionalProperties": false
     },
     "DockerConfig": {
-      "description": "Docker configuration for running checks in containers.\n\nSupports both `docker exec` (for running containers) and `docker run`\n(for standalone execution).",
+      "description": "Docker configuration for running checks in containers.\n\nTwo modes, picked by `image`:\n- compose (no `image`): a command runs in its compose service (`service`,\n  overridable per check / pre-command): `docker exec` into the service's\n  running container, else `docker compose run` (see\n  [`crate::runner::resolve_service`])\n- plain image (`image` set): every command runs in `docker run <image>`\n  with `volume_mount` / `work_dir`; no compose calls",
       "type": "object",
       "properties": {
-        "container": {
-          "description": "Container name for docker exec (e.g., \"myproject-app-1\")\nIf not set, derived from project_dir + service using compose naming convention",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
         "env": {
-          "description": "Environment variables to pass to all docker exec commands",
+          "description": "Environment variables passed to every docker command",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -246,7 +230,7 @@
           "default": {}
         },
         "image": {
-          "description": "Docker image for standalone run (e.g., \"rust:latest\")\nIf set, use this image directly instead of deriving from container name",
+          "description": "Plain-image mode: every command runs in `docker run` of this image\n(e.g. \"rust:latest\"); no compose",
           "type": [
             "string",
             "null"
@@ -254,10 +238,15 @@
           "default": null
         },
         "project_dir": {
-          "type": "string"
+          "description": "Compose mode (required without `image`): directory for `docker compose\n--project-directory`",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "service": {
-          "description": "Default Docker service name (defaults to \"app\" if not specified)",
+          "description": "Compose mode: default service commands run in (default \"app\")",
           "type": "string",
           "default": "app"
         },
@@ -266,7 +255,7 @@
           "type": "string"
         },
         "volume_mount": {
-          "description": "Volume mount string for standalone run (e.g., \".:/build\")\nFull volume specification including source:dest",
+          "description": "Plain-image mode: repo mount for `docker run -v` (e.g. \".:/build\";\n`${VAR}` expanded)",
           "type": [
             "string",
             "null"
@@ -274,7 +263,7 @@
           "default": null
         },
         "work_dir": {
-          "description": "Working directory inside container (e.g., \"/build\")\nOverrides the default /app workdir",
+          "description": "Plain-image mode: working directory inside the container (default \"/app\")",
           "type": [
             "string",
             "null"
@@ -283,8 +272,31 @@
         }
       },
       "additionalProperties": false,
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "volume_mount"
+              ]
+            },
+            {
+              "required": [
+                "work_dir"
+              ]
+            }
+          ]
+        },
+        "required": [
+          "project_dir"
+        ]
+      },
+      "if": {
+        "required": [
+          "image"
+        ]
+      },
       "required": [
-        "project_dir",
         "shell"
       ]
     },
@@ -429,14 +441,6 @@
           "description": "The command to execute",
           "type": "string"
         },
-        "container": {
-          "description": "Explicit container name (overrides service-based derivation)",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
         "env": {
           "description": "Additional environment variables for this command (merged with global env)",
           "type": "object",
@@ -460,7 +464,7 @@
           "type": "string"
         },
         "service": {
-          "description": "Docker service to run in (uses group/global default if not specified)",
+          "description": "Compose service to run in (default `docker.service`; not allowed with\n`docker.image` or `runner: local`)",
           "type": [
             "string",
             "null"

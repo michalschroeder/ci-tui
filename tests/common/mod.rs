@@ -118,7 +118,8 @@ pub fn mock_executor_success(stdout: &str) -> ci_tui::runner::MockCommandExecuto
             stderr: String::new(),
         }
     });
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(RUNNING_ID.into()));
     mock
 }
 
@@ -136,7 +137,8 @@ pub fn mock_executor_failure(stderr: &str) -> ci_tui::runner::MockCommandExecuto
             stderr: err,
         }
     });
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(RUNNING_ID.into()));
     mock
 }
 
@@ -174,7 +176,6 @@ pub fn make_check_with_options(
             name: name.to_string(),
             command: format!("{} --check", id),
             service: None,
-            container: None,
             fix_command: if has_fix {
                 Some(format!("{} --fix", id))
             } else {
@@ -202,14 +203,17 @@ pub fn make_check_with_options(
     }
 }
 
-/// Minimal DockerConfig for mocked-executor tests. Field values are immaterial
-/// beyond being stable strings that mocks can match against.
+/// Container id mocks report for a running compose service
+#[allow(dead_code)]
+pub const RUNNING_ID: &str = "c0ffee";
+
+/// Minimal plain-image DockerConfig (`docker.image`) for mocked-executor
+/// tests: every command is a `docker run` of `image`.
 #[allow(dead_code)]
 pub fn test_docker_config(image: &str) -> DockerConfig {
     DockerConfig {
-        project_dir: "/app".to_string(),
+        project_dir: None,
         service: "app".to_string(),
-        container: None,
         image: Some(image.to_string()),
         volume_mount: None,
         work_dir: None,
@@ -234,17 +238,16 @@ pub fn local_sh() -> ci_tui::runner::ExecTarget {
 }
 
 /// CheckToRun whose resolved_command equals `command`, for executor tests.
-/// `container` sets the per-check container override.
+/// `service` sets the check's compose service (default `app`).
 #[allow(dead_code)]
-pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> CheckToRun {
+pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckToRun {
     CheckToRun {
         id: id.to_string(),
         group: "g".to_string(),
         definition: CheckDefinition {
             name: id.to_string(),
             command: command.to_string(),
-            service: None,
-            container: container.map(String::from),
+            service: service.map(String::from),
             fix_command: None,
             triggers: None,
             on_demand: false,
@@ -252,7 +255,7 @@ pub fn make_exec_check(id: &str, command: &str, container: Option<&str>) -> Chec
             timeout: None,
             error_pattern: None,
         },
-        service: Some("app".to_string()),
+        service: Some(service.unwrap_or("app").to_string()),
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,
@@ -372,18 +375,9 @@ impl ci_tui::runner::CommandExecutor for ConcurrencyExecutor {
         }
     }
 
-    fn is_container_running(&self, _: &str) -> bool {
-        true
+    fn running_container(&self, _: &str, _: &str, _: &std::path::Path) -> Option<String> {
+        Some(RUNNING_ID.into())
     }
 
     fn kill_container(&self, _: &str) {}
-}
-
-/// Expected Compose v2 container `{project}-{service}-1` next to `default` (`{project}-app-1`)
-#[allow(dead_code)]
-pub fn service_container(default: &str, service: &str) -> String {
-    let project = default
-        .strip_suffix("-app-1")
-        .expect("default `app` container");
-    format!("{project}-{service}-1")
 }

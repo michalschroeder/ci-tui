@@ -1,9 +1,11 @@
 //! Startup sanity probe for docker mode.
 //!
 //! Checks get repo-relative paths via `{files}`, which only resolve if the
-//! repo is visible where the command runs in the container (the container's
-//! WORKDIR for `docker exec`, `docker.work_dir` for `docker run`). A mismatch would
-//! otherwise surface only as "file not found" inside checks, so warn up front.
+//! repo is visible where the command runs in the container (the running
+//! container's WORKDIR for `docker exec`, `docker.work_dir` for plain-image
+//! `docker run`; `docker compose run` takes volumes / working_dir from the
+//! compose file, not checked). A mismatch would otherwise surface only as
+//! "file not found" inside checks, so warn up front.
 //!
 //! Warnings are advisory: callers print/show them and run normally. An
 //! unreachable Docker daemon is not: [`docker_reachable`] fails the run
@@ -12,7 +14,8 @@
 use crate::checks::CheckToRun;
 use crate::config::DockerConfig;
 use crate::runner::{
-    build_docker_exec_command, CommandExecutor, ExecTarget, OutputSink, RealCommandExecutor,
+    build_docker_exec_command, resolve_service, CommandExecutor, DockerPlacement, ExecTarget,
+    OutputSink, RealCommandExecutor,
 };
 use crate::utils::shell::quote;
 use std::collections::HashMap;
@@ -83,12 +86,17 @@ pub async fn docker_reachable(
 /// when fine or not applicable.
 ///
 /// - local mode, no selected checks or no changed files: no probe
-/// - each distinct container the checks use (`container:` override, else the
-///   check's `service` container, else the default) is probed once:
-///   - running: `test -e <file>` via `docker exec` on the first changed file
-///     present on the host; warn if missing (first stderr line appended)
-///   - not running: checks use the `docker run` fallback, whose mount is
-///     checked once (see [`run_fallback_warning`])
+/// - each distinct service the checks use is resolved once
+///   ([`resolve_service`]):
+///   - running container: `test -e <file>` via `docker exec` on the first
+///     changed file present on the host; warn if missing (first stderr line
+///     appended)
+///   - stopped (`docker compose run`): nothing to check, the compose file
+///     supplies volumes and working_dir
+///   - plain image: its `docker run` mount is checked (see
+///     [`image_mount_warning`])
+///
+/// Identical warnings are reported once.
 pub async fn docker_warnings(
     target: &ExecTarget,
     checks: &[CheckToRun],
@@ -102,50 +110,51 @@ pub async fn docker_warnings(
     if checks.is_empty() || files.is_empty() {
         return Vec::new();
     }
-    let mut containers: Vec<String> = Vec::new();
+    let mut services: Vec<Option<&str>> = Vec::new();
     for check in checks {
-        let name = docker.container_for(
-            check.definition.container.as_deref(),
-            check.service.as_deref(),
-        );
-        if !containers.contains(&name) {
-            containers.push(name);
+        let service = check.service.as_deref();
+        if !services.contains(&service) {
+            services.push(service);
         }
     }
 
     let mut warnings = Vec::new();
-    let mut stopped = Vec::new();
-    for container in &containers {
-        if executor.is_container_running(container) {
-            warnings.extend(exec_probe(docker, container, files, root, executor).await);
-        } else {
-            stopped.push(container.as_str());
+    for service in services {
+        let warning = match resolve_service(docker, service, root, executor) {
+            DockerPlacement::Exec(id) => {
+                let service = service.unwrap_or(&docker.service);
+                exec_probe(docker, service, &id, files, root, executor).await
+            }
+            DockerPlacement::ComposeRun(_) => None,
+            DockerPlacement::Image(image) => image_mount_warning(docker, image),
+        };
+        if let Some(warning) = warning.filter(|w| !warnings.contains(w)) {
+            warnings.push(warning);
         }
-    }
-    if !stopped.is_empty() {
-        warnings.extend(run_fallback_warning(docker, &stopped.join("`, `")));
     }
     warnings
 }
 
-/// `test -e <file>` in running `container`; warning if the file is missing
+/// `test -e <file>` in running container `id` of `service`; warning if the
+/// file is missing
 async fn exec_probe(
     docker: &DockerConfig,
-    container: &str,
+    service: &str,
+    id: &str,
     files: &[String],
     root: &Path,
     executor: &dyn CommandExecutor,
 ) -> Option<String> {
     let file = files.iter().find(|f| root.join(f).exists())?;
     let probe = format!("test -e {}", quote(file));
-    let command = build_docker_exec_command(container, &HashMap::new(), &probe, &docker.shell);
+    let command = build_docker_exec_command(id, &HashMap::new(), &probe, &docker.shell);
     let output = executor.execute(&command, root, &OutputSink::none()).await;
     if output.success {
         return None;
     }
     let mut warning = format!(
-        "`{file}` not found in `{container}` working directory: mount the repo at the \
-         container's WORKDIR"
+        "`{file}` not found in service `{service}` working directory (container `{id}`): \
+         mount the repo at the container's WORKDIR"
     );
     // Surface the real cause when exec itself failed (missing shell, container gone)
     if let Some(cause) = output
@@ -160,22 +169,22 @@ async fn exec_probe(
     Some(warning)
 }
 
-/// Warning for the `docker run` fallback of stopped `containers`: no
+/// Warning for plain-image `docker run` of `image`: no
 /// `docker.volume_mount`, or its destination (`src:dst[:opts]`) is not
 /// `docker.work_dir`, so `{files}` would not resolve.
-fn run_fallback_warning(docker: &DockerConfig, containers: &str) -> Option<String> {
+fn image_mount_warning(docker: &DockerConfig, image: &str) -> Option<String> {
     let work_dir = docker.working_dir().trim_end_matches('/');
     let Some(mount) = &docker.volume_mount else {
         return Some(format!(
-            "`{containers}` not running, `docker run` fallback has no repo mount: \
-             set `docker.volume_mount` (e.g. `.:{work_dir}`, matching `docker.work_dir`)"
+            "`docker run` of `{image}` has no repo mount: set `docker.volume_mount` \
+             (e.g. `.:{work_dir}`, matching `docker.work_dir`)"
         ));
     };
     let dst = mount.split(':').nth(1)?.trim_end_matches('/');
     (dst != work_dir).then(|| {
         format!(
-            "`{containers}` not running, `docker run` fallback mounts the repo at `{dst}` \
-             but runs in `docker.work_dir` `{work_dir}`: make them match"
+            "`docker run` of `{image}` mounts the repo at `{dst}` but runs in \
+             `docker.work_dir` `{work_dir}`: make them match"
         )
     })
 }

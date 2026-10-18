@@ -14,18 +14,17 @@ docker:
   # Path to directory containing docker-compose.yml
   project_dir: .
 
-  # Docker service name from docker-compose.yml
-  # Assumes you have a service like:
+  # Default compose service from docker-compose.yml. Assumes a service like:
   #   services:
   #     php:
   #       image: php:8.2-cli
+  # Checks `docker exec` into its running container (found via
+  # `docker compose ps`, any container name); when it is not running they
+  # use `docker compose run --rm php ...`
   service: php
 
   # Shell inside the container ("/bin/sh" for Alpine images)
   shell: bash
-
-  # Optional: Explicit container name if not using standard compose naming
-  # container: myproject-php-1
 
   # Environment variables passed to all commands
   # Useful for disabling xdebug, setting test environment

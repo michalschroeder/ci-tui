@@ -45,6 +45,7 @@ pub struct ConfigBuilder {
     docker_service: String,
     docker_shell: String,
     docker_env: HashMap<String, String>,
+    docker_image: Option<String>,
     docker_work_dir: Option<String>,
     docker_volume_mount: Option<String>,
     git_base: String,
@@ -64,6 +65,7 @@ impl ConfigBuilder {
             docker_service: "app".to_string(),
             docker_shell: "bash".to_string(),
             docker_env: HashMap::new(),
+            docker_image: None,
             docker_work_dir: None,
             docker_volume_mount: None,
             git_base: "main".to_string(),
@@ -97,14 +99,22 @@ impl ConfigBuilder {
         self
     }
 
-    /// Set `docker.work_dir` (container path the repo is mounted at)
+    /// Set `docker.image` (plain-image mode: every command is a `docker run`
+    /// of it; `project_dir` / `service` unused)
+    #[allow(dead_code)]
+    pub fn with_image(mut self, image: &str) -> Self {
+        self.docker_image = Some(image.to_string());
+        self
+    }
+
+    /// Set `docker.work_dir` (plain-image mode: container path the repo is mounted at)
     #[allow(dead_code)]
     pub fn with_work_dir(mut self, work_dir: &str) -> Self {
         self.docker_work_dir = Some(work_dir.to_string());
         self
     }
 
-    /// Set `docker.volume_mount` (repo mount for the `docker run` fallback)
+    /// Set `docker.volume_mount` (plain-image mode: repo mount for `docker run`)
     #[allow(dead_code)]
     pub fn with_volume_mount(mut self, mount: &str) -> Self {
         self.docker_volume_mount = Some(mount.to_string());
@@ -203,7 +213,6 @@ impl ConfigBuilder {
                 name: name.to_string(),
                 command: command.to_string(),
                 service: None,
-                container: None,
                 exec: false,
                 host: false,
                 env: std::collections::HashMap::new(),
@@ -232,7 +241,6 @@ impl ConfigBuilder {
                 name: name.to_string(),
                 command: command.to_string(),
                 service: None,
-                container: None,
                 exec: false,
                 host: true,
                 env: std::collections::HashMap::new(),
@@ -246,10 +254,9 @@ impl ConfigBuilder {
         let mut config = CiConfig::new(
             self.version,
             DockerConfig {
-                project_dir: self.docker_project_dir,
+                project_dir: Some(self.docker_project_dir),
                 service: self.docker_service,
-                container: None,
-                image: None,
+                image: self.docker_image,
                 volume_mount: self.docker_volume_mount,
                 work_dir: self.docker_work_dir,
                 shell: self.docker_shell,
@@ -348,7 +355,6 @@ impl CheckBuilder {
             name: self.name,
             command: self.command,
             service: self.service,
-            container: None,
             fix_command: self.fix_command,
             triggers: self.triggers,
             on_demand: self.on_demand,
@@ -726,7 +732,10 @@ mod tests {
     fn test_minimal_config_has_required_fields() {
         let config = minimal_config();
         assert_eq!(config.version, 2);
-        assert_eq!(config.docker().unwrap().project_dir, "./test");
+        assert_eq!(
+            config.docker().unwrap().project_dir.as_deref(),
+            Some("./test")
+        );
         assert_eq!(config.docker().unwrap().service, "app");
         assert_eq!(config.git.base_branch, "main");
         assert_eq!(config.git.fallback_branch, "HEAD~1");
@@ -753,7 +762,10 @@ mod tests {
             .with_file_pattern("custom", r"\.custom$", Some("green"))
             .build();
 
-        assert_eq!(config.docker().unwrap().project_dir, "./custom");
+        assert_eq!(
+            config.docker().unwrap().project_dir.as_deref(),
+            Some("./custom")
+        );
         assert_eq!(config.docker().unwrap().service, "web");
         assert_eq!(config.git.base_branch, "develop");
         assert_eq!(config.git.fallback_branch, "HEAD~5");

@@ -1908,7 +1908,6 @@ checks:
                 name: id.to_string(),
                 command: format!("{} {{files}}", id),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,

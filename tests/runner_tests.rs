@@ -152,7 +152,13 @@ mod build_docker_run_command_tests {
     fn basic_command() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "cargo test", "ci-tui-test-1");
+        let cmd = build_docker_run_command(
+            &config,
+            "test-image:latest",
+            &env,
+            "cargo test",
+            "ci-tui-test-1",
+        );
 
         assert!(cmd.starts_with("docker run --rm"));
         assert!(cmd.contains("test-image:latest"));
@@ -164,7 +170,8 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.shell = "/bin/sh".to_string();
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "ls", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("/bin/sh -c 'ls'"));
         assert!(!cmd.contains("bash"));
@@ -175,7 +182,8 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.work_dir = Some("/custom".to_string());
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "ls", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("-w /custom"));
     }
@@ -185,7 +193,8 @@ mod build_docker_run_command_tests {
         let config = super::common::test_docker_config("test-image:latest");
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
 
         assert!(cmd.contains("-e FOO='bar'"));
     }
@@ -195,7 +204,8 @@ mod build_docker_run_command_tests {
         let mut config = super::common::test_docker_config("test-image:latest");
         config.volume_mount = Some("/host/path:/container/path".to_string());
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
 
         // Volume mount should be included
         assert!(cmd.contains("-v /host/path:/container/path"));
@@ -204,7 +214,13 @@ mod build_docker_run_command_tests {
     #[test]
     fn includes_container_name() {
         let config = super::common::test_docker_config("test-image:latest");
-        let cmd = build_docker_run_command(&config, &HashMap::new(), "ls", "ci-tui-lint-42-7");
+        let cmd = build_docker_run_command(
+            &config,
+            "test-image:latest",
+            &HashMap::new(),
+            "ls",
+            "ci-tui-lint-42-7",
+        );
 
         // Named so cancel/timeout can `docker kill` it
         assert!(cmd.contains("--name ci-tui-lint-42-7 "), "got: {cmd}");
@@ -214,7 +230,8 @@ mod build_docker_run_command_tests {
     fn rm_flag_always_present() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
 
         // --rm flag should be present for auto-cleanup
         assert!(cmd.contains("--rm"));
@@ -224,7 +241,8 @@ mod build_docker_run_command_tests {
     fn command_structure_order() {
         let config = super::common::test_docker_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(&config, &env, "test", "ci-tui-test-1");
+        let cmd =
+            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
 
         // Check general structure: docker run --rm [volumes] [env] -w dir image bash -c 'cmd'
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -310,12 +328,17 @@ mod execute_docker_command_tests {
     use pretty_assertions::assert_eq;
     use std::path::Path;
 
+    /// Compose mode target: `project_dir: ./test`, default service `app`
+    fn compose_target() -> ci_tui::runner::ExecTarget {
+        common::configs::ConfigBuilder::new().build().runner
+    }
+
     #[tokio::test]
     async fn execute_successful_check() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("test-container"))
-            .returning(|_| true);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("app"), eq(Path::new("/app")))
+            .returning(|_, _, _| Some("test-container".into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| cmd.contains("cargo test"))
             .returning(|_, _, _| CommandOutput {
@@ -324,13 +347,13 @@ mod execute_docker_command_tests {
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let result = execute_command_with_executor(
             "test-check".to_string(),
             "cargo test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -348,9 +371,9 @@ mod execute_docker_command_tests {
     #[tokio::test]
     async fn execute_failed_check() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("test-container"))
-            .returning(|_| true);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("app"), eq(Path::new("/app")))
+            .returning(|_, _, _| Some("test-container".into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| cmd.contains("cargo test"))
             .returning(|_, _, _| CommandOutput {
@@ -359,13 +382,13 @@ mod execute_docker_command_tests {
                 stderr: "error: test failed\n".to_string(),
             });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let result = execute_command_with_executor(
             "test-check".to_string(),
             "cargo test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -380,29 +403,26 @@ mod execute_docker_command_tests {
     }
 
     #[tokio::test]
-    async fn uses_docker_exec_when_container_running() {
+    async fn uses_docker_exec_into_resolved_container_when_service_running() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("test-container"))
-            .returning(|_| true);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("app"), eq(Path::new("/app")))
+            .returning(|_, _, _| Some("test-container".into()));
         mock.expect_execute()
-            .withf(|cmd: &str, _, _| {
-                // Should use docker exec when container is running
-                cmd.starts_with("docker exec")
-            })
+            .withf(|cmd: &str, _, _| cmd.starts_with("docker exec test-container "))
             .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let _result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -414,15 +434,15 @@ mod execute_docker_command_tests {
     }
 
     #[tokio::test]
-    async fn uses_docker_run_when_container_not_running() {
+    async fn uses_compose_run_when_service_not_running() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("test-container"))
-            .returning(|_| false);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("app"), eq(Path::new("/app")))
+            .returning(|_, _, _| None);
         mock.expect_execute()
             .withf(|cmd: &str, _, _| {
-                // Should use docker run when container is not running
-                cmd.starts_with("docker run")
+                cmd.starts_with("docker compose --project-directory ./test run --rm -T --name ")
+                    && cmd.ends_with(" app bash -c 'test'")
             })
             .returning(|_, _, _| CommandOutput {
                 success: true,
@@ -430,13 +450,13 @@ mod execute_docker_command_tests {
                 stderr: String::new(),
             });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let _result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -451,13 +471,13 @@ mod execute_docker_command_tests {
     async fn captures_duration() {
         let mock = mock_executor_success("output");
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -475,7 +495,8 @@ mod execute_docker_command_tests {
     #[tokio::test]
     async fn filters_docker_warnings_in_stderr() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
@@ -483,13 +504,13 @@ mod execute_docker_command_tests {
                 .to_string(),
         });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -507,20 +528,21 @@ mod execute_docker_command_tests {
     #[tokio::test]
     async fn caps_stdout_and_stderr_to_max_output_lines() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "1\n2\n3\n4\n5".to_string(),
             stderr: "e1\ne2\ne3".to_string(),
         });
 
-        let config = super::common::test_docker_target("test-image:latest");
+        let config = compose_target();
         let env = HashMap::new();
         let result = execute_command_with_executor(
             "test-check".to_string(),
             "test",
             Path::new("/app"),
-            Some("test-container"),
+            Some("app"),
             &config,
             &env,
             &mock,
@@ -674,7 +696,8 @@ mod check_runner_tests {
     async fn run_checks_sequential_sends_events_in_order() {
         // Create mock that returns success for any command
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "ok".to_string(),
@@ -743,7 +766,8 @@ mod check_runner_tests {
     async fn run_checks_skips_on_demand_checks() {
         // Create mock that should NOT be called for on-demand checks
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         // No execute expectation for on-demand checks
 
         let config = ConfigBuilder::new().build();
@@ -790,7 +814,8 @@ mod check_runner_tests {
     #[tokio::test]
     async fn run_checks_handles_pre_commands_success() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "ok".to_string(),
@@ -836,7 +861,8 @@ mod check_runner_tests {
     #[tokio::test]
     async fn run_checks_truncates_pre_command_output() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: "1\n2\n3\n4\n5".to_string(),
@@ -876,7 +902,7 @@ mod check_runner_tests {
     #[tokio::test]
     async fn local_mode_pre_command_runs_on_host_shell() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().times(0);
+        mock.expect_running_container().times(0);
         mock.expect_execute()
             .withf(|cmd, _, _| cmd == "bash -c 'echo warmup'")
             .times(1)
@@ -918,7 +944,8 @@ mod check_runner_tests {
     #[tokio::test]
     async fn run_checks_pre_command_failure_stops_execution() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: false, // Pre-command fails
             stdout: String::new(),
@@ -973,7 +1000,7 @@ mod check_runner_tests {
     async fn run_checks_host_pre_command_runs_raw_command() {
         let mut mock = MockCommandExecutor::new();
         // Host pre-commands skip the Docker path entirely.
-        mock.expect_is_container_running().times(0);
+        mock.expect_running_container().times(0);
         // Executor must receive the raw command, NOT a docker exec/run wrapped version.
         // Make it fail so the check never runs and we only need one execute expectation.
         mock.expect_execute()
@@ -1032,7 +1059,7 @@ mod check_runner_tests {
     async fn all_on_demand_group_skips_pre_commands() {
         let mut mock = MockCommandExecutor::new();
         // has_runnable=false → pre_commands never run → executor never called for execute/is_running
-        mock.expect_is_container_running().times(0);
+        mock.expect_running_container().times(0);
         mock.expect_execute().times(0);
 
         let config = ConfigBuilder::new()
@@ -1184,6 +1211,76 @@ mod check_runner_tests {
         );
     }
 
+    /// Commands a `run_checks` of checks `a`, `b` (group `g`, parallel,
+    /// pre-command `init` in service `db`) executes; `db` is stopped, `app`
+    /// runs as `app-id`
+    async fn compose_run_commands() -> Vec<String> {
+        let mut config = ConfigBuilder::new()
+            .with_parallel_group("g")
+            .with_pre_command("g", "init", "migrate")
+            .build();
+        config.checks["g"].pre_commands[0].service = Some("db".into());
+        let mut mock = MockCommandExecutor::new();
+        // Once per service for the whole run, not per check
+        mock.expect_running_container()
+            .withf(|_, service, _| service == "app")
+            .times(1)
+            .returning(|_, _, _| Some("app-id".into()));
+        mock.expect_running_container()
+            .withf(|_, service, _| service == "db")
+            .times(1)
+            .returning(|_, _, _| None);
+        let executed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&executed);
+        mock.expect_execute().returning(move |cmd, _, _| {
+            log.lock().unwrap().push(cmd.to_string());
+            CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
+        });
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+        let checks = vec![
+            make_widget_check("a", "g", "A", false),
+            make_widget_check("b", "g", "B", false),
+        ];
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        runner.run_checks(checks, tx).await.unwrap();
+        drop(collect_events(rx).await);
+        let mut executed = executed.lock().unwrap().clone();
+        executed.sort();
+        executed
+    }
+
+    #[tokio::test]
+    async fn run_checks_resolves_each_service_once_and_places_pre_commands() {
+        let executed = compose_run_commands().await;
+
+        assert_eq!(executed.len(), 3, "{executed:?}");
+        // Sorted: `docker compose ...` first
+        let pre = &executed[0];
+        let name = pre
+            .split_whitespace()
+            .skip_while(|w| *w != "--name")
+            .nth(1)
+            .unwrap_or_default();
+        assert_eq!(
+            *pre,
+            format!(
+                "docker compose --project-directory ./test run --rm -T --name {name} db \
+                 bash -c 'migrate'"
+            )
+        );
+        assert_eq!(
+            executed[1..],
+            [
+                "docker exec app-id bash -c 'a --check src/main.rs src/lib.rs'",
+                "docker exec app-id bash -c 'b --check src/main.rs src/lib.rs'",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn only_parallel_group_checks_are_queued_before_start() {
         let config = ConfigBuilder::new()
@@ -1228,23 +1325,22 @@ mod run_single_check_with_executor_tests {
     use std::path::Path;
 
     #[tokio::test]
-    async fn uses_default_container_when_check_has_none() {
+    async fn uses_default_service_when_check_has_none() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("default-container"))
-            .returning(|_| true);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("app"), eq(Path::new("/app")))
+            .returning(|_, _, _| Some("default-container".into()));
         mock.expect_execute()
-            .withf(|cmd: &str, _, _| cmd.contains("default-container") && cmd.contains("echo hi"))
+            .withf(|cmd: &str, _, _| cmd == "docker exec default-container bash -c 'echo hi'")
             .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: "hi".into(),
                 stderr: String::new(),
             });
 
-        let check = super::common::make_exec_check("c1", "echo hi", None);
-        let mut docker = super::common::test_docker_config("img:latest");
-        docker.container = Some("default-container".into());
-        let cfg = ExecTarget::Docker(docker);
+        let mut check = super::common::make_exec_check("c1", "echo hi", None);
+        check.service = None;
+        let cfg = common::configs::ConfigBuilder::new().build().runner;
         let result = run_single_check_with_executor(
             &check,
             Path::new("/app"),
@@ -1260,23 +1356,22 @@ mod run_single_check_with_executor_tests {
     }
 
     #[tokio::test]
-    async fn per_check_container_overrides_default() {
+    async fn per_check_service_overrides_default() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .with(eq("override-container"))
-            .returning(|_| true);
+        mock.expect_running_container()
+            .with(eq("./test"), eq("worker"), eq(Path::new("/app")))
+            .returning(|_, _, _| Some("worker-container".into()));
         mock.expect_execute()
-            .withf(|cmd: &str, _, _| cmd.contains("override-container"))
+            .withf(|cmd: &str, _, _| cmd.starts_with("docker exec worker-container "))
+            .times(1)
             .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
             });
 
-        let check = super::common::make_exec_check("c1", "ls", Some("override-container"));
-        let mut docker = super::common::test_docker_config("img:latest");
-        docker.container = Some("default-container".into());
-        let cfg = ExecTarget::Docker(docker);
+        let check = super::common::make_exec_check("c1", "ls", Some("worker"));
+        let cfg = common::configs::ConfigBuilder::new().build().runner;
         let _ = run_single_check_with_executor(
             &check,
             Path::new("/app"),
@@ -1290,7 +1385,8 @@ mod run_single_check_with_executor_tests {
     #[tokio::test]
     async fn merges_global_and_check_env_with_check_taking_precedence() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| {
                 // global FOO=global overridden to FOO=check
@@ -1323,7 +1419,8 @@ mod run_single_check_with_executor_tests {
     #[tokio::test]
     async fn reports_failure_when_exec_fails() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: false,
             stdout: String::new(),
@@ -1354,7 +1451,8 @@ mod run_check_with_command_with_executor_tests {
     #[tokio::test]
     async fn uses_supplied_command_not_resolved_command() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| cmd.contains("phpunit-all") && !cmd.contains("phpunit a.rs"))
             .returning(|_, _, _| CommandOutput {
@@ -1378,25 +1476,24 @@ mod run_check_with_command_with_executor_tests {
     }
 
     // Check with a non-default `service` execs into that service's container
+    // (resolved via compose, whatever its name: `container_name:`, Compose v1)
     #[tokio::test]
     async fn check_service_execs_into_service_container() {
-        let docker = super::common::test_docker_config("img:latest");
-        let worker = super::common::service_container(&docker.container_name(), "worker");
-        let prefix = format!("docker exec {worker} ");
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .withf(|_, service, _| service == "worker")
+            .returning(|_, _, _| Some("legacy_worker".into()));
         mock.expect_execute()
             .times(1)
-            .withf(move |cmd: &str, _, _| cmd.starts_with(&prefix))
+            .withf(|cmd: &str, _, _| cmd == "docker exec legacy_worker bash -c 'ls'")
             .returning(|_, _, _| CommandOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
             });
 
-        let mut c = super::common::make_exec_check("a", "ls", None);
-        c.service = Some("worker".into());
-        let cfg = ci_tui::runner::ExecTarget::Docker(docker);
+        let c = super::common::make_exec_check("a", "ls", Some("worker"));
+        let cfg = common::configs::ConfigBuilder::new().build().runner;
         let _ = run_check_with_command_with_executor(
             &c,
             "ls",
@@ -1408,6 +1505,47 @@ mod run_check_with_command_with_executor_tests {
         )
         .await;
     }
+
+    // Stopped non-default service: `docker compose run` of THAT service (its
+    // image), never the default service's
+    #[tokio::test]
+    async fn stopped_check_service_runs_via_compose_run_of_that_service() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_running_container()
+            .withf(|_, service, _| service == "worker")
+            .returning(|_, _, _| None);
+        mock.expect_execute()
+            .times(1)
+            .withf(|cmd: &str, _, _| {
+                let name = cmd.split_whitespace().skip_while(|w| *w != "--name").nth(1);
+                let expected = format!(
+                    "docker compose --project-directory ./test run --rm -T --name {} \
+                     -e FOO='bar' worker bash -c 'ls'",
+                    name.unwrap_or_default()
+                );
+                name.is_some_and(|n| n.starts_with("ci-tui-")) && cmd == expected
+            })
+            .returning(|_, _, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let mut c = super::common::make_exec_check("a", "ls", Some("worker"));
+        c.definition.env.insert("FOO".into(), "bar".into());
+        let cfg = common::configs::ConfigBuilder::new().build().runner;
+        let result = run_check_with_command_with_executor(
+            &c,
+            "ls",
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
+        )
+        .await;
+        assert_eq!(result.status, CheckStatus::Passed);
+    }
 }
 
 mod run_fix_command_with_executor_tests {
@@ -1418,7 +1556,8 @@ mod run_fix_command_with_executor_tests {
     #[tokio::test]
     async fn check_id_is_literal_fix() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_running_container()
+            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
@@ -1429,7 +1568,7 @@ mod run_fix_command_with_executor_tests {
         let result = run_fix_command_with_executor(
             "cargo fmt",
             Path::new("/app"),
-            Some("container"),
+            None,
             &cfg,
             &mock,
             DEFAULT_MAX_OUTPUT_LINES,
@@ -1440,9 +1579,9 @@ mod run_fix_command_with_executor_tests {
     }
 
     #[tokio::test]
-    async fn uses_docker_run_when_container_not_running() {
+    async fn image_mode_uses_docker_run() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| false);
+        mock.expect_running_container().never();
         mock.expect_execute()
             .withf(|cmd: &str, _, _| cmd.starts_with("docker run") && cmd.contains("cargo fmt"))
             .returning(|_, _, _| CommandOutput {
@@ -1455,7 +1594,7 @@ mod run_fix_command_with_executor_tests {
         let _ = run_fix_command_with_executor(
             "cargo fmt",
             Path::new("/app"),
-            Some("container"),
+            None,
             &cfg,
             &mock,
             DEFAULT_MAX_OUTPUT_LINES,
@@ -1583,8 +1722,8 @@ mod cancel_tests {
             std::future::pending().await
         }
 
-        fn is_container_running(&self, _container_name: &str) -> bool {
-            false
+        fn running_container(&self, _: &str, _: &str, _: &Path) -> Option<String> {
+            None
         }
 
         fn kill_container(&self, name: &str) {
@@ -1862,7 +2001,7 @@ mod cancel_tests {
     #[tokio::test]
     async fn finished_docker_run_check_does_not_kill_container() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| false);
+        mock.expect_running_container().returning(|_, _, _| None);
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),

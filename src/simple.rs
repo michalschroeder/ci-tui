@@ -42,6 +42,8 @@ pub async fn run_with_executor(
     project_root: PathBuf,
     executor: std::sync::Arc<dyn crate::runner::CommandExecutor>,
 ) -> Result<Vec<CheckResult>> {
+    // One run: each service's container resolved once
+    let executor = crate::runner::CachingExecutor::wrap(executor);
     let target = &config.runner;
     let max_output_lines = config.max_output_lines;
     let grouped = group_checks(&checks);
@@ -110,8 +112,10 @@ pub async fn run(
         cprintln!();
     }
 
-    let executor: std::sync::Arc<dyn crate::runner::CommandExecutor> =
-        std::sync::Arc::new(crate::runner::RealCommandExecutor);
+    // One run: each service's container resolved once
+    let executor = crate::runner::CachingExecutor::wrap(std::sync::Arc::new(
+        crate::runner::RealCommandExecutor,
+    ));
     let grouped = group_checks(&checks);
     let mut all_results: Vec<CheckResult> = Vec::new();
 
@@ -428,7 +432,6 @@ mod tests {
                 name: "C".into(),
                 command: command.into(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
@@ -505,7 +508,7 @@ mod tests {
             ..LocalConfig::default()
         };
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().times(0);
+        mock.expect_running_container().times(0);
         mock.expect_execute()
             .withf(|cmd, _, _| cmd == "env APP_ENV='ci' bash -c 'ls'")
             .times(1)

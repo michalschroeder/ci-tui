@@ -405,7 +405,6 @@ mod tests {
                 name: format!("{id} name"),
                 command: "true".into(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
