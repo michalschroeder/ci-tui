@@ -241,7 +241,6 @@ checks:
       - name: Migrate database
         command: php artisan migrate --env=testing
         service: php
-        exec: true
     checks:
       phpunit:
         name: PHPUnit
@@ -570,14 +569,12 @@ checks:
       - name: Migrate test database
         command: php artisan migrate --env=testing
         service: php
-        exec: true
         env:
           DB_CONNECTION: testing
 
       - name: Seed database
         command: php artisan db:seed --class=TestSeeder
         service: php
-        exec: true
 
       - name: Ensure local cache dir
         command: mkdir -p .cache/tests
@@ -599,13 +596,9 @@ checks:
 - Falls back to `docker.service`
 - Config error in plain-image mode (`docker.image`) and with `runner: local`
 
-**`exec`** (default: `false`)
-- If `true`, uses `docker exec` (requires running container)
-- If `false`, uses `docker run` (creates new container)
-
 **`host`** (default: `false`)
 - If `true`, runs the command directly on the host machine via `sh -c` instead of in Docker
-- When `true`, `service` and `exec` are ignored
+- When `true`, `service` is ignored
 
 **`env`** (optional)
 - Additional environment variables

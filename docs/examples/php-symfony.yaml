@@ -149,7 +149,6 @@ checks:
       - name: Migrate test database
         command: bin/console doctrine:migrations:migrate --no-interaction --env=test
         service: php
-        exec: true
         env:
           APP_ENV: test
 
@@ -157,7 +156,6 @@ checks:
       # - name: Load test fixtures
       #   command: bin/console doctrine:fixtures:load --no-interaction --env=test
       #   service: php
-      #   exec: true
       #   env:
       #     APP_ENV: test
 

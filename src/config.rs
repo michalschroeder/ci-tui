@@ -587,9 +587,6 @@ pub struct PreCommand {
     /// `docker.image` or `runner: local`)
     #[serde(default)]
     pub service: Option<String>,
-    /// If true, use `docker compose exec` (existing container) instead of `run` (new container)
-    #[serde(default)]
-    pub exec: bool,
     /// If true, run command directly on host instead of inside Docker
     #[serde(default)]
     pub host: bool,
@@ -1538,6 +1535,13 @@ checks: {}
         fn test_container_field_removed(#[case] docker: &str, #[case] group: &str) {
             let err = validated(docker, group).unwrap_err();
             assert!(err.contains("unknown field `container`"), "{err}");
+        }
+
+        #[test]
+        fn test_pre_command_exec_field_removed() {
+            let group = "    pre_commands:\n      - name: init\n        command: x\n        exec: true\n    checks: {}\n";
+            let err = validated(COMPOSE, group).unwrap_err();
+            assert!(err.contains("unknown field `exec`"), "{err}");
         }
 
         // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
