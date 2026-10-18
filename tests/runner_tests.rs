@@ -1385,8 +1385,6 @@ mod run_single_check_with_executor_tests {
     #[tokio::test]
     async fn merges_global_and_check_env_with_check_taking_precedence() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_running_container()
-            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| {
                 // global FOO=global overridden to FOO=check
@@ -1417,10 +1415,8 @@ mod run_single_check_with_executor_tests {
     }
 
     #[tokio::test]
-    async fn reports_failure_when_exec_fails() {
+    async fn reports_failure_when_command_fails() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_running_container()
-            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: false,
             stdout: String::new(),
@@ -1451,8 +1447,6 @@ mod run_check_with_command_with_executor_tests {
     #[tokio::test]
     async fn uses_supplied_command_not_resolved_command() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_running_container()
-            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute()
             .withf(|cmd: &str, _, _| cmd.contains("phpunit-all") && !cmd.contains("phpunit a.rs"))
             .returning(|_, _, _| CommandOutput {
@@ -1556,8 +1550,6 @@ mod run_fix_command_with_executor_tests {
     #[tokio::test]
     async fn check_id_is_literal_fix() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_running_container()
-            .returning(|_, _, _| Some(common::RUNNING_ID.into()));
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
@@ -2001,7 +1993,6 @@ mod cancel_tests {
     #[tokio::test]
     async fn finished_docker_run_check_does_not_kill_container() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_running_container().returning(|_, _, _| None);
         mock.expect_execute().returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),

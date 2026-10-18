@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -200,12 +200,12 @@ impl CommandExecutor for RealCommandExecutor {
 }
 
 /// [`CommandExecutor`] asking `inner` for each service's running container
-/// once, so one run (a [`CheckRunner::run_checks`], a simple-mode or a fix
-/// run) queries `docker compose ps` per service, not per check. A container
-/// started or stopped mid-run is not noticed until the next run.
+/// once, so one run (a [`CheckRunner`], a simple-mode or a fix run) queries
+/// `docker compose ps` per service, not per check. A container started or
+/// stopped mid-run is not noticed until the next run.
 pub struct CachingExecutor {
     inner: Arc<dyn CommandExecutor>,
-    running: Mutex<HashMap<String, Option<String>>>,
+    running: Mutex<HashMap<String, Arc<OnceLock<Option<String>>>>>,
 }
 
 impl CachingExecutor {
@@ -225,23 +225,24 @@ impl CommandExecutor for CachingExecutor {
     }
 
     /// Cached per service (`project_dir` / `working_dir` are fixed per run).
-    /// The lock is held while querying, so concurrent checks of one service
-    /// wait for the first answer instead of querying too.
+    /// Concurrent checks of one service wait for the first answer instead of
+    /// querying too; other services query in parallel.
     fn running_container(
         &self,
         project_dir: &str,
         service: &str,
         working_dir: &Path,
     ) -> Option<String> {
-        // A panic while holding the lock leaves the map consistent
-        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        running
-            .entry(service.to_string())
-            .or_insert_with(|| {
-                self.inner
-                    .running_container(project_dir, service, working_dir)
-            })
-            .clone()
+        let cell = {
+            // A panic while holding the lock leaves the map consistent
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(running.entry(service.to_string()).or_default())
+        };
+        cell.get_or_init(|| {
+            self.inner
+                .running_container(project_dir, service, working_dir)
+        })
+        .clone()
     }
 
     fn kill_container(&self, name: &str) {
@@ -937,7 +938,9 @@ impl CheckRunner {
         Self::with_executor(config, project_root, Arc::new(RealCommandExecutor))
     }
 
-    /// Create a new check runner with a custom executor (for testing)
+    /// Create a new check runner with a custom executor (for testing).
+    /// A runner serves one run: each service's container is resolved once
+    /// ([`CachingExecutor`]).
     pub fn with_executor(
         config: impl Into<Arc<CiConfig>>,
         project_root: &Path,
@@ -946,7 +949,7 @@ impl CheckRunner {
         Self {
             config: config.into(),
             project_root: Arc::from(project_root),
-            executor,
+            executor: CachingExecutor::wrap(executor),
             cancels: CancelRegistry::default(),
         }
     }
@@ -973,14 +976,7 @@ impl CheckRunner {
     ) -> Result<()> {
         use crate::checks::group_checks;
         let grouped = group_checks(&checks);
-        // One run: each service's container resolved once (CachingExecutor)
-        let run = Self {
-            config: Arc::clone(&self.config),
-            project_root: Arc::clone(&self.project_root),
-            executor: CachingExecutor::wrap(Arc::clone(&self.executor)),
-            cancels: self.cancels.clone(),
-        };
-        run_check_groups(&run, grouped, &event_tx).await
+        run_check_groups(self, grouped, &event_tx).await
     }
 
     /// Run `group`'s pre-commands, sending their events to `event_tx`; false

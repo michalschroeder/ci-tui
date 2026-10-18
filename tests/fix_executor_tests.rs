@@ -10,8 +10,6 @@ use std::path::Path;
 #[tokio::test]
 async fn returns_ok_on_success() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
@@ -27,8 +25,6 @@ async fn returns_ok_on_success() {
 #[tokio::test]
 async fn reports_stderr_when_present() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-noise".into(),
@@ -45,8 +41,6 @@ async fn reports_stderr_when_present() {
 #[tokio::test]
 async fn falls_back_to_stdout_when_stderr_empty() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-only".into(),
@@ -63,8 +57,6 @@ async fn falls_back_to_stdout_when_stderr_empty() {
 #[tokio::test]
 async fn falls_back_to_formatted_message_when_both_empty() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),

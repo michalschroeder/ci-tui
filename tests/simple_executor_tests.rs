@@ -11,8 +11,6 @@ use std::path::Path;
 #[tokio::test]
 async fn passes_when_executor_succeeds() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: "output".into(),
@@ -34,8 +32,6 @@ async fn passes_when_executor_succeeds() {
 #[tokio::test]
 async fn fails_with_stderr_when_executor_reports_failure() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_running_container()
-        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),

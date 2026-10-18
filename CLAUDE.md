@@ -144,7 +144,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 - **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching
 - **checks/**: `CheckToRun` struct (`mod.rs`), `determine_checks()` logic (`determine.rs`), `group_checks()` for execution grouping
-- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants. `resolve_service()` is the only docker placement path (checks, pre-commands, fix, preflight): plain image (`docker.image`) → `docker run`; compose → `CommandExecutor::running_container` (`docker compose ps -q --status running <service>`, first id) → `docker exec <id>`, else `docker compose run --rm -T --name <unique> <service>`. `CachingExecutor` caches the lookup per service for one run (`run_checks`, simple, fix)
+- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants. `resolve_service()` is the only docker placement path (checks, pre-commands, fix, preflight): plain image (`docker.image`) → `docker run`; compose → `CommandExecutor::running_container` (`docker compose ps -q --status running <service>`, first id) → `docker exec <id>`, else `docker compose run --rm -T --name <unique> <service>`. `CachingExecutor` caches the lookup per service for one run (each `CheckRunner`, simple, fix)
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets

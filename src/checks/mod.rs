@@ -97,7 +97,8 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// Docker service to use (resolved from check/group/global default); `None` in local mode
+    /// Docker service to use (resolved from check/group/global default); `None` in local and
+    /// plain-image mode
     pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,

@@ -86,17 +86,15 @@ pub async fn docker_reachable(
 /// when fine or not applicable.
 ///
 /// - local mode, no selected checks or no changed files: no probe
-/// - each distinct service the checks use is resolved once
+/// - plain image: its `docker run` mount is checked once (see
+///   [`image_mount_warning`])
+/// - compose: each distinct service the checks use is resolved once
 ///   ([`resolve_service`]):
 ///   - running container: `test -e <file>` via `docker exec` on the first
 ///     changed file present on the host; warn if missing (first stderr line
 ///     appended)
 ///   - stopped (`docker compose run`): nothing to check, the compose file
 ///     supplies volumes and working_dir
-///   - plain image: its `docker run` mount is checked (see
-///     [`image_mount_warning`])
-///
-/// Identical warnings are reported once.
 pub async fn docker_warnings(
     target: &ExecTarget,
     checks: &[CheckToRun],
@@ -110,9 +108,13 @@ pub async fn docker_warnings(
     if checks.is_empty() || files.is_empty() {
         return Vec::new();
     }
-    let mut services: Vec<Option<&str>> = Vec::new();
+    // One placement for every check: no per-service lookup
+    if let Some(image) = &docker.image {
+        return image_mount_warning(docker, image).into_iter().collect();
+    }
+    let mut services: Vec<&str> = Vec::new();
     for check in checks {
-        let service = check.service.as_deref();
+        let service = check.service.as_deref().unwrap_or(&docker.service);
         if !services.contains(&service) {
             services.push(service);
         }
@@ -120,16 +122,8 @@ pub async fn docker_warnings(
 
     let mut warnings = Vec::new();
     for service in services {
-        let warning = match resolve_service(docker, service, root, executor) {
-            DockerPlacement::Exec(id) => {
-                let service = service.unwrap_or(&docker.service);
-                exec_probe(docker, service, &id, files, root, executor).await
-            }
-            DockerPlacement::ComposeRun(_) => None,
-            DockerPlacement::Image(image) => image_mount_warning(docker, image),
-        };
-        if let Some(warning) = warning.filter(|w| !warnings.contains(w)) {
-            warnings.push(warning);
+        if let DockerPlacement::Exec(id) = resolve_service(docker, Some(service), root, executor) {
+            warnings.extend(exec_probe(docker, service, &id, files, root, executor).await);
         }
     }
     warnings
