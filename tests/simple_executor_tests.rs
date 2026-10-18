@@ -280,3 +280,45 @@ async fn parallel_group_respects_max_parallel(
     assert_eq!(results.len(), 5, "every check still runs");
     assert_eq!(executor.peak(), expected);
 }
+
+/// Daemon error of a `docker run` / `docker compose run` whose `--name` is taken
+const NAME_CONFLICT: &str = "Error response from daemon: Conflict. The container name \
+                             \"/ci-tui-1-0\" is already in use by container \"35127c\".";
+
+// #235: a container that never starts fails the check with docker's error
+// in its output (stderr), not an empty failure
+#[rstest::rstest]
+#[case::compose_run(common::configs::ConfigBuilder::new().build().runner, "docker compose ")]
+#[case::docker_run(common::test_docker_target("img:latest"), "docker run ")]
+#[tokio::test]
+async fn failed_container_start_shows_docker_error(
+    #[case] target: ci_tui::runner::ExecTarget,
+    #[case] prefix: &'static str,
+) {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_running_container().returning(|_, _, _| None);
+    mock.expect_execute()
+        .withf(move |cmd, _, _| cmd.starts_with(prefix) && cmd.contains(" --name ci-tui-"))
+        .returning(|_, _, _| CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: format!(" Container ci-tui-1-0  Creating\n{NAME_CONFLICT}\n"),
+        });
+    let check = common::make_exec_check("c", "cargo test", None);
+    let result = run_check_with_executor(
+        &check,
+        Path::new("/app"),
+        &target,
+        &mock,
+        DEFAULT_MAX_OUTPUT_LINES,
+    )
+    .await;
+    assert_eq!(result.status, CheckStatus::Failed);
+    assert!(
+        result.error_output.contains(NAME_CONFLICT),
+        "{}",
+        result.error_output
+    );
+    let shown = ci_tui::simple::format_failed_check(&result, None);
+    assert!(shown.contains(NAME_CONFLICT), "{shown}");
+}
