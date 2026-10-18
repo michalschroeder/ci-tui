@@ -1553,91 +1553,10 @@ mod tests {
         assert_eq!(config.runner.env().get("A").unwrap(), "b");
     }
 
-    /// Check `a` running `ls` with `container` / resolved `service` overrides
-    fn check_on(container: Option<&str>, service: Option<&str>) -> CheckToRun {
-        CheckToRun {
-            id: "a".into(),
-            group: "g".into(),
-            definition: crate::config::CheckDefinition {
-                name: "a".into(),
-                command: "ls".into(),
-                service: service.map(String::from),
-                container: container.map(String::from),
-                fix_command: None,
-                triggers: None,
-                on_demand: false,
-                env: HashMap::new(),
-                timeout: None,
-                error_pattern: None,
-            },
-            service: service.map(String::from),
-            files: crate::checks::CheckFiles::Files(vec![]),
-            resolved_command: "ls".into(),
-            resolved_fix_command: None,
-            cache_key: None,
-        }
-    }
-
-    /// Command `check` runs on `target` with every container running
-    async fn command_for(target: &ExecTarget, check: &CheckToRun) -> String {
-        let seen = Arc::new(Mutex::new(String::new()));
-        let log = Arc::clone(&seen);
-        let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
-        mock.expect_execute().returning(move |cmd, _, _| {
-            *log.lock().unwrap() = cmd.to_string();
-            CommandOutput {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            }
-        });
-        let root = Path::new(".");
-        let sink = OutputSink::none();
-        run_check_with_command_with_executor(check, "ls", root, target, &mock, 100, &sink).await;
-        let cmd = seen.lock().unwrap().clone();
-        cmd
-    }
-
-    fn explicit_container_target() -> ExecTarget {
-        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
-        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
-    }
-
-    #[tokio::test]
-    async fn test_check_service_execs_into_service_container() {
-        let target = docker_target();
-        let ExecTarget::Docker(docker) = &target else {
-            unreachable!()
-        };
-        let expected = format!("docker exec {}-php-1 ", docker.compose_project_name());
-
-        let cmd = command_for(&target, &check_on(None, Some("php"))).await;
-
-        assert!(cmd.starts_with(&expected), "got: {cmd}");
-    }
-
-    #[tokio::test]
-    async fn test_check_container_beats_service() {
-        let cmd = command_for(&docker_target(), &check_on(Some("custom-c"), Some("php"))).await;
-        assert!(cmd.starts_with("docker exec custom-c "), "got: {cmd}");
-    }
-
-    #[tokio::test]
-    async fn test_check_default_or_no_service_uses_config_container() {
-        for service in [None, Some("app")] {
-            let check = check_on(None, service);
-            let cmd = command_for(&explicit_container_target(), &check).await;
-            assert!(
-                cmd.starts_with("docker exec explicit-c "),
-                "{service:?}: {cmd}"
-            );
-        }
-    }
-
     #[test]
     fn test_container_for_precedence() {
-        let target = explicit_container_target();
+        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
+        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
         let ExecTarget::Docker(docker) = &target else {
             unreachable!()
         };

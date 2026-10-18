@@ -385,32 +385,26 @@ async fn fix_runs_in_check_service_container() {
     let ci_tui::runner::ExecTarget::Docker(docker) = &config.runner else {
         unreachable!("docker target expected")
     };
-    let expected = docker.container_name().replace("-app-1", "-php-1");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = Arc::clone(&seen);
+    let php = docker.container_name().replace("-app-1", "-php-1");
+    let prefix = format!("docker exec {php} ");
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
-    mock.expect_execute().returning(move |cmd, _, _| {
-        log.lock().unwrap().push(cmd.to_string());
-        CommandOutput {
+    mock.expect_execute()
+        .times(1)
+        .withf(move |cmd: &str, _, _| cmd.starts_with(&prefix))
+        .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
-        }
-    });
-    let changed = ChangedFiles {
-        files: vec!["src/main.rs".into()],
-        base_ref: "main".into(),
-    };
+        });
 
-    run_with_executor(config, changed, "/app".into(), None, Arc::new(mock))
-        .await
-        .unwrap();
-
-    let cmds = seen.lock().unwrap();
-    assert_eq!(cmds.len(), 1, "{cmds:?}");
-    assert!(
-        cmds[0].starts_with(&format!("docker exec {expected} ")),
-        "{cmds:?}"
-    );
+    run_with_executor(
+        config,
+        main_rs_changed(),
+        "/app".into(),
+        None,
+        Arc::new(mock),
+    )
+    .await
+    .unwrap();
 }
