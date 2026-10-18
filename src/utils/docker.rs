@@ -1,10 +1,14 @@
 //! Docker container utilities.
 
-/// Id of the first running service container of compose `service`: `docker
-/// compose --project-directory <project_dir> ps --status running --no-trunc
-/// --format <id + oneoff label> <service>`, run in `working_dir` (relative
-/// `project_dir` resolves like the check commands). One-off `docker compose
-/// run` containers are skipped (see [`first_service_id`]).
+/// Id of the first running container of compose `service`: `docker compose
+/// --project-directory <project_dir> ps -q <service>`, run in `working_dir`
+/// (relative `project_dir` resolves like the check commands).
+///
+/// No `--status` filter: any status filter makes compose list one-off
+/// `docker compose run` containers too, e.g. another ci-tui's `--rm` check
+/// container, removed when its command ends, killing a check exec'd into it
+/// (#235). Plain `ps` lists only service containers that are up (incl.
+/// paused / restarting: those fail on `docker exec` with docker's error).
 ///
 /// Returns `None` if no container of the service runs, or the command fails
 /// (no docker / compose, unknown service, invalid project).
@@ -15,9 +19,7 @@ pub(crate) fn compose_running(
 ) -> Option<String> {
     let output = super::own_process_group(&mut std::process::Command::new("docker"))
         .args(["compose", "--project-directory", project_dir])
-        .args(["ps", "--status", "running", "--no-trunc", "--format"])
-        .arg(format!("{{{{.ID}}}} {{{{.Label \"{ONE_OFF_LABEL}\"}}}}"))
-        .arg(service)
+        .args(["ps", "-q", service])
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .output()
@@ -25,27 +27,17 @@ pub(crate) fn compose_running(
     if !output.status.success() {
         return None;
     }
-    first_service_id(&String::from_utf8_lossy(&output.stdout))
+    first_id(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Compose label, `True` on `docker compose run` containers
-const ONE_OFF_LABEL: &str = "com.docker.compose.oneoff";
-
-/// First container id of [`compose_running`]'s `<id> <oneoff>` lines that
-/// is not a one-off (`True`); scaled services list several, the first is
-/// used. One-off containers are skipped because `docker compose ps` lists
-/// them too: another ci-tui's (or our own) `docker compose run --rm`
-/// container, removed when its command ends, killing any check exec'd into
-/// it mid-run (#235).
-fn first_service_id(stdout: &str) -> Option<String> {
+/// First container id (non-empty line) of `docker compose ps -q` output;
+/// scaled services list several, the first is used
+fn first_id(stdout: &str) -> Option<String> {
     stdout
         .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            Some((fields.next()?, fields.next()))
-        })
-        .find(|&(_, one_off)| one_off != Some("True"))
-        .map(|(id, _)| id.to_owned())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 /// `docker kill` a container, fire-and-forget (best effort: errors, e.g.
@@ -71,26 +63,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_first_service_id_takes_first_non_empty_line() {
-        assert_eq!(
-            first_service_id("\n abc123 False\ndef456 False\n"),
-            Some("abc123".into())
-        );
-        assert_eq!(first_service_id(""), None);
-        assert_eq!(first_service_id(" \n"), None);
-    }
-
-    // A `docker compose run` container (another ci-tui's check, or ours)
-    // is removed when its command ends: exec'ing into it fails mid-check
-    #[test]
-    fn test_first_service_id_skips_one_off_containers() {
-        assert_eq!(
-            first_service_id("oneoff1 True\nsvc2 False\n"),
-            Some("svc2".into())
-        );
-        assert_eq!(first_service_id("oneoff1 True\n"), None);
-        // No label (container not created by compose's service path)
-        assert_eq!(first_service_id("svc3\n"), Some("svc3".into()));
+    fn test_first_id_takes_first_non_empty_line() {
+        assert_eq!(first_id("\n abc123 \ndef456\n"), Some("abc123".into()));
+        assert_eq!(first_id(""), None);
+        assert_eq!(first_id(" \n"), None);
     }
 
     #[test]
