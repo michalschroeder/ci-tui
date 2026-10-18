@@ -56,34 +56,28 @@ local:
     APP_ENV: testing
 ```
 
-With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory; untracked-file detection and the default `ci-tui.yaml` lookup still use the current directory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` and `container` are rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
+With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory; untracked-file detection and the default `ci-tui.yaml` lookup still use the current directory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` is rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
 
 ## Docker Configuration
 
 The `docker` section configures how CI-TUI interacts with Docker containers. Required in docker mode (the default); optional and ignored when `runner: local`, though if present it must still be valid (see [Runner Mode](#runner-mode)).
 
+It has two modes, picked by `image`:
+
+- **Compose mode** (no `image`): every check / pre-command / fix runs in a compose service — the check's `service`, else `docker.service`. CI-TUI asks Compose for the service's running container (`docker compose --project-directory <project_dir> ps -q --status running <service>`, first id) and `docker exec`s into it. Container names are never guessed, so `container_name:`, Compose v1 names and custom project names all work. When the service has no running container, the command runs in a fresh one of that service: `docker compose --project-directory <project_dir> run --rm -T --name ci-tui-<pid>-<n> [-e K=V ...] <service> <shell> -c '<cmd>'` (the service's own image, volumes and working_dir from the compose file). Like any `docker compose run`, this also starts the service's `depends_on` services, which stay running afterwards. Running containers are looked up once per service per run (TUI run, `--simple`, `--fix`); a container started or stopped mid-run is noticed on the next run. Compose itself honors `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME` etc. from the environment.
+- **Plain-image mode** (`image` set): every command runs in `docker run --rm --name ci-tui-<pid>-<n> [-v <volume_mount>] [-e K=V ...] -w <work_dir> <image> <shell> -c '<cmd>'`. No compose calls; `project_dir` and `service` are not needed, and a check / pre-command `service` is a config error.
+
 ```yaml
+# Compose mode
 docker:
-  # Required in docker mode: Working directory for docker commands
+  # Required: directory for `docker compose --project-directory`
   project_dir: ./infrastructure
 
-  # Optional: Default Docker service name (default: "app")
+  # Optional: default compose service (default: "app")
   service: php
 
-  # Optional: Explicit container name for docker exec
-  # If not set, derived from project_dir + service (e.g., "myproject-php-1")
-  container: myproject-php-1
-
-  # Optional: Docker image for standalone docker run
-  # If not set, derived from container name
-  image: php:8.2-cli
-
-  # Optional: Volume mount for standalone docker run
-  # Supports environment variable expansion: ${VAR_NAME}
-  volume_mount: "${HOST_PWD}:/app"
-
-  # Optional: Working directory inside container (default: "/app")
-  work_dir: /build
+  # Required: shell inside the container ("/bin/sh" for Alpine images)
+  shell: bash
 
   # Optional: Environment variables passed to all docker commands
   env:
@@ -91,40 +85,47 @@ docker:
     APP_ENV: "testing"
 ```
 
+```yaml
+# Plain-image mode
+docker:
+  image: php:8.2-cli
+  # Optional: repo mount; supports environment variable expansion: ${VAR_NAME}
+  volume_mount: "${HOST_PWD}:/app"
+  # Optional: working directory inside the container (default: "/app")
+  work_dir: /app
+  shell: bash
+```
+
 ### Field Details
 
-**`project_dir`** (required in docker mode, the default)
-- Path used for `docker compose --project-directory`
-- Can be absolute or relative to current directory
-- Used to derive container name if not explicit
+**`project_dir`** (required in compose mode)
+- Path used for `docker compose --project-directory` (compose looks for its compose file there)
+- Absolute, or relative to the directory checks run in
+- Not used in plain-image mode
 
-**`service`** (default: `"app"`)
-- Default Docker service name from docker-compose.yml
-- Used for container name derivation and as fallback when check doesn't specify service
+**`service`** (default: `"app"`, compose mode)
+- Default compose service for checks / pre-commands / fixes without their own `service`
 
-**`container`** (optional)
-- Explicit container name for `docker exec` commands
-- If not set, derived using Docker Compose naming: `{project_dir_basename}-{service}-1`
-- Example: project_dir="./backend", service="php" → container="backend-php-1"
-- Project name normalized like Compose (lowercase, only `a-z0-9_-`): `./My.App` → `myapp-php-1`
-
-**`image`** (optional)
-- Docker image for standalone `docker run` when container isn't running
-- If not set, derived from container name by removing `-1` suffix
+**`image`** (optional; switches to plain-image mode)
+- Image every command runs in via `docker run`
 - Use for self-hosting CI-TUI without docker-compose
 
-**`volume_mount`** (optional)
+**`volume_mount`** (optional, plain-image mode only)
 - Volume mount specification for `docker run`: `"source:destination"`
 - Supports environment variable expansion: `${HOST_PWD}`, `${HOME}`, etc.
 - Example: `"${HOST_PWD}:/build"` expands HOST_PWD to absolute path
+- In compose mode the compose file supplies volumes: setting it is a config error
 
-**`work_dir`** (optional, default: `"/app"`)
+**`work_dir`** (optional, default: `"/app"`, plain-image mode only)
 - Working directory inside the container where commands execute
-- Overrides container default
+- In compose mode the service's `working_dir` applies: setting it is a config error
+
+**`shell`** (required)
+- Shell inside the container that runs each command (`<shell> -c '<cmd>'`)
 
 **`env`** (optional)
 - Key-value pairs of environment variables
-- Passed to all docker exec/run commands
+- Passed to all `docker exec` / `docker compose run` / `docker run` commands
 - Individual checks can add additional env vars
 
 ## Git Configuration
@@ -240,7 +241,6 @@ checks:
       - name: Migrate database
         command: php artisan migrate --env=testing
         service: php
-        exec: true
     checks:
       phpunit:
         name: PHPUnit
@@ -290,13 +290,10 @@ checks:
 - Shell command to execute
 - Supports `{files}` placeholder (see below)
 
-**`service`** (optional)
-- Docker service to run this check in
-- Overrides group/global default
-
-**`container`** (optional)
-- Explicit container name
-- Overrides service-based derivation
+**`service`** (optional, compose mode only)
+- Compose service to run this check (and its fix) in
+- Overrides `docker.service`
+- Config error in plain-image mode (`docker.image`) and with `runner: local`
 
 **`fix_command`** (optional)
 - Command that automatically fixes issues
@@ -320,7 +317,7 @@ checks:
 - Max runtime as `<n>s`, `<n>m` or `<n>h` (e.g. `30s`, `10m`, `1h`); must be > 0
 - On expiry the check process is killed and reported as **timed out** (counts as a failure)
 - Falls back to the top-level `timeout:`; if neither is set the check runs unbounded
-- The command's whole local process tree is killed (it runs in its own process group), and a `docker run` fallback container (started with a unique `--name ci-tui-<pid>-<n>`) gets `docker kill`. The same cleanup applies to cancel (`s`), quit, Ctrl-C and rerun
+- The command's whole local process tree is killed (it runs in its own process group), and a `docker compose run` / `docker run` container (started with a unique `--name ci-tui-<pid>-<n>`) gets `docker kill`. The same cleanup applies to cancel (`s`), quit, Ctrl-C and rerun
 - Limitation: with `docker exec` (container already running) only the local client is killed; the command keeps running inside the container until it exits
 
 **`error_pattern`** (optional)
@@ -572,14 +569,12 @@ checks:
       - name: Migrate test database
         command: php artisan migrate --env=testing
         service: php
-        exec: true
         env:
           DB_CONNECTION: testing
 
       - name: Seed database
         command: php artisan db:seed --class=TestSeeder
         service: php
-        exec: true
 
       - name: Ensure local cache dir
         command: mkdir -p .cache/tests
@@ -596,21 +591,14 @@ checks:
 **`command`** (required)
 - Shell command to execute
 
-**`service`** (optional)
-- Docker service to run in
-- Falls back to group/global default
-
-**`container`** (optional)
-- Explicit container name
-- Overrides service-based derivation
-
-**`exec`** (default: `false`)
-- If `true`, uses `docker exec` (requires running container)
-- If `false`, uses `docker run` (creates new container)
+**`service`** (optional, compose mode only)
+- Compose service to run in
+- Falls back to `docker.service`
+- Config error in plain-image mode (`docker.image`) and with `runner: local`
 
 **`host`** (default: `false`)
 - If `true`, runs the command directly on the host machine via `sh -c` instead of in Docker
-- When `true`, `service`, `container`, and `exec` are ignored
+- When `true`, `service` is ignored
 
 **`env`** (optional)
 - Additional environment variables
@@ -888,7 +876,9 @@ After changing config structs, regenerate the committed file with `make schema` 
 ## Version History
 
 **Version 2** (current)
-- Added: `docker.container`, `docker.image`, `docker.volume_mount`, `docker.work_dir`
+- Added: `docker.image` (plain-image mode), `docker.volume_mount`, `docker.work_dir`
+- Compose services resolved via `docker compose ps` / `docker compose run` (no `container` setting)
+- Removed: `container` (docker section, checks, pre-commands) and pre-command `exec`
 - Added: `docker.env` and per-check `env`
 - Added: Test discovery with path_mapping and grep_search
 - Added: `{files}` placeholder auto-skip behavior

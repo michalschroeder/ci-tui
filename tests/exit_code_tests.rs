@@ -68,6 +68,41 @@ fn missing_config_file_exits_2() {
     assert_code(&out, exit::CONFIG_ERROR);
 }
 
+/// Docker-section errors are config errors (exit 2) naming the problem
+#[rstest::rstest]
+#[case::compose_without_project_dir(
+    "docker:\n  shell: sh\n",
+    "",
+    "`docker.project_dir` is required"
+)]
+#[case::volume_mount_without_image(
+    "docker:\n  project_dir: .\n  shell: sh\n  volume_mount: .:/app\n",
+    "",
+    "`docker.volume_mount` needs `docker.image`"
+)]
+#[case::work_dir_without_image(
+    "docker:\n  project_dir: .\n  shell: sh\n  work_dir: /app\n",
+    "",
+    "`docker.work_dir` needs `docker.image`"
+)]
+#[case::service_with_image(
+    "docker:\n  image: img\n  shell: sh\n",
+    "        service: worker\n",
+    "`g.c` sets `service`"
+)]
+#[case::removed_container(
+    "docker:\n  image: img\n  shell: sh\n  container: c\n",
+    "",
+    "container"
+)]
+fn invalid_docker_section_exits_2(#[case] docker: &str, #[case] extra: &str, #[case] msg: &str) {
+    let config = format!("{HEAD}{docker}{}{extra}", check("'true'"));
+    let (_tmp, out) = run_with(&config, &["--list", "--files", "a.rs"]);
+    assert_code(&out, exit::CONFIG_ERROR);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(msg), "{stderr}");
+}
+
 #[test]
 fn invalid_files_filter_regex_exits_2() {
     let config = docker_config("        triggers:\n          files_filter: '[invalid'\n");

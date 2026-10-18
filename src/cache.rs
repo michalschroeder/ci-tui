@@ -344,7 +344,6 @@ mod tests {
                 name: id.into(),
                 command: command.into(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,

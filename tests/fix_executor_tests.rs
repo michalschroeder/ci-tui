@@ -10,7 +10,6 @@ use std::path::Path;
 #[tokio::test]
 async fn returns_ok_on_success() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
@@ -26,7 +25,6 @@ async fn returns_ok_on_success() {
 #[tokio::test]
 async fn reports_stderr_when_present() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-noise".into(),
@@ -43,7 +41,6 @@ async fn reports_stderr_when_present() {
 #[tokio::test]
 async fn falls_back_to_stdout_when_stderr_empty() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: "stdout-only".into(),
@@ -60,7 +57,6 @@ async fn falls_back_to_stdout_when_stderr_empty() {
 #[tokio::test]
 async fn falls_back_to_formatted_message_when_both_empty() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
@@ -77,9 +73,9 @@ async fn falls_back_to_formatted_message_when_both_empty() {
 }
 
 #[tokio::test]
-async fn uses_docker_run_when_container_not_running() {
+async fn image_mode_uses_docker_run() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| false);
+    mock.expect_running_container().never();
     mock.expect_execute()
         .withf(|cmd, _, _| cmd.starts_with("docker run"))
         .returning(|_, _, _| CommandOutput {
@@ -115,7 +111,8 @@ fn rust_fmt_with_fix_config() -> ci_tui::config::CiConfig {
 #[tokio::test]
 async fn all_fixes_pass_summary_is_clean() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
@@ -142,7 +139,8 @@ async fn all_fixes_pass_summary_is_clean() {
 #[tokio::test]
 async fn failing_fix_recorded_in_summary() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
@@ -240,7 +238,8 @@ fn logging_mock(
     let log = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&log);
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(move |cmd, _, _| {
         seen.lock().unwrap().push(kind(cmd).to_string());
         let success = !failing.contains(&kind(cmd));
@@ -370,8 +369,10 @@ async fn no_setup_without_verification() {
     assert_eq!(log, ["fix", "fix"]);
 }
 
-#[tokio::test]
-async fn fix_runs_in_check_service_container() {
+/// Fix run of a `worker`-service `fmt` fix (compose mode) whose single
+/// command must equal `expected(--name value)`; `worker_id`: the running
+/// worker container, `None` = stopped
+async fn worker_fix(worker_id: Option<&'static str>, expected: fn(&str) -> String) {
     let config = common::configs::ConfigBuilder::new()
         .with_check(
             "lint",
@@ -382,23 +383,25 @@ async fn fix_runs_in_check_service_container() {
                 .build(),
         )
         .build();
-    let ci_tui::runner::ExecTarget::Docker(docker) = &config.runner else {
-        unreachable!("docker target expected")
-    };
-    let worker = common::service_container(&docker.container_name(), "worker");
-    let prefix = format!("docker exec {worker} ");
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    // Default service `app` runs; only `worker` may be asked for
+    mock.expect_running_container()
+        .withf(|dir, service, _| dir == "./test" && service == "worker")
+        .times(1)
+        .returning(move |_, _, _| worker_id.map(String::from));
     mock.expect_execute()
         .times(1)
-        .withf(move |cmd: &str, _, _| cmd.starts_with(&prefix))
+        .withf(move |cmd: &str, _, _| {
+            let name = cmd.split_whitespace().skip_while(|w| *w != "--name").nth(1);
+            cmd == expected(name.unwrap_or_default())
+        })
         .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
         });
 
-    run_with_executor(
+    let summary = run_with_executor(
         config,
         main_rs_changed(),
         "/app".into(),
@@ -407,4 +410,24 @@ async fn fix_runs_in_check_service_container() {
     )
     .await
     .unwrap();
+    assert_eq!(summary.pass_count, 1);
+}
+
+#[tokio::test]
+async fn fix_execs_into_running_check_service_container() {
+    worker_fix(Some("w0rk3r"), |_| {
+        "docker exec w0rk3r bash -c 'cargo fmt'".into()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fix_of_stopped_check_service_uses_compose_run_of_that_service() {
+    worker_fix(None, |name| {
+        format!(
+            "docker compose --project-directory ./test run --rm -T --name {name} worker \
+             bash -c 'cargo fmt'"
+        )
+    })
+    .await;
 }

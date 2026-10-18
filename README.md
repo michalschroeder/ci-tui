@@ -12,7 +12,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 
 - **Change-aware**: file-pattern triggers decide which checks run for this diff.
 - **Test discovery**: maps changed sources to their tests (`src/Foo.php` → `tests/FooTest.php`) or greps test dirs for references — so it runs the *related* tests, not the whole suite.
-- **CI parity**: checks execute via `docker exec` into your compose service's container. Green here predicts green in CI.
+- **CI parity**: checks execute in your compose service's container (`docker exec` when it runs, `docker compose run` when not). Green here predicts green in CI.
 
 ## Features
 
@@ -31,7 +31,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--only <id>[,<id>]` / `--group <id>[,<id>]` run a subset of checks for fast iteration (TUI, `--simple`, `--fix`, `--list`); unknown ids error with the valid ones listed
 - Result cache: a check whose inputs (id, resolved command, content of its matched files and test-discovery sources, config file except `notify`, comments and formatting) are unchanged since its last passing run is skipped and shown as `✓ cached` (counts as passed). Stored per check in `.git/ci-tui/` (per linked worktree); checks without concrete files (always-run, run-all, on-demand) are never cached, `r` / `R` / `t` in the TUI always run (a skipped group's `pre_commands` run first); `--list` marks cached checks. Only those inputs count: edits elsewhere (`Cargo.toml`, unchanged files the changed ones use, a new base ref, the docker image, env) don't invalidate a pass — use `--no-cache` then. `--no-cache` runs everything (passes are still recorded). Check ids must be unique across groups
 - `--list` (alias `--dry-run`) prints changed files, base ref, and which checks would run / wait on-demand / skip and why — executes nothing
-- Falls back to `docker run` when the compose container isn't up — without `docker.volume_mount` this runs the image's baked-in code, not your working tree
+- Compose services are resolved via `docker compose ps` (no guessed container names: `container_name:`, Compose v1 and custom project names work); a stopped service runs via `docker compose run --rm` with its own image and volumes. Without compose, `docker.image` runs every check in `docker run` of that image (`docker.volume_mount` mounts your working tree)
 - `runner: local` runs checks directly on the host when you don't use Docker
 - `--color auto|always|never` (TUI, `--simple`, `--fix`): `auto` (default) colors only when stdout is a terminal and `NO_COLOR` is unset or empty ([no-color.org](https://no-color.org)), so piped / redirected output carries no ANSI escapes; `always` colors even then (also with `NO_COLOR` set); `--no-color` is the same as `--color never`
 - `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
@@ -56,14 +56,16 @@ Docker image (published to GHCR on each release):
 ```bash
 docker pull ghcr.io/michalschroeder/ci-tui:latest
 
-# needs the docker socket (to run checks) and your project mounted at /app;
-# workdir /app derives compose project name "app" unless overridden
+# needs the docker socket (to run checks) and your project mounted at its host
+# path: the docker daemon reads bind-mount sources (compose `./:/app`,
+# `volume_mount`) as host paths, and compose names the project after the dir
 docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$PWD":/app \
-  -e COMPOSE_PROJECT_NAME=<your-compose-project> \
+  -v "$PWD":"$PWD" -w "$PWD" \
   ghcr.io/michalschroeder/ci-tui:latest
 ```
+
+Add `-e COMPOSE_PROJECT_NAME=<name>` when your project name is not the directory name and not set by `name:` in the compose file, and `-e HOST_PWD="$PWD"` when `volume_mount` uses `${HOST_PWD}`.
 
 ## Quickstart
 
@@ -84,10 +86,9 @@ The starter's placeholder check fails on purpose until you replace its `command`
 version: 2
 
 docker:
-  project_dir: .
-  service: app
+  project_dir: .  # where your compose file lives
+  service: app    # exec'd into when running, else `docker compose run`
   shell: bash
-  volume_mount: .:/app  # used by the docker-run fallback if the compose container isn't up
 
 git:
   base_branch: main
@@ -149,7 +150,7 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `w` | Save selected check's output to `.ci-tui/logs/<check>.log` (plain text, overwritten) |
 | `m` | Show / hide CPU/MEM stats panel |
 
-Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker run` fallback. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.
+Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker compose run` / `docker run`. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.
 
 Info messages (e.g. "Command copied") auto-dismiss after 3s; errors stay until a keypress; progress messages ("Refreshing changed files...") stay until the work finishes. Any keypress dismisses the message and still performs its action.
 

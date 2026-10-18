@@ -261,7 +261,7 @@ fn timeout_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 /// Command building lives in `runner.rs` (`impl ExecTarget`).
 #[derive(Debug, Clone)]
 pub enum ExecTarget {
-    /// Run inside Docker: `docker exec` into a running container, else `docker run`
+    /// Run inside Docker: compose services or a plain image (see [`DockerConfig`])
     Docker(DockerConfig),
     /// Run directly on the host via `local.shell -c` from the repo root
     Local(LocalConfig),
@@ -334,116 +334,77 @@ fn default_local_shell() -> String {
 
 /// Docker configuration for running checks in containers.
 ///
-/// Supports both `docker exec` (for running containers) and `docker run`
-/// (for standalone execution).
+/// Two modes, picked by `image`:
+/// - compose (no `image`): a command runs in its compose service (`service`,
+///   overridable per check / pre-command): `docker exec` into the service's
+///   running container, else `docker compose run` (see
+///   [`crate::runner::resolve_service`])
+/// - plain image (`image` set): every command runs in `docker run <image>`
+///   with `volume_mount` / `work_dir`; no compose calls
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend(
+    "if" = {"required": ["image"]},
+    "else" = {
+        "required": ["project_dir"],
+        "not": {"anyOf": [{"required": ["volume_mount"]}, {"required": ["work_dir"]}]}
+    }
+))]
 pub struct DockerConfig {
-    pub project_dir: String,
-    /// Default Docker service name (defaults to "app" if not specified)
+    /// Compose mode (required without `image`): directory for `docker compose
+    /// --project-directory`
+    #[serde(default)]
+    pub project_dir: Option<String>,
+    /// Compose mode: default service commands run in (default "app")
     #[serde(default = "default_service")]
     pub service: String,
-    /// Container name for docker exec (e.g., "myproject-app-1")
-    /// If not set, derived from project_dir + service using compose naming convention
-    #[serde(default)]
-    pub container: Option<String>,
-    /// Docker image for standalone run (e.g., "rust:latest")
-    /// If set, use this image directly instead of deriving from container name
+    /// Plain-image mode: every command runs in `docker run` of this image
+    /// (e.g. "rust:latest"); no compose
     #[serde(default)]
     pub image: Option<String>,
-    /// Volume mount string for standalone run (e.g., ".:/build")
-    /// Full volume specification including source:dest
+    /// Plain-image mode: repo mount for `docker run -v` (e.g. ".:/build";
+    /// `${VAR}` expanded)
     #[serde(default)]
     pub volume_mount: Option<String>,
-    /// Working directory inside container (e.g., "/build")
-    /// Overrides the default /app workdir
+    /// Plain-image mode: working directory inside the container (default "/app")
     #[serde(default)]
     pub work_dir: Option<String>,
     /// Shell to use inside container (e.g., "bash" or "/bin/sh" for Alpine)
     pub shell: String,
-    /// Environment variables to pass to all docker exec commands
+    /// Environment variables passed to every docker command
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }
 
 impl DockerConfig {
-    /// Get the container name to use for docker exec
-    /// Returns explicit container name if set, otherwise derives from project_dir + service
-    pub fn container_name(&self) -> String {
-        match self.container {
-            Some(ref container) => container.clone(),
-            None => self.compose_container(&self.service),
+    /// Compose mode (no `image`) needs `project_dir` and takes no
+    /// `volume_mount` / `work_dir` (the compose file sets those)
+    fn validate(&self) -> Result<()> {
+        if self.image.is_some() {
+            return Ok(());
         }
+        ensure!(
+            self.project_dir.is_some(),
+            "`docker.project_dir` is required without `docker.image` (compose mode: \
+             the directory `docker compose --project-directory` uses)"
+        );
+        for (key, value) in [
+            ("volume_mount", &self.volume_mount),
+            ("work_dir", &self.work_dir),
+        ] {
+            ensure!(
+                value.is_none(),
+                "`docker.{key}` needs `docker.image`: compose services take volumes and \
+                 working_dir from the compose file"
+            );
+        }
+        Ok(())
     }
 
-    /// Docker Compose v2 container name of `service`: `{project}-{service}-1`
-    fn compose_container(&self, service: &str) -> String {
-        format!("{}-{}-1", self.compose_project_name(), service)
-    }
-
-    /// Container for a check / pre-command with optional `container` /
-    /// `service` overrides.
-    ///
-    /// Precedence: explicit `container` > compose-convention name for a
-    /// non-default service > default container ([`Self::container_name`]).
-    ///
-    /// LIMITATION: assumes the Docker Compose v2 naming convention
-    /// `{project}-{service}-1` (see [`Self::compose_project_name`]).
-    /// Future work: resolve via `docker compose ps -q <service>` instead of
-    /// string construction.
-    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> String {
-        match (container, service) {
-            (Some(container), _) => container.to_string(),
-            (None, Some(service)) if service != self.service => self.compose_container(service),
-            _ => self.container_name(),
-        }
-    }
-
-    /// Compose project name, in docker compose's own precedence order:
-    /// 1. `COMPOSE_PROJECT_NAME` env var
-    /// 2. top-level `name:` key in a compose file found in `project_dir`
-    /// 3. `project_dir`'s last path component
-    ///
-    /// LIMITATION: does not honor `COMPOSE_FILE` / `-f` overrides or multiple/override
-    /// compose files — only the first default-named file in `project_dir` is read.
-    pub(crate) fn compose_project_name(&self) -> String {
-        let name = std::env::var("COMPOSE_PROJECT_NAME")
-            .ok()
-            .filter(|name| !name.is_empty())
-            .or_else(|| compose_file_name(&self.project_dir))
-            .unwrap_or_else(|| self.derive_project_name());
-        let normalized = normalize_project_name(&name);
-        if normalized.is_empty() {
-            // Nothing valid left (e.g. "___", non-ASCII) - same fallback as non-UTF8 paths
-            return "project".to_string();
-        }
-        normalized
-    }
-
-    /// Extract project name from project_dir (last path component)
-    /// Handle "." and relative paths by resolving to absolute path first
-    fn derive_project_name(&self) -> String {
-        if self.project_dir == "." || self.project_dir == ".." {
-            return resolve_project_name_from_cwd(&self.project_dir)
-                .unwrap_or_else(|| "project".to_string());
-        }
-        let path = std::path::Path::new(&self.project_dir);
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project")
-            .to_string()
-    }
-
-    /// Get the Docker image name to use
-    /// Returns explicit image if set, otherwise derives from container_name by stripping the trailing "-1"
-    pub fn image_name(&self) -> String {
-        if let Some(ref image) = self.image {
-            return image.clone();
-        }
-
-        // Derive image from container name (strip exactly one trailing "-1")
-        let name = self.container_name();
-        name.strip_suffix("-1").unwrap_or(&name).to_string()
+    /// `project_dir` for compose commands; "." if unset (only a config that
+    /// skipped [`CiConfig::validate_and_compile`] lacks it in compose mode)
+    pub fn compose_dir(&self) -> &str {
+        self.project_dir.as_deref().unwrap_or(".")
     }
 
     /// Get volume mount arguments for docker run
@@ -461,65 +422,6 @@ impl DockerConfig {
     pub fn working_dir(&self) -> &str {
         self.work_dir.as_deref().unwrap_or("/app")
     }
-}
-
-/// Resolve project name from current working directory.
-/// Only `"."` (cwd) and `".."` (cwd's parent) are meaningful; any other input returns `None`.
-fn resolve_project_name_from_cwd(project_dir: &str) -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    let resolved = match project_dir {
-        "." => cwd,
-        ".." => cwd.parent()?.to_path_buf(),
-        _ => return None,
-    };
-    resolved.file_name()?.to_str().map(String::from)
-}
-
-/// Compose file names to look for in `project_dir`, in docker compose's own
-/// default discovery order. Only the first one found is read.
-const COMPOSE_FILE_NAMES: &[&str] = &[
-    "compose.yaml",
-    "compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.yml",
-];
-
-/// Minimal shape for reading just the top-level `name:` key from a compose file.
-/// `deny_unknown_fields` is deliberately omitted — compose files have many other
-/// top-level keys (`services`, `volumes`, ...) we don't care about here.
-#[derive(Deserialize)]
-struct ComposeFileName {
-    name: Option<String>,
-}
-
-/// Read the top-level `name:` key from the first compose file found in `project_dir`.
-/// Returns `None` if no compose file is found, it fails to parse, or it has no
-/// (non-empty) `name:` key — callers fall back to the basename-derived name.
-fn compose_file_name(project_dir: &str) -> Option<String> {
-    let dir = Path::new(project_dir);
-    for filename in COMPOSE_FILE_NAMES {
-        let Ok(contents) = std::fs::read_to_string(dir.join(filename)) else {
-            continue;
-        };
-        // Compose only ever reads the first file it finds, so stop here regardless
-        // of whether this file has a usable `name:` key.
-        return serde_yaml::from_str::<ComposeFileName>(&contents)
-            .ok()
-            .and_then(|parsed| parsed.name)
-            .filter(|name| !name.is_empty());
-    }
-    None
-}
-
-/// Normalize a compose project name like docker compose (compose-go
-/// `NormalizeProjectName`): lowercase, keep only `[a-z0-9_-]`, trim leading `_`/`-`
-fn normalize_project_name(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
-        .collect::<String>()
-        .trim_start_matches(['_', '-'])
-        .to_string()
 }
 
 fn default_service() -> String {
@@ -583,12 +485,10 @@ pub struct GroupConfig {
 pub struct CheckDefinition {
     pub name: String,
     pub command: String,
-    /// Docker service to run this check in (overrides group/global default)
+    /// Compose service to run this check in (default `docker.service`; not
+    /// allowed with `docker.image` or `runner: local`)
     #[serde(default)]
     pub service: Option<String>,
-    /// Explicit container name (overrides service-based derivation)
-    #[serde(default)]
-    pub container: Option<String>,
     #[serde(default)]
     pub fix_command: Option<String>,
     #[serde(default)]
@@ -683,15 +583,10 @@ pub struct PreCommand {
     pub name: String,
     /// The command to execute
     pub command: String,
-    /// Docker service to run in (uses group/global default if not specified)
+    /// Compose service to run in (default `docker.service`; not allowed with
+    /// `docker.image` or `runner: local`)
     #[serde(default)]
     pub service: Option<String>,
-    /// Explicit container name (overrides service-based derivation)
-    #[serde(default)]
-    pub container: Option<String>,
-    /// If true, use `docker compose exec` (existing container) instead of `run` (new container)
-    #[serde(default)]
-    pub exec: bool,
     /// If true, run command directly on host instead of inside Docker
     #[serde(default)]
     pub host: bool,
@@ -750,22 +645,20 @@ fn dangling_pattern_ref<'a>(
     })
 }
 
-/// Check one group's pre-commands and checks for `service`/`container` set, which is
-/// disallowed under `runner: local`. Extracted to keep `check_no_docker_targets` nesting low.
-fn ensure_group_has_no_docker_targets(g: &str, group: &GroupConfig) -> Result<()> {
+/// Error if one of `group`'s pre-commands or checks sets `service`, which
+/// `mode` (`runner: local`, `docker.image`) does not allow.
+fn ensure_group_has_no_services(g: &str, group: &GroupConfig, mode: &str) -> Result<()> {
     for (i, pre) in group.pre_commands.iter().enumerate() {
-        if pre.service.is_some() || pre.container.is_some() {
-            bail!(
-                "`{g}.pre_commands[{i}]` sets `service`/`container`, which is not allowed with `runner: local`"
-            );
-        }
+        ensure!(
+            pre.service.is_none(),
+            "`{g}.pre_commands[{i}]` sets `service`, which is not allowed with {mode}"
+        );
     }
     for (c, check) in group.checks.iter() {
-        if check.service.is_some() || check.container.is_some() {
-            bail!(
-                "`{g}.{c}` sets `service`/`container`, which is not allowed with `runner: local`"
-            );
-        }
+        ensure!(
+            check.service.is_none(),
+            "`{g}.{c}` sets `service`, which is not allowed with {mode}"
+        );
     }
     Ok(())
 }
@@ -860,14 +753,14 @@ impl CiConfig {
         }
         match &self.runner {
             // Docker section presence is enforced at parse time (RawCiConfig)
-            ExecTarget::Docker(_) => {}
-            ExecTarget::Local(local) => {
-                ensure!(
-                    !local.shell.trim().is_empty(),
-                    "`local.shell` must not be empty when runner is `local`"
-                );
-                self.check_no_docker_targets()?;
-            }
+            ExecTarget::Docker(docker) => docker.validate()?,
+            ExecTarget::Local(local) => ensure!(
+                !local.shell.trim().is_empty(),
+                "`local.shell` must not be empty when runner is `local`"
+            ),
+        }
+        if let Some(mode) = self.serviceless_mode() {
+            self.check_no_services(mode)?;
         }
         self.check_pattern_references()?;
         self.check_files_filter_scope()?;
@@ -936,11 +829,21 @@ impl CiConfig {
         }
     }
 
-    /// In `runner: local` mode, no group may set `service`/`container` on a check or
-    /// pre-command — those only make sense for Docker execution.
-    fn check_no_docker_targets(&self) -> Result<()> {
+    /// Runner mode without compose services (local runner, plain-image
+    /// docker), named for errors; `None` in compose mode
+    fn serviceless_mode(&self) -> Option<&'static str> {
+        match &self.runner {
+            ExecTarget::Docker(docker) if docker.image.is_none() => None,
+            ExecTarget::Docker(_) => Some("`docker.image` (every command runs in that image)"),
+            ExecTarget::Local(_) => Some("`runner: local`"),
+        }
+    }
+
+    /// No check or pre-command may set `service` under `mode` (local runner,
+    /// plain-image docker): services only exist in compose mode.
+    fn check_no_services(&self, mode: &str) -> Result<()> {
         for (g, group) in self.checks.iter() {
-            ensure_group_has_no_docker_targets(g, group)?;
+            ensure_group_has_no_services(g, group, mode)?;
         }
         Ok(())
     }
@@ -995,9 +898,12 @@ impl CiConfig {
             .unwrap_or("white")
     }
 
-    /// Default Docker service (from docker config); `None` in local mode.
+    /// Default compose service (`docker.service`); `None` in local and
+    /// plain-image mode (no services there).
     pub fn default_service(&self) -> Option<&str> {
-        self.docker().map(|d| d.service.as_str())
+        self.docker()
+            .filter(|d| d.image.is_none())
+            .map(|d| d.service.as_str())
     }
 
     /// Get group config by name
@@ -1184,9 +1090,8 @@ mod tests {
             CiConfig {
                 version: 2,
                 runner: ExecTarget::Docker(DockerConfig {
-                    project_dir: self.docker_project_dir,
+                    project_dir: Some(self.docker_project_dir),
                     service: self.docker_service,
-                    container: None,
                     image: None,
                     volume_mount: None,
                     work_dir: None,
@@ -1245,7 +1150,6 @@ mod tests {
                 name: self.name,
                 command: self.command,
                 service: self.service,
-                container: None,
                 fix_command: self.fix_command,
                 triggers: self.triggers,
                 on_demand: false,
@@ -1554,261 +1458,90 @@ checks: {}
     mod test_docker_config {
         use super::*;
 
-        // Edge case: Tests explicit container name configuration - requires raw YAML to verify container field parsing
+        /// Load-validated config with `docker` section body `docker` and
+        /// group `g` body `group`; the validation error text on failure
+        fn validated(docker: &str, group: &str) -> std::result::Result<CiConfig, String> {
+            let yaml = format!(
+                "version: 2\ndocker:\n{docker}git:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks:\n  g:\n{group}"
+            );
+            let config: CiConfig = serde_yaml::from_str(&yaml).map_err(|e| e.to_string())?;
+            config.validate_and_compile().map_err(|e| e.to_string())?;
+            Ok(config)
+        }
+
+        const COMPOSE: &str = "  project_dir: .\n  shell: bash\n";
+        const IMAGE: &str = "  image: img\n  shell: bash\n";
+        const NO_CHECKS: &str = "    checks: {}\n";
+
         #[test]
-        fn test_container_name_explicit() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: ./infrastructure
-  service: php
-  shell: bash
-  container: explicit-container-name
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(
-                config.docker().unwrap().container_name(),
-                "explicit-container-name"
+        fn test_compose_mode_requires_project_dir() {
+            let err = validated("  shell: bash\n", NO_CHECKS).unwrap_err();
+            assert!(err.contains("`docker.project_dir` is required"), "{err}");
+            assert!(err.contains("docker.image"), "{err}");
+        }
+
+        #[test]
+        fn test_image_mode_needs_no_project_dir_or_service() {
+            let config = validated(IMAGE, NO_CHECKS).unwrap();
+            assert_eq!(config.docker().unwrap().project_dir, None);
+            assert_eq!(config.default_service(), None, "no services in image mode");
+        }
+
+        #[rstest]
+        #[case::volume_mount("volume_mount: .:/app")]
+        #[case::work_dir("work_dir: /app")]
+        fn test_compose_mode_rejects_image_only_keys(#[case] line: &str) {
+            let key = line.split(':').next().unwrap();
+            let err = validated(&format!("{COMPOSE}  {line}\n"), NO_CHECKS).unwrap_err();
+            assert!(
+                err.contains(&format!("`docker.{key}` needs `docker.image`")),
+                "{err}"
             );
         }
 
-        // Edge case: Tests container name derivation from project_dir and service - requires raw YAML to verify default derivation logic
-        #[test]
-        fn test_container_name_derived() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: ./infrastructure
-  service: php
-  shell: bash
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(
-                config.docker().unwrap().container_name(),
-                "infrastructure-php-1"
-            );
-        }
-
-        // Edge case: Tests container name derivation with "." project_dir - requires raw YAML to verify special path handling
-        #[test]
-        fn test_container_name_current_dir() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: .
-  service: app
-  shell: bash
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            let container_name = config.docker().unwrap().container_name();
-            // Should derive from current directory name
-            assert!(container_name.ends_with("-app-1"));
-            assert_ne!(container_name, ".-app-1"); // Should not use literal "."
-        }
-
-        // Edge case: Tests explicit Docker image name configuration - requires raw YAML to verify image field parsing
-        #[test]
-        fn test_image_name_explicit() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: .
-  service: app
-  shell: bash
-  image: rust:latest
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().unwrap().image_name(), "rust:latest");
-        }
-
-        // Edge case: Tests Docker image name derivation from container name - requires raw YAML to verify derivation logic
-        #[test]
-        fn test_image_name_derived() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: ./myproject
-  service: web
-  shell: bash
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            // Image derived from container name by stripping -1 suffix
-            assert_eq!(config.docker().unwrap().image_name(), "myproject-web");
-        }
-
-        // Edge case: project_dir basename is normalized like docker compose
-        // (lowercase, drop chars outside [a-z0-9_-], trim leading _/-)
         #[rstest]
-        #[case("./MyApp", "myapp-web-1", "myapp-web")]
-        #[case("./my.app", "myapp-web-1", "myapp-web")]
-        #[case("./_My App!", "myapp-web-1", "myapp-web")]
-        #[case("./my_proj-2", "my_proj-2-web-1", "my_proj-2-web")]
-        #[case("./___", "project-web-1", "project-web")]
-        #[case("./日本", "project-web-1", "project-web")]
-        fn test_derived_names_normalized_like_compose(
-            #[case] project_dir: &str,
-            #[case] container: &str,
-            #[case] image: &str,
-        ) {
-            let config = DockerConfig {
-                project_dir: project_dir.to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            };
-            assert_eq!(config.container_name(), container);
-            assert_eq!(config.image_name(), image);
+        #[case::volume_mount("volume_mount: .:/app")]
+        #[case::work_dir("work_dir: /app")]
+        fn test_image_mode_allows_image_only_keys(#[case] line: &str) {
+            validated(&format!("{IMAGE}  {line}\n"), NO_CHECKS).unwrap();
         }
 
-        // Edge case: COMPOSE_PROJECT_NAME overrides project_dir-derived compose project name.
-        // Uses a unique var value; test mutates process env, so restore afterwards.
-        #[test]
-        fn test_container_name_honors_compose_project_name_env() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: ./myproject
-  service: web
-  shell: bash
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            std::env::set_var("COMPOSE_PROJECT_NAME", "customproj");
-            let name = config.docker().unwrap().container_name();
-            std::env::remove_var("COMPOSE_PROJECT_NAME");
-            assert_eq!(name, "customproj-web-1");
-        }
-
-        // Shared by the compose-file-`name:`-key tests below: a `DockerConfig` pointed
-        // at `dir`, varying only in project_dir.
-        fn docker_config_for(dir: &std::path::Path) -> DockerConfig {
-            DockerConfig {
-                project_dir: dir.to_str().unwrap().to_string(),
-                service: "web".to_string(),
-                container: None,
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                shell: "bash".to_string(),
-                env: Default::default(),
-            }
-        }
-
-        // Compose file's top-level `name:` key is honored when COMPOSE_PROJECT_NAME is unset.
-        #[test]
-        fn test_compose_project_name_honors_compose_file_name_key() {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                dir.path().join("docker-compose.yml"),
-                "name: FromCompose\nservices:\n  web: {}\n",
-            )
-            .unwrap();
-            let config = docker_config_for(dir.path());
-            // normalize_project_name lowercases, so "FromCompose" -> "fromcompose"
-            assert_eq!(config.compose_project_name(), "fromcompose");
-            assert_eq!(config.container_name(), "fromcompose-web-1");
-        }
-
-        // When both a canonical `compose.yaml` and a legacy `docker-compose.yml` are
-        // present, the canonical file wins (matches Docker Compose's own discovery order).
-        #[test]
-        fn test_compose_project_name_prefers_canonical_compose_yaml_over_legacy() {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("compose.yaml"), "name: Canonical\n").unwrap();
-            std::fs::write(dir.path().join("docker-compose.yml"), "name: Legacy\n").unwrap();
-            let config = docker_config_for(dir.path());
-            assert_eq!(config.compose_project_name(), "canonical");
-        }
-
-        // COMPOSE_PROJECT_NAME still takes precedence over the compose file's `name:` key.
-        #[test]
-        fn test_compose_project_name_env_var_wins_over_name_key() {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("docker-compose.yml"), "name: FromCompose\n").unwrap();
-            let config = docker_config_for(dir.path());
-            std::env::set_var("COMPOSE_PROJECT_NAME", "fromenv");
-            let name = config.compose_project_name();
-            std::env::remove_var("COMPOSE_PROJECT_NAME");
-            assert_eq!(name, "fromenv");
-        }
-
-        // No compose file in project_dir: fall back to the basename-derived name.
-        #[test]
-        fn test_compose_project_name_missing_compose_file_falls_back_to_basename() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = docker_config_for(dir.path());
-            let expected =
-                normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
-            assert_eq!(config.compose_project_name(), expected);
-        }
-
-        // Compose file present but with no top-level `name:` key (and a malformed one):
-        // both fall back to the basename-derived name.
         #[rstest]
-        #[case::no_name_key("services:\n  web: {}\n")]
-        #[case::malformed_yaml("not: [valid: yaml")]
-        fn test_compose_project_name_bad_compose_file_falls_back_to_basename(
-            #[case] compose_contents: &str,
-        ) {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("docker-compose.yml"), compose_contents).unwrap();
-            let config = docker_config_for(dir.path());
-            let expected =
-                normalize_project_name(dir.path().file_name().unwrap().to_str().unwrap());
-            assert_eq!(config.compose_project_name(), expected);
+        #[case::check(
+            "    checks:\n      lint:\n        name: Lint\n        command: x\n        service: worker\n",
+            "`g.lint` sets `service`"
+        )]
+        #[case::pre_command(
+            "    pre_commands:\n      - name: init\n        command: x\n        service: db\n    checks: {}\n",
+            "`g.pre_commands[0]` sets `service`"
+        )]
+        fn test_image_mode_rejects_service(#[case] group: &str, #[case] expected: &str) {
+            let err = validated(IMAGE, group).unwrap_err();
+            assert!(err.contains(expected), "{err}");
+            assert!(err.contains("docker.image"), "{err}");
+            validated(COMPOSE, group).expect("compose mode allows `service`");
         }
 
-        // Edge case: container name itself ending in -1 must lose only ONE -1 suffix
+        #[rstest]
+        #[case::docker("  project_dir: .\n  shell: bash\n  container: c\n", NO_CHECKS)]
+        #[case::check(
+            COMPOSE,
+            "    checks:\n      lint:\n        name: Lint\n        command: x\n        container: c\n"
+        )]
+        #[case::pre_command(
+            COMPOSE,
+            "    pre_commands:\n      - name: init\n        command: x\n        container: c\n    checks: {}\n"
+        )]
+        fn test_container_field_removed(#[case] docker: &str, #[case] group: &str) {
+            let err = validated(docker, group).unwrap_err();
+            assert!(err.contains("unknown field `container`"), "{err}");
+        }
+
         #[test]
-        fn test_image_name_derived_strips_single_dash_one_suffix() {
-            let yaml = r#"
-version: 2
-docker:
-  project_dir: ./proj
-  service: x-1
-  shell: bash
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-checks: {}
-"#;
-            let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            // container_name = "proj-x-1-1"; image must be "proj-x-1", not "proj-x"
-            assert_eq!(config.docker().unwrap().image_name(), "proj-x-1");
+        fn test_pre_command_exec_field_removed() {
+            let group = "    pre_commands:\n      - name: init\n        command: x\n        exec: true\n    checks: {}\n";
+            let err = validated(COMPOSE, group).unwrap_err();
+            assert!(err.contains("unknown field `exec`"), "{err}");
         }
 
         // Edge case: Tests Docker volume mount configuration - requires raw YAML to verify volume_mount field parsing and formatting
@@ -1817,8 +1550,7 @@ checks: {}
             let yaml = r#"
 version: 2
 docker:
-  project_dir: .
-  service: app
+  image: img
   shell: bash
   volume_mount: ".:/build"
 git:
@@ -1840,8 +1572,7 @@ checks: {}
             let yaml = r#"
 version: 2
 docker:
-  project_dir: .
-  service: app
+  image: img
   shell: bash
 git:
   base_branch: main
@@ -1859,8 +1590,7 @@ checks: {}
             let yaml = r#"
 version: 2
 docker:
-  project_dir: .
-  service: app
+  image: img
   shell: bash
   work_dir: "/custom/path"
 git:
@@ -1922,8 +1652,7 @@ checks: {}
             let yaml = r#"
 version: 2
 docker:
-  project_dir: .
-  service: app
+  image: img
   shell: bash
 git:
   base_branch: main
@@ -1942,8 +1671,7 @@ checks: {}
             let yaml = r#"
 version: 2
 docker:
-  project_dir: .
-  service: app
+  image: img
   shell: bash
   volume_mount: "${CI_TUI_TEST_VOL}:/build"
 git:
@@ -2260,7 +1988,6 @@ checks:
         name: Full Featured Check
         command: cargo test
         service: custom_service
-        container: custom_container
         fix_command: cargo fmt
         on_demand: true
         env:
@@ -2275,7 +2002,6 @@ checks:
             assert_eq!(check.name, "Full Featured Check");
             assert_eq!(check.command, "cargo test");
             assert_eq!(check.service, Some("custom_service".to_string()));
-            assert_eq!(check.container, Some("custom_container".to_string()));
             assert_eq!(check.fix_command, Some("cargo fmt".to_string()));
             assert!(check.on_demand);
             assert_eq!(check.env.get("TEST_VAR"), Some(&"value".to_string()));
@@ -2299,7 +2025,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.version, 2);
-            assert_eq!(config.docker().unwrap().project_dir, ".");
+            assert_eq!(config.docker().unwrap().project_dir.as_deref(), Some("."));
             assert_eq!(config.docker().unwrap().service, "app"); // Default value
             assert_eq!(config.docker().unwrap().shell, "bash");
             assert_eq!(config.git.base_branch, "main");
@@ -2438,9 +2164,8 @@ checks:
             CiConfig::new(
                 2,
                 DockerConfig {
-                    project_dir: ".".to_string(),
+                    project_dir: Some(".".to_string()),
                     service: "app".to_string(),
-                    container: None,
                     image: None,
                     volume_mount: None,
                     work_dir: None,
@@ -2485,38 +2210,6 @@ checks:
         fn invalid_ignore_pattern_panics_on_lazy_path() {
             let cfg = cfg_with_patterns(vec![], vec![r"\.md$", r"[unclosed"]);
             let _ = cfg.should_ignore_file("README.md");
-        }
-    }
-
-    mod test_resolve_project_name_from_cwd {
-        use super::super::resolve_project_name_from_cwd;
-
-        #[test]
-        fn dot_returns_current_dir_name() {
-            let cwd = std::env::current_dir().unwrap();
-            let expected = cwd.file_name().unwrap().to_string_lossy().to_string();
-            assert_eq!(resolve_project_name_from_cwd("."), Some(expected));
-        }
-
-        #[test]
-        fn dotdot_returns_parent_dir_name() {
-            let cwd = std::env::current_dir().unwrap();
-            let expected_parent = cwd.parent().map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
-            if let Some(parent_name) = expected_parent {
-                if !parent_name.is_empty() {
-                    assert_eq!(resolve_project_name_from_cwd(".."), Some(parent_name));
-                }
-            }
-        }
-
-        #[test]
-        fn non_dot_input_returns_none() {
-            assert_eq!(resolve_project_name_from_cwd("weird"), None);
-            assert_eq!(resolve_project_name_from_cwd("./sub"), None);
         }
     }
 
@@ -2601,10 +2294,10 @@ checks:
         }
 
         #[test]
-        fn test_local_mode_rejects_pre_command_container() {
+        fn test_local_mode_rejects_pre_command_service() {
             let yaml = LOCAL_MIN.replace(
                 "checks: {}\n",
-                "checks:\n  g:\n    pre_commands:\n      - name: init\n        command: echo\n        container: db\n    checks: {}\n",
+                "checks:\n  g:\n    pre_commands:\n      - name: init\n        command: echo\n        service: db\n    checks: {}\n",
             );
             let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
             let err = config.validate_and_compile().unwrap_err().to_string();

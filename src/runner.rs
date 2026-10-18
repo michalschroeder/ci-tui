@@ -1,8 +1,9 @@
 //! Check execution (Docker or local host) with event streaming.
 //!
 //! This module handles the actual execution of CI checks. [`ExecTarget`] picks
-//! the mode: Docker (`docker exec` for running containers, `docker run` for
-//! standalone execution) or local host (`shell -c`). Lifecycle events
+//! the mode: Docker (see [`resolve_service`]: `docker exec` into a compose
+//! service's running container, else `docker compose run`; `docker run` of
+//! `docker.image` in plain-image mode) or local host (`shell -c`). Lifecycle events
 //! ([`RunnerEvent`]) go through async channels; while a check runs its output
 //! is streamed as batched [`RunnerEvent::CheckOutput`] chunks (see
 //! [`OutputSink`]). The final [`RunnerEvent::CheckFinished`] result stays
@@ -21,8 +22,8 @@
 //! A command that does not finish normally (cancel, timeout, or its task
 //! aborted/dropped on quit or retry-all) is cleaned up by drop guards:
 //! [`RealCommandExecutor`] kills the command's whole process group, and a
-//! `docker run` fallback (always started with a unique `--name`) gets a
-//! `docker kill`. LIMITATION: for `docker exec` only the local client dies;
+//! `docker run` / `docker compose run` container (always started with a
+//! unique `--name`) gets a `docker kill`. LIMITATION: for `docker exec` only the local client dies;
 //! the process inside the container keeps running until it exits.
 //!
 //! # Key Functions
@@ -32,6 +33,7 @@
 
 use crate::checks::CheckToRun;
 use crate::config::CiConfig;
+use crate::utils::shell::quote;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
@@ -39,7 +41,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -109,11 +111,20 @@ pub trait CommandExecutor: Send + Sync {
     /// complete either way.
     async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput;
 
-    /// Check if a Docker container is running
-    fn is_container_running(&self, container_name: &str) -> bool;
+    /// Id of the first running container of compose `service`: `docker
+    /// compose --project-directory <project_dir> ps -q --status running
+    /// <service>`, run in `working_dir`. `None` when none runs or the command
+    /// fails.
+    fn running_container(
+        &self,
+        project_dir: &str,
+        service: &str,
+        working_dir: &Path,
+    ) -> Option<String>;
 
     /// Kill a Docker container (best effort; errors ignored). Called when a
-    /// `docker run` command is cancelled, times out or is dropped.
+    /// `docker run` / `docker compose run` command is cancelled, times out or
+    /// is dropped.
     fn kill_container(&self, name: &str);
 }
 
@@ -174,12 +185,68 @@ impl CommandExecutor for RealCommandExecutor {
         }
     }
 
-    fn is_container_running(&self, container_name: &str) -> bool {
-        crate::utils::docker::is_running(container_name)
+    fn running_container(
+        &self,
+        project_dir: &str,
+        service: &str,
+        working_dir: &Path,
+    ) -> Option<String> {
+        crate::utils::docker::compose_running(project_dir, service, working_dir)
     }
 
     fn kill_container(&self, name: &str) {
         crate::utils::docker::kill(name);
+    }
+}
+
+/// [`CommandExecutor`] asking `inner` for each service's running container
+/// once, so one run (a [`CheckRunner`], a simple-mode or a fix run) queries
+/// `docker compose ps` per service, not per check. A container started or
+/// stopped mid-run is not noticed until the next run.
+pub struct CachingExecutor {
+    inner: Arc<dyn CommandExecutor>,
+    running: Mutex<HashMap<String, Arc<OnceLock<Option<String>>>>>,
+}
+
+impl CachingExecutor {
+    /// `inner` with a fresh cache, for one run
+    pub fn wrap(inner: Arc<dyn CommandExecutor>) -> Arc<dyn CommandExecutor> {
+        Arc::new(Self {
+            inner,
+            running: Mutex::default(),
+        })
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for CachingExecutor {
+    async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput {
+        self.inner.execute(command, working_dir, sink).await
+    }
+
+    /// Cached per service (`project_dir` / `working_dir` are fixed per run).
+    /// Concurrent checks of one service wait for the first answer instead of
+    /// querying too; other services query in parallel.
+    fn running_container(
+        &self,
+        project_dir: &str,
+        service: &str,
+        working_dir: &Path,
+    ) -> Option<String> {
+        let cell = {
+            // A panic while holding the lock leaves the map consistent
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(running.entry(service.to_string()).or_default())
+        };
+        cell.get_or_init(|| {
+            self.inner
+                .running_container(project_dir, service, working_dir)
+        })
+        .clone()
+    }
+
+    fn kill_container(&self, name: &str) {
+        self.inner.kill_container(name);
     }
 }
 
@@ -285,7 +352,8 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-/// `docker kill`s a `docker run` container on drop unless disarmed
+/// `docker kill`s a `docker run` / `docker compose run` container on drop
+/// unless disarmed
 /// (`name` cleared)
 struct ContainerGuard<'a> {
     executor: &'a dyn CommandExecutor,
@@ -305,8 +373,8 @@ impl Drop for ContainerGuard<'_> {
 /// Cleanup when this future is dropped before the command finished (timeout
 /// expiry, a cancel, or its task aborted on quit, Ctrl-C, retry-all):
 /// dropping the executor future makes [`RealCommandExecutor`] SIGKILL the
-/// command's whole process group, and a `docker run` command
-/// ([`BuiltCommand::container`]) gets `docker kill <name>`. LIMITATION: a
+/// command's whole process group, and a `docker run` / `docker compose run`
+/// command ([`BuiltCommand::container`]) gets `docker kill <name>`. LIMITATION: a
 /// `docker exec` command keeps running inside the container (only the local
 /// client is killed).
 pub async fn execute_built(
@@ -466,54 +534,56 @@ fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Unique `docker run --name` for this process: `ci-tui-<pid>-<n>`
+/// Unique `docker run` / `docker compose run` `--name` for this process:
+/// `ci-tui-<pid>-<n>`
 fn unique_container_name() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("ci-tui-{}-{n}", std::process::id())
 }
 
-/// Build a docker run command with environment variables. `name` becomes
-/// `--name`, so cancel/timeout can `docker kill` the container.
+/// `docker run` of `image` (plain-image mode): `docker run --rm --name
+/// <name> [-v mount] [-e K='V' ...] -w <work_dir> <image> <shell> -c '<cmd>'`.
+/// `name` lets cancel/timeout `docker kill` the container.
 pub fn build_docker_run_command(
     docker_config: &crate::config::DockerConfig,
+    image: &str,
     env: &HashMap<String, String>,
     command: &str,
     name: &str,
 ) -> String {
-    // Build env flags for docker run (-e KEY='VALUE' for each)
-    let env_flags: String = env_assignments(env)
-        .map(|a| format!("-e {a}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // Get image name from config (explicit or derived from container name)
-    let image_name = docker_config.image_name();
-
-    // Get working directory from config (default: /app)
-    let work_dir = docker_config.working_dir();
-
-    // Get shell from config (default: bash)
-    let shell = &docker_config.shell;
-
-    // Get volume mount args if configured
-    let volume_args = docker_config.volume_args().unwrap_or_default();
-
-    // Build docker run command with --rm flag
     let mut parts = vec![format!("docker run --rm --name {name}")];
+    parts.extend(docker_config.volume_args());
+    parts.extend(env_assignments(env).map(|a| format!("-e {a}")));
+    parts.push(format!("-w {}", docker_config.working_dir()));
+    parts.push(image.to_string());
+    parts.push(format!(
+        "{} -c {}",
+        docker_config.shell,
+        single_quote(command)
+    ));
+    parts.join(" ")
+}
 
-    if !volume_args.is_empty() {
-        parts.push(volume_args);
-    }
-
-    if !env_flags.is_empty() {
-        parts.push(env_flags);
-    }
-
-    parts.push(format!("-w {}", work_dir));
-    parts.push(image_name);
-    parts.push(format!("{} -c {}", shell, single_quote(command)));
-
+/// `docker compose run` of `service` (compose mode, no running container):
+/// `docker compose --project-directory <project_dir> run --rm -T --name <name>
+/// [-e K='V' ...] <service> <shell> -c '<cmd>'`. Compose supplies the
+/// service's image, volumes and working_dir; `name` lets cancel/timeout
+/// `docker kill` the container.
+pub fn build_compose_run_command(
+    docker: &crate::config::DockerConfig,
+    service: &str,
+    env: &HashMap<String, String>,
+    command: &str,
+    name: &str,
+) -> String {
+    let dir = quote(docker.compose_dir());
+    let mut parts = vec![format!(
+        "docker compose --project-directory {dir} run --rm -T --name {name}"
+    )];
+    parts.extend(env_assignments(env).map(|a| format!("-e {a}")));
+    parts.push(quote(service));
+    parts.push(format!("{} -c {}", docker.shell, single_quote(command)));
     parts.join(" ")
 }
 
@@ -524,8 +594,9 @@ pub use crate::config::ExecTarget;
 pub struct BuiltCommand {
     /// Full shell command line
     pub command: String,
-    /// `--name` of the container a `docker run` command starts (killed on
-    /// cancel/timeout/drop); `None` for `docker exec` and host commands
+    /// `--name` of the container a `docker run` / `docker compose run`
+    /// command starts (killed on cancel/timeout/drop); `None` for `docker
+    /// exec` and host commands
     pub container: Option<String>,
 }
 
@@ -548,55 +619,72 @@ impl ExecTarget {
         }
     }
 
-    /// Docker container for `container` / `service` overrides (see
-    /// [`crate::config::DockerConfig::container_for`]); `None` in local mode.
-    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> Option<String> {
-        match self {
-            Self::Docker(docker) => Some(docker.container_for(container, service)),
-            Self::Local(_) => None,
-        }
-    }
-
-    /// Full shell command for `command`. `container` overrides the docker
-    /// default container (`docker.container_name()`); ignored in local mode.
-    /// Queries container state ONLY in docker mode.
+    /// Full shell command for `command`. `service` overrides
+    /// `docker.service` (compose mode only, see [`resolve_service`]); `root`
+    /// is where commands run. Queries container state ONLY in compose mode.
     pub fn build_command(
         &self,
-        container: Option<&str>,
+        service: Option<&str>,
         env: &HashMap<String, String>,
         command: &str,
+        root: &Path,
         executor: &dyn CommandExecutor,
     ) -> BuiltCommand {
         match self {
             Self::Local(local) => BuiltCommand::plain(build_local_command(local, env, command)),
-            Self::Docker(docker) => build_docker_command(docker, container, env, command, executor),
+            Self::Docker(docker) => match resolve_service(docker, service, root, executor) {
+                DockerPlacement::Exec(id) => {
+                    BuiltCommand::plain(build_docker_exec_command(&id, env, command, &docker.shell))
+                }
+                DockerPlacement::ComposeRun(service) => named_container(|name| {
+                    build_compose_run_command(docker, service, env, command, name)
+                }),
+                DockerPlacement::Image(image) => named_container(|name| {
+                    build_docker_run_command(docker, image, env, command, name)
+                }),
+            },
         }
     }
 }
 
-/// `docker exec` into `container` (default: `docker.container_name()`) when it
-/// is running, else standalone `docker run`.
-fn build_docker_command(
-    docker: &crate::config::DockerConfig,
-    container: Option<&str>,
-    env: &HashMap<String, String>,
-    command: &str,
+/// Where a docker-mode command runs, see [`resolve_service`]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerPlacement<'a> {
+    /// `docker exec` into this running container (id from `docker compose ps`)
+    Exec(String),
+    /// `docker compose run` of this service: none of its containers runs
+    ComposeRun(&'a str),
+    /// `docker run` of this image (plain-image mode, `docker.image`)
+    Image(&'a str),
+}
+
+/// Where a command for `service` (default `docker.service`) runs: the single
+/// resolution path for checks, pre-commands, fixes and preflight. Plain-image
+/// mode never asks compose; compose mode asks `executor` for the service's
+/// running container ([`CommandExecutor::running_container`], run in `root`).
+pub fn resolve_service<'a>(
+    docker: &'a crate::config::DockerConfig,
+    service: Option<&'a str>,
+    root: &Path,
     executor: &dyn CommandExecutor,
-) -> BuiltCommand {
-    let name = container.map_or_else(|| docker.container_name(), str::to_owned);
-    if executor.is_container_running(&name) {
-        BuiltCommand::plain(build_docker_exec_command(
-            &name,
-            env,
-            command,
-            &docker.shell,
-        ))
-    } else {
-        let run_name = unique_container_name();
-        BuiltCommand {
-            command: build_docker_run_command(docker, env, command, &run_name),
-            container: Some(run_name),
-        }
+) -> DockerPlacement<'a> {
+    if let Some(image) = &docker.image {
+        return DockerPlacement::Image(image);
+    }
+    let service = service.unwrap_or(&docker.service);
+    match executor.running_container(docker.compose_dir(), service, root) {
+        Some(id) => DockerPlacement::Exec(id),
+        None => DockerPlacement::ComposeRun(service),
+    }
+}
+
+/// Command `build` makes for a fresh unique container name, with that name
+/// as [`BuiltCommand::container`] (killed on cancel/timeout/drop)
+fn named_container(build: impl FnOnce(&str) -> String) -> BuiltCommand {
+    let name = unique_container_name();
+    BuiltCommand {
+        command: build(&name),
+        container: Some(name),
     }
 }
 
@@ -850,7 +938,9 @@ impl CheckRunner {
         Self::with_executor(config, project_root, Arc::new(RealCommandExecutor))
     }
 
-    /// Create a new check runner with a custom executor (for testing)
+    /// Create a new check runner with a custom executor (for testing).
+    /// A runner serves one run: each service's container is resolved once
+    /// ([`CachingExecutor`]).
     pub fn with_executor(
         config: impl Into<Arc<CiConfig>>,
         project_root: &Path,
@@ -859,7 +949,7 @@ impl CheckRunner {
         Self {
             config: config.into(),
             project_root: Arc::from(project_root),
-            executor,
+            executor: CachingExecutor::wrap(executor),
             cancels: CancelRegistry::default(),
         }
     }
@@ -1048,17 +1138,15 @@ impl CheckRunner {
         (output.success, combined, duration_ms)
     }
 
-    /// Shell command for a non-host pre-command. Local mode ignores
-    /// `service`/`container` (rejected at load) and runs on the host.
+    /// Shell command for a non-host pre-command, in its `service` (compose
+    /// mode; rejected at load in local / plain-image mode).
     fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> BuiltCommand {
         let env = merged_env(self.target(), &pre_cmd.env);
-        let container = self
-            .target()
-            .container_for(pre_cmd.container.as_deref(), pre_cmd.service.as_deref());
         self.target().build_command(
-            container.as_deref(),
+            pre_cmd.service.as_deref(),
             &env,
             &pre_cmd.command,
+            &self.project_root,
             self.executor.as_ref(),
         )
     }
@@ -1185,8 +1273,8 @@ async fn wait_for_slot<'a>(
 
 /// Execute a command on `target` and return the result (for testing with executor).
 ///
-/// `container` overrides the docker default container (ignored in local mode).
-/// `check_env` is merged over the target's global env (check env wins).
+/// `service` overrides `docker.service` (compose mode only, see
+/// [`resolve_service`]). `check_env` is merged over the target's global env (check env wins).
 /// `timeout` bounds the run (`None` = unbounded); expiry yields
 /// [`CheckStatus::TimedOut`] with the reason in `error_output`.
 /// `max_output_lines` caps stored stdout/stderr to their last N lines each
@@ -1199,7 +1287,7 @@ pub async fn execute_command_with_executor(
     check_id: String,
     command: &str,
     project_root: &std::path::Path,
-    container: Option<&str>,
+    service: Option<&str>,
     target: &ExecTarget,
     check_env: &HashMap<String, String>,
     executor: &dyn CommandExecutor,
@@ -1211,7 +1299,7 @@ pub async fn execute_command_with_executor(
     let start = std::time::Instant::now();
 
     let env = merged_env(target, check_env);
-    let full_cmd = target.build_command(container, &env, command, executor);
+    let full_cmd = target.build_command(service, &env, command, project_root, executor);
     let output = execute_with_timeout(executor, &full_cmd, project_root, timeout, sink).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1273,19 +1361,19 @@ pub async fn run_single_check_with_executor(
     .await
 }
 
-/// Run a fix command. `container` overrides the docker default container;
+/// Run a fix command. `service` overrides `docker.service` (compose mode);
 /// target env applies.
 pub async fn run_fix_command(
     fix_command: &str,
     project_root: &std::path::Path,
-    container: Option<&str>,
+    service: Option<&str>,
     target: &ExecTarget,
     max_output_lines: usize,
 ) -> CheckResult {
     run_fix_command_with_executor(
         fix_command,
         project_root,
-        container,
+        service,
         target,
         &RealCommandExecutor,
         max_output_lines,
@@ -1297,7 +1385,7 @@ pub async fn run_fix_command(
 pub async fn run_fix_command_with_executor(
     fix_command: &str,
     project_root: &std::path::Path,
-    container: Option<&str>,
+    service: Option<&str>,
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
     max_output_lines: usize,
@@ -1306,7 +1394,7 @@ pub async fn run_fix_command_with_executor(
         "fix".to_string(),
         fix_command,
         project_root,
-        container,
+        service,
         target,
         &HashMap::new(),
         executor,
@@ -1321,8 +1409,7 @@ pub async fn run_fix_command_with_executor(
 /// [`RunnerEvent::CheckOutput`] chunks while the command runs.
 ///
 /// Used e.g. when running a check for "all files" by removing the {files}
-/// placeholder from the command. Check container (or service) override and
-/// env apply.
+/// placeholder from the command. Check service and env apply.
 pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
@@ -1332,15 +1419,11 @@ pub async fn run_check_with_command_with_executor(
     max_output_lines: usize,
     sink: &OutputSink,
 ) -> CheckResult {
-    let container = target.container_for(
-        check.definition.container.as_deref(),
-        check.service.as_deref(),
-    );
     execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        container.as_deref(),
+        check.service.as_deref(),
         target,
         &check.definition.env,
         executor,
@@ -1463,10 +1546,9 @@ mod tests {
     #[test]
     fn test_build_docker_run_command_skips_invalid_env_keys() {
         let docker: crate::config::DockerConfig =
-            serde_yaml::from_str("project_dir: .\nservice: app\nshell: bash\nimage: img\n")
-                .unwrap();
+            serde_yaml::from_str("shell: bash\nimage: img\n").unwrap();
         let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
-        let cmd = build_docker_run_command(&docker, &env, "ls", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&docker, "img", &env, "ls", "ci-tui-test-1");
         assert!(!cmd.contains("BAD"), "got: {cmd}");
         assert!(!cmd.contains(" -e "), "got: {cmd}");
     }
@@ -1475,48 +1557,90 @@ mod tests {
         ExecTarget::Local(crate::config::LocalConfig::default())
     }
 
-    fn docker_target() -> ExecTarget {
-        let yaml = "project_dir: .\nservice: app\nshell: bash\nimage: test-img\n";
+    /// Plain-image mode target (`docker.image`)
+    fn image_target() -> ExecTarget {
+        let yaml = "shell: bash\nimage: test-img\n";
         ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+    }
+
+    /// Compose mode target: project `./infra`, default service `app`
+    fn compose_target() -> ExecTarget {
+        let yaml = "project_dir: ./infra\nservice: app\nshell: bash\n";
+        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+    }
+
+    /// Mock whose compose `service` runs container `id` (others stopped);
+    /// asserts the query's project dir and working dir
+    fn compose_mock(service: &'static str, id: &'static str) -> MockCommandExecutor {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_running_container()
+            .withf(|dir, _, root| dir == "./infra" && root == Path::new("/repo"))
+            .returning(move |_, s, _| (s == service).then(|| id.to_string()));
+        mock
+    }
+
+    fn build(
+        target: &ExecTarget,
+        service: Option<&str>,
+        mock: &MockCommandExecutor,
+    ) -> BuiltCommand {
+        target.build_command(service, &HashMap::new(), "ls", Path::new("/repo"), mock)
     }
 
     #[test]
     fn test_build_command_local_never_queries_docker() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().times(0);
-        let cmd =
-            local_target().build_command(Some("ignored"), &HashMap::new(), "cargo test", &mock);
+        mock.expect_running_container().times(0);
+        let cmd = local_target().build_command(
+            Some("ignored"),
+            &HashMap::new(),
+            "cargo test",
+            Path::new("/repo"),
+            &mock,
+        );
         assert_eq!(cmd, BuiltCommand::plain("bash -c 'cargo test'"));
     }
 
     #[test]
-    fn test_build_command_docker_running_uses_exec() {
-        let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| true);
-        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
-        assert!(
-            cmd.command.starts_with("docker exec proj-app-1"),
-            "got: {cmd:?}"
+    fn test_build_command_compose_running_service_execs_into_resolved_id() {
+        let mock = compose_mock("app", "abc123");
+        let cmd = build(&compose_target(), None, &mock);
+        assert_eq!(cmd, BuiltCommand::plain("docker exec abc123 bash -c 'ls'"));
+    }
+
+    #[test]
+    fn test_build_command_compose_check_service_execs_into_its_container() {
+        let mock = compose_mock("worker", "w0rk3r");
+        let cmd = build(&compose_target(), Some("worker"), &mock);
+        assert_eq!(cmd, BuiltCommand::plain("docker exec w0rk3r bash -c 'ls'"));
+    }
+
+    #[test]
+    fn test_build_command_compose_stopped_service_uses_compose_run_of_that_service() {
+        // Default service `app` runs; check's `worker` does not
+        let mock = compose_mock("app", "abc123");
+        let env = HashMap::from([("APP_ENV".to_string(), "ci".to_string())]);
+        let cmd =
+            compose_target().build_command(Some("worker"), &env, "ls", Path::new("/repo"), &mock);
+        let name = cmd.container.clone().expect("compose run is named");
+        assert_eq!(
+            cmd.command,
+            format!(
+                "docker compose --project-directory ./infra run --rm -T --name {name} \
+                 -e APP_ENV='ci' worker bash -c 'ls'"
+            )
         );
-        assert_eq!(cmd.container, None, "exec starts no container");
     }
 
     #[test]
-    fn test_build_command_docker_stopped_uses_run() {
-        let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| false);
-        let cmd = docker_target().build_command(Some("proj-app-1"), &HashMap::new(), "ls", &mock);
-        assert!(cmd.command.starts_with("docker run --rm"), "got: {cmd:?}");
-    }
+    fn test_build_command_compose_run_gets_unique_name() {
+        let mock = compose_mock("app", "abc123");
+        let (first, second) = (
+            build(&compose_target(), Some("worker"), &mock),
+            build(&compose_target(), Some("worker"), &mock),
+        );
 
-    #[test]
-    fn test_build_command_docker_run_gets_unique_name() {
-        let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running().returning(|_| false);
-        let build = || docker_target().build_command(None, &HashMap::new(), "ls", &mock);
-        let (first, second) = (build(), build());
-
-        let name = first.container.clone().expect("docker run is named");
+        let name = first.container.clone().expect("compose run is named");
         assert!(name.starts_with("ci-tui-"), "got: {name}");
         assert!(
             first.command.contains(&format!("--name {name} ")),
@@ -1526,23 +1650,43 @@ mod tests {
     }
 
     #[test]
-    fn test_cancelled_is_not_failure() {
-        assert!(!CheckStatus::Cancelled.is_failure());
+    fn test_build_command_image_mode_runs_image_without_compose() {
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_running_container().times(0);
+        let cmd = build(&image_target(), None, &mock);
+        let name = cmd.container.clone().expect("docker run is named");
+        assert_eq!(
+            cmd.command,
+            format!("docker run --rm --name {name} -w /app test-img bash -c 'ls'")
+        );
     }
 
     #[test]
-    fn test_build_command_docker_defaults_to_config_container() {
+    fn test_caching_executor_queries_each_service_once() {
         let mut mock = MockCommandExecutor::new();
-        mock.expect_is_container_running()
-            .withf(|name| name == "explicit-c")
-            .returning(|_| true);
-        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
-        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
-        let cmd = target.build_command(None, &HashMap::new(), "ls", &mock);
-        assert!(
-            cmd.command.starts_with("docker exec explicit-c"),
-            "got: {cmd:?}"
+        mock.expect_running_container()
+            .withf(|_, s, _| s == "app")
+            .times(1)
+            .returning(|_, _, _| Some("abc123".into()));
+        mock.expect_running_container()
+            .withf(|_, s, _| s == "worker")
+            .times(1)
+            .returning(|_, _, _| None);
+        let cached = CachingExecutor::wrap(Arc::new(mock));
+        for _ in 0..3 {
+            for service in ["app", "worker"] {
+                let _ = cached.running_container("./infra", service, Path::new("/repo"));
+            }
+        }
+        assert_eq!(
+            cached.running_container("./infra", "app", Path::new("/repo")),
+            Some("abc123".into())
         );
+    }
+
+    #[test]
+    fn test_cancelled_is_not_failure() {
+        assert!(!CheckStatus::Cancelled.is_failure());
     }
 
     #[test]
@@ -1551,30 +1695,6 @@ mod tests {
         let config: crate::config::CiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.runner, ExecTarget::Local(_)));
         assert_eq!(config.runner.env().get("A").unwrap(), "b");
-    }
-
-    #[test]
-    fn test_container_for_precedence() {
-        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
-        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
-        let ExecTarget::Docker(docker) = &target else {
-            unreachable!()
-        };
-        let worker = format!("{}-worker-1", docker.compose_project_name());
-        let cases = [
-            (None, Some("worker"), worker.as_str()),
-            (Some("c"), Some("worker"), "c"),
-            (None, Some("app"), "explicit-c"),
-            (None, None, "explicit-c"),
-        ];
-        for (container, service, expected) in cases {
-            let got = target.container_for(container, service);
-            assert_eq!(got.as_deref(), Some(expected), "{container:?} {service:?}");
-        }
-        assert_eq!(
-            local_target().container_for(Some("c"), Some("worker")),
-            None
-        );
     }
 
     #[test]

@@ -387,9 +387,8 @@ mod tests {
         CiConfig::new(
             2,
             DockerConfig {
-                project_dir: ".".to_string(),
+                project_dir: Some(".".to_string()),
                 service: "app".to_string(),
-                container: None,
                 image: None,
                 volume_mount: None,
                 work_dir: None,
@@ -416,7 +415,6 @@ mod tests {
             name: "N".to_string(),
             command: cmd.to_string(),
             service: None,
-            container: None,
             fix_command: fix.map(String::from),
             triggers,
             on_demand,

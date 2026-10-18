@@ -7,9 +7,8 @@ timeout: 15m
 # TUI: bell + desktop notification when a full run finishes
 notify: true
 
+# Plain-image mode: every check is a `docker run` of the dev image (no compose)
 docker:
-  project_dir: .
-  service: dev
   image: ci-tui-dev:latest
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build

@@ -11,7 +11,6 @@ use std::path::Path;
 #[tokio::test]
 async fn passes_when_executor_succeeds() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: "output".into(),
@@ -33,7 +32,6 @@ async fn passes_when_executor_succeeds() {
 #[tokio::test]
 async fn fails_with_stderr_when_executor_reports_failure() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),
@@ -53,11 +51,11 @@ async fn fails_with_stderr_when_executor_reports_failure() {
 }
 
 #[tokio::test]
-async fn uses_docker_run_when_container_not_running() {
+async fn image_mode_uses_docker_run_without_compose() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| false);
+    mock.expect_running_container().never();
     mock.expect_execute()
-        .withf(|cmd, _, _| cmd.starts_with("docker run"))
+        .withf(|cmd, _, _| cmd.starts_with("docker run") && cmd.contains(" img:latest "))
         .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
@@ -75,22 +73,49 @@ async fn uses_docker_run_when_container_not_running() {
 }
 
 #[tokio::test]
-async fn per_check_container_overrides_default() {
+async fn check_service_execs_into_its_resolved_container() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running()
-        .withf(|name| name == "override")
-        .returning(|_| true);
+    mock.expect_running_container()
+        .withf(|_, service, _| service == "worker")
+        .returning(|_, _, _| Some("w0rk3r".into()));
     mock.expect_execute()
-        .withf(|cmd, _, _| cmd.contains("override"))
+        .withf(|cmd, _, _| cmd == "docker exec w0rk3r bash -c 'cargo test'")
+        .times(1)
         .returning(|_, _, _| CommandOutput {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
         });
-    let mut c = common::make_exec_check("c", "cargo test", None);
-    c.definition.container = Some("override".into());
-    let cfg = common::test_docker_target("img:latest");
+    let cfg = common::configs::ConfigBuilder::new().build().runner;
+    let c = common::make_exec_check("c", "cargo test", Some("worker"));
     run_check_with_executor(&c, Path::new("/app"), &cfg, &mock, DEFAULT_MAX_OUTPUT_LINES).await;
+}
+
+#[tokio::test]
+async fn simple_run_resolves_each_service_once() {
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_running_container()
+        .times(1)
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
+    mock.expect_execute()
+        .times(3)
+        .returning(|_, _, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+    let config = common::configs::ConfigBuilder::new()
+        .with_parallel_group("g2")
+        .build();
+    let checks = vec![
+        common::make_widget_check("a", "g1", "A", false),
+        common::make_widget_check("b", "g2", "B", false),
+        common::make_widget_check("c", "g2", "C", false),
+    ];
+    let results = run_with_executor(config, checks, "/app".into(), Arc::new(mock))
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 3);
 }
 
 use ci_tui::simple::run_with_executor;
@@ -99,7 +124,8 @@ use std::sync::Arc;
 #[tokio::test]
 async fn sequential_group_runs_checks_in_order() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
@@ -127,7 +153,8 @@ async fn sequential_group_runs_checks_in_order() {
 #[tokio::test]
 async fn parallel_group_runs_all_checks() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: true,
         stdout: String::new(),
@@ -158,7 +185,8 @@ async fn parallel_group_runs_all_checks() {
 #[tokio::test]
 async fn on_demand_checks_skipped_in_both_modes() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute()
         .times(1)
         .returning(|_, _, _| CommandOutput {
@@ -187,7 +215,8 @@ async fn on_demand_checks_skipped_in_both_modes() {
 #[tokio::test]
 async fn failure_recorded_in_results() {
     let mut mock = MockCommandExecutor::new();
-    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
     mock.expect_execute().returning(|_, _, _| CommandOutput {
         success: false,
         stdout: String::new(),

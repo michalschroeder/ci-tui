@@ -27,19 +27,21 @@ version: 2
 #     APP_ENV: testing
 
 docker:
-  # Directory containing docker-compose.yml (for `docker compose --project-directory`)
+  # Directory with your compose file (for `docker compose --project-directory`)
   project_dir: .
-  # Compose service to exec checks in; container name derives as
-  # {project}-{service}-1 (project = $COMPOSE_PROJECT_NAME, else project_dir name)
+  # Compose service checks run in (per check: `service:`). ci-tui asks
+  # `docker compose ps` for its running container and `docker exec`s into it;
+  # when it is not running, `docker compose run --rm` starts one
   service: app
-  # container: myproject-app-1           # override if the derived name is wrong (e.g. compose `name:`)
   # Shell inside the container ("/bin/sh" for Alpine images)
   shell: bash
-  # image: my-dev-image:latest            # for standalone `docker run` fallback
-  # volume_mount: "${HOST_PWD}:/app"      # mount for `docker run`
-  # work_dir: /app                        # workdir inside container
   # env:
   #   APP_ENV: testing
+  # Without compose: run every check in a plain image instead (drop
+  # project_dir / service, no per-check `service:`)
+  # image: my-dev-image:latest
+  # volume_mount: "${HOST_PWD}:/app"      # repo mount for `docker run`
+  # work_dir: /app                        # workdir inside the container
 
 git:
   # Changed files are detected against origin/{base_branch}, then {base_branch},

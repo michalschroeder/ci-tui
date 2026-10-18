@@ -1932,7 +1932,6 @@ checks:
                 name: name.to_string(),
                 command: format!("{} {{files}}", id),
                 service: None,
-                container: None,
                 fix_command: if has_fix {
                     Some(format!("{} --fix {{files}}", id))
                 } else {

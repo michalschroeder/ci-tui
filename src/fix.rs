@@ -22,7 +22,8 @@ use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{
-    CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget, RunnerEvent,
+    CachingExecutor, CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget,
+    RunnerEvent,
 };
 use crate::utils::time;
 use anyhow::Result;
@@ -68,6 +69,8 @@ pub async fn run_with_executor(
     executor: Arc<dyn CommandExecutor>,
 ) -> Result<FixSummary> {
     let start_time = Instant::now();
+    // One fix run (verification included): each service resolved once
+    let executor = CachingExecutor::wrap(executor);
     let ctx = FixCtx {
         config: &config,
         changed_files: &changed_files,
@@ -211,13 +214,12 @@ async fn run_group_fixes(
             check_id
         );
 
-        let container = target.container_for(check.container.as_deref(), check.service.as_deref());
         let result = run_fix_command_with_executor(
             &resolved_command,
             check_id,
             ctx.project_root,
             target,
-            container.as_deref(),
+            check.service.as_deref(),
             ctx.executor,
         )
         .await;
@@ -434,12 +436,13 @@ pub async fn run_fix_command_with_executor(
     check_id: &str,
     project_root: &Path,
     target: &ExecTarget,
-    check_container: Option<&str>,
+    check_service: Option<&str>,
     executor: &dyn crate::runner::CommandExecutor,
 ) -> Result<u64> {
     let start = Instant::now();
 
-    let full_cmd = target.build_command(check_container, target.env(), command, executor);
+    let full_cmd =
+        target.build_command(check_service, target.env(), command, project_root, executor);
     let output = crate::runner::execute_built(
         executor,
         &full_cmd,
@@ -538,9 +541,8 @@ mod tests {
         CiConfig::new(
             2,
             DockerConfig {
-                project_dir: ".".into(),
+                project_dir: Some(".".into()),
                 service: "app".into(),
-                container: None,
                 image: None,
                 volume_mount: None,
                 work_dir: None,
@@ -562,7 +564,6 @@ mod tests {
             name: "N".into(),
             command: "cmd".into(),
             service: None,
-            container: None,
             fix_command: Some("fix {files}".into()),
             triggers,
             on_demand: false,
@@ -744,7 +745,8 @@ mod tests {
             docker.env.insert("APP_ENV".into(), "ci".into());
             let target = ExecTarget::Docker(docker);
             let mut mock = MockCommandExecutor::new();
-            mock.expect_is_container_running().returning(|_| true);
+            mock.expect_running_container()
+                .returning(|_, _, _| Some("cid".into()));
             mock.expect_execute()
                 .withf(|cmd, _, _| cmd.contains("-e APP_ENV='ci'"))
                 .times(1)

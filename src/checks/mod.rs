@@ -97,7 +97,8 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// Docker service to use (resolved from check/group/global default); `None` in local mode
+    /// Docker service to use (resolved from check/group/global default); `None` in local and
+    /// plain-image mode
     pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,
@@ -316,7 +317,6 @@ mod tests {
                 name: "Cache warmup".to_string(),
                 command: "bin/console cache:warmup".to_string(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
@@ -342,7 +342,6 @@ mod tests {
                 name: "PHP syntax check".to_string(),
                 command: "parallel-lint {files}".to_string(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
@@ -360,7 +359,6 @@ mod tests {
                 name: "YAML syntax check".to_string(),
                 command: "yaml-lint {files}".to_string(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("yaml".to_string()),
@@ -389,7 +387,6 @@ mod tests {
                 name: "PHPStan".to_string(),
                 command: "phpstan analyse {files}".to_string(),
                 service: None,
-                container: None,
                 fix_command: Some("phpstan fix {files}".to_string()),
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("php".to_string()),
@@ -418,7 +415,6 @@ mod tests {
                 name: "PHPUnit".to_string(),
                 command: "phpunit {files}".to_string(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: Some(CheckTriggers {
                     file_pattern: Some("tests".to_string()),
@@ -435,9 +431,8 @@ mod tests {
         CiConfig {
             version: 2,
             runner: crate::config::ExecTarget::Docker(DockerConfig {
-                project_dir: "./infrastructure".to_string(),
+                project_dir: Some("./infrastructure".to_string()),
                 service: "php".to_string(),
-                container: None,
                 image: None,
                 volume_mount: None,
                 work_dir: None,
@@ -476,7 +471,6 @@ mod tests {
                 name: name.to_string(),
                 command: command.to_string(),
                 service: None,
-                container: None,
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
@@ -1420,7 +1414,6 @@ checks:
                 name: "Test".to_string(),
                 command: command.to_string(),
                 service: None,
-                container: None,
                 fix_command: fix.map(String::from),
                 triggers: Some(crate::config::CheckTriggers::default()),
                 on_demand: false,
