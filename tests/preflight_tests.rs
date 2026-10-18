@@ -63,6 +63,35 @@ fn running_mock(found: bool, seen: Arc<Mutex<Vec<String>>>) -> MockCommandExecut
     mock
 }
 
+/// Mock with running containers, logging probed container names and executed
+/// commands; one `execute` (the path probe) answering `success`
+fn recording_mock(
+    success: bool,
+) -> (
+    MockCommandExecutor,
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut mock = MockCommandExecutor::new();
+    let log = Arc::clone(&checked);
+    mock.expect_is_container_running().returning(move |name| {
+        log.lock().unwrap().push(name.to_string());
+        true
+    });
+    let log = Arc::clone(&seen);
+    mock.expect_execute().times(1).returning(move |cmd, _, _| {
+        log.lock().unwrap().push(cmd.to_string());
+        CommandOutput {
+            success,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    });
+    (mock, checked, seen)
+}
+
 /// Mock: container not running; no probe may run
 fn stopped_mock() -> MockCommandExecutor {
     let mut mock = MockCommandExecutor::new();
@@ -221,23 +250,7 @@ async fn no_selected_checks_never_probes() {
 #[tokio::test]
 async fn check_container_override_is_probed_instead_of_default() {
     let target = ConfigBuilder::new().build().runner;
-    let checked = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut mock = MockCommandExecutor::new();
-    let log = Arc::clone(&checked);
-    mock.expect_is_container_running().returning(move |name| {
-        log.lock().unwrap().push(name.to_string());
-        true
-    });
-    let log = Arc::clone(&seen);
-    mock.expect_execute().times(1).returning(move |cmd, _, _| {
-        log.lock().unwrap().push(cmd.to_string());
-        CommandOutput {
-            success: true,
-            stdout: String::new(),
-            stderr: String::new(),
-        }
-    });
+    let (mock, checked, seen) = recording_mock(true);
     let checks = vec![make_exec_check("a", "true", Some("custom-c"))];
 
     docker_warnings(&target, &checks, &files(&["Cargo.toml"]), root(), &mock).await;
@@ -429,4 +442,41 @@ async fn docker_probe_timeout_is_env_error() {
 
     assert_eq!(exit::code_for(&err), exit::ENV_ERROR);
     assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
+}
+
+#[tokio::test]
+async fn check_service_container_is_probed_instead_of_default() {
+    let target = ConfigBuilder::new().build().runner;
+    let worker = common::service_container(&container(&target), "worker");
+    let (mock, checked, seen) = recording_mock(false);
+    let mut check = make_exec_check("a", "true", None);
+    check.service = Some("worker".into());
+
+    let warnings = docker_warnings(&target, &[check], &files(&["Cargo.toml"]), root(), &mock).await;
+
+    assert_eq!(*checked.lock().unwrap(), vec![worker.clone()]);
+    let cmd = seen.lock().unwrap()[0].clone();
+    assert!(cmd.starts_with(&format!("docker exec {worker} ")), "{cmd}");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(&worker), "{warnings:?}");
+}
+
+#[tokio::test]
+async fn stopped_service_container_named_in_run_fallback_warning() {
+    let target = ConfigBuilder::new().build().runner;
+    let worker = common::service_container(&container(&target), "worker");
+    let mut check = make_exec_check("a", "true", None);
+    check.service = Some("worker".into());
+
+    let warnings = docker_warnings(
+        &target,
+        &[check],
+        &files(&["Cargo.toml"]),
+        root(),
+        &stopped_mock(),
+    )
+    .await;
+
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(&worker), "{warnings:?}");
 }

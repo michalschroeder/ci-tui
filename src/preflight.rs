@@ -84,7 +84,7 @@ pub async fn docker_reachable(
 ///
 /// - local mode, no selected checks or no changed files: no probe
 /// - each distinct container the checks use (`container:` override, else the
-///   default) is probed once:
+///   check's `service` container, else the default) is probed once:
 ///   - running: `test -e <file>` via `docker exec` on the first changed file
 ///     present on the host; warn if missing (first stderr line appended)
 ///   - not running: checks use the `docker run` fallback, whose mount is
@@ -104,11 +104,10 @@ pub async fn docker_warnings(
     }
     let mut containers: Vec<String> = Vec::new();
     for check in checks {
-        let name = check
-            .definition
-            .container
-            .clone()
-            .unwrap_or_else(|| docker.container_name());
+        let name = docker.container_for(
+            check.definition.container.as_deref(),
+            check.service.as_deref(),
+        );
         if !containers.contains(&name) {
             containers.push(name);
         }

@@ -369,3 +369,42 @@ async fn no_setup_without_verification() {
 
     assert_eq!(log, ["fix", "fix"]);
 }
+
+#[tokio::test]
+async fn fix_runs_in_check_service_container() {
+    let config = common::configs::ConfigBuilder::new()
+        .with_check(
+            "lint",
+            "fmt",
+            common::configs::CheckBuilder::new("Format", "cargo fmt --check")
+                .with_fix_command("cargo fmt")
+                .with_service("worker")
+                .build(),
+        )
+        .build();
+    let ci_tui::runner::ExecTarget::Docker(docker) = &config.runner else {
+        unreachable!("docker target expected")
+    };
+    let worker = common::service_container(&docker.container_name(), "worker");
+    let prefix = format!("docker exec {worker} ");
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_is_container_running().returning(|_| true);
+    mock.expect_execute()
+        .times(1)
+        .withf(move |cmd: &str, _, _| cmd.starts_with(&prefix))
+        .returning(|_, _, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+    run_with_executor(
+        config,
+        main_rs_changed(),
+        "/app".into(),
+        None,
+        Arc::new(mock),
+    )
+    .await
+    .unwrap();
+}

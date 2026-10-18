@@ -1376,6 +1376,38 @@ mod run_check_with_command_with_executor_tests {
         )
         .await;
     }
+
+    // Check with a non-default `service` execs into that service's container
+    #[tokio::test]
+    async fn check_service_execs_into_service_container() {
+        let docker = super::common::test_docker_config("img:latest");
+        let worker = super::common::service_container(&docker.container_name(), "worker");
+        let prefix = format!("docker exec {worker} ");
+        let mut mock = MockCommandExecutor::new();
+        mock.expect_is_container_running().returning(|_| true);
+        mock.expect_execute()
+            .times(1)
+            .withf(move |cmd: &str, _, _| cmd.starts_with(&prefix))
+            .returning(|_, _, _| CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+
+        let mut c = super::common::make_exec_check("a", "ls", None);
+        c.service = Some("worker".into());
+        let cfg = ci_tui::runner::ExecTarget::Docker(docker);
+        let _ = run_check_with_command_with_executor(
+            &c,
+            "ls",
+            Path::new("/app"),
+            &cfg,
+            &mock,
+            DEFAULT_MAX_OUTPUT_LINES,
+            &OutputSink::none(),
+        )
+        .await;
+    }
 }
 
 mod run_fix_command_with_executor_tests {

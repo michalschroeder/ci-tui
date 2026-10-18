@@ -548,6 +548,15 @@ impl ExecTarget {
         }
     }
 
+    /// Docker container for `container` / `service` overrides (see
+    /// [`crate::config::DockerConfig::container_for`]); `None` in local mode.
+    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> Option<String> {
+        match self {
+            Self::Docker(docker) => Some(docker.container_for(container, service)),
+            Self::Local(_) => None,
+        }
+    }
+
     /// Full shell command for `command`. `container` overrides the docker
     /// default container (`docker.container_name()`); ignored in local mode.
     /// Queries container state ONLY in docker mode.
@@ -1043,41 +1052,15 @@ impl CheckRunner {
     /// `service`/`container` (rejected at load) and runs on the host.
     fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> BuiltCommand {
         let env = merged_env(self.target(), &pre_cmd.env);
-        let container = match self.target() {
-            ExecTarget::Docker(docker) => Some(pre_command_container(docker, pre_cmd)),
-            ExecTarget::Local(_) => None,
-        };
+        let container = self
+            .target()
+            .container_for(pre_cmd.container.as_deref(), pre_cmd.service.as_deref());
         self.target().build_command(
             container.as_deref(),
             &env,
             &pre_cmd.command,
             self.executor.as_ref(),
         )
-    }
-}
-
-/// Resolve the container for a docker-mode pre-command.
-///
-/// Precedence: explicit `container:` > compose-convention name for a
-/// non-default service > default container.
-///
-/// LIMITATION: assumes the Docker Compose v2 naming convention
-/// `{project}-{service}-1`. `COMPOSE_PROJECT_NAME` and a top-level `name:`
-/// key in the compose file are both honored (see `DockerConfig::compose_project_name`).
-/// Non-UTF8 project paths fall back to the literal project name "project".
-/// Future work: resolve via `docker compose ps -q <service>` instead of
-/// string construction.
-fn pre_command_container(
-    docker: &crate::config::DockerConfig,
-    pre_cmd: &crate::config::PreCommand,
-) -> String {
-    let service = pre_cmd.service.as_deref().unwrap_or(&docker.service);
-    match pre_cmd.container.as_deref() {
-        Some(container) => container.to_string(),
-        None if service != docker.service => {
-            format!("{}-{}-1", docker.compose_project_name(), service)
-        }
-        None => docker.container_name(),
     }
 }
 
@@ -1338,7 +1321,8 @@ pub async fn run_fix_command_with_executor(
 /// [`RunnerEvent::CheckOutput`] chunks while the command runs.
 ///
 /// Used e.g. when running a check for "all files" by removing the {files}
-/// placeholder from the command. Check container override and env apply.
+/// placeholder from the command. Check container (or service) override and
+/// env apply.
 pub async fn run_check_with_command_with_executor(
     check: &CheckToRun,
     command: &str,
@@ -1348,11 +1332,15 @@ pub async fn run_check_with_command_with_executor(
     max_output_lines: usize,
     sink: &OutputSink,
 ) -> CheckResult {
+    let container = target.container_for(
+        check.definition.container.as_deref(),
+        check.service.as_deref(),
+    );
     execute_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        check.definition.container.as_deref(),
+        container.as_deref(),
         target,
         &check.definition.env,
         executor,
@@ -1563,6 +1551,30 @@ mod tests {
         let config: crate::config::CiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.runner, ExecTarget::Local(_)));
         assert_eq!(config.runner.env().get("A").unwrap(), "b");
+    }
+
+    #[test]
+    fn test_container_for_precedence() {
+        let yaml = "project_dir: .\nservice: app\nshell: bash\ncontainer: explicit-c\n";
+        let target = ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap());
+        let ExecTarget::Docker(docker) = &target else {
+            unreachable!()
+        };
+        let worker = format!("{}-worker-1", docker.compose_project_name());
+        let cases = [
+            (None, Some("worker"), worker.as_str()),
+            (Some("c"), Some("worker"), "c"),
+            (None, Some("app"), "explicit-c"),
+            (None, None, "explicit-c"),
+        ];
+        for (container, service, expected) in cases {
+            let got = target.container_for(container, service);
+            assert_eq!(got.as_deref(), Some(expected), "{container:?} {service:?}");
+        }
+        assert_eq!(
+            local_target().container_for(Some("c"), Some("worker")),
+            None
+        );
     }
 
     #[test]

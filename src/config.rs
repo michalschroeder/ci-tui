@@ -370,15 +370,33 @@ impl DockerConfig {
     /// Get the container name to use for docker exec
     /// Returns explicit container name if set, otherwise derives from project_dir + service
     pub fn container_name(&self) -> String {
-        if let Some(ref container) = self.container {
-            return container.clone();
+        match self.container {
+            Some(ref container) => container.clone(),
+            None => self.compose_container(&self.service),
         }
+    }
 
-        // Derive container name from project_dir and service
-        let project_name = self.compose_project_name();
+    /// Docker Compose v2 container name of `service`: `{project}-{service}-1`
+    fn compose_container(&self, service: &str) -> String {
+        format!("{}-{}-1", self.compose_project_name(), service)
+    }
 
-        // Docker Compose naming convention: {project}-{service}-1
-        format!("{}-{}-1", project_name, self.service)
+    /// Container for a check / pre-command with optional `container` /
+    /// `service` overrides.
+    ///
+    /// Precedence: explicit `container` > compose-convention name for a
+    /// non-default service > default container ([`Self::container_name`]).
+    ///
+    /// LIMITATION: assumes the Docker Compose v2 naming convention
+    /// `{project}-{service}-1` (see [`Self::compose_project_name`]).
+    /// Future work: resolve via `docker compose ps -q <service>` instead of
+    /// string construction.
+    pub fn container_for(&self, container: Option<&str>, service: Option<&str>) -> String {
+        match (container, service) {
+            (Some(container), _) => container.to_string(),
+            (None, Some(service)) if service != self.service => self.compose_container(service),
+            _ => self.container_name(),
+        }
     }
 
     /// Compose project name, in docker compose's own precedence order:
