@@ -378,15 +378,15 @@ async fn fix_runs_in_check_service_container() {
             "fmt",
             common::configs::CheckBuilder::new("Format", "cargo fmt --check")
                 .with_fix_command("cargo fmt")
-                .with_service("php")
+                .with_service("worker")
                 .build(),
         )
         .build();
     let ci_tui::runner::ExecTarget::Docker(docker) = &config.runner else {
         unreachable!("docker target expected")
     };
-    let php = docker.container_name().replace("-app-1", "-php-1");
-    let prefix = format!("docker exec {php} ");
+    let worker = common::service_container(&docker.container_name(), "worker");
+    let prefix = format!("docker exec {worker} ");
     let mut mock = MockCommandExecutor::new();
     mock.expect_is_container_running().returning(|_| true);
     mock.expect_execute()

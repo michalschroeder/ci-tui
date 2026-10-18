@@ -1560,10 +1560,10 @@ mod tests {
         let ExecTarget::Docker(docker) = &target else {
             unreachable!()
         };
-        let php = format!("{}-php-1", docker.compose_project_name());
+        let worker = format!("{}-worker-1", docker.compose_project_name());
         let cases = [
-            (None, Some("php"), php.as_str()),
-            (Some("c"), Some("php"), "c"),
+            (None, Some("worker"), worker.as_str()),
+            (Some("c"), Some("worker"), "c"),
             (None, Some("app"), "explicit-c"),
             (None, None, "explicit-c"),
         ];
@@ -1571,7 +1571,10 @@ mod tests {
             let got = target.container_for(container, service);
             assert_eq!(got.as_deref(), Some(expected), "{container:?} {service:?}");
         }
-        assert_eq!(local_target().container_for(Some("c"), Some("php")), None);
+        assert_eq!(
+            local_target().container_for(Some("c"), Some("worker")),
+            None
+        );
     }
 
     #[test]

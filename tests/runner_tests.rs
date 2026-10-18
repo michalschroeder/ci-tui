@@ -1381,8 +1381,8 @@ mod run_check_with_command_with_executor_tests {
     #[tokio::test]
     async fn check_service_execs_into_service_container() {
         let docker = super::common::test_docker_config("img:latest");
-        let php = docker.container_name().replace("-app-1", "-php-1");
-        let prefix = format!("docker exec {php} ");
+        let worker = super::common::service_container(&docker.container_name(), "worker");
+        let prefix = format!("docker exec {worker} ");
         let mut mock = MockCommandExecutor::new();
         mock.expect_is_container_running().returning(|_| true);
         mock.expect_execute()
@@ -1395,7 +1395,7 @@ mod run_check_with_command_with_executor_tests {
             });
 
         let mut c = super::common::make_exec_check("a", "ls", None);
-        c.service = Some("php".into());
+        c.service = Some("worker".into());
         let cfg = ci_tui::runner::ExecTarget::Docker(docker);
         let _ = run_check_with_command_with_executor(
             &c,

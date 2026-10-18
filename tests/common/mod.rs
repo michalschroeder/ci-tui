@@ -378,3 +378,12 @@ impl ci_tui::runner::CommandExecutor for ConcurrencyExecutor {
 
     fn kill_container(&self, _: &str) {}
 }
+
+/// Expected Compose v2 container `{project}-{service}-1` next to `default` (`{project}-app-1`)
+#[allow(dead_code)]
+pub fn service_container(default: &str, service: &str) -> String {
+    let project = default
+        .strip_suffix("-app-1")
+        .expect("default `app` container");
+    format!("{project}-{service}-1")
+}

@@ -447,26 +447,26 @@ async fn docker_probe_timeout_is_env_error() {
 #[tokio::test]
 async fn check_service_container_is_probed_instead_of_default() {
     let target = ConfigBuilder::new().build().runner;
-    let php = container(&target).replace("-app-1", "-php-1");
+    let worker = common::service_container(&container(&target), "worker");
     let (mock, checked, seen) = recording_mock(false);
     let mut check = make_exec_check("a", "true", None);
-    check.service = Some("php".into());
+    check.service = Some("worker".into());
 
     let warnings = docker_warnings(&target, &[check], &files(&["Cargo.toml"]), root(), &mock).await;
 
-    assert_eq!(*checked.lock().unwrap(), vec![php.clone()]);
+    assert_eq!(*checked.lock().unwrap(), vec![worker.clone()]);
     let cmd = seen.lock().unwrap()[0].clone();
-    assert!(cmd.starts_with(&format!("docker exec {php} ")), "{cmd}");
+    assert!(cmd.starts_with(&format!("docker exec {worker} ")), "{cmd}");
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains(&php), "{warnings:?}");
+    assert!(warnings[0].contains(&worker), "{warnings:?}");
 }
 
 #[tokio::test]
 async fn stopped_service_container_named_in_run_fallback_warning() {
     let target = ConfigBuilder::new().build().runner;
-    let php = container(&target).replace("-app-1", "-php-1");
+    let worker = common::service_container(&container(&target), "worker");
     let mut check = make_exec_check("a", "true", None);
-    check.service = Some("php".into());
+    check.service = Some("worker".into());
 
     let warnings = docker_warnings(
         &target,
@@ -478,5 +478,5 @@ async fn stopped_service_container_named_in_run_fallback_warning() {
     .await;
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains(&php), "{warnings:?}");
+    assert!(warnings[0].contains(&worker), "{warnings:?}");
 }
