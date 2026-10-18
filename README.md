@@ -56,14 +56,16 @@ Docker image (published to GHCR on each release):
 ```bash
 docker pull ghcr.io/michalschroeder/ci-tui:latest
 
-# needs the docker socket (to run checks) and your project mounted at /app;
-# compose derives the project name from the dir (/app -> "app") unless overridden
+# needs the docker socket (to run checks) and your project mounted at its host
+# path: the docker daemon reads bind-mount sources (compose `./:/app`,
+# `volume_mount`) as host paths, and compose names the project after the dir
 docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$PWD":/app \
-  -e COMPOSE_PROJECT_NAME=<your-compose-project> \
+  -v "$PWD":"$PWD" -w "$PWD" \
   ghcr.io/michalschroeder/ci-tui:latest
 ```
+
+Add `-e COMPOSE_PROJECT_NAME=<name>` when your project name is not the directory name and not set by `name:` in the compose file, and `-e HOST_PWD="$PWD"` when `volume_mount` uses `${HOST_PWD}`.
 
 ## Quickstart
 
