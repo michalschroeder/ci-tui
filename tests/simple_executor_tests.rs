@@ -283,10 +283,10 @@ async fn parallel_group_respects_max_parallel(
 
 /// Daemon error of a `docker run` / `docker compose run` whose `--name` is taken
 const NAME_CONFLICT: &str = "Error response from daemon: Conflict. The container name \
-                             \"/ci-tui-1-0\" is already in use by container \"35127c\".";
+                             \"/ci-tui-0123456789abcdef-0\" is already in use by container \"35127c\".";
 
-// #235: a container that never starts fails the check with docker's error
-// in its output (stderr), not an empty failure
+// A container that never starts fails the check with docker's error in its
+// output (stderr), not an empty failure
 #[rstest::rstest]
 #[case::compose_run(common::configs::ConfigBuilder::new().build().runner, "docker compose ")]
 #[case::docker_run(common::test_docker_target("img:latest"), "docker run ")]
@@ -302,7 +302,7 @@ async fn failed_container_start_shows_docker_error(
         .returning(|_, _, _| CommandOutput {
             success: false,
             stdout: String::new(),
-            stderr: format!(" Container ci-tui-1-0  Creating\n{NAME_CONFLICT}\n"),
+            stderr: format!(" Container ci-tui-0123456789abcdef-0  Creating\n{NAME_CONFLICT}\n"),
         });
     let check = common::make_exec_check("c", "cargo test", None);
     let result = run_check_with_executor(

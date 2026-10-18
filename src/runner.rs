@@ -112,9 +112,9 @@ pub trait CommandExecutor: Send + Sync {
     async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput;
 
     /// Id of the first running container of compose `service`: `docker
-    /// compose --project-directory <project_dir> ps -q <service>`, run in
-    /// `working_dir` (service containers only, no one-off `docker compose
-    /// run` ones). `None` when none runs or the command fails.
+    /// compose --project-directory <project_dir> ps --status running
+    /// <service>`, run in `working_dir`, skipping one-off `docker compose
+    /// run` containers. `None` when none runs or the command fails.
     fn running_container(
         &self,
         project_dir: &str,
