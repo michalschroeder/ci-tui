@@ -112,9 +112,9 @@ pub trait CommandExecutor: Send + Sync {
     async fn execute(&self, command: &str, working_dir: &Path, sink: &OutputSink) -> CommandOutput;
 
     /// Id of the first running container of compose `service`: `docker
-    /// compose --project-directory <project_dir> ps -q --status running
-    /// <service>`, run in `working_dir`. `None` when none runs or the command
-    /// fails.
+    /// compose --project-directory <project_dir> ps --status running
+    /// <service>`, run in `working_dir`, skipping one-off `docker compose
+    /// run` containers. `None` when none runs or the command fails.
     fn running_container(
         &self,
         project_dir: &str,
@@ -535,11 +535,25 @@ fn single_quote(s: &str) -> String {
 }
 
 /// Unique `docker run` / `docker compose run` `--name` for this process:
-/// `ci-tui-<pid>-<n>`
+/// `ci-tui-<token>-<n>` ([`process_token`], then a per-process counter)
 fn unique_container_name() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    format!("ci-tui-{}-{n}", std::process::id())
+    format!("ci-tui-{}-{n}", process_token())
+}
+
+/// Random 16-hex-digit token of this process, drawn once. Not the PID:
+/// PIDs repeat across PID namespaces (ci-tui is PID 1 in its image), so
+/// concurrent instances would reuse names and fail on docker's name
+/// conflict. `RandomState` keys are seeded from OS randomness, so std
+/// suffices (no `rand` dependency).
+fn process_token() -> &'static str {
+    use std::hash::BuildHasher;
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let hash = std::collections::hash_map::RandomState::new().hash_one(());
+        format!("{hash:016x}")
+    })
 }
 
 /// `docker run` of `image` (plain-image mode): `docker run --rm --name
@@ -1541,6 +1555,29 @@ mod tests {
     fn test_filter_docker_warnings_unchanged() {
         let stderr = "WARN: X variable is not set. Defaulting to a blank string.\nreal\n";
         assert_eq!(filter_docker_warnings(stderr), "real");
+    }
+
+    #[test]
+    fn test_process_token_is_16_hex_digits() {
+        let token = process_token();
+        assert!(
+            token.len() == 16 && token.chars().all(|c| c.is_ascii_hexdigit()),
+            "got: {token}"
+        );
+    }
+
+    #[test]
+    fn test_unique_container_name_keeps_process_token_and_counts() {
+        let (a, b) = (unique_container_name(), unique_container_name());
+        let prefix = format!("ci-tui-{}-", process_token());
+        let n = |name: &str| {
+            name.strip_prefix(&prefix)
+                .and_then(|n| n.parse::<u64>().ok())
+        };
+        assert!(
+            n(&a).is_some_and(|na| n(&b).is_some_and(|nb| nb > na)),
+            "{a} {b}"
+        );
     }
 
     #[test]
