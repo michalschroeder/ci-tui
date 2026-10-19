@@ -392,6 +392,7 @@ mod tests {
                 image: None,
                 volume_mount: None,
                 work_dir: None,
+                user: None,
                 shell: "bash".to_string(),
                 env: HashMap::new(),
             },

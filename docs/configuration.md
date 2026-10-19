@@ -65,7 +65,7 @@ The `docker` section configures how CI-TUI interacts with Docker containers. Req
 It has two modes, picked by `image`:
 
 - **Compose mode** (no `image`): every check / pre-command / fix runs in a compose service — the check's `service`, else `docker.service`. CI-TUI asks Compose for the service's running container (`docker compose --project-directory <project_dir> ps --status running <service>`, first id; paused / restarting containers don't count) and `docker exec`s into it. One-off `docker compose run` containers are never used — neither another ci-tui's check container nor your own `docker compose run <service> bash` shell; without an `up` service container, checks run in fresh ones as below. Container names are never guessed, so `container_name:`, Compose v1 names and custom project names all work. When the service has no running container, the command runs in a fresh one of that service: `docker compose --project-directory <project_dir> run --rm -T --name ci-tui-<token>-<n> [-e K=V ...] <service> <shell> -c '<cmd>'` (the service's own image, volumes and working_dir from the compose file). Like any `docker compose run`, this also starts the service's `depends_on` services, which stay running afterwards. Running containers are looked up once per service per run (TUI run, `--simple`, `--fix`); a container started or stopped mid-run is noticed on the next run. Compose itself honors `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME` etc. from the environment.
-- **Plain-image mode** (`image` set): every command runs in `docker run --rm --name ci-tui-<token>-<n> [-v <volume_mount>] [-e K=V ...] -w <work_dir> <image> <shell> -c '<cmd>'`. No compose calls; `project_dir` and `service` are not needed, and a check / pre-command `service` is a config error.
+- **Plain-image mode** (`image` set): every command runs in `docker run --rm --name ci-tui-<token>-<n> [-v <volume_mount>] [--user <user>] [-e K=V ...] -w <work_dir> <image> <shell> -c '<cmd>'`. No compose calls; `project_dir` and `service` are not needed, and a check / pre-command `service` is a config error.
 
 ```yaml
 # Compose mode
@@ -93,6 +93,8 @@ docker:
   volume_mount: "${HOST_PWD}:/app"
   # Optional: working directory inside the container (default: "/app")
   work_dir: /app
+  # Optional: `docker run --user`; "host" = ci-tui's own uid:gid (default: image's user)
+  user: host
   shell: bash
 ```
 
@@ -119,6 +121,11 @@ docker:
 **`work_dir`** (optional, default: `"/app"`, plain-image mode only)
 - Working directory inside the container where commands execute
 - In compose mode the service's `working_dir` applies: setting it is a config error
+
+**`user`** (optional, default: the image's user, plain-image mode only)
+- `docker run --user` value: `name`, `uid`, `uid:gid`, ...
+- `host`: uid:gid of the ci-tui process, so files checks write into the mounted repo (caches, `cargo fmt`, fixes) are owned by the same user as ci-tui instead of the image's (often root)
+- In compose mode the service's `user:` applies: setting it is a config error
 
 **`shell`** (required)
 - Shell inside the container that runs each command (`<shell> -c '<cmd>'`)
@@ -876,7 +883,7 @@ After changing config structs, regenerate the committed file with `make schema` 
 ## Version History
 
 **Version 2** (current)
-- Added: `docker.image` (plain-image mode), `docker.volume_mount`, `docker.work_dir`
+- Added: `docker.image` (plain-image mode), `docker.volume_mount`, `docker.work_dir`, `docker.user`
 - Compose services resolved via `docker compose ps` / `docker compose run` (no `container` setting)
 - Removed: `container` (docker section, checks, pre-commands) and pre-command `exec`
 - Added: `docker.env` and per-check `env`

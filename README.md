@@ -58,12 +58,16 @@ docker pull ghcr.io/michalschroeder/ci-tui:latest
 
 # needs the docker socket (to run checks) and your project mounted at its host
 # path: the docker daemon reads bind-mount sources (compose `./:/app`,
-# `volume_mount`) as host paths, and compose names the project after the dir
+# `volume_mount`) as host paths, and compose names the project after the dir.
 docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD":"$PWD" -w "$PWD" \
   ghcr.io/michalschroeder/ci-tui:latest
 ```
+
+The entrypoint drops root to the owner of the mounted project (with the socket's group), so files ci-tui writes (cache, logs, reports) are yours, not root's. It stays root when the project is root-owned inside the container (rootless Docker) or the owner can't reach the socket; Docker Desktop maps writes to you either way. `--user` works too. Rootless Docker: mount `"$XDG_RUNTIME_DIR/docker.sock"` instead of `/var/run/docker.sock`. Upgrading from an image that ran as root: `sudo rm -rf .git/ci-tui .ci-tui` once (root-owned cache / logs).
+
+Plain-image checks (`docker.image`) run as the image's user; set `docker.user: host` to write files as you (see [docs/configuration.md](docs/configuration.md)).
 
 Add `-e COMPOSE_PROJECT_NAME=<name>` when your project name is not the directory name and not set by `name:` in the compose file, and `-e HOST_PWD="$PWD"` when `volume_mount` uses `${HOST_PWD}`.
 

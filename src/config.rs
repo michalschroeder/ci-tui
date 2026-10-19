@@ -340,14 +340,18 @@ fn default_local_shell() -> String {
 ///   running container, else `docker compose run` (see
 ///   [`crate::runner::resolve_service`])
 /// - plain image (`image` set): every command runs in `docker run <image>`
-///   with `volume_mount` / `work_dir`; no compose calls
+///   with `volume_mount` / `work_dir` / `user`; no compose calls
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(extend(
     "if" = {"required": ["image"]},
     "else" = {
         "required": ["project_dir"],
-        "not": {"anyOf": [{"required": ["volume_mount"]}, {"required": ["work_dir"]}]}
+        "not": {"anyOf": [
+            {"required": ["volume_mount"]},
+            {"required": ["work_dir"]},
+            {"required": ["user"]}
+        ]}
     }
 ))]
 pub struct DockerConfig {
@@ -369,6 +373,11 @@ pub struct DockerConfig {
     /// Plain-image mode: working directory inside the container (default "/app")
     #[serde(default)]
     pub work_dir: Option<String>,
+    /// Plain-image mode: `docker run --user` (e.g. "1000:1000"); "host" = uid:gid
+    /// of the ci-tui process, so files checks write are owned like its own.
+    /// Default: the image's user
+    #[serde(default)]
+    pub user: Option<String>,
     /// Shell to use inside container (e.g., "bash" or "/bin/sh" for Alpine)
     pub shell: String,
     /// Environment variables passed to every docker command
@@ -378,7 +387,7 @@ pub struct DockerConfig {
 
 impl DockerConfig {
     /// Compose mode (no `image`) needs `project_dir` and takes no
-    /// `volume_mount` / `work_dir` (the compose file sets those)
+    /// `volume_mount` / `work_dir` / `user` (the compose file sets those)
     fn validate(&self) -> Result<()> {
         if self.image.is_some() {
             return Ok(());
@@ -391,11 +400,12 @@ impl DockerConfig {
         for (key, value) in [
             ("volume_mount", &self.volume_mount),
             ("work_dir", &self.work_dir),
+            ("user", &self.user),
         ] {
             ensure!(
                 value.is_none(),
-                "`docker.{key}` needs `docker.image`: compose services take volumes and \
-                 working_dir from the compose file"
+                "`docker.{key}` needs `docker.image`: compose services take volumes, \
+                 working_dir and user from the compose file"
             );
         }
         Ok(())
@@ -414,6 +424,15 @@ impl DockerConfig {
         self.volume_mount.as_ref().map(|mount| {
             let expanded = expand_env_vars(mount);
             format!("-v {}", expanded)
+        })
+    }
+
+    /// `docker run --user` value: `user`, "host" resolved to this process's
+    /// `uid:gid`; None if unset (image's user)
+    pub fn run_user(&self) -> Option<String> {
+        self.user.as_deref().map(|user| match user {
+            "host" => crate::utils::docker::host_user(),
+            spec => spec.to_owned(),
         })
     }
 
@@ -1095,6 +1114,7 @@ mod tests {
                     image: None,
                     volume_mount: None,
                     work_dir: None,
+                    user: None,
                     shell: "bash".to_string(),
                     env: HashMap::new(),
                 }),
@@ -1490,6 +1510,7 @@ checks: {}
         #[rstest]
         #[case::volume_mount("volume_mount: .:/app")]
         #[case::work_dir("work_dir: /app")]
+        #[case::user("user: host")]
         fn test_compose_mode_rejects_image_only_keys(#[case] line: &str) {
             let key = line.split(':').next().unwrap();
             let err = validated(&format!("{COMPOSE}  {line}\n"), NO_CHECKS).unwrap_err();
@@ -1502,6 +1523,7 @@ checks: {}
         #[rstest]
         #[case::volume_mount("volume_mount: .:/app")]
         #[case::work_dir("work_dir: /app")]
+        #[case::user("user: host")]
         fn test_image_mode_allows_image_only_keys(#[case] line: &str) {
             validated(&format!("{IMAGE}  {line}\n"), NO_CHECKS).unwrap();
         }
@@ -2169,6 +2191,7 @@ checks:
                     image: None,
                     volume_mount: None,
                     work_dir: None,
+                    user: None,
                     shell: "bash".to_string(),
                     env: HashMap::new(),
                 },

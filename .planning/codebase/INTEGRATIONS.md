@@ -12,7 +12,7 @@
   - Fallback: `{fallback_branch}` (configured fallback)
 - Purpose: Determines which files have changed to trigger appropriate checks
 - Implementation: `src/git.rs` - Git CLI invocation via `tokio::process::Command`
-- Git feature: Safely mounts git repositories via `git config --global --add safe.directory '*'` (allows any mounted directory)
+- Git feature: Safely mounts git repositories via `git config --system --add safe.directory '*'` (allows any mounted directory)
 
 ## Container Orchestration
 

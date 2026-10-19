@@ -362,10 +362,10 @@ Refactoring Rust codebases presents unique challenges due to the borrow checker,
 - CI-TUI already has validation commands - USE THEM:
   ```bash
   # Fix format first
-  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
+  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":"$PWD" -w "$PWD" -e HOST_PWD="$PWD" ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --fix
 
   # Then validate
-  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)":/app -e HOST_PWD="$(pwd)" -w /app ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
+  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":"$PWD" -w "$PWD" -e HOST_PWD="$PWD" ghcr.io/michalschroeder/ci-tui:latest --config ./ci-tui.yaml --simple
   ```
 - Make this a habit: `--fix` then `--simple` before every commit
 
