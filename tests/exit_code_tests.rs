@@ -85,6 +85,11 @@ fn missing_config_file_exits_2() {
     "",
     "`docker.work_dir` needs `docker.image`"
 )]
+#[case::user_without_image(
+    "docker:\n  project_dir: .\n  shell: sh\n  user: host\n",
+    "",
+    "`docker.user` needs `docker.image`"
+)]
 #[case::service_with_image(
     "docker:\n  image: img\n  shell: sh\n",
     "        service: worker\n",

@@ -557,7 +557,8 @@ fn process_token() -> &'static str {
 }
 
 /// `docker run` of `image` (plain-image mode): `docker run --rm --name
-/// <name> [-v mount] [-e K='V' ...] -w <work_dir> <image> <shell> -c '<cmd>'`.
+/// <name> [-v mount] [--user <user>] [-e K='V' ...] -w <work_dir> <image>
+/// <shell> -c '<cmd>'`.
 /// `name` lets cancel/timeout `docker kill` the container.
 pub fn build_docker_run_command(
     docker_config: &crate::config::DockerConfig,
@@ -568,6 +569,11 @@ pub fn build_docker_run_command(
 ) -> String {
     let mut parts = vec![format!("docker run --rm --name {name}")];
     parts.extend(docker_config.volume_args());
+    parts.extend(
+        docker_config
+            .run_user()
+            .map(|u| format!("--user {}", quote(&u))),
+    );
     parts.extend(env_assignments(env).map(|a| format!("-e {a}")));
     parts.push(format!("-w {}", docker_config.working_dir()));
     parts.push(image.to_string());
@@ -1588,6 +1594,24 @@ mod tests {
         let cmd = build_docker_run_command(&docker, "img", &env, "ls", "ci-tui-test-1");
         assert!(!cmd.contains("BAD"), "got: {cmd}");
         assert!(!cmd.contains(" -e "), "got: {cmd}");
+    }
+
+    #[rstest::rstest]
+    #[case::unset("", None)]
+    #[case::spec("user: '1000:1000'\n", Some("1000:1000".to_string()))]
+    #[case::host("user: host\n", Some(crate::utils::docker::host_user()))]
+    fn test_build_docker_run_command_user(#[case] line: &str, #[case] user: Option<String>) {
+        let yaml = format!("shell: bash\nimage: img\n{line}");
+        let docker: crate::config::DockerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let cmd = build_docker_run_command(&docker, "img", &HashMap::new(), "ls", "n");
+        match user {
+            Some(user) => assert!(cmd.contains(&format!(" --user {user} ")), "{cmd}"),
+            None => assert!(!cmd.contains("--user"), "{cmd}"),
+        }
+        assert!(
+            cmd.ends_with(" img bash -c 'ls'"),
+            "--user before image: {cmd}"
+        );
     }
 
     fn local_target() -> ExecTarget {

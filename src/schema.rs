@@ -68,7 +68,7 @@ mod tests {
         std::fs::read_to_string(manifest_path("docs/examples/php-symfony.yaml")).unwrap()
     )]
     #[case::plain_image_without_compose_keys(
-        "version: 2\ndocker: {image: img, shell: bash, volume_mount: '.:/app', work_dir: /app}\n\
+        "version: 2\ndocker: {image: img, shell: bash, volume_mount: '.:/app', work_dir: /app, user: host}\n\
          git: {base_branch: main, fallback_branch: HEAD~1}\nfile_patterns: {}\nchecks: {}\n"
             .to_string()
     )]
@@ -127,6 +127,10 @@ mod tests {
     #[case::work_dir_without_image(
         "docker: {project_dir: ., shell: bash}\n",
         "docker: {project_dir: ., shell: bash, work_dir: /app}\n"
+    )]
+    #[case::user_without_image(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {project_dir: ., shell: bash, user: host}\n"
     )]
     #[case::removed_docker_container(
         "docker: {project_dir: ., shell: bash}\n",

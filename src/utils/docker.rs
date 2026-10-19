@@ -55,6 +55,20 @@ fn first_service_id(stdout: &str) -> Option<String> {
     })
 }
 
+/// `<uid>:<gid>` of this process (real ids), for `docker.user: host`.
+/// Declared directly (std links libc but exposes no getuid): no `libc`
+/// crate dependency.
+pub(crate) fn host_user() -> String {
+    extern "C" {
+        fn getuid() -> u32;
+        fn getgid() -> u32;
+    }
+    // SAFETY: POSIX getuid / getgid take no arguments, always succeed and
+    // touch no memory; uid_t / gid_t are u32 on Linux and macOS.
+    let (uid, gid) = unsafe { (getuid(), getgid()) };
+    format!("{uid}:{gid}")
+}
+
 /// `docker kill` a container, fire-and-forget (best effort: errors, e.g.
 /// the container already gone, are ignored).
 ///
@@ -107,6 +121,16 @@ mod tests {
             "compose --project-directory /proj ps --status running --no-trunc \
              --format {{.ID}} {{.Label \"com.docker.compose.oneoff\"}} app"
         );
+    }
+
+    /// Real ids, as `id -ru` / `id -rg` report them for this process
+    #[test]
+    fn test_host_user_is_process_uid_gid() {
+        let id = |flag: &str| {
+            let out = std::process::Command::new("id").arg(flag).output().unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(host_user(), format!("{}:{}", id("-ru"), id("-rg")));
     }
 
     #[test]

@@ -218,7 +218,7 @@
       "additionalProperties": false
     },
     "DockerConfig": {
-      "description": "Docker configuration for running checks in containers.\n\nTwo modes, picked by `image`:\n- compose (no `image`): a command runs in its compose service (`service`,\n  overridable per check / pre-command): `docker exec` into the service's\n  running container, else `docker compose run` (see\n  [`crate::runner::resolve_service`])\n- plain image (`image` set): every command runs in `docker run <image>`\n  with `volume_mount` / `work_dir`; no compose calls",
+      "description": "Docker configuration for running checks in containers.\n\nTwo modes, picked by `image`:\n- compose (no `image`): a command runs in its compose service (`service`,\n  overridable per check / pre-command): `docker exec` into the service's\n  running container, else `docker compose run` (see\n  [`crate::runner::resolve_service`])\n- plain image (`image` set): every command runs in `docker run <image>`\n  with `volume_mount` / `work_dir` / `user`; no compose calls",
       "type": "object",
       "properties": {
         "env": {
@@ -254,6 +254,14 @@
           "description": "Shell to use inside container (e.g., \"bash\" or \"/bin/sh\" for Alpine)",
           "type": "string"
         },
+        "user": {
+          "description": "Plain-image mode: `docker run --user` (e.g. \"1000:1000\"); \"host\" = uid:gid\nof the ci-tui process, so files checks write are owned like its own.\nDefault: the image's user",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "volume_mount": {
           "description": "Plain-image mode: repo mount for `docker run -v` (e.g. \".:/build\";\n`${VAR}` expanded)",
           "type": [
@@ -283,6 +291,11 @@
             {
               "required": [
                 "work_dir"
+              ]
+            },
+            {
+              "required": [
+                "user"
               ]
             }
           ]

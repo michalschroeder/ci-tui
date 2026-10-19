@@ -257,6 +257,7 @@ impl ConfigBuilder {
                 image: self.docker_image,
                 volume_mount: self.docker_volume_mount,
                 work_dir: self.docker_work_dir,
+                user: None,
                 shell: self.docker_shell,
                 env: self.docker_env,
             },

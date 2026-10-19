@@ -217,6 +217,7 @@ pub fn test_docker_config(image: &str) -> DockerConfig {
         image: Some(image.to_string()),
         volume_mount: None,
         work_dir: None,
+        user: None,
         shell: "bash".to_string(),
         env: std::collections::HashMap::new(),
     }
