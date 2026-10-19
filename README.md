@@ -58,12 +58,19 @@ docker pull ghcr.io/michalschroeder/ci-tui:latest
 
 # needs the docker socket (to run checks) and your project mounted at its host
 # path: the docker daemon reads bind-mount sources (compose `./:/app`,
-# `volume_mount`) as host paths, and compose names the project after the dir
+# `volume_mount`) as host paths, and compose names the project after the dir.
+# --user: files ci-tui writes (result cache in .git/ci-tui/, .ci-tui/logs/,
+# `init` output, --output reports) belong to you, not root; --group-add: the
+# docker socket's group, so that user can still reach the daemon
 docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  --group-add "$(stat -c %g /var/run/docker.sock)" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD":"$PWD" -w "$PWD" \
   ghcr.io/michalschroeder/ci-tui:latest
 ```
+
+Without `--user` the image runs as root and those files end up root-owned, so a host-installed ci-tui can no longer update the cache. `stat -c` is GNU (Linux); with rootless Docker, container root already maps to you, so drop both flags.
 
 Add `-e COMPOSE_PROJECT_NAME=<name>` when your project name is not the directory name and not set by `name:` in the compose file, and `-e HOST_PWD="$PWD"` when `volume_mount` uses `${HOST_PWD}`.
 
