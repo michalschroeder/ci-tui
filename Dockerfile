@@ -65,8 +65,9 @@ LABEL org.opencontainers.image.description="TUI for running CI checks"
 LABEL org.opencontainers.image.source="https://github.com/michalschroeder/ci-tui"
 
 # Install runtime dependencies (git for change detection, docker CLI + compose
-# plugin: compose services are resolved and run via `docker compose`)
-RUN apk add --no-cache git docker-cli docker-cli-compose
+# plugin: compose services are resolved and run via `docker compose`, setpriv:
+# entrypoint drops root to the project owner)
+RUN apk add --no-cache git docker-cli docker-cli-compose setpriv
 
 # Trust any dir for git (mounted volumes); --system so it also applies under `--user`
 RUN git config --system --add safe.directory '*'
@@ -75,6 +76,6 @@ WORKDIR /app
 
 # Copy the binary
 COPY --from=builder /tmp/ci-tui /usr/local/bin/ci-tui
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/ci-tui-entrypoint
 
-# Default command
-ENTRYPOINT ["ci-tui"]
+ENTRYPOINT ["ci-tui-entrypoint"]
