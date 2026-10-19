@@ -68,8 +68,7 @@ LABEL org.opencontainers.image.source="https://github.com/michalschroeder/ci-tui
 # plugin: compose services are resolved and run via `docker compose`)
 RUN apk add --no-cache git docker-cli docker-cli-compose
 
-# Mark any directory as safe for git (needed for mounted volumes). System-level
-# (/etc/gitconfig), not root's ~/.gitconfig: also applies under `--user <uid>`
+# Trust any dir for git (mounted volumes); --system so it also applies under `--user`
 RUN git config --system --add safe.directory '*'
 
 WORKDIR /app
