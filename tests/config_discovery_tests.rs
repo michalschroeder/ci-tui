@@ -5,7 +5,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::yaml::{docker_config, local_config};
+use common::configs::{docker_yaml, local_yaml};
 use common::{assert_code, git, run_ci_tui_env, stderr, stdout};
 
 /// `<tmp>/repo` (a git repo unless `git_init` is false) with `sub/deeper`;
@@ -32,7 +32,7 @@ fn run_in(tmp: &tempfile::TempDir, dir: &str, args: &[&str]) -> std::process::Ou
 
 #[test]
 fn config_at_repo_root_found_from_subdir() {
-    let tmp = repo(true, &[("ci-tui.yaml", &local_config("'true'"))]);
+    let tmp = repo(true, &[("ci-tui.yaml", &local_yaml("'true'"))]);
     let out = run_in(&tmp, "sub/deeper", &["--simple", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
 }
@@ -42,8 +42,8 @@ fn nearest_config_wins() {
     let tmp = repo(
         true,
         &[
-            ("ci-tui.yaml", &local_config("'false'")),
-            ("sub/ci-tui.yaml", &local_config("'true'")),
+            ("ci-tui.yaml", &local_yaml("'false'")),
+            ("sub/ci-tui.yaml", &local_yaml("'true'")),
         ],
     );
     let out = run_in(&tmp, "sub/deeper", &["--simple", "--files", "a.rs"]);
@@ -53,7 +53,7 @@ fn nearest_config_wins() {
 #[test]
 fn config_above_repo_root_is_not_found() {
     let tmp = repo(true, &[]);
-    std::fs::write(tmp.path().join("ci-tui.yaml"), local_config("'true'")).unwrap();
+    std::fs::write(tmp.path().join("ci-tui.yaml"), local_yaml("'true'")).unwrap();
     let out = run_in(&tmp, "sub", &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::CONFIG_ERROR);
     assert!(
@@ -65,7 +65,7 @@ fn config_above_repo_root_is_not_found() {
 
 #[test]
 fn outside_repo_only_cwd_is_searched() {
-    let tmp = repo(false, &[("ci-tui.yaml", &local_config("'true'"))]);
+    let tmp = repo(false, &[("ci-tui.yaml", &local_yaml("'true'"))]);
     let out = run_in(&tmp, "sub", &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::CONFIG_ERROR);
 }
@@ -74,7 +74,7 @@ fn outside_repo_only_cwd_is_searched() {
 fn files_are_relative_to_discovered_config_dir() {
     // Docker mode keeps `--files` as given; from a subdir they are rewritten
     // relative to the config's dir, as if ci-tui ran there
-    let tmp = repo(true, &[("ci-tui.yaml", &docker_config(""))]);
+    let tmp = repo(true, &[("ci-tui.yaml", &docker_yaml(""))]);
     let out = run_in(&tmp, "sub", &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
     assert!(stdout(&out).contains("  sub/a.rs\n"), "{}", stdout(&out));
@@ -82,7 +82,7 @@ fn files_are_relative_to_discovered_config_dir() {
 
 #[test]
 fn files_kept_as_given_in_config_dir() {
-    let tmp = repo(true, &[("ci-tui.yaml", &docker_config(""))]);
+    let tmp = repo(true, &[("ci-tui.yaml", &docker_yaml(""))]);
     let out = run_in(&tmp, "", &["--list", "--files", "./a.rs"]);
     assert_code(&out, exit::SUCCESS);
     assert!(stdout(&out).contains("  ./a.rs\n"), "{}", stdout(&out));
@@ -91,7 +91,7 @@ fn files_kept_as_given_in_config_dir() {
 #[test]
 fn config_flag_skips_walk_up() {
     // Explicit --config: no discovery, ci-tui runs from cwd (files as given)
-    let tmp = repo(true, &[("ci-tui.yaml", &docker_config(""))]);
+    let tmp = repo(true, &[("ci-tui.yaml", &docker_yaml(""))]);
     let out = run_in(
         &tmp,
         "sub",
@@ -107,7 +107,7 @@ fn local_overrides_of_discovered_config_are_merged() {
     let tmp = repo(
         true,
         &[
-            ("ci-tui.yaml", &local_config("'test \"$FROM_LOCAL\" = yes'")),
+            ("ci-tui.yaml", &local_yaml("'test \"$FROM_LOCAL\" = yes'")),
             (
                 "ci-tui.local.yaml",
                 "local:\n  env:\n    FROM_LOCAL: 'yes'\n",
@@ -123,7 +123,7 @@ fn invalid_local_overrides_exit_2_naming_the_file() {
     let tmp = repo(
         true,
         &[
-            ("ci-tui.yaml", &local_config("'true'")),
+            ("ci-tui.yaml", &local_yaml("'true'")),
             ("ci-tui.local.yaml", "checks: {}\n"),
         ],
     );
@@ -132,6 +132,24 @@ fn invalid_local_overrides_exit_2_naming_the_file() {
     assert!(
         stderr(&out).contains("ci-tui.local.yaml"),
         "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn validate_uses_discovered_config() {
+    let tmp = repo(
+        true,
+        &[
+            ("ci-tui.yaml", &local_yaml("'true'")),
+            ("ci-tui.local.yaml", "checks: {}\n"),
+        ],
+    );
+    let out = run_in(&tmp, "sub", &["validate"]);
+    assert_code(&out, exit::CONFIG_ERROR);
+    assert!(
+        stderr(&out).contains("ci-tui.local.yaml"),
+        "checks the discovered config with its overrides: {}",
         stderr(&out)
     );
 }

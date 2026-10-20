@@ -17,7 +17,7 @@ Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [pa
 
 ### Config Discovery
 
-Without `--config`, ci-tui uses the nearest `ci-tui.yaml` from the current directory up to the git repository root (only the current directory outside a repository), and runs as if launched from that file's directory: git detection, docker commands, a relative `docker.project_dir` and cwd-relative `--files` all resolve from there. With `--config`, nothing is searched and the current directory is used. `ci-tui init` / `ci-tui validate` default to `ci-tui.yaml` in the current directory.
+Without `--config`, ci-tui uses the nearest `ci-tui.yaml` from the current directory up to the git repository root (only the current directory outside a repository), and runs as if launched from that file's directory: git detection, docker commands, a relative `docker.project_dir` and cwd-relative `--files` all resolve from there. With `--config`, nothing is searched and the current directory is used. `ci-tui validate` without a path checks the same file a run would use; `ci-tui init` writes `ci-tui.yaml` in the current directory.
 
 ### Local Overrides (`ci-tui.local.yaml`)
 
@@ -35,7 +35,7 @@ max_parallel: 2
 notify: true
 ```
 
-Any other key, a wrong type or invalid YAML fails startup (exit 2) naming the file; mode rules still apply to the merged config (`docker.service` with `docker.image` is rejected). CLI flags beat both files (`--jobs` replaces `max_parallel`, `--notify` enables `notify`). Overrides count toward the result cache like the config itself (`notify` excepted).
+Any other key, a wrong type or invalid YAML fails startup (exit 2) naming the file; mode rules still apply to the merged config (`docker.service` with `docker.image` is rejected). `docker` keys are ignored when the config has no `docker:` section (e.g. `runner: local`). CLI flags beat both files (`--jobs` replaces `max_parallel`, `--notify` enables `notify`). Overrides count toward the result cache like the config itself (`notify` excepted).
 
 ## Top-Level Structure
 

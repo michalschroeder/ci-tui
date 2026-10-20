@@ -1,7 +1,6 @@
 //! Shared test utilities and mock helpers
 
 pub mod configs;
-pub mod yaml;
 
 use ci_tui::checks::{CheckFiles, CheckToRun};
 use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig, DockerMode, ImageConfig};

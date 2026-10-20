@@ -914,12 +914,20 @@ fn merge_yaml(base: &mut serde_yaml::Value, local: serde_yaml::Value) {
     }
 }
 
-/// `content` merged with `overrides`, parsed, plus the merged YAML text
-fn parse_merged(content: &str, overrides: serde_yaml::Value) -> Result<(CiConfig, String)> {
+/// `content` merged with `overrides`, parsed, plus the merged YAML text.
+/// `docker` overrides only adjust an existing `docker:` section (a
+/// `runner: local` config may have none). Parsed from the text, not the
+/// value: `from_value` rejects plain scalars like `1` for string fields.
+fn parse_merged(content: &str, mut overrides: serde_yaml::Value) -> Result<(CiConfig, String)> {
     let mut merged: serde_yaml::Value = serde_yaml::from_str(content)?;
+    if merged.get("docker").is_none() {
+        if let serde_yaml::Value::Mapping(overrides) = &mut overrides {
+            overrides.remove("docker");
+        }
+    }
     merge_yaml(&mut merged, overrides);
     let text = serde_yaml::to_string(&merged)?;
-    Ok((serde_yaml::from_value(merged)?, text))
+    Ok((serde_yaml::from_str(&text)?, text))
 }
 
 /// Load configuration from a YAML file, merged with the
@@ -3106,6 +3114,26 @@ checks:
             };
             assert_eq!(env(&local.env), [("A", "base"), ("B", "local")]);
             assert_eq!(local.shell, "bash", "base keys kept");
+        }
+
+        #[test]
+        fn docker_overrides_ignored_without_docker_section() {
+            let local = "docker:\n  env: {X: y}\nmax_parallel: 2\n";
+            let config = load(&local_runner(), Some(local)).unwrap();
+            assert!(config.docker().is_none());
+            assert_eq!(config.max_parallel, NonZeroUsize::new(2));
+        }
+
+        #[test]
+        fn plain_scalars_still_parse_as_strings() {
+            // Edge case: unquoted int / bool where the config wants strings
+            let base = format!(
+                "{HEAD}docker:\n  project_dir: .\n  shell: sh\n  env: {{CI: 1, V: true}}\n"
+            );
+            let config = load(&base, Some("notify: true\n")).unwrap();
+            let env = &config.docker().unwrap().env;
+            assert_eq!(env["CI"], "1");
+            assert_eq!(env["V"], "true");
         }
 
         #[rstest]

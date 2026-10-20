@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::yaml::{check, docker_config, local_config, HEAD};
+use common::configs::{docker_yaml, local_yaml, yaml_check, YAML_HEAD};
 use common::{assert_code, git, run_ci_tui};
 
 /// Tempdir holding `ci-tui.yaml` = `config`; runs the binary with `args`
@@ -17,13 +17,13 @@ fn run_with(config: &str, args: &[&str]) -> (tempfile::TempDir, std::process::Ou
 
 #[test]
 fn passing_checks_exit_0() {
-    let (_tmp, out) = run_with(&local_config("'true'"), &["--simple", "--files", "a.rs"]);
+    let (_tmp, out) = run_with(&local_yaml("'true'"), &["--simple", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
 }
 
 #[test]
 fn failing_check_exits_1() {
-    let (_tmp, out) = run_with(&local_config("'false'"), &["--simple", "--files", "a.rs"]);
+    let (_tmp, out) = run_with(&local_yaml("'false'"), &["--simple", "--files", "a.rs"]);
     assert_code(&out, exit::CHECKS_FAILED);
 }
 
@@ -84,7 +84,7 @@ fn missing_config_file_exits_2() {
     "container"
 )]
 fn invalid_docker_section_exits_2(#[case] docker: &str, #[case] extra: &str, #[case] msg: &str) {
-    let config = format!("{HEAD}{docker}{}{extra}", check("'true'"));
+    let config = format!("{YAML_HEAD}{docker}{}{extra}", yaml_check("'true'"));
     let (_tmp, out) = run_with(&config, &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::CONFIG_ERROR);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -93,7 +93,7 @@ fn invalid_docker_section_exits_2(#[case] docker: &str, #[case] extra: &str, #[c
 
 #[test]
 fn invalid_files_filter_regex_exits_2() {
-    let config = docker_config("        triggers:\n          files_filter: '[invalid'\n");
+    let config = docker_yaml("        triggers:\n          files_filter: '[invalid'\n");
     let (_tmp, out) = run_with(&config, &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::CONFIG_ERROR);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -108,13 +108,13 @@ fn validate_invalid_config_exits_2() {
 
 #[test]
 fn validate_valid_config_exits_0() {
-    let (_tmp, out) = run_with(&local_config("'true'"), &["validate"]);
+    let (_tmp, out) = run_with(&local_yaml("'true'"), &["validate"]);
     assert_code(&out, exit::SUCCESS);
 }
 
 #[test]
 fn git_detection_outside_repo_exits_3() {
-    let (_tmp, out) = run_with(&local_config("'true'"), &["--list"]);
+    let (_tmp, out) = run_with(&local_yaml("'true'"), &["--list"]);
     assert_code(&out, exit::ENV_ERROR);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("No base ref could be resolved"), "{stderr}");
@@ -124,7 +124,7 @@ fn git_detection_outside_repo_exits_3() {
 fn unknown_base_ref_exits_3() {
     let tmp = tempfile::TempDir::new().unwrap();
     git(tmp.path(), &["init", "-q"]);
-    std::fs::write(tmp.path().join("ci-tui.yaml"), local_config("'true'")).unwrap();
+    std::fs::write(tmp.path().join("ci-tui.yaml"), local_yaml("'true'")).unwrap();
     let out = run_ci_tui(tmp.path(), &["--list", "--base", "no-such-ref"]);
     assert_code(&out, exit::ENV_ERROR);
 }
@@ -132,14 +132,14 @@ fn unknown_base_ref_exits_3() {
 #[test]
 fn list_in_docker_mode_does_not_probe_docker() {
     // No daemon needed: --list executes nothing
-    let (_tmp, out) = run_with(&docker_config(""), &["--list", "--files", "a.rs"]);
+    let (_tmp, out) = run_with(&docker_yaml(""), &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
 }
 
 #[test]
 fn only_on_demand_checks_do_not_probe_docker() {
     // `rust`-triggered check, no `.rs` changed: selected on-demand only
-    let config = docker_config("        triggers:\n          file_pattern: rust\n").replace(
+    let config = docker_yaml("        triggers:\n          file_pattern: rust\n").replace(
         "file_patterns: {}",
         "file_patterns:\n  rust:\n    pattern: '\\.rs$'",
     );
@@ -149,13 +149,13 @@ fn only_on_demand_checks_do_not_probe_docker() {
 
 #[test]
 fn fix_without_fix_commands_does_not_probe_docker() {
-    let (_tmp, out) = run_with(&docker_config(""), &["--fix", "--files", "a.rs"]);
+    let (_tmp, out) = run_with(&docker_yaml(""), &["--fix", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
 }
 
 /// Local config whose check `c` fails even after its (passing) fix
 fn still_failing_after_fix() -> String {
-    format!("{}        fix_command: 'true'\n", local_config("'false'"))
+    format!("{}        fix_command: 'true'\n", local_yaml("'false'"))
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn fix_with_no_verify_exits_0() {
 
 #[test]
 fn init_over_existing_config_exits_2() {
-    let (_tmp, out) = run_with(&local_config("'true'"), &["init"]);
+    let (_tmp, out) = run_with(&local_yaml("'true'"), &["init"]);
     assert_code(&out, exit::CONFIG_ERROR);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("already exists"), "{stderr}");

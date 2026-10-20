@@ -120,7 +120,7 @@ fn print_schema() -> Result<()> {
 
 /// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
-    let Some(path) = command.config_path(config) else {
+    let Some(path) = command.config_path(config, &std::env::current_dir()?) else {
         return print_schema();
     };
     if let Command::Init { .. } = command {

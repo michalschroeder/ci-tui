@@ -263,7 +263,7 @@ pub enum Command {
     },
     /// Validate a config file (exit non-zero if invalid)
     Validate {
-        /// Config path [default: --config value, else ci-tui.yaml]
+        /// Config path [default: --config value, else the discovered ci-tui.yaml]
         path: Option<PathBuf>,
     },
     /// Print the config JSON Schema (for editor autocomplete / validation)
@@ -285,14 +285,20 @@ pub fn filter_error(message: String) -> clap::Error {
 
 impl Command {
     /// Config path for `init` / `validate`: positional arg, then `--config`,
+    /// then (`validate` only) the config a run from `cwd` would discover,
     /// then `ci-tui.yaml`. `None` for `schema`, which reads no config.
-    pub fn config_path(&self, config: Option<PathBuf>) -> Option<PathBuf> {
+    pub fn config_path(&self, config: Option<PathBuf>, cwd: &Path) -> Option<PathBuf> {
         let (Self::Init { path } | Self::Validate { path }) = self else {
             return None;
+        };
+        let discovered = || match self {
+            Self::Validate { .. } => run_config(None, cwd).map(|found| found.path),
+            _ => None,
         };
         Some(
             path.clone()
                 .or(config)
+                .or_else(discovered)
                 .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE)),
         )
     }
@@ -367,7 +373,7 @@ mod tests {
         let cli = Cli::try_parse_checked(args).unwrap();
         cli.command
             .expect("expected a subcommand")
-            .config_path(cli.config)
+            .config_path(cli.config, tempfile::tempdir().unwrap().path())
             .expect("init / validate resolve a path")
     }
 
