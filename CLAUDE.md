@@ -171,7 +171,7 @@ The tool expects a YAML config with:
 - `runner`: `docker` (default) or `local` — where checks execute
 - `docker.project_dir`: Path for `docker compose --project-directory` (required in compose mode, i.e. without `docker.image`)
 - `docker.service`: Default compose service (compose mode only; default `app`; checks / pre-commands override with `service`)
-- `docker.image`: plain-image mode — every command is `docker run` of it (with `volume_mount` / `work_dir`, allowed only here); no compose; `docker.project_dir` / `docker.service` and check / pre-command `service` rejected
+- `docker.image`: plain-image mode — every command is `docker run` of it (with `volume_mount` / `work_dir` / `user`, allowed only here); no compose; `docker.project_dir` / `docker.service` and check / pre-command `service` rejected
 - `docker.user`: plain-image only, `docker run --user`; `host` = ci-tui's real uid:gid (`utils::docker::host_user`)
 - `local.shell` / `local.env`: Shell and env vars for `runner: local` (docker section optional/ignored in this mode)
 - `git.base_branch` / `git.fallback_branch`: For change detection
