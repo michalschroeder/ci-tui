@@ -464,7 +464,8 @@ pub async fn run_fix_command_with_executor(
 mod tests {
     use super::*;
     use crate::config::{
-        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig,
+        CheckDefinition, CheckTriggers, CiConfig, ComposeConfig, DockerConfig, DockerMode,
+        FilePattern, GitConfig,
     };
     use crate::git::ChangedFiles;
     use indexmap::IndexMap;
@@ -541,12 +542,10 @@ mod tests {
         CiConfig::new(
             2,
             DockerConfig {
-                project_dir: Some(".".into()),
-                service: "app".into(),
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                user: None,
+                mode: DockerMode::Compose(ComposeConfig {
+                    project_dir: ".".into(),
+                    service: "app".into(),
+                }),
                 shell: "bash".into(),
                 env: HashMap::new(),
             },

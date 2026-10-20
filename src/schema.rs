@@ -132,6 +132,14 @@ mod tests {
         "docker: {project_dir: ., shell: bash}\n",
         "docker: {project_dir: ., shell: bash, user: host}\n"
     )]
+    #[case::project_dir_with_image(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {image: img, project_dir: ., shell: bash}\n"
+    )]
+    #[case::service_with_image(
+        "docker: {project_dir: ., shell: bash}\n",
+        "docker: {image: img, service: app, shell: bash}\n"
+    )]
     #[case::removed_docker_container(
         "docker: {project_dir: ., shell: bash}\n",
         "docker: {project_dir: ., shell: bash, container: c}\n"

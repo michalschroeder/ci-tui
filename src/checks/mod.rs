@@ -97,8 +97,9 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// Docker service to use (resolved from check/group/global default); `None` in local and
-    /// plain-image mode
+    /// The check's own compose `service`; `None` = `docker.service`
+    /// (applied by [`crate::runner::resolve_service`]; always `None` in
+    /// local and plain-image mode)
     pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,
@@ -191,19 +192,12 @@ pub fn select_checks(
 ) -> Selected {
     let mut checks_to_run = Vec::new();
     let mut warnings = Vec::new();
-    let default_service = config.default_service();
 
     for (group_name, group_config) in config.groups() {
         for (check_id, check) in &group_config.checks {
             let selection = Selection::evaluate(config, changed_files, project_root, check);
             warnings.extend_from_slice(selection.warnings());
-            checks_to_run.extend(process_check(
-                selection,
-                group_name,
-                check_id,
-                check,
-                default_service,
-            ));
+            checks_to_run.extend(process_check(selection, group_name, check_id, check));
         }
     }
 
@@ -263,8 +257,8 @@ mod tests {
     // See: https://github.com/rust-lang/rustfmt/issues/4656
     fn checks_test_config() -> CiConfig {
         use crate::config::{
-            CheckDefinition, CheckTriggers, DockerConfig, FilePattern, GitConfig, GroupConfig,
-            DEFAULT_MAX_OUTPUT_LINES,
+            CheckDefinition, CheckTriggers, ComposeConfig, DockerConfig, DockerMode, FilePattern,
+            GitConfig, GroupConfig, DEFAULT_MAX_OUTPUT_LINES,
         };
         use indexmap::IndexMap;
         use std::collections::HashMap;
@@ -431,12 +425,10 @@ mod tests {
         CiConfig {
             version: 2,
             runner: crate::config::ExecTarget::Docker(DockerConfig {
-                project_dir: Some("./infrastructure".to_string()),
-                service: "php".to_string(),
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                user: None,
+                mode: DockerMode::Compose(ComposeConfig {
+                    project_dir: "./infrastructure".to_string(),
+                    service: "php".to_string(),
+                }),
                 shell: "bash".to_string(),
                 env: HashMap::new(),
             }),
@@ -501,6 +493,28 @@ mod tests {
         let cache_warmup = cache_warmup.unwrap();
         assert!(!cache_warmup.is_on_demand());
         assert!(cache_warmup.files.paths().is_empty());
+    }
+
+    /// `CheckToRun.service` is the check's own `service` only: the compose
+    /// default (`docker.service`) is applied by `runner::resolve_service`
+    #[test]
+    fn test_service_not_prefilled_with_docker_service() {
+        let mut config = checks_test_config();
+        config.checks["warmup"].checks["cache-warmup"].service = Some("worker".into());
+        let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
+
+        let checks = determine_checks(&config, &changed_files, &PathBuf::from("/tmp"));
+
+        let service = |id: &str| {
+            checks
+                .iter()
+                .find(|c| c.id() == id)
+                .unwrap()
+                .service
+                .clone()
+        };
+        assert_eq!(service("cache-warmup").as_deref(), Some("worker"));
+        assert_eq!(service("php-lint"), None, "no pre-fill from docker.service");
     }
 
     #[test]

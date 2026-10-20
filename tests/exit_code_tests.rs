@@ -90,6 +90,16 @@ fn missing_config_file_exits_2() {
     "",
     "`docker.user` needs `docker.image`"
 )]
+#[case::project_dir_with_image(
+    "docker:\n  image: img\n  project_dir: .\n  shell: sh\n",
+    "",
+    "`docker.project_dir` is not allowed with `docker.image`"
+)]
+#[case::docker_service_with_image(
+    "docker:\n  image: img\n  service: app\n  shell: sh\n",
+    "",
+    "`docker.service` is not allowed with `docker.image`"
+)]
 #[case::service_with_image(
     "docker:\n  image: img\n  shell: sh\n",
     "        service: worker\n",

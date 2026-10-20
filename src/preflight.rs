@@ -12,7 +12,7 @@
 //! (exit 3) before any check starts.
 
 use crate::checks::CheckToRun;
-use crate::config::DockerConfig;
+use crate::config::{DockerConfig, DockerMode, ImageConfig};
 use crate::runner::{
     build_docker_exec_command, resolve_service, CommandExecutor, DockerPlacement, ExecTarget,
     OutputSink, RealCommandExecutor,
@@ -108,13 +108,14 @@ pub async fn docker_warnings(
     if checks.is_empty() || files.is_empty() {
         return Vec::new();
     }
-    // One placement for every check: no per-service lookup
-    if let Some(image) = &docker.image {
-        return image_mount_warning(docker, image).into_iter().collect();
-    }
+    let compose = match &docker.mode {
+        // One placement for every check: no per-service lookup
+        DockerMode::Image(image) => return image_mount_warning(image).into_iter().collect(),
+        DockerMode::Compose(compose) => compose,
+    };
     let mut services: Vec<&str> = Vec::new();
     for check in checks {
-        let service = check.service.as_deref().unwrap_or(&docker.service);
+        let service = compose.service_for(check.service.as_deref());
         if !services.contains(&service) {
             services.push(service);
         }
@@ -163,12 +164,13 @@ async fn exec_probe(
     Some(warning)
 }
 
-/// Warning for plain-image `docker run` of `image`: no
+/// Warning for plain-image `docker run` of `config.image`: no
 /// `docker.volume_mount`, or its destination (`src:dst[:opts]`) is not
 /// `docker.work_dir`, so `{files}` would not resolve.
-fn image_mount_warning(docker: &DockerConfig, image: &str) -> Option<String> {
-    let work_dir = docker.working_dir().trim_end_matches('/');
-    let Some(mount) = &docker.volume_mount else {
+fn image_mount_warning(config: &ImageConfig) -> Option<String> {
+    let work_dir = config.working_dir().trim_end_matches('/');
+    let image = &config.image;
+    let Some(mount) = &config.volume_mount else {
         return Some(format!(
             "`docker run` of `{image}` has no repo mount: set `docker.volume_mount` \
              (e.g. `.:{work_dir}`, matching `docker.work_dir`)"

@@ -150,15 +150,9 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn basic_command() {
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_image_config("test-image:latest");
         let env = HashMap::new();
-        let cmd = build_docker_run_command(
-            &config,
-            "test-image:latest",
-            &env,
-            "cargo test",
-            "ci-tui-test-1",
-        );
+        let cmd = build_docker_run_command(&config, "bash", &env, "cargo test", "ci-tui-test-1");
 
         assert!(cmd.starts_with("docker run --rm"));
         assert!(cmd.contains("test-image:latest"));
@@ -167,11 +161,9 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn with_custom_shell() {
-        let mut config = super::common::test_docker_config("test-image:latest");
-        config.shell = "/bin/sh".to_string();
+        let config = super::common::test_image_config("test-image:latest");
         let env = HashMap::new();
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "ls", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "/bin/sh", &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("/bin/sh -c 'ls'"));
         assert!(!cmd.contains("bash"));
@@ -179,33 +171,30 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn with_custom_working_directory() {
-        let mut config = super::common::test_docker_config("test-image:latest");
+        let mut config = super::common::test_image_config("test-image:latest");
         config.work_dir = Some("/custom".to_string());
         let env = HashMap::new();
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "ls", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "bash", &env, "ls", "ci-tui-test-1");
 
         assert!(cmd.contains("-w /custom"));
     }
 
     #[test]
     fn with_env_vars() {
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_image_config("test-image:latest");
         let mut env = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "bash", &env, "test", "ci-tui-test-1");
 
         assert!(cmd.contains("-e FOO='bar'"));
     }
 
     #[test]
     fn with_volume_mount() {
-        let mut config = super::common::test_docker_config("test-image:latest");
+        let mut config = super::common::test_image_config("test-image:latest");
         config.volume_mount = Some("/host/path:/container/path".to_string());
         let env = HashMap::new();
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "bash", &env, "test", "ci-tui-test-1");
 
         // Volume mount should be included
         assert!(cmd.contains("-v /host/path:/container/path"));
@@ -213,14 +202,9 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn includes_container_name() {
-        let config = super::common::test_docker_config("test-image:latest");
-        let cmd = build_docker_run_command(
-            &config,
-            "test-image:latest",
-            &HashMap::new(),
-            "ls",
-            "ci-tui-lint-42-7",
-        );
+        let config = super::common::test_image_config("test-image:latest");
+        let cmd =
+            build_docker_run_command(&config, "bash", &HashMap::new(), "ls", "ci-tui-lint-42-7");
 
         // Named so cancel/timeout can `docker kill` it
         assert!(cmd.contains("--name ci-tui-lint-42-7 "), "got: {cmd}");
@@ -228,10 +212,9 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn rm_flag_always_present() {
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_image_config("test-image:latest");
         let env = HashMap::new();
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "bash", &env, "test", "ci-tui-test-1");
 
         // --rm flag should be present for auto-cleanup
         assert!(cmd.contains("--rm"));
@@ -239,10 +222,9 @@ mod build_docker_run_command_tests {
 
     #[test]
     fn command_structure_order() {
-        let config = super::common::test_docker_config("test-image:latest");
+        let config = super::common::test_image_config("test-image:latest");
         let env = HashMap::new();
-        let cmd =
-            build_docker_run_command(&config, "test-image:latest", &env, "test", "ci-tui-test-1");
+        let cmd = build_docker_run_command(&config, "bash", &env, "test", "ci-tui-test-1");
 
         // Check general structure: docker run --rm [volumes] [env] -w dir image bash -c 'cmd'
         let parts: Vec<&str> = cmd.split_whitespace().collect();

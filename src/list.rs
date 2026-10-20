@@ -112,7 +112,7 @@ fn explain(
 ) -> (Vec<String>, Option<CheckToRun>) {
     let selection = Selection::evaluate(config, changed_files, project_root, check);
     let mut reasons = selection_reasons(&selection);
-    let to_run = process_check(selection, group, id, check, config.default_service());
+    let to_run = process_check(selection, group, id, check);
     if to_run.as_ref().map(CheckToRun::decision) == Some(Decision::OnDemand) {
         reasons.push("manual trigger only ('t' in TUI)".to_string());
     }

@@ -3,7 +3,7 @@
 pub mod configs;
 
 use ci_tui::checks::{CheckFiles, CheckToRun};
-use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig};
+use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig, DockerMode, ImageConfig};
 use ci_tui::git::ChangedFiles;
 use ci_tui::runner::CheckStatus;
 use ci_tui::ui::app::App;
@@ -207,17 +207,23 @@ pub fn make_check_with_options(
 #[allow(dead_code)]
 pub const RUNNING_ID: &str = "c0ffee";
 
+/// Plain-image settings (`docker.image`) without mount / work_dir / user
+#[allow(dead_code)]
+pub fn test_image_config(image: &str) -> ImageConfig {
+    ImageConfig {
+        image: image.to_string(),
+        volume_mount: None,
+        work_dir: None,
+        user: None,
+    }
+}
+
 /// Minimal plain-image DockerConfig (`docker.image`) for mocked-executor
 /// tests: every command is a `docker run` of `image`.
 #[allow(dead_code)]
 pub fn test_docker_config(image: &str) -> DockerConfig {
     DockerConfig {
-        project_dir: None,
-        service: "app".to_string(),
-        image: Some(image.to_string()),
-        volume_mount: None,
-        work_dir: None,
-        user: None,
+        mode: DockerMode::Image(test_image_config(image)),
         shell: "bash".to_string(),
         env: std::collections::HashMap::new(),
     }
@@ -256,7 +262,7 @@ pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckT
             timeout: None,
             error_pattern: None,
         },
-        service: Some(service.unwrap_or("app").to_string()),
+        service: service.map(String::from),
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,
