@@ -81,11 +81,11 @@ fn files_are_relative_to_discovered_config_dir() {
 }
 
 #[test]
-fn files_kept_as_given_in_config_dir() {
+fn files_normalized_in_config_dir() {
     let tmp = repo(true, &[("ci-tui.yaml", &docker_yaml(""))]);
     let out = run_in(&tmp, "", &["--list", "--files", "./a.rs"]);
     assert_code(&out, exit::SUCCESS);
-    assert!(stdout(&out).contains("  ./a.rs\n"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("  a.rs\n"), "{}", stdout(&out));
 }
 
 #[test]

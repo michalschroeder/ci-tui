@@ -35,25 +35,10 @@ fn git_detect_changes_or_exit(
     })
 }
 
-/// `--files` entry as a changed-file path. With `root`, cwd-relative paths
-/// are rewritten relative to it: the repo root in local mode (matching git
-/// output), the discovered config's dir in docker mode run from a subdir.
-/// Otherwise (docker mode from the project root) they are kept as given.
-fn cli_file_path(
-    cwd: &std::path::Path,
-    root: Option<&std::path::Path>,
-    path: &std::path::Path,
-) -> String {
-    match root {
-        Some(root) => git::to_repo_relative(cwd, root, path),
-        None => path.to_string_lossy().into_owned(),
-    }
-}
-
 /// Changed files minus `ignore_patterns`: from --files, the git index
 /// (--staged) or git detection in `project_root`. `--files` (cwd-relative) are
 /// rewritten relative to `repo_root` (local mode, to match git paths), else to
-/// `project_root` when it is not `cwd` (docker mode, discovered config).
+/// `project_root` (docker mode); paths outside it are kept as given.
 fn changed_files(
     cli: &Cli,
     config: &config::CiConfig,
@@ -61,7 +46,7 @@ fn changed_files(
     project_root: &std::path::Path,
     repo_root: Option<&std::path::Path>,
 ) -> git::ChangedFiles {
-    let files_root = repo_root.or_else(|| (project_root != cwd).then_some(project_root));
+    let files_root = repo_root.unwrap_or(project_root);
     let mut changed_files = if cli.files.is_empty() {
         git_detect_changes_or_exit(project_root, &config.git, cli.base.as_deref(), cli.staged)
     } else {
@@ -69,7 +54,7 @@ fn changed_files(
             files: cli
                 .files
                 .iter()
-                .map(|p| cli_file_path(cwd, files_root, p))
+                .map(|p| git::to_repo_relative(cwd, files_root, p))
                 .collect(),
             base_ref: git::CLI_FILES_BASE_REF.to_string(),
         }
