@@ -841,24 +841,128 @@ fn check_version(version: u32) -> std::result::Result<(), String> {
     }
 }
 
-/// Load configuration from a YAML file.
+/// Personal overrides file, read from the config file's directory
+/// (gitignored by the user); see [`LocalOverrides`]
+pub const LOCAL_CONFIG_FILE: &str = "ci-tui.local.yaml";
+
+/// Allowed shape of [`LOCAL_CONFIG_FILE`]: personal settings only, same
+/// paths as in the config. Validation only: [`merge_yaml`] merges the file's
+/// YAML into the config's before parsing, so mode rules still apply.
+//
+// Fields are never read: deserializing checks keys and types, naming the
+// offending key. Alternative: apply typed fields onto the parsed config;
+// rejected, it would repeat the docker mode rules of `RawDockerConfig`.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalOverrides {
+    #[serde(default)]
+    docker: Option<DockerOverrides>,
+    #[serde(default)]
+    local: Option<EnvOverrides>,
+    #[serde(default)]
+    max_parallel: Option<NonZeroUsize>,
+    #[serde(default)]
+    notify: Option<bool>,
+}
+
+/// `docker:` keys of [`LocalOverrides`]
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DockerOverrides {
+    #[serde(default)]
+    service: Option<String>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+}
+
+/// `local:` keys of [`LocalOverrides`]
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvOverrides {
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+}
+
+/// YAML of the [`LOCAL_CONFIG_FILE`] at `path`, validated as
+/// [`LocalOverrides`]; `None` if missing or empty
+fn read_overrides(path: &Path) -> Result<Option<serde_yaml::Value>> {
+    let content = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        content => content
+            .with_context(|| format!("Failed to read local config file: {}", path.display()))?,
+    };
+    let invalid = || {
+        format!(
+            "Invalid local config file: {} (allowed: docker.service, docker.env, \
+             local.env, max_parallel, notify)",
+            path.display()
+        )
+    };
+    let value: serde_yaml::Value = serde_yaml::from_str(&content).with_context(invalid)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_yaml::from_str::<LocalOverrides>(&content).with_context(invalid)?;
+    Ok(Some(value))
+}
+
+/// Merge `local` into `base`: mappings key by key (`env` maps: local wins
+/// per key), other values replaced; `~` keeps the base value
+fn merge_yaml(base: &mut serde_yaml::Value, local: serde_yaml::Value) {
+    use serde_yaml::Value;
+    match (base, local) {
+        (_, Value::Null) => {}
+        (Value::Mapping(base), Value::Mapping(local)) => {
+            for (key, value) in local.into_iter().filter(|(_, v)| !v.is_null()) {
+                merge_yaml(base.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (base, local) => *base = local,
+    }
+}
+
+/// Load configuration from a YAML file, merged with the
+/// [`LOCAL_CONFIG_FILE`] next to it if present.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read, parsed, or contains invalid regexes.
+/// Returns an error if either file cannot be read, parsed, or contains invalid regexes.
 pub fn load_config(path: &Path) -> Result<CiConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))
         .map_err(ConfigError)?;
 
+    // Parsed alone first: its errors keep their line numbers
     let mut config: CiConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
         .map_err(ConfigError)?;
+    let local_path = path.with_file_name(LOCAL_CONFIG_FILE);
+    let mut cached = content;
+    if let Some(overrides) = read_overrides(&local_path).map_err(ConfigError)? {
+        let parse_merged = || -> Result<(CiConfig, String)> {
+            let mut merged: serde_yaml::Value = serde_yaml::from_str(&cached)?;
+            merge_yaml(&mut merged, overrides);
+            let text = serde_yaml::to_string(&merged)?;
+            Ok((serde_yaml::from_value(merged)?, text))
+        };
+        (config, cached) = parse_merged()
+            .with_context(|| {
+                format!(
+                    "Failed to parse config file: {} with overrides from {}",
+                    path.display(),
+                    local_path.display()
+                )
+            })
+            .map_err(ConfigError)?;
+    }
     config
         .validate_and_compile()
         .with_context(|| format!("Invalid config file: {}", path.display()))
         .map_err(ConfigError)?;
-    config.source_hash = crate::cache::hash_bytes(cache_text(&content).as_bytes());
+    config.source_hash = crate::cache::hash_bytes(cache_text(&cached).as_bytes());
     Ok(config)
 }
 
@@ -2947,6 +3051,148 @@ checks:
             let config: CiConfig = serde_yaml::from_str(&yaml(Some("4"), Some("2"))).unwrap();
             assert_eq!(config.group_parallel_limit(config.get_group("g")), 2);
             assert_eq!(config.group_parallel_limit(None), 4);
+        }
+    }
+
+    mod test_local_overrides {
+        use super::*;
+
+        const HEAD: &str = "version: 2\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+
+        /// Compose-mode base config (service `app`, env `A`, `B`)
+        fn compose() -> String {
+            format!("{HEAD}docker:\n  project_dir: .\n  shell: sh\n  env: {{A: base, B: base}}\n")
+        }
+
+        /// Local-mode base config (env `A`, `B`)
+        fn local_runner() -> String {
+            format!("{HEAD}runner: local\nlocal:\n  env: {{A: base, B: base}}\n")
+        }
+
+        /// Dir with `ci-tui.yaml` = `base` and, if given, `ci-tui.local.yaml` = `local`
+        fn project(base: &str, local: Option<&str>) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("ci-tui.yaml"), base).unwrap();
+            if let Some(local) = local {
+                std::fs::write(dir.path().join(LOCAL_CONFIG_FILE), local).unwrap();
+            }
+            dir
+        }
+
+        fn load(base: &str, local: Option<&str>) -> Result<CiConfig> {
+            load_config(&project(base, local).path().join("ci-tui.yaml"))
+        }
+
+        fn env(map: &HashMap<String, String>) -> Vec<(&str, &str)> {
+            let mut env: Vec<_> = map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            env.sort();
+            env
+        }
+
+        #[test]
+        fn merges_docker_service_env_and_settings() {
+            let local = "docker:\n  service: mine\n  env: {B: local, C: local}\nmax_parallel: 2\nnotify: true\n";
+            let config = load(&compose(), Some(local)).unwrap();
+            let docker = config.docker().unwrap();
+            let DockerMode::Compose(compose) = &docker.mode else {
+                panic!("compose mode expected");
+            };
+            assert_eq!(compose.service, "mine");
+            assert_eq!(
+                env(&docker.env),
+                [("A", "base"), ("B", "local"), ("C", "local")]
+            );
+            assert_eq!(config.max_parallel, NonZeroUsize::new(2));
+            assert!(config.notify);
+        }
+
+        #[test]
+        fn merges_local_env() {
+            let config = load(&local_runner(), Some("local:\n  env: {B: local}\n")).unwrap();
+            let ExecTarget::Local(local) = &config.runner else {
+                panic!("local runner expected");
+            };
+            assert_eq!(env(&local.env), [("A", "base"), ("B", "local")]);
+            assert_eq!(local.shell, "bash", "base keys kept");
+        }
+
+        #[rstest]
+        #[case::missing(None)]
+        #[case::empty(Some(""))]
+        #[case::comments_only(Some("# nothing yet\n"))]
+        fn absent_or_empty_changes_nothing(#[case] local: Option<&str>) {
+            let config = load(&compose(), local).unwrap();
+            let base = load(&compose(), None).unwrap();
+            assert_eq!(config.source_hash, base.source_hash);
+            assert_eq!(config.max_parallel, None);
+        }
+
+        #[test]
+        fn found_next_to_config_flag_path() {
+            // `--config other/x.yaml`: the local file sits next to it, not in cwd
+            let dir = project("", None);
+            std::fs::create_dir(dir.path().join("other")).unwrap();
+            std::fs::write(dir.path().join("other/x.yaml"), compose()).unwrap();
+            std::fs::write(
+                dir.path().join("other").join(LOCAL_CONFIG_FILE),
+                "notify: true\n",
+            )
+            .unwrap();
+            assert!(
+                load_config(&dir.path().join("other/x.yaml"))
+                    .unwrap()
+                    .notify
+            );
+        }
+
+        #[rstest]
+        #[case::checks("checks: {}\n", "checks")]
+        #[case::git("git:\n  base_branch: dev\n", "git")]
+        #[case::runner("runner: local\n", "runner")]
+        #[case::docker_shell("docker:\n  shell: bash\n", "shell")]
+        #[case::docker_project_dir("docker:\n  project_dir: /x\n", "project_dir")]
+        #[case::docker_image("docker:\n  image: img\n", "image")]
+        #[case::local_shell("local:\n  shell: zsh\n", "shell")]
+        #[case::wrong_type_max_parallel("max_parallel: lots\n", "max_parallel")]
+        #[case::zero_max_parallel("max_parallel: 0\n", "max_parallel")]
+        #[case::wrong_type_notify("notify: maybe\n", "notify")]
+        #[case::wrong_type_env("docker:\n  env: [A]\n", "env")]
+        #[case::invalid_yaml("docker: [unclosed\n", "")]
+        #[case::not_a_map("- notify\n", "")]
+        fn rejected_naming_local_file(#[case] local: &str, #[case] key: &str) {
+            let err = load(&compose(), Some(local)).unwrap_err();
+            assert_eq!(crate::exit::code_for(&err), crate::exit::CONFIG_ERROR);
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(LOCAL_CONFIG_FILE),
+                "names the local file: {msg}"
+            );
+            assert!(msg.contains(key), "names `{key}`: {msg}");
+        }
+
+        #[test]
+        fn wrong_mode_service_rejected_by_mode_rules() {
+            let base = format!("{HEAD}docker:\n  image: img\n  shell: sh\n");
+            let err = load(&base, Some("docker:\n  service: app\n")).unwrap_err();
+            assert_eq!(crate::exit::code_for(&err), crate::exit::CONFIG_ERROR);
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("`docker.service` is not allowed with `docker.image`"),
+                "{msg}"
+            );
+            assert!(msg.contains(LOCAL_CONFIG_FILE), "{msg}");
+        }
+
+        #[rstest]
+        #[case::service("docker:\n  service: mine\n", false)]
+        #[case::env("docker:\n  env: {A: local}\n", false)]
+        #[case::same_env("docker:\n  env: {A: base}\n", true)]
+        #[case::max_parallel("max_parallel: 2\n", false)]
+        #[case::ui_only_notify("notify: true\n", true)]
+        fn cache_hash_covers_overrides(#[case] local: &str, #[case] same: bool) {
+            let base = load(&compose(), None).unwrap().source_hash;
+            let merged = load(&compose(), Some(local)).unwrap().source_hash;
+            assert_eq!(merged == base, same, "{local}");
         }
     }
 }

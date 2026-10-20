@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ci_tui::cli::{filter_error, missing_config_error, run_config_path, Cli, Command};
+use ci_tui::cli::{filter_error, missing_config_error, run_config, Cli, Command, RunConfig};
 use ci_tui::exit;
 use ci_tui::runner::ExecTarget;
 use ci_tui::{
@@ -35,18 +35,47 @@ fn git_detect_changes_or_exit(
     })
 }
 
-/// `--files` entry as a changed-file path. With `repo_root` (local mode only),
-/// cwd-relative paths are rewritten repo-relative (matching git output);
-/// otherwise (docker mode) they are kept as given.
+/// `--files` entry as a changed-file path. With `root`, cwd-relative paths
+/// are rewritten relative to it: the repo root in local mode (matching git
+/// output), the discovered config's dir in docker mode run from a subdir.
+/// Otherwise (docker mode from the project root) they are kept as given.
 fn cli_file_path(
     cwd: &std::path::Path,
-    repo_root: Option<&std::path::Path>,
+    root: Option<&std::path::Path>,
     path: &std::path::Path,
 ) -> String {
-    match repo_root {
+    match root {
         Some(root) => git::to_repo_relative(cwd, root, path),
         None => path.to_string_lossy().into_owned(),
     }
+}
+
+/// Changed files minus `ignore_patterns`: from --files, the git index
+/// (--staged) or git detection in `project_root`. `--files` (cwd-relative) are
+/// rewritten relative to `repo_root` (local mode, to match git paths), else to
+/// `project_root` when it is not `cwd` (docker mode, discovered config).
+fn changed_files(
+    cli: &Cli,
+    config: &config::CiConfig,
+    cwd: &std::path::Path,
+    project_root: &std::path::Path,
+    repo_root: Option<&std::path::Path>,
+) -> git::ChangedFiles {
+    let files_root = repo_root.or_else(|| (project_root != cwd).then_some(project_root));
+    let mut changed_files = if cli.files.is_empty() {
+        git_detect_changes_or_exit(project_root, &config.git, cli.base.as_deref(), cli.staged)
+    } else {
+        git::ChangedFiles {
+            files: cli
+                .files
+                .iter()
+                .map(|p| cli_file_path(cwd, files_root, p))
+                .collect(),
+            base_ref: git::CLI_FILES_BASE_REF.to_string(),
+        }
+    };
+    changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
+    changed_files
 }
 
 /// Local-mode execution root: the git repo root, or `cwd` (with a warning)
@@ -164,18 +193,22 @@ async fn run() -> Result<i32> {
     }
     let report = report::ReportOptions::new(cli.format, cli.output.clone())?;
 
-    // Use current working directory as project root
-    let project_root = std::env::current_dir()?;
-
-    // Enforced here, not via clap `required`: clap forbids required global args.
-    let Some(config_path) = run_config_path(cli.config.clone(), &project_root) else {
+    // Project root: the discovered config's dir (as if launched there), cwd
+    // with --config. Enforced here, not via clap `required`: clap forbids
+    // required global args.
+    let cwd = std::env::current_dir()?;
+    let Some(RunConfig {
+        path: config_path,
+        root: project_root,
+    }) = run_config(cli.config.clone(), &cwd)
+    else {
         missing_config_error().exit();
     };
 
     // Simple mode if stdout is not a terminal; a json / junit report implies it
     let simple_mode = cli.simple || report.writes_report() || !std::io::stdout().is_terminal();
 
-    // Load configuration
+    // Load configuration (plus `ci-tui.local.yaml` overrides)
     let mut config = config::load_config(&config_path)?;
 
     // --only / --group: narrow the config so every mode sees the same subset.
@@ -183,8 +216,8 @@ async fn run() -> Result<i32> {
     if let Err(e) = filter::apply(&mut config, &cli.only, &cli.groups) {
         filter_error(e).exit();
     }
-    // --jobs overrides the config's global parallel cap
-    config.max_parallel = cli.jobs.or(config.max_parallel);
+    // --jobs / --notify override the config's (and local overrides') values
+    cli.override_config(&mut config);
 
     // Say checks were excluded: console modes on stderr (keeps --list stdout
     // clean), the TUI in its header.
@@ -197,29 +230,14 @@ async fn run() -> Result<i32> {
     }
 
     // Local mode runs commands from the repo root so repo-relative {files}
-    // resolve from any subdirectory. Docker mode keeps cwd (compose project dir).
+    // resolve from any subdirectory. Docker mode keeps the project root
+    // (compose project dir).
     let repo_root = match config.runner {
         ExecTarget::Local(_) => Some(local_exec_root(&project_root)),
         ExecTarget::Docker(_) => None,
     };
     let exec_root = repo_root.clone().unwrap_or_else(|| project_root.clone());
-
-    // Get changed files: from --files arg, the git index (--staged) or git
-    // detection. In local mode `--files` (cwd-relative) are rewritten
-    // repo-relative to match git paths.
-    let mut changed_files = if cli.files.is_empty() {
-        git_detect_changes_or_exit(&project_root, &config.git, cli.base.as_deref(), cli.staged)
-    } else {
-        git::ChangedFiles {
-            files: cli
-                .files
-                .iter()
-                .map(|p| cli_file_path(&project_root, repo_root.as_deref(), p))
-                .collect(),
-            base_ref: git::CLI_FILES_BASE_REF.to_string(),
-        }
-    };
-    changed_files.apply_ignore_patterns(config.compiled_ignore_patterns());
+    let changed_files = changed_files(&cli, &config, &cwd, &project_root, repo_root.as_deref());
 
     // Result cache: skips checks unchanged since their last pass. Fix mode
     // only runs fix commands.

@@ -163,6 +163,18 @@ fn config_change_reruns_unless_irrelevant(#[case] added: &str, #[case] lint_runs
     assert_eq!(runs(tmp.path(), "lint"), lint_runs);
 }
 
+/// `ci-tui.local.yaml` overrides are part of the cached config (`notify` is UI-only)
+#[rstest::rstest]
+#[case::env("local:\n  env: {X: '1'}\n", 2)]
+#[case::ui_only_notify("notify: true\n", 1)]
+fn local_override_change_reruns_unless_irrelevant(#[case] local: &str, #[case] lint_runs: usize) {
+    let tmp = project(CONFIG, true);
+    run(tmp.path(), &[]);
+    write(tmp.path(), "ci-tui.local.yaml", local);
+    run(tmp.path(), &[]);
+    assert_eq!(runs(tmp.path(), "lint"), lint_runs);
+}
+
 #[test]
 fn editing_only_the_discovery_source_reruns() {
     let tmp = project(DISCOVERY_CONFIG, true);
