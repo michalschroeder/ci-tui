@@ -4,35 +4,8 @@
 use ci_tui::exit;
 
 mod common;
+use common::yaml::{check, docker_config, local_config, HEAD};
 use common::{assert_code, git, run_ci_tui};
-
-// Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
-/// Config head shared by the fixtures below
-const HEAD: &str = "version: 2
-git:
-  base_branch: main
-  fallback_branch: HEAD~1
-file_patterns: {}
-";
-
-/// One always-run check `c` running `command`
-fn check(command: &str) -> String {
-    format!("checks:\n  g:\n    checks:\n      c:\n        name: C\n        command: {command}\n")
-}
-
-/// Local-mode config with one always-run check running `command`
-fn local_config(command: &str) -> String {
-    format!("{HEAD}runner: local\n{}", check(command))
-}
-
-/// Docker-mode config; `extra` adds fields to check `c`. Tests never need a
-/// daemon: none of them runs a command in docker.
-fn docker_config(extra: &str) -> String {
-    format!(
-        "{HEAD}docker:\n  project_dir: .\n  service: app\n  shell: sh\n{}{extra}",
-        check("'true'")
-    )
-}
 
 /// Tempdir holding `ci-tui.yaml` = `config`; runs the binary with `args`
 fn run_with(config: &str, args: &[&str]) -> (tempfile::TempDir, std::process::Output) {

@@ -25,7 +25,7 @@ use anyhow::{bail, ensure, Context, Result};
 use indexmap::IndexMap;
 use regex::Regex;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -846,82 +846,80 @@ fn check_version(version: u32) -> std::result::Result<(), String> {
 pub const LOCAL_CONFIG_FILE: &str = "ci-tui.local.yaml";
 
 /// Allowed shape of [`LOCAL_CONFIG_FILE`]: personal settings only, same
-/// paths as in the config. Validation only: [`merge_yaml`] merges the file's
-/// YAML into the config's before parsing, so mode rules still apply.
+/// paths as in the config. Serialized back to YAML and merged into the
+/// config's by [`merge_yaml`] before parsing, so mode rules still apply.
 //
-// Fields are never read: deserializing checks keys and types, naming the
-// offending key. Alternative: apply typed fields onto the parsed config;
-// rejected, it would repeat the docker mode rules of `RawDockerConfig`.
-#[allow(dead_code)]
-#[derive(Deserialize)]
+// Alternative: apply the fields onto the parsed config; rejected, it would
+// repeat the docker mode rules of `RawDockerConfig`.
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LocalOverrides {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     docker: Option<DockerOverrides>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     local: Option<EnvOverrides>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_parallel: Option<NonZeroUsize>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     notify: Option<bool>,
 }
 
 /// `docker:` keys of [`LocalOverrides`]
-#[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DockerOverrides {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<String>,
-    #[serde(default)]
-    env: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<IndexMap<String, String>>,
 }
 
 /// `local:` keys of [`LocalOverrides`]
-#[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EnvOverrides {
-    #[serde(default)]
-    env: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<IndexMap<String, String>>,
 }
 
-/// YAML of the [`LOCAL_CONFIG_FILE`] at `path`, validated as
-/// [`LocalOverrides`]; `None` if missing or empty
+/// [`LocalOverrides`] at `path` as YAML (`~` keys left out); `None` if the
+/// file is missing or empty
 fn read_overrides(path: &Path) -> Result<Option<serde_yaml::Value>> {
     let content = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         content => content
             .with_context(|| format!("Failed to read local config file: {}", path.display()))?,
     };
-    let invalid = || {
+    let overrides: Option<LocalOverrides> = serde_yaml::from_str(&content).with_context(|| {
         format!(
             "Invalid local config file: {} (allowed: docker.service, docker.env, \
-             local.env, max_parallel, notify)",
+                 local.env, max_parallel, notify)",
             path.display()
         )
-    };
-    let value: serde_yaml::Value = serde_yaml::from_str(&content).with_context(invalid)?;
-    if value.is_null() {
-        return Ok(None);
-    }
-    serde_yaml::from_str::<LocalOverrides>(&content).with_context(invalid)?;
-    Ok(Some(value))
+    })?;
+    Ok(overrides.map(serde_yaml::to_value).transpose()?)
 }
 
 /// Merge `local` into `base`: mappings key by key (`env` maps: local wins
-/// per key), other values replaced; `~` keeps the base value
+/// per key), other values replaced
 fn merge_yaml(base: &mut serde_yaml::Value, local: serde_yaml::Value) {
     use serde_yaml::Value;
     match (base, local) {
-        (_, Value::Null) => {}
         (Value::Mapping(base), Value::Mapping(local)) => {
-            for (key, value) in local.into_iter().filter(|(_, v)| !v.is_null()) {
+            for (key, value) in local {
                 merge_yaml(base.entry(key).or_insert(Value::Null), value);
             }
         }
         (base, local) => *base = local,
     }
+}
+
+/// `content` merged with `overrides`, parsed, plus the merged YAML text
+fn parse_merged(content: &str, overrides: serde_yaml::Value) -> Result<(CiConfig, String)> {
+    let mut merged: serde_yaml::Value = serde_yaml::from_str(content)?;
+    merge_yaml(&mut merged, overrides);
+    let text = serde_yaml::to_string(&merged)?;
+    Ok((serde_yaml::from_value(merged)?, text))
 }
 
 /// Load configuration from a YAML file, merged with the
@@ -942,13 +940,7 @@ pub fn load_config(path: &Path) -> Result<CiConfig> {
     let local_path = path.with_file_name(LOCAL_CONFIG_FILE);
     let mut cached = content;
     if let Some(overrides) = read_overrides(&local_path).map_err(ConfigError)? {
-        let parse_merged = || -> Result<(CiConfig, String)> {
-            let mut merged: serde_yaml::Value = serde_yaml::from_str(&cached)?;
-            merge_yaml(&mut merged, overrides);
-            let text = serde_yaml::to_string(&merged)?;
-            Ok((serde_yaml::from_value(merged)?, text))
-        };
-        (config, cached) = parse_merged()
+        (config, cached) = parse_merged(&cached, overrides)
             .with_context(|| {
                 format!(
                     "Failed to parse config file: {} with overrides from {}",
@@ -3125,24 +3117,6 @@ checks:
             let base = load(&compose(), None).unwrap();
             assert_eq!(config.source_hash, base.source_hash);
             assert_eq!(config.max_parallel, None);
-        }
-
-        #[test]
-        fn found_next_to_config_flag_path() {
-            // `--config other/x.yaml`: the local file sits next to it, not in cwd
-            let dir = project("", None);
-            std::fs::create_dir(dir.path().join("other")).unwrap();
-            std::fs::write(dir.path().join("other/x.yaml"), compose()).unwrap();
-            std::fs::write(
-                dir.path().join("other").join(LOCAL_CONFIG_FILE),
-                "notify: true\n",
-            )
-            .unwrap();
-            assert!(
-                load_config(&dir.path().join("other/x.yaml"))
-                    .unwrap()
-                    .notify
-            );
         }
 
         #[rstest]

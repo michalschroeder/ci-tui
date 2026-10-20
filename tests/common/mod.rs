@@ -1,6 +1,7 @@
 //! Shared test utilities and mock helpers
 
 pub mod configs;
+pub mod yaml;
 
 use ci_tui::checks::{CheckFiles, CheckToRun};
 use ci_tui::config::{CheckDefinition, CiConfig, DockerConfig, DockerMode, ImageConfig};
@@ -43,6 +44,12 @@ pub fn assert_code(out: &std::process::Output, code: i32) {
 #[allow(dead_code)]
 pub fn stdout(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Stderr of a finished process as text
+#[allow(dead_code)]
+pub fn stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 /// Run the ci-tui binary in `dir` with [`OUTER_GIT_ENV`] cleared and git

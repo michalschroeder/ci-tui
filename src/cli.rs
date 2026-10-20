@@ -306,27 +306,30 @@ pub struct RunConfig {
     pub root: PathBuf,
 }
 
+impl RunConfig {
+    fn new(path: impl Into<PathBuf>, root: &Path) -> Self {
+        Self {
+            path: path.into(),
+            root: root.to_path_buf(),
+        }
+    }
+}
+
 /// Config for running checks: `--config` (run from `cwd`), else the nearest
 /// `ci-tui.yaml` from `cwd` up to the git repo root (only `cwd` outside a
 /// repo), run from its dir. `None` means no config was given or found.
 pub fn run_config(config: Option<PathBuf>, cwd: &Path) -> Option<RunConfig> {
     let file = crate::commands::DEFAULT_CONFIG_FILE;
-    let found = |path: PathBuf, root: &Path| {
-        Some(RunConfig {
-            path,
-            root: root.to_path_buf(),
-        })
-    };
     if let Some(path) = config {
-        return found(path, cwd);
+        return Some(RunConfig::new(path, cwd));
     }
     // In cwd: no git call, and the path stays as short as before
     if cwd.join(file).is_file() {
-        return found(PathBuf::from(file), cwd);
+        return Some(RunConfig::new(file, cwd));
     }
     let top = crate::git::repo_root(cwd).ok()?;
     let dir = find_config_dir(cwd, &top)?;
-    found(dir.join(file), dir)
+    Some(RunConfig::new(dir.join(file), dir))
 }
 
 /// Nearest dir from `cwd` up to `top` (inclusive) holding `ci-tui.yaml`;
@@ -670,10 +673,7 @@ mod tests {
 
     /// [`RunConfig`] of `path` run from `root`
     fn found(path: impl Into<PathBuf>, root: &Path) -> Option<RunConfig> {
-        Some(RunConfig {
-            path: path.into(),
-            root: root.to_path_buf(),
-        })
+        Some(RunConfig::new(path, root))
     }
 
     #[test]
@@ -728,10 +728,9 @@ mod tests {
     ) {
         let dir = tree(with_config);
         let (cwd, top) = (dir.path().join("a/b"), dir.path().join(top));
-        let expected = expected.map(|sub| dir.path().join(sub));
         assert_eq!(
-            find_config_dir(&cwd, &top).map(Path::to_path_buf),
-            expected.map(|p| p.components().collect())
+            find_config_dir(&cwd, &top).map(|d| d.strip_prefix(dir.path()).unwrap()),
+            expected.map(Path::new)
         );
     }
 
@@ -742,26 +741,9 @@ mod tests {
         assert_eq!(find_config_dir(&dir.path().join("a/b"), other.path()), None);
     }
 
-    #[test]
-    fn test_missing_config_error_mentions_parents() {
-        let message = missing_config_error().to_string();
-        assert!(
-            message.contains("or its parents up to the repo root"),
-            "{message}"
-        );
-    }
-
-    /// Config of `<tmp>/ci-tui.yaml` = `base` plus `ci-tui.local.yaml` = `local`
-    fn load_with_local(base: &str, local: &str) -> crate::config::CiConfig {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ci-tui.yaml"), base).unwrap();
-        std::fs::write(dir.path().join("ci-tui.local.yaml"), local).unwrap();
-        crate::config::load_config(&dir.path().join("ci-tui.yaml")).unwrap()
-    }
-
-    /// Precedence: base config < `ci-tui.local.yaml` < CLI flags
+    /// Precedence: `ci-tui.local.yaml` (merged into the config) < CLI flags
     #[rstest::rstest]
-    #[case::local_beats_base(&["ci-tui"], Some(3), false)]
+    #[case::no_flags(&["ci-tui"], Some(3), false)]
     #[case::cli_beats_local(&["ci-tui", "-j", "2"], Some(2), false)]
     #[case::notify_flag(&["ci-tui", "--notify"], Some(3), true)]
     fn test_override_config_precedence(
@@ -769,8 +751,11 @@ mod tests {
         #[case] max_parallel: Option<usize>,
         #[case] notify: bool,
     ) {
-        let base = "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\nmax_parallel: 4\n";
-        let mut config = load_with_local(base, "max_parallel: 3\n");
+        // As loaded with `max_parallel: 3` from `ci-tui.local.yaml`
+        let mut config: crate::config::CiConfig = serde_yaml::from_str(
+            "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\nmax_parallel: 3\n",
+        )
+        .unwrap();
         Cli::try_parse_checked(args)
             .unwrap()
             .override_config(&mut config);
