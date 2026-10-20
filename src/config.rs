@@ -491,8 +491,7 @@ fn reject_set_keys(
 /// `Option` fields of both modes side by side, so wrong-mode keys are
 /// rejected in one place ([`TryFrom<RawDockerConfig>`]) and every consumer
 /// `match`es the mode (see [`crate::runner::resolve_service`]).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "RawDockerConfig")]
+#[derive(Debug, Clone)]
 pub struct DockerConfig {
     /// Compose services or a plain image
     pub mode: DockerMode,
@@ -519,6 +518,21 @@ pub struct ComposeConfig {
     /// Service a command without its own `service` runs in (default "app");
     /// applied by [`crate::runner::resolve_service`]
     pub service: String,
+}
+
+#[cfg(test)]
+impl DockerConfig {
+    /// Compose mode of `project_dir` / `service`, `bash`, no env
+    pub(crate) fn compose_for_test(project_dir: &str, service: &str) -> Self {
+        Self {
+            mode: DockerMode::Compose(ComposeConfig {
+                project_dir: project_dir.to_string(),
+                service: service.to_string(),
+            }),
+            shell: "bash".to_string(),
+            env: HashMap::new(),
+        }
+    }
 }
 
 impl ComposeConfig {
@@ -1219,14 +1233,10 @@ mod tests {
         fn build(self) -> CiConfig {
             CiConfig {
                 version: 2,
-                runner: ExecTarget::Docker(DockerConfig {
-                    mode: DockerMode::Compose(ComposeConfig {
-                        project_dir: self.docker_project_dir,
-                        service: self.docker_service,
-                    }),
-                    shell: "bash".to_string(),
-                    env: HashMap::new(),
-                }),
+                runner: ExecTarget::Docker(DockerConfig::compose_for_test(
+                    &self.docker_project_dir,
+                    &self.docker_service,
+                )),
                 git: GitConfig {
                     base_branch: self.git_base,
                     fallback_branch: self.git_fallback,
@@ -2283,9 +2293,7 @@ checks:
     }
 
     mod test_lazy_compiled_fallback {
-        use super::super::{
-            CiConfig, ComposeConfig, DockerConfig, DockerMode, FilePattern, GitConfig,
-        };
+        use super::super::{CiConfig, DockerConfig, FilePattern, GitConfig};
         use indexmap::IndexMap;
         use std::collections::HashMap;
 
@@ -2302,14 +2310,7 @@ checks:
             }
             CiConfig::new(
                 2,
-                DockerConfig {
-                    mode: DockerMode::Compose(ComposeConfig {
-                        project_dir: ".".to_string(),
-                        service: "app".to_string(),
-                    }),
-                    shell: "bash".to_string(),
-                    env: HashMap::new(),
-                },
+                DockerConfig::compose_for_test(".", "app"),
                 GitConfig {
                     base_branch: "main".to_string(),
                     fallback_branch: "HEAD~1".to_string(),

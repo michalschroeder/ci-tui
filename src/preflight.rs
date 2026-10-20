@@ -14,7 +14,7 @@
 use crate::checks::CheckToRun;
 use crate::config::{DockerConfig, DockerMode, ImageConfig};
 use crate::runner::{
-    build_docker_exec_command, resolve_service, CommandExecutor, DockerPlacement, ExecTarget,
+    build_docker_exec_command, compose_placement, CommandExecutor, DockerPlacement, ExecTarget,
     OutputSink, RealCommandExecutor,
 };
 use crate::utils::shell::quote;
@@ -89,7 +89,7 @@ pub async fn docker_reachable(
 /// - plain image: its `docker run` mount is checked once (see
 ///   [`image_mount_warning`])
 /// - compose: each distinct service the checks use is resolved once
-///   ([`resolve_service`]):
+///   ([`compose_placement`]):
 ///   - running container: `test -e <file>` via `docker exec` on the first
 ///     changed file present on the host; warn if missing (first stderr line
 ///     appended)
@@ -115,7 +115,7 @@ pub async fn docker_warnings(
     };
     let mut services: Vec<&str> = Vec::new();
     for check in checks {
-        let service = compose.service_for(check.service.as_deref());
+        let service = compose.service_for(check.service());
         if !services.contains(&service) {
             services.push(service);
         }
@@ -123,7 +123,7 @@ pub async fn docker_warnings(
 
     let mut warnings = Vec::new();
     for service in services {
-        if let DockerPlacement::Exec(id) = resolve_service(docker, Some(service), root, executor) {
+        if let DockerPlacement::Exec(id) = compose_placement(compose, service, root, executor) {
             warnings.extend(exec_probe(docker, service, &id, files, root, executor).await);
         }
     }

@@ -351,7 +351,6 @@ mod tests {
                 timeout: None,
                 error_pattern: None,
             },
-            service: None,
             files,
             resolved_command: command.into(),
             resolved_fix_command: None,

@@ -1320,8 +1320,7 @@ mod run_single_check_with_executor_tests {
                 stderr: String::new(),
             });
 
-        let mut check = super::common::make_exec_check("c1", "echo hi", None);
-        check.service = None;
+        let check = super::common::make_exec_check("c1", "echo hi", None);
         let cfg = common::configs::ConfigBuilder::new().build().runner;
         let result = run_single_check_with_executor(
             &check,

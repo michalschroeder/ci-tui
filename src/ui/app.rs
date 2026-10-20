@@ -1943,7 +1943,6 @@ checks:
                 timeout: None,
                 error_pattern: None,
             },
-            service: Some("php".to_string()),
             files: if on_demand {
                 CheckFiles::OnDemand
             } else {

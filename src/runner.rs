@@ -673,11 +673,10 @@ pub enum DockerPlacement<'a> {
     Image(&'a ImageConfig),
 }
 
-/// Where a command for `service` (default `docker.service`, the only place
-/// that default is applied) runs: the single resolution path for checks,
-/// pre-commands, fixes and preflight. Plain-image mode never asks compose;
-/// compose mode asks `executor` for the service's running container
-/// ([`CommandExecutor::running_container`], run in `root`).
+/// Where a command for `service` (default `docker.service`) runs: the
+/// resolution path for checks, pre-commands and fixes. Plain-image mode never
+/// asks compose; compose mode goes through [`compose_placement`] (preflight
+/// calls that directly per service).
 pub fn resolve_service<'a>(
     docker: &'a DockerConfig,
     service: Option<&'a str>,
@@ -687,12 +686,22 @@ pub fn resolve_service<'a>(
     match &docker.mode {
         DockerMode::Image(image) => DockerPlacement::Image(image),
         DockerMode::Compose(compose) => {
-            let service = compose.service_for(service);
-            match executor.running_container(&compose.project_dir, service, root) {
-                Some(id) => DockerPlacement::Exec(id),
-                None => DockerPlacement::ComposeRun(compose, service),
-            }
+            compose_placement(compose, compose.service_for(service), root, executor)
         }
+    }
+}
+
+/// Compose placement of `service`: its running container
+/// ([`CommandExecutor::running_container`], run in `root`), else a one-off
+pub fn compose_placement<'a>(
+    compose: &'a ComposeConfig,
+    service: &'a str,
+    root: &Path,
+    executor: &dyn CommandExecutor,
+) -> DockerPlacement<'a> {
+    match executor.running_container(&compose.project_dir, service, root) {
+        Some(id) => DockerPlacement::Exec(id),
+        None => DockerPlacement::ComposeRun(compose, service),
     }
 }
 
@@ -1441,7 +1450,7 @@ pub async fn run_check_with_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        check.service.as_deref(),
+        check.service(),
         target,
         &check.definition.env,
         executor,
@@ -1634,14 +1643,16 @@ mod tests {
 
     /// Plain-image mode target (`docker.image`)
     fn image_target() -> ExecTarget {
-        let yaml = "shell: bash\nimage: test-img\n";
-        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+        ExecTarget::Docker(DockerConfig {
+            mode: DockerMode::Image(image_config("test-img", None)),
+            shell: "bash".to_string(),
+            env: HashMap::new(),
+        })
     }
 
     /// Compose mode target: project `./infra`, default service `app`
     fn compose_target() -> ExecTarget {
-        let yaml = "project_dir: ./infra\nservice: app\nshell: bash\n";
-        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+        ExecTarget::Docker(DockerConfig::compose_for_test("./infra", "app"))
     }
 
     /// Mock whose compose `service` runs container `id` (others stopped);

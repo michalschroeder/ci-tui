@@ -187,7 +187,6 @@ pub fn make_check_with_options(
             timeout: None,
             error_pattern: None,
         },
-        service: Some("app".to_string()),
         files: if on_demand {
             CheckFiles::OnDemand
         } else {
@@ -245,7 +244,7 @@ pub fn local_sh() -> ci_tui::runner::ExecTarget {
 }
 
 /// CheckToRun whose resolved_command equals `command`, for executor tests.
-/// `service` sets the check's compose service (default `app`).
+/// `service` sets the check's compose service (`None` = `docker.service`).
 #[allow(dead_code)]
 pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckToRun {
     CheckToRun {
@@ -262,7 +261,6 @@ pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckT
             timeout: None,
             error_pattern: None,
         },
-        service: service.map(String::from),
         files: CheckFiles::Files(vec![]),
         resolved_command: command.to_string(),
         resolved_fix_command: None,

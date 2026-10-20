@@ -97,10 +97,6 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// The check's own compose `service`; `None` = `docker.service`
-    /// (applied by [`crate::runner::resolve_service`]; always `None` in
-    /// local and plain-image mode)
-    pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,
     /// The fully resolved command to execute
@@ -126,6 +122,13 @@ impl CheckToRun {
     /// Get the execution group this check belongs to
     pub fn group(&self) -> &str {
         &self.group
+    }
+
+    /// The check's own compose `service`; `None` = `docker.service`
+    /// (applied by [`crate::runner::resolve_service`]; always `None` in
+    /// local and plain-image mode)
+    pub fn service(&self) -> Option<&str> {
+        self.definition.service.as_deref()
     }
 
     /// Check if this check has a fix command available
@@ -257,8 +260,8 @@ mod tests {
     // See: https://github.com/rust-lang/rustfmt/issues/4656
     fn checks_test_config() -> CiConfig {
         use crate::config::{
-            CheckDefinition, CheckTriggers, ComposeConfig, DockerConfig, DockerMode, FilePattern,
-            GitConfig, GroupConfig, DEFAULT_MAX_OUTPUT_LINES,
+            CheckDefinition, CheckTriggers, DockerConfig, FilePattern, GitConfig, GroupConfig,
+            DEFAULT_MAX_OUTPUT_LINES,
         };
         use indexmap::IndexMap;
         use std::collections::HashMap;
@@ -424,14 +427,10 @@ mod tests {
 
         CiConfig {
             version: 2,
-            runner: crate::config::ExecTarget::Docker(DockerConfig {
-                mode: DockerMode::Compose(ComposeConfig {
-                    project_dir: "./infrastructure".to_string(),
-                    service: "php".to_string(),
-                }),
-                shell: "bash".to_string(),
-                env: HashMap::new(),
-            }),
+            runner: crate::config::ExecTarget::Docker(DockerConfig::compose_for_test(
+                "./infrastructure",
+                "php",
+            )),
             git: GitConfig {
                 base_branch: "development".to_string(),
                 fallback_branch: "HEAD~1".to_string(),
@@ -471,7 +470,6 @@ mod tests {
                 timeout: None,
                 error_pattern: None,
             },
-            service: Some("php".to_string()),
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,
@@ -493,28 +491,6 @@ mod tests {
         let cache_warmup = cache_warmup.unwrap();
         assert!(!cache_warmup.is_on_demand());
         assert!(cache_warmup.files.paths().is_empty());
-    }
-
-    /// `CheckToRun.service` is the check's own `service` only: the compose
-    /// default (`docker.service`) is applied by `runner::resolve_service`
-    #[test]
-    fn test_service_not_prefilled_with_docker_service() {
-        let mut config = checks_test_config();
-        config.checks["warmup"].checks["cache-warmup"].service = Some("worker".into());
-        let changed_files = make_changed_files(vec!["src/Service/Foo.php"]);
-
-        let checks = determine_checks(&config, &changed_files, &PathBuf::from("/tmp"));
-
-        let service = |id: &str| {
-            checks
-                .iter()
-                .find(|c| c.id() == id)
-                .unwrap()
-                .service
-                .clone()
-        };
-        assert_eq!(service("cache-warmup").as_deref(), Some("worker"));
-        assert_eq!(service("php-lint"), None, "no pre-fill from docker.service");
     }
 
     #[test]

@@ -105,7 +105,6 @@ async fn selected_check_without_service_runs_in_docker_service() {
         base_ref: "main".into(),
     };
     let checks = ci_tui::checks::determine_checks(&config, &changed, Path::new("/app"));
-    assert_eq!(checks[0].service, None);
     let mut mock = MockCommandExecutor::new();
     mock.expect_running_container()
         .withf(|dir, service, _| dir == "./test" && service == "php")
