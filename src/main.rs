@@ -37,16 +37,15 @@ fn git_detect_changes_or_exit(
 
 /// Changed files minus `ignore_patterns`: from --files, the git index
 /// (--staged) or git detection in `project_root`. `--files` (cwd-relative) are
-/// rewritten relative to `repo_root` (local mode, to match git paths), else to
-/// `project_root` (docker mode); paths outside it are kept as given.
+/// rewritten relative to `exec_root` (local mode: the repo root, matching git
+/// paths); paths outside it are kept as given.
 fn changed_files(
     cli: &Cli,
     config: &config::CiConfig,
     cwd: &std::path::Path,
     project_root: &std::path::Path,
-    repo_root: Option<&std::path::Path>,
+    exec_root: &std::path::Path,
 ) -> git::ChangedFiles {
-    let files_root = repo_root.unwrap_or(project_root);
     let mut changed_files = if cli.files.is_empty() {
         git_detect_changes_or_exit(project_root, &config.git, cli.base.as_deref(), cli.staged)
     } else {
@@ -54,7 +53,7 @@ fn changed_files(
             files: cli
                 .files
                 .iter()
-                .map(|p| git::to_repo_relative(cwd, files_root, p))
+                .map(|p| git::to_relative(cwd, exec_root, p))
                 .collect(),
             base_ref: git::CLI_FILES_BASE_REF.to_string(),
         }
@@ -217,12 +216,11 @@ async fn run() -> Result<i32> {
     // Local mode runs commands from the repo root so repo-relative {files}
     // resolve from any subdirectory. Docker mode keeps the project root
     // (compose project dir).
-    let repo_root = match config.runner {
-        ExecTarget::Local(_) => Some(local_exec_root(&project_root)),
-        ExecTarget::Docker(_) => None,
+    let exec_root = match config.runner {
+        ExecTarget::Local(_) => local_exec_root(&project_root),
+        ExecTarget::Docker(_) => project_root.clone(),
     };
-    let exec_root = repo_root.clone().unwrap_or_else(|| project_root.clone());
-    let changed_files = changed_files(&cli, &config, &cwd, &project_root, repo_root.as_deref());
+    let changed_files = changed_files(&cli, &config, &cwd, &project_root, &exec_root);
 
     // Result cache: skips checks unchanged since their last pass. Fix mode
     // only runs fix commands.
