@@ -1533,7 +1533,7 @@ pub struct TuiOptions {
 }
 
 impl TuiOptions {
-    /// From the CLI flags; `notify` also from config
+    /// From the CLI flags; `notify` from config (`--notify` already merged)
     pub fn new(
         cli: &crate::cli::Cli,
         config: &CiConfig,
@@ -1544,7 +1544,7 @@ impl TuiOptions {
             filter_notice,
             show_stats: !cli.no_stats,
             cache,
-            notify: cli.notify || config.notify,
+            notify: config.notify,
             exit_on_finish: cli.exit_on_finish,
             verify: !cli.no_verify,
             watch: cli.watch,

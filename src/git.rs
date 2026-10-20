@@ -403,11 +403,11 @@ fn rev_parse_path(
     Ok(PathBuf::from(path))
 }
 
-/// Rewrite a cwd-relative path to repo-relative (`cwd.join(path)` stripped of
-/// `repo_root`). Paths outside the repo are returned unchanged.
-pub fn to_repo_relative(cwd: &Path, repo_root: &Path, path: &Path) -> String {
+/// Rewrite a cwd-relative path relative to `root` (`cwd.join(path)` stripped
+/// of `root`). Paths outside `root` are returned unchanged.
+pub fn to_relative(cwd: &Path, root: &Path, path: &Path) -> String {
     let joined = cwd.join(path);
-    match joined.strip_prefix(repo_root) {
+    match joined.strip_prefix(root) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => path.to_string_lossy().into_owned(),
     }
@@ -418,17 +418,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn to_repo_relative_rewrites_cwd_relative_paths() {
+    fn to_relative_rewrites_cwd_relative_paths() {
         let root = Path::new("/repo");
         let cwd = Path::new("/repo/sub");
-        assert_eq!(to_repo_relative(cwd, root, Path::new("a.rs")), "sub/a.rs");
+        assert_eq!(to_relative(cwd, root, Path::new("a.rs")), "sub/a.rs");
+        assert_eq!(to_relative(root, root, Path::new("src/a.rs")), "src/a.rs");
+        assert_eq!(to_relative(cwd, root, Path::new("/repo/b.rs")), "b.rs");
         assert_eq!(
-            to_repo_relative(root, root, Path::new("src/a.rs")),
-            "src/a.rs"
-        );
-        assert_eq!(to_repo_relative(cwd, root, Path::new("/repo/b.rs")), "b.rs");
-        assert_eq!(
-            to_repo_relative(cwd, root, Path::new("/other/c.rs")),
+            to_relative(cwd, root, Path::new("/other/c.rs")),
             "/other/c.rs"
         );
     }
