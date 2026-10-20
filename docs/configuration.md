@@ -886,6 +886,7 @@ After changing config structs, regenerate the committed file with `make schema` 
 **Version 2** (current)
 - Added: `docker.image` (plain-image mode), `docker.volume_mount`, `docker.work_dir`, `docker.user`
 - Plain-image mode rejects `docker.project_dir` / `docker.service` (exit 2)
+- `runner: local`: an ignored `docker` section must still follow its mode rules (exit 2)
 - Compose services resolved via `docker compose ps` / `docker compose run` (no `container` setting)
 - Removed: `container` (docker section, checks, pre-commands) and pre-command `exec`
 - Added: `docker.env` and per-check `env`

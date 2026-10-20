@@ -137,9 +137,12 @@ impl TryFrom<RawCiConfig> for CiConfig {
                         .to_string(),
                 )
             }
-            // A `docker` section in local mode must deserialize but is ignored
-            // (not converted: its mode rules are not checked)
-            (RunnerMode::Local, _) => ExecTarget::Local(raw.local),
+            // A `docker` section in local mode is ignored, but must be valid
+            // (mode rules too, as the schema requires)
+            (RunnerMode::Local, docker) => {
+                docker.map(DockerConfig::try_from).transpose()?;
+                ExecTarget::Local(raw.local)
+            }
         };
         let mut checks = raw.checks;
         if let Some(default) = raw.timeout {
@@ -2438,6 +2441,32 @@ checks:
             };
             assert_eq!(local.shell, "bash");
             assert!(config.docker().is_none());
+        }
+
+        // Ignored `docker` section still follows its mode rules
+        #[rstest]
+        #[case::valid("docker:\n  image: img\n  shell: bash\n", None)]
+        #[case::no_project_dir(
+            "docker:\n  shell: bash\n",
+            Some("`docker.project_dir` is required")
+        )]
+        #[case::wrong_mode_key(
+            "docker:\n  image: img\n  service: app\n  shell: bash\n",
+            Some("`docker.service` is not allowed with `docker.image`")
+        )]
+        fn test_runner_local_validates_docker_section(
+            #[case] docker: &str,
+            #[case] expected: Option<&str>,
+        ) {
+            let yaml = LOCAL_MIN.replace("runner: local\n", &format!("runner: local\n{docker}"));
+            let result = serde_yaml::from_str::<CiConfig>(&yaml);
+            match expected {
+                None => assert!(result.unwrap().docker().is_none()),
+                Some(msg) => {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.contains(msg), "got: {err}");
+                }
+            }
         }
 
         #[test]
