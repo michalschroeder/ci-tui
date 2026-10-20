@@ -126,6 +126,8 @@ impl TryFrom<RawCiConfig> for CiConfig {
     type Error = String;
 
     fn try_from(raw: RawCiConfig) -> std::result::Result<Self, Self::Error> {
+        // Before the docker section: a wrong version explains its other errors
+        check_version(raw.version)?;
         let runner = match (raw.runner, raw.docker) {
             (RunnerMode::Docker, Some(docker)) => ExecTarget::Docker(docker.try_into()?),
             (RunnerMode::Docker, None) => {
@@ -139,18 +141,6 @@ impl TryFrom<RawCiConfig> for CiConfig {
             // (not converted: its mode rules are not checked)
             (RunnerMode::Local, _) => ExecTarget::Local(raw.local),
         };
-        // Services exist in compose mode only
-        let serviceless = match &runner {
-            ExecTarget::Docker(DockerConfig {
-                mode: DockerMode::Compose(_),
-                ..
-            }) => None,
-            ExecTarget::Docker(_) => Some("`docker.image` (every command runs in that image)"),
-            ExecTarget::Local(_) => Some("`runner: local`"),
-        };
-        if let Some(mode) = serviceless {
-            reject_services(&raw.checks, mode)?;
-        }
         let mut checks = raw.checks;
         if let Some(default) = raw.timeout {
             apply_default_timeout(&mut checks, default);
@@ -183,6 +173,15 @@ fn apply_default_timeout(checks: &mut IndexMap<String, GroupConfig>, default: Du
             timeout.get_or_insert(default);
         }
     }
+}
+
+/// Deserialize a key that may be left out (`None`); a value, `~` included
+/// (a string to serde_yaml), is `Some`
+fn deserialize_some<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 /// Deserialize an optional `timeout:` duration string (`30s`, `10m`, `1h`).
@@ -381,7 +380,8 @@ pub(crate) struct RawDockerConfig {
     #[serde(default)]
     project_dir: Option<String>,
     /// Compose mode: default service commands run in (default "app")
-    #[schemars(extend("default" = DEFAULT_SERVICE))]
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schemars(with = "String", extend("default" = DEFAULT_SERVICE))]
     service: Option<String>,
     /// Plain-image mode: every command runs in `docker run` of this image
     /// (e.g. "rust:latest"); no compose
@@ -827,6 +827,17 @@ fn reject_services(
     Ok(())
 }
 
+/// Error unless `version` is [`SUPPORTED_VERSION`]
+fn check_version(version: u32) -> std::result::Result<(), String> {
+    if version == SUPPORTED_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported config version {version} (expected {SUPPORTED_VERSION})"
+        ))
+    }
+}
+
 /// Load configuration from a YAML file.
 ///
 /// # Errors
@@ -909,13 +920,9 @@ impl CiConfig {
     /// second call never replaces already-cached patterns (even if `file_patterns`
     /// was mutated in between). Call at most once per config instance.
     pub fn validate_and_compile(&self) -> Result<()> {
-        if self.version != SUPPORTED_VERSION {
-            bail!(
-                "unsupported config version {} (expected {SUPPORTED_VERSION})",
-                self.version
-            );
-        }
+        check_version(self.version).map_err(anyhow::Error::msg)?;
         // Docker section and mode keys are checked at parse time (RawCiConfig)
+        self.check_services().map_err(anyhow::Error::msg)?;
         if let ExecTarget::Local(local) = &self.runner {
             ensure!(
                 !local.shell.trim().is_empty(),
@@ -932,6 +939,20 @@ impl CiConfig {
             .compiled_ignore_patterns
             .set(compile_ignore_patterns(&self.ignore_patterns)?);
         Ok(())
+    }
+
+    /// Check / pre-command `service` only in compose mode (services exist
+    /// there only)
+    fn check_services(&self) -> std::result::Result<(), String> {
+        let mode = match &self.runner {
+            ExecTarget::Docker(DockerConfig {
+                mode: DockerMode::Compose(_),
+                ..
+            }) => return Ok(()),
+            ExecTarget::Docker(_) => "`docker.image` (every command runs in that image)",
+            ExecTarget::Local(_) => "`runner: local`",
+        };
+        reject_services(&self.checks, mode)
     }
 
     /// Every `triggers.file_pattern` / `test_discovery.source_pattern` must name a
@@ -1107,6 +1128,7 @@ mod tests {
     };
     use indexmap::IndexMap;
     use std::collections::HashMap;
+    use std::sync::OnceLock;
 
     /// Compose settings of a docker-mode `config` (panics otherwise)
     fn compose(config: &CiConfig) -> &ComposeConfig {
@@ -1123,7 +1145,6 @@ mod tests {
             other => panic!("expected plain-image mode, got {other:?}"),
         }
     }
-    use std::sync::OnceLock;
 
     // Inline ConfigBuilder for tests (simplified version of tests/common/configs.rs)
     struct ConfigBuilder {
@@ -1648,6 +1669,14 @@ checks: {}
             );
         }
 
+        // `service: ~` counts as set, like the schema's `required` (no
+        // `null` → unset shortcut)
+        #[test]
+        fn test_image_mode_rejects_null_service() {
+            let err = validated(&format!("{IMAGE}  service: ~\n"), NO_CHECKS).unwrap_err();
+            assert!(err.contains("`docker.service` is not allowed"), "{err}");
+        }
+
         #[rstest]
         #[case::volume_mount("volume_mount: .:/app")]
         #[case::work_dir("work_dir: /app")]
@@ -1670,6 +1699,20 @@ checks: {}
             assert!(err.contains(expected), "{err}");
             assert!(err.contains("docker.image"), "{err}");
             validated(COMPOSE, group).expect("compose mode allows `service`");
+        }
+
+        // Configs built without YAML (`CiConfig::new`) get the check too
+        #[test]
+        fn test_validate_rejects_service_in_built_image_config() {
+            let group = "    checks:\n      lint:\n        name: Lint\n        command: x\n        service: worker\n";
+            let mut config = validated(COMPOSE, group).unwrap();
+            config.runner = ExecTarget::Docker(DockerConfig {
+                mode: DockerMode::Image(image(&validated(IMAGE, NO_CHECKS).unwrap()).clone()),
+                shell: "bash".to_string(),
+                env: HashMap::new(),
+            });
+            let err = config.validate_and_compile().unwrap_err().to_string();
+            assert!(err.contains("`g.lint` sets `service`"), "{err}");
         }
 
         #[rstest]
@@ -1990,7 +2033,28 @@ checks: {}
             let yaml = format!(
                 "version: {version}\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
             );
-            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let msg = serde_yaml::from_str::<CiConfig>(&yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("unsupported config version"), "got: {msg}");
+        }
+
+        // Version is checked before the docker section: its mode errors are
+        // likely a schema mismatch, not the real cause
+        #[test]
+        fn test_version_error_before_docker_mode_error() {
+            let yaml = "version: 1\ndocker:\n  image: img\n  service: app\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+            let msg = serde_yaml::from_str::<CiConfig>(yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("unsupported config version 1"), "got: {msg}");
+        }
+
+        // `CiConfig::new` (no YAML) still gets the version check
+        #[test]
+        fn test_validate_checks_version_of_built_config() {
+            let mut config = ConfigBuilder::new().build();
+            config.version = 1;
             let msg = config.validate_and_compile().unwrap_err().to_string();
             assert!(msg.contains("unsupported config version"), "got: {msg}");
         }
@@ -2423,9 +2487,8 @@ checks:
                 "file_patterns: {}\nchecks: {}\n",
                 "file_patterns:\n  rust: { pattern: '\\.rs$' }\nchecks:\n  g:\n    checks:\n      lint:\n        name: Lint\n        command: echo\n        service: app\n        triggers: { file_pattern: rust }\n",
             );
-            let err = serde_yaml::from_str::<CiConfig>(&yaml)
-                .unwrap_err()
-                .to_string();
+            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let err = config.validate_and_compile().unwrap_err().to_string();
             assert!(
                 err.contains("g.lint") && err.contains("runner: local"),
                 "got: {err}"
@@ -2438,9 +2501,8 @@ checks:
                 "checks: {}\n",
                 "checks:\n  g:\n    pre_commands:\n      - name: init\n        command: echo\n        service: db\n    checks: {}\n",
             );
-            let err = serde_yaml::from_str::<CiConfig>(&yaml)
-                .unwrap_err()
-                .to_string();
+            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let err = config.validate_and_compile().unwrap_err().to_string();
             assert!(
                 err.contains("pre_commands") && err.contains("runner: local"),
                 "got: {err}"

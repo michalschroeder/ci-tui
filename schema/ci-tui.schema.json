@@ -247,10 +247,7 @@
         },
         "service": {
           "description": "Compose mode: default service commands run in (default \"app\")",
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": "string",
           "default": "app"
         },
         "shell": {

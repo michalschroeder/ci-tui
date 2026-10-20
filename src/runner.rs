@@ -32,7 +32,7 @@
 //! - [`run_fix_command`]: Execute a fix command for a check
 
 use crate::checks::CheckToRun;
-use crate::config::CiConfig;
+use crate::config::{CiConfig, ComposeConfig, DockerConfig, DockerMode, ImageConfig};
 use crate::utils::shell::quote;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -601,7 +601,6 @@ pub fn build_compose_run_command(
 }
 
 pub use crate::config::ExecTarget;
-use crate::config::{ComposeConfig, DockerConfig, DockerMode, ImageConfig};
 
 /// Shell command built for an [`ExecTarget`]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,10 +672,11 @@ pub enum DockerPlacement<'a> {
     Image(&'a ImageConfig),
 }
 
-/// Where a command for `service` (default `docker.service`) runs: the
-/// resolution path for checks, pre-commands and fixes. Plain-image mode never
-/// asks compose; compose mode goes through [`compose_placement`] (preflight
-/// calls that directly per service).
+/// Where a command for `service` (default `docker.service`, applied only
+/// here and in preflight's per-service dedup) runs: the single resolution
+/// path for checks, pre-commands, fixes and preflight. Plain-image mode never
+/// asks compose; compose mode asks `executor` for the service's running
+/// container ([`CommandExecutor::running_container`], run in `root`).
 pub fn resolve_service<'a>(
     docker: &'a DockerConfig,
     service: Option<&'a str>,
@@ -686,22 +686,12 @@ pub fn resolve_service<'a>(
     match &docker.mode {
         DockerMode::Image(image) => DockerPlacement::Image(image),
         DockerMode::Compose(compose) => {
-            compose_placement(compose, compose.service_for(service), root, executor)
+            let service = compose.service_for(service);
+            match executor.running_container(&compose.project_dir, service, root) {
+                Some(id) => DockerPlacement::Exec(id),
+                None => DockerPlacement::ComposeRun(compose, service),
+            }
         }
-    }
-}
-
-/// Compose placement of `service`: its running container
-/// ([`CommandExecutor::running_container`], run in `root`), else a one-off
-pub fn compose_placement<'a>(
-    compose: &'a ComposeConfig,
-    service: &'a str,
-    root: &Path,
-    executor: &dyn CommandExecutor,
-) -> DockerPlacement<'a> {
-    match executor.running_container(&compose.project_dir, service, root) {
-        Some(id) => DockerPlacement::Exec(id),
-        None => DockerPlacement::ComposeRun(compose, service),
     }
 }
 
