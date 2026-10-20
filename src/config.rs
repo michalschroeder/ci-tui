@@ -96,7 +96,7 @@ pub(crate) struct RawCiConfig {
     runner: RunnerMode,
     /// Required when runner is docker (the default)
     #[serde(default)]
-    docker: Option<DockerConfig>,
+    docker: Option<RawDockerConfig>,
     /// Settings for runner: local
     #[serde(default)]
     local: LocalConfig,
@@ -126,8 +126,10 @@ impl TryFrom<RawCiConfig> for CiConfig {
     type Error = String;
 
     fn try_from(raw: RawCiConfig) -> std::result::Result<Self, Self::Error> {
+        // Before the docker section: a wrong version explains its other errors
+        check_version(raw.version)?;
         let runner = match (raw.runner, raw.docker) {
-            (RunnerMode::Docker, Some(docker)) => ExecTarget::Docker(docker),
+            (RunnerMode::Docker, Some(docker)) => ExecTarget::Docker(docker.try_into()?),
             (RunnerMode::Docker, None) => {
                 return Err(
                     "`docker` section is required when runner is `docker` (the default). \
@@ -135,8 +137,12 @@ impl TryFrom<RawCiConfig> for CiConfig {
                         .to_string(),
                 )
             }
-            // A `docker` section in local mode is parsed (must be valid) but ignored
-            (RunnerMode::Local, _) => ExecTarget::Local(raw.local),
+            // A `docker` section in local mode is ignored, but must be valid
+            // (mode rules too, as the schema requires)
+            (RunnerMode::Local, docker) => {
+                docker.map(DockerConfig::try_from).transpose()?;
+                ExecTarget::Local(raw.local)
+            }
         };
         let mut checks = raw.checks;
         if let Some(default) = raw.timeout {
@@ -170,6 +176,15 @@ fn apply_default_timeout(checks: &mut IndexMap<String, GroupConfig>, default: Du
             timeout.get_or_insert(default);
         }
     }
+}
+
+/// Deserialize a key that may be left out (`None`); a value, `~` included
+/// (a string to serde_yaml), is `Some`
+fn deserialize_some<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 /// Deserialize an optional `timeout:` duration string (`30s`, `10m`, `1h`).
@@ -337,14 +352,22 @@ fn default_local_shell() -> String {
 /// Two modes, picked by `image`:
 /// - compose (no `image`): a command runs in its compose service (`service`,
 ///   overridable per check / pre-command): `docker exec` into the service's
-///   running container, else `docker compose run` (see
-///   [`crate::runner::resolve_service`])
+///   running container, else `docker compose run`
 /// - plain image (`image` set): every command runs in `docker run <image>`
 ///   with `volume_mount` / `work_dir` / `user`; no compose calls
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+//
+// On-disk shape (both modes' keys side by side); converted to the typed
+// [`DockerConfig`] right after parsing, which rejects the other mode's keys.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename = "DockerConfig", deny_unknown_fields)]
 #[schemars(extend(
     "if" = {"required": ["image"]},
+    "then" = {
+        "not": {"anyOf": [
+            {"required": ["project_dir"]},
+            {"required": ["service"]}
+        ]}
+    },
     "else" = {
         "required": ["project_dir"],
         "not": {"anyOf": [
@@ -354,69 +377,188 @@ fn default_local_shell() -> String {
         ]}
     }
 ))]
-pub struct DockerConfig {
+pub(crate) struct RawDockerConfig {
     /// Compose mode (required without `image`): directory for `docker compose
     /// --project-directory`
     #[serde(default)]
-    pub project_dir: Option<String>,
+    project_dir: Option<String>,
     /// Compose mode: default service commands run in (default "app")
-    #[serde(default = "default_service")]
-    pub service: String,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schemars(with = "String", extend("default" = DEFAULT_SERVICE))]
+    service: Option<String>,
     /// Plain-image mode: every command runs in `docker run` of this image
     /// (e.g. "rust:latest"); no compose
     #[serde(default)]
-    pub image: Option<String>,
+    image: Option<String>,
     /// Plain-image mode: repo mount for `docker run -v` (e.g. ".:/build";
     /// `${VAR}` expanded)
     #[serde(default)]
-    pub volume_mount: Option<String>,
+    volume_mount: Option<String>,
     /// Plain-image mode: working directory inside the container (default "/app")
     #[serde(default)]
-    pub work_dir: Option<String>,
+    work_dir: Option<String>,
     /// Plain-image mode: `docker run --user` (e.g. "1000:1000"); "host" = uid:gid
     /// of the ci-tui process, so files checks write are owned like its own.
     /// Default: the image's user
     #[serde(default)]
-    pub user: Option<String>,
+    user: Option<String>,
     /// Shell to use inside container (e.g., "bash" or "/bin/sh" for Alpine)
-    pub shell: String,
+    shell: String,
     /// Environment variables passed to every docker command
     #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
+    env: HashMap<String, String>,
 }
 
-impl DockerConfig {
-    /// Compose mode (no `image`) needs `project_dir` and takes no
-    /// `volume_mount` / `work_dir` / `user` (the compose file sets those)
-    fn validate(&self) -> Result<()> {
-        if self.image.is_some() {
-            return Ok(());
-        }
-        ensure!(
-            self.project_dir.is_some(),
-            "`docker.project_dir` is required without `docker.image` (compose mode: \
-             the directory `docker compose --project-directory` uses)"
-        );
-        for (key, value) in [
+impl TryFrom<RawDockerConfig> for DockerConfig {
+    type Error = String;
+
+    /// Pick the mode by `image`; error on a key of the other mode (or a
+    /// compose mode without `project_dir`)
+    fn try_from(mut raw: RawDockerConfig) -> std::result::Result<Self, Self::Error> {
+        let mode = match raw.image.take() {
+            Some(image) => raw.image_mode(image)?,
+            None => raw.compose_mode()?,
+        };
+        Ok(Self {
+            mode,
+            shell: raw.shell,
+            env: raw.env,
+        })
+    }
+}
+
+impl RawDockerConfig {
+    /// Plain-image mode of `image` (takes its keys); error on a compose key
+    fn image_mode(&mut self, image: String) -> std::result::Result<DockerMode, String> {
+        let compose_keys = [
+            ("project_dir", &self.project_dir),
+            ("service", &self.service),
+        ];
+        reject_set_keys(&compose_keys, |key| {
+            format!(
+                "`docker.{key}` is not allowed with `docker.image`: \
+                 plain-image mode runs every command in that image, without compose"
+            )
+        })?;
+        Ok(DockerMode::Image(ImageConfig {
+            image,
+            volume_mount: self.volume_mount.take(),
+            work_dir: self.work_dir.take(),
+            user: self.user.take(),
+        }))
+    }
+
+    /// Compose mode (takes its keys); error on a plain-image key or without
+    /// `project_dir`
+    fn compose_mode(&mut self) -> std::result::Result<DockerMode, String> {
+        let image_keys = [
             ("volume_mount", &self.volume_mount),
             ("work_dir", &self.work_dir),
             ("user", &self.user),
-        ] {
-            ensure!(
-                value.is_none(),
+        ];
+        reject_set_keys(&image_keys, |key| {
+            format!(
                 "`docker.{key}` needs `docker.image`: compose services take volumes, \
                  working_dir and user from the compose file"
-            );
+            )
+        })?;
+        let project_dir = self.project_dir.take().ok_or(
+            "`docker.project_dir` is required without `docker.image` (compose mode: \
+             the directory `docker compose --project-directory` uses)",
+        )?;
+        Ok(DockerMode::Compose(ComposeConfig {
+            project_dir,
+            service: self
+                .service
+                .take()
+                .unwrap_or_else(|| DEFAULT_SERVICE.to_string()),
+        }))
+    }
+}
+
+/// `error(key)` for the first set `docker.<key>` of `keys` (wrong-mode keys)
+fn reject_set_keys(
+    keys: &[(&str, &Option<String>)],
+    error: impl Fn(&str) -> String,
+) -> std::result::Result<(), String> {
+    match keys.iter().find(|(_, value)| value.is_some()) {
+        Some((key, _)) => Err(error(key)),
+        None => Ok(()),
+    }
+}
+
+/// Docker settings of `runner: docker` (from [`RawDockerConfig`]): the mode
+/// plus what both modes share.
+///
+/// Design: the mode is an enum chosen once at parse time instead of
+/// `Option` fields of both modes side by side, so wrong-mode keys are
+/// rejected in one place ([`TryFrom<RawDockerConfig>`]) and every consumer
+/// `match`es the mode (see [`crate::runner::resolve_service`]).
+#[derive(Debug, Clone)]
+pub struct DockerConfig {
+    /// Compose services or a plain image
+    pub mode: DockerMode,
+    /// Shell to use inside container (e.g., "bash" or "/bin/sh" for Alpine)
+    pub shell: String,
+    /// Environment variables passed to every docker command
+    pub env: HashMap<String, String>,
+}
+
+/// How docker-mode commands get a container
+#[derive(Debug, Clone)]
+pub enum DockerMode {
+    /// Compose services (`docker exec` / `docker compose run`)
+    Compose(ComposeConfig),
+    /// `docker run` of one image (`docker.image`)
+    Image(ImageConfig),
+}
+
+/// Compose mode (no `docker.image`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeConfig {
+    /// Directory for `docker compose --project-directory`
+    pub project_dir: String,
+    /// Service a command without its own `service` runs in (default "app");
+    /// applied by [`crate::runner::resolve_service`]
+    pub service: String,
+}
+
+#[cfg(test)]
+impl DockerConfig {
+    /// Compose mode of `project_dir` / `service`, `bash`, no env
+    pub(crate) fn compose_for_test(project_dir: &str, service: &str) -> Self {
+        Self {
+            mode: DockerMode::Compose(ComposeConfig {
+                project_dir: project_dir.to_string(),
+                service: service.to_string(),
+            }),
+            shell: "bash".to_string(),
+            env: HashMap::new(),
         }
-        Ok(())
     }
+}
 
-    /// `project_dir` for compose commands; "." if unset (only a config that
-    /// skipped [`CiConfig::validate_and_compile`] lacks it in compose mode)
-    pub fn compose_dir(&self) -> &str {
-        self.project_dir.as_deref().unwrap_or(".")
+impl ComposeConfig {
+    /// Service a command runs in: its own `service`, else `docker.service`
+    pub fn service_for<'a>(&'a self, service: Option<&'a str>) -> &'a str {
+        service.unwrap_or(&self.service)
     }
+}
 
+/// Plain-image mode (`docker.image`): every command is a `docker run`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageConfig {
+    /// Image every command runs in (e.g. "rust:latest")
+    pub image: String,
+    /// Repo mount for `docker run -v` (`${VAR}` expanded)
+    pub volume_mount: Option<String>,
+    /// Working directory inside the container (default "/app")
+    pub work_dir: Option<String>,
+    /// `docker run --user`; "host" = uid:gid of the ci-tui process
+    pub user: Option<String>,
+}
+
+impl ImageConfig {
     /// Get volume mount arguments for docker run
     /// Returns "-v {volume_mount}" if volume_mount is set, None otherwise
     /// Expands environment variables in format ${VAR_NAME}
@@ -443,9 +585,8 @@ impl DockerConfig {
     }
 }
 
-fn default_service() -> String {
-    "app".to_string()
-}
+/// Default compose service (`docker.service` unset)
+const DEFAULT_SERVICE: &str = "app";
 
 /// Expand environment variables in format ${VAR_NAME}
 fn expand_env_vars(input: &str) -> String {
@@ -664,22 +805,40 @@ fn dangling_pattern_ref<'a>(
     })
 }
 
-/// Error if one of `group`'s pre-commands or checks sets `service`, which
-/// `mode` (`runner: local`, `docker.image`) does not allow.
-fn ensure_group_has_no_services(g: &str, group: &GroupConfig, mode: &str) -> Result<()> {
-    for (i, pre) in group.pre_commands.iter().enumerate() {
-        ensure!(
-            pre.service.is_none(),
-            "`{g}.pre_commands[{i}]` sets `service`, which is not allowed with {mode}"
-        );
-    }
-    for (c, check) in group.checks.iter() {
-        ensure!(
-            check.service.is_none(),
-            "`{g}.{c}` sets `service`, which is not allowed with {mode}"
-        );
+/// Error if a check or pre-command sets `service`, which `mode` (`runner:
+/// local`, `docker.image`) does not allow: services only exist in compose mode.
+fn reject_services(
+    checks: &IndexMap<String, GroupConfig>,
+    mode: &str,
+) -> std::result::Result<(), String> {
+    for (g, group) in checks {
+        if let Some(i) = group.pre_commands.iter().position(|p| p.service.is_some()) {
+            return Err(format!(
+                "`{g}.pre_commands[{i}]` sets `service`, which is not allowed with {mode}"
+            ));
+        }
+        if let Some((c, _)) = group
+            .checks
+            .iter()
+            .find(|(_, check)| check.service.is_some())
+        {
+            return Err(format!(
+                "`{g}.{c}` sets `service`, which is not allowed with {mode}"
+            ));
+        }
     }
     Ok(())
+}
+
+/// Error unless `version` is [`SUPPORTED_VERSION`]
+fn check_version(version: u32) -> std::result::Result<(), String> {
+    if version == SUPPORTED_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported config version {version} (expected {SUPPORTED_VERSION})"
+        ))
+    }
 }
 
 /// Load configuration from a YAML file.
@@ -764,22 +923,14 @@ impl CiConfig {
     /// second call never replaces already-cached patterns (even if `file_patterns`
     /// was mutated in between). Call at most once per config instance.
     pub fn validate_and_compile(&self) -> Result<()> {
-        if self.version != SUPPORTED_VERSION {
-            bail!(
-                "unsupported config version {} (expected {SUPPORTED_VERSION})",
-                self.version
-            );
-        }
-        match &self.runner {
-            // Docker section presence is enforced at parse time (RawCiConfig)
-            ExecTarget::Docker(docker) => docker.validate()?,
-            ExecTarget::Local(local) => ensure!(
+        check_version(self.version).map_err(anyhow::Error::msg)?;
+        // Docker section and mode keys are checked at parse time (RawCiConfig)
+        self.check_services().map_err(anyhow::Error::msg)?;
+        if let ExecTarget::Local(local) = &self.runner {
+            ensure!(
                 !local.shell.trim().is_empty(),
                 "`local.shell` must not be empty when runner is `local`"
-            ),
-        }
-        if let Some(mode) = self.serviceless_mode() {
-            self.check_no_services(mode)?;
+            );
         }
         self.check_pattern_references()?;
         self.check_files_filter_scope()?;
@@ -791,6 +942,20 @@ impl CiConfig {
             .compiled_ignore_patterns
             .set(compile_ignore_patterns(&self.ignore_patterns)?);
         Ok(())
+    }
+
+    /// Check / pre-command `service` only in compose mode (services exist
+    /// there only)
+    fn check_services(&self) -> std::result::Result<(), String> {
+        let mode = match &self.runner {
+            ExecTarget::Docker(DockerConfig {
+                mode: DockerMode::Compose(_),
+                ..
+            }) => return Ok(()),
+            ExecTarget::Docker(_) => "`docker.image` (every command runs in that image)",
+            ExecTarget::Local(_) => "`runner: local`",
+        };
+        reject_services(&self.checks, mode)
     }
 
     /// Every `triggers.file_pattern` / `test_discovery.source_pattern` must name a
@@ -848,25 +1013,6 @@ impl CiConfig {
         }
     }
 
-    /// Runner mode without compose services (local runner, plain-image
-    /// docker), named for errors; `None` in compose mode
-    fn serviceless_mode(&self) -> Option<&'static str> {
-        match &self.runner {
-            ExecTarget::Docker(docker) if docker.image.is_none() => None,
-            ExecTarget::Docker(_) => Some("`docker.image` (every command runs in that image)"),
-            ExecTarget::Local(_) => Some("`runner: local`"),
-        }
-    }
-
-    /// No check or pre-command may set `service` under `mode` (local runner,
-    /// plain-image docker): services only exist in compose mode.
-    fn check_no_services(&self, mode: &str) -> Result<()> {
-        for (g, group) in self.checks.iter() {
-            ensure_group_has_no_services(g, group, mode)?;
-        }
-        Ok(())
-    }
-
     /// Get the raw regex string for a file pattern key
     pub fn get_file_pattern(&self, key: &str) -> Option<&str> {
         self.file_patterns.get(key).map(|fp| fp.pattern.as_str())
@@ -917,14 +1063,6 @@ impl CiConfig {
             .unwrap_or("white")
     }
 
-    /// Default compose service (`docker.service`); `None` in local and
-    /// plain-image mode (no services there).
-    pub fn default_service(&self) -> Option<&str> {
-        self.docker()
-            .filter(|d| d.image.is_none())
-            .map(|d| d.service.as_str())
-    }
-
     /// Get group config by name
     pub fn get_group(&self, group_name: &str) -> Option<&GroupConfig> {
         self.checks.get(group_name)
@@ -968,11 +1106,6 @@ impl GroupConfig {
 }
 
 impl CheckDefinition {
-    /// Get the service for this check, with fallback to default (`None` in local mode)
-    pub fn service_or_default<'a>(&'a self, default: Option<&'a str>) -> Option<&'a str> {
-        self.service.as_deref().or(default)
-    }
-
     /// Check if this check should always run (no triggers defined)
     pub fn always_run(&self) -> bool {
         self.triggers.is_none()
@@ -993,12 +1126,28 @@ mod tests {
 
     // Import builder types from the main config module
     use super::{
-        CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig,
-        GroupConfig, DEFAULT_MAX_OUTPUT_LINES,
+        CheckDefinition, CheckTriggers, CiConfig, ComposeConfig, DockerConfig, DockerMode,
+        FilePattern, GitConfig, GroupConfig, DEFAULT_MAX_OUTPUT_LINES,
     };
     use indexmap::IndexMap;
     use std::collections::HashMap;
     use std::sync::OnceLock;
+
+    /// Compose settings of a docker-mode `config` (panics otherwise)
+    fn compose(config: &CiConfig) -> &ComposeConfig {
+        match config.docker().map(|d| &d.mode) {
+            Some(DockerMode::Compose(compose)) => compose,
+            other => panic!("expected compose mode, got {other:?}"),
+        }
+    }
+
+    /// Plain-image settings of a docker-mode `config` (panics otherwise)
+    fn image(config: &CiConfig) -> &ImageConfig {
+        match config.docker().map(|d| &d.mode) {
+            Some(DockerMode::Image(image)) => image,
+            other => panic!("expected plain-image mode, got {other:?}"),
+        }
+    }
 
     // Inline ConfigBuilder for tests (simplified version of tests/common/configs.rs)
     struct ConfigBuilder {
@@ -1108,16 +1257,10 @@ mod tests {
         fn build(self) -> CiConfig {
             CiConfig {
                 version: 2,
-                runner: ExecTarget::Docker(DockerConfig {
-                    project_dir: Some(self.docker_project_dir),
-                    service: self.docker_service,
-                    image: None,
-                    volume_mount: None,
-                    work_dir: None,
-                    user: None,
-                    shell: "bash".to_string(),
-                    env: HashMap::new(),
-                }),
+                runner: ExecTarget::Docker(DockerConfig::compose_for_test(
+                    &self.docker_project_dir,
+                    &self.docker_service,
+                )),
                 git: GitConfig {
                     base_branch: self.git_base,
                     fallback_branch: self.git_fallback,
@@ -1259,11 +1402,13 @@ mod tests {
     }
 
     #[test]
-    fn test_default_service() {
+    fn test_compose_service() {
         let config = ConfigBuilder::new()
             .with_docker("./infrastructure", "php")
             .build();
-        assert_eq!(config.default_service(), Some("php"));
+        assert_eq!(compose(&config).service, "php");
+        assert_eq!(compose(&config).service_for(None), "php");
+        assert_eq!(compose(&config).service_for(Some("db")), "db");
     }
 
     #[test]
@@ -1301,22 +1446,16 @@ mod tests {
     }
 
     #[test]
-    fn test_check_service_or_default() {
+    fn test_check_service() {
         let config = php_project_config();
 
         let fast = config.get_group("fast").unwrap();
         let php_lint = fast.checks.get("php-lint").unwrap();
-        assert_eq!(
-            php_lint.service_or_default(Some("default")),
-            Some("default")
-        );
+        assert_eq!(php_lint.service, None);
 
         let tests = config.get_group("tests").unwrap();
         let phpunit = tests.checks.get("phpunit").unwrap();
-        assert_eq!(
-            phpunit.service_or_default(Some("default")),
-            Some("custom-service")
-        );
+        assert_eq!(phpunit.service.as_deref(), Some("custom-service"));
     }
 
     #[test]
@@ -1503,8 +1642,7 @@ checks: {}
         #[test]
         fn test_image_mode_needs_no_project_dir_or_service() {
             let config = validated(IMAGE, NO_CHECKS).unwrap();
-            assert_eq!(config.docker().unwrap().project_dir, None);
-            assert_eq!(config.default_service(), None, "no services in image mode");
+            assert_eq!(image(&config).image, "img");
         }
 
         #[rstest]
@@ -1518,6 +1656,28 @@ checks: {}
                 err.contains(&format!("`docker.{key}` needs `docker.image`")),
                 "{err}"
             );
+        }
+
+        #[rstest]
+        #[case::project_dir("project_dir: .")]
+        #[case::service("service: app")]
+        fn test_image_mode_rejects_compose_keys(#[case] line: &str) {
+            let key = line.split(':').next().unwrap();
+            let err = validated(&format!("{IMAGE}  {line}\n"), NO_CHECKS).unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "`docker.{key}` is not allowed with `docker.image`"
+                )),
+                "{err}"
+            );
+        }
+
+        // `service: ~` counts as set, like the schema's `required` (no
+        // `null` → unset shortcut)
+        #[test]
+        fn test_image_mode_rejects_null_service() {
+            let err = validated(&format!("{IMAGE}  service: ~\n"), NO_CHECKS).unwrap_err();
+            assert!(err.contains("`docker.service` is not allowed"), "{err}");
         }
 
         #[rstest]
@@ -1542,6 +1702,20 @@ checks: {}
             assert!(err.contains(expected), "{err}");
             assert!(err.contains("docker.image"), "{err}");
             validated(COMPOSE, group).expect("compose mode allows `service`");
+        }
+
+        // Configs built without YAML (`CiConfig::new`) get the check too
+        #[test]
+        fn test_validate_rejects_service_in_built_image_config() {
+            let group = "    checks:\n      lint:\n        name: Lint\n        command: x\n        service: worker\n";
+            let mut config = validated(COMPOSE, group).unwrap();
+            config.runner = ExecTarget::Docker(DockerConfig {
+                mode: DockerMode::Image(image(&validated(IMAGE, NO_CHECKS).unwrap()).clone()),
+                shell: "bash".to_string(),
+                env: HashMap::new(),
+            });
+            let err = config.validate_and_compile().unwrap_err().to_string();
+            assert!(err.contains("`g.lint` sets `service`"), "{err}");
         }
 
         #[rstest]
@@ -1583,7 +1757,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(
-                config.docker().unwrap().volume_args(),
+                image(&config).volume_args(),
                 Some("-v .:/build".to_string())
             );
         }
@@ -1603,7 +1777,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().unwrap().working_dir(), "/app");
+            assert_eq!(image(&config).working_dir(), "/app");
         }
 
         // Edge case: Tests custom working directory configuration - requires raw YAML to verify work_dir field parsing
@@ -1622,7 +1796,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().unwrap().working_dir(), "/custom/path");
+            assert_eq!(image(&config).working_dir(), "/custom/path");
         }
 
         // Edge case: Tests that shell field is required - requires raw YAML missing shell to verify error handling
@@ -1683,7 +1857,7 @@ file_patterns: {}
 checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(config.docker().unwrap().volume_args(), None);
+            assert_eq!(image(&config).volume_args(), None);
         }
 
         // volume_args() expands env vars when present
@@ -1704,7 +1878,7 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(
-                config.docker().unwrap().volume_args(),
+                image(&config).volume_args(),
                 Some("-v /tmp/ci-tui-vol:/build".to_string())
             );
             std::env::remove_var("CI_TUI_TEST_VOL");
@@ -1862,7 +2036,28 @@ checks: {}
             let yaml = format!(
                 "version: {version}\ndocker:\n  project_dir: .\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {{}}\nchecks: {{}}\n"
             );
-            let config: CiConfig = serde_yaml::from_str(&yaml).unwrap();
+            let msg = serde_yaml::from_str::<CiConfig>(&yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("unsupported config version"), "got: {msg}");
+        }
+
+        // Version is checked before the docker section: its mode errors are
+        // likely a schema mismatch, not the real cause
+        #[test]
+        fn test_version_error_before_docker_mode_error() {
+            let yaml = "version: 1\ndocker:\n  image: img\n  service: app\n  shell: bash\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\n";
+            let msg = serde_yaml::from_str::<CiConfig>(yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("unsupported config version 1"), "got: {msg}");
+        }
+
+        // `CiConfig::new` (no YAML) still gets the version check
+        #[test]
+        fn test_validate_checks_version_of_built_config() {
+            let mut config = ConfigBuilder::new().build();
+            config.version = 1;
             let msg = config.validate_and_compile().unwrap_err().to_string();
             assert!(msg.contains("unsupported config version"), "got: {msg}");
         }
@@ -2047,8 +2242,8 @@ checks: {}
 "#;
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.version, 2);
-            assert_eq!(config.docker().unwrap().project_dir.as_deref(), Some("."));
-            assert_eq!(config.docker().unwrap().service, "app"); // Default value
+            assert_eq!(compose(&config).project_dir, ".");
+            assert_eq!(compose(&config).service, "app"); // Default value
             assert_eq!(config.docker().unwrap().shell, "bash");
             assert_eq!(config.git.base_branch, "main");
             assert_eq!(config.git.fallback_branch, "HEAD~1");
@@ -2112,9 +2307,9 @@ checks:
             assert!(check.always_run()); // No triggers = always_run
         }
 
-        // Edge case: Tests service_or_default() returns explicit service - requires raw YAML to verify service field override
+        // Edge case: Tests a check's explicit service is parsed - requires raw YAML to verify service field override
         #[test]
-        fn test_service_or_default_with_service() {
+        fn test_check_with_service() {
             let yaml = r#"
 version: 2
 docker:
@@ -2135,12 +2330,12 @@ checks:
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             let group = config.get_group("group").unwrap();
             let check = group.checks.get("check_with_service").unwrap();
-            assert_eq!(check.service_or_default(Some("default")), Some("custom"));
+            assert_eq!(check.service.as_deref(), Some("custom"));
         }
 
-        // Edge case: Tests service_or_default() returns default when no service specified - requires raw YAML to verify fallback behavior
+        // Edge case: Tests a check without service stays unset (the compose default is applied by resolve_service) - requires raw YAML
         #[test]
-        fn test_service_or_default_without_service() {
+        fn test_check_without_service() {
             let yaml = r#"
 version: 2
 docker:
@@ -2160,10 +2355,7 @@ checks:
             let config: CiConfig = serde_yaml::from_str(yaml).unwrap();
             let group = config.get_group("group").unwrap();
             let check = group.checks.get("check_no_service").unwrap();
-            assert_eq!(
-                check.service_or_default(Some("default_service")),
-                Some("default_service")
-            );
+            assert_eq!(check.service, None);
         }
     }
 
@@ -2185,16 +2377,7 @@ checks:
             }
             CiConfig::new(
                 2,
-                DockerConfig {
-                    project_dir: Some(".".to_string()),
-                    service: "app".to_string(),
-                    image: None,
-                    volume_mount: None,
-                    work_dir: None,
-                    user: None,
-                    shell: "bash".to_string(),
-                    env: HashMap::new(),
-                },
+                DockerConfig::compose_for_test(".", "app"),
                 GitConfig {
                     base_branch: "main".to_string(),
                     fallback_branch: "HEAD~1".to_string(),
@@ -2257,8 +2440,33 @@ checks:
                 panic!("expected local runner, got {:?}", config.runner);
             };
             assert_eq!(local.shell, "bash");
-            assert_eq!(config.default_service(), None);
             assert!(config.docker().is_none());
+        }
+
+        // Ignored `docker` section still follows its mode rules
+        #[rstest]
+        #[case::valid("docker:\n  image: img\n  shell: bash\n", None)]
+        #[case::no_project_dir(
+            "docker:\n  shell: bash\n",
+            Some("`docker.project_dir` is required")
+        )]
+        #[case::wrong_mode_key(
+            "docker:\n  image: img\n  service: app\n  shell: bash\n",
+            Some("`docker.service` is not allowed with `docker.image`")
+        )]
+        fn test_runner_local_validates_docker_section(
+            #[case] docker: &str,
+            #[case] expected: Option<&str>,
+        ) {
+            let yaml = LOCAL_MIN.replace("runner: local\n", &format!("runner: local\n{docker}"));
+            let result = serde_yaml::from_str::<CiConfig>(&yaml);
+            match expected {
+                None => assert!(result.unwrap().docker().is_none()),
+                Some(msg) => {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.contains(msg), "got: {err}");
+                }
+            }
         }
 
         #[test]

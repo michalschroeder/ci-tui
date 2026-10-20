@@ -540,16 +540,7 @@ mod tests {
         );
         CiConfig::new(
             2,
-            DockerConfig {
-                project_dir: Some(".".into()),
-                service: "app".into(),
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                user: None,
-                shell: "bash".into(),
-                env: HashMap::new(),
-            },
+            DockerConfig::compose_for_test(".", "app"),
             GitConfig {
                 base_branch: "main".into(),
                 fallback_branch: "HEAD~1".into(),

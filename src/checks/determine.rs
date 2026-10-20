@@ -19,7 +19,6 @@ pub(super) fn new_check_to_run(
     check_id: &str,
     check: &CheckDefinition,
     group_name: &str,
-    service: Option<String>,
     files: CheckFiles,
 ) -> CheckToRun {
     let file_list: Vec<&str> = files.paths().iter().map(|s| s.as_str()).collect();
@@ -33,7 +32,6 @@ pub(super) fn new_check_to_run(
         id: check_id.to_string(),
         group: group_name.to_string(),
         definition: check.clone(),
-        service,
         files,
         resolved_command,
         resolved_fix_command,
@@ -48,13 +46,9 @@ pub(crate) fn process_check(
     group_name: &str,
     check_id: &str,
     check: &CheckDefinition,
-    default_service: Option<&str>,
 ) -> Option<CheckToRun> {
-    let service = check.service_or_default(default_service).map(str::to_owned);
     let files = selection.into_check_files()?;
-    Some(new_check_to_run(
-        check_id, check, group_name, service, files,
-    ))
+    Some(new_check_to_run(check_id, check, group_name, files))
 }
 
 /// Match changed files against a file pattern trigger
@@ -386,16 +380,7 @@ mod tests {
         );
         CiConfig::new(
             2,
-            DockerConfig {
-                project_dir: Some(".".to_string()),
-                service: "app".to_string(),
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                user: None,
-                shell: "bash".to_string(),
-                env: HashMap::new(),
-            },
+            DockerConfig::compose_for_test(".", "app"),
             GitConfig {
                 base_branch: "main".to_string(),
                 fallback_branch: "HEAD~1".to_string(),
@@ -433,10 +418,9 @@ mod tests {
         group: &str,
         id: &str,
         def: &CheckDefinition,
-        default_service: Option<&str>,
     ) -> Option<CheckToRun> {
         let selection = Selection::evaluate(cfg, cf, root, def);
-        process_check(selection, group, id, def, default_service)
+        process_check(selection, group, id, def)
     }
 
     fn changed(files: &[&str]) -> ChangedFiles {
@@ -590,12 +574,10 @@ mod tests {
                 "id",
                 &def,
                 "g",
-                Some("svc".to_string()),
                 CheckFiles::Files(vec!["a.rs".into(), "b.rs".into()]),
             );
             assert_eq!(out.id, "id");
             assert_eq!(out.group, "g");
-            assert_eq!(out.service.as_deref(), Some("svc"));
             assert_eq!(
                 out.files,
                 CheckFiles::Files(vec!["a.rs".to_string(), "b.rs".to_string()])
@@ -612,13 +594,7 @@ mod tests {
         #[test]
         fn empty_files_strips_placeholder() {
             let def = mk_check("cargo check {files}", None, None, false);
-            let out = new_check_to_run(
-                "id",
-                &def,
-                "g",
-                Some("svc".to_string()),
-                CheckFiles::Files(vec![]),
-            );
+            let out = new_check_to_run("id", &def, "g", CheckFiles::Files(vec![]));
             assert!(out.files.paths().is_empty());
             assert_eq!(out.resolved_command, "cargo check");
             assert!(out.resolved_fix_command.is_none());
@@ -635,19 +611,12 @@ mod tests {
                 (CheckFiles::SkippedNoMatch, true, true),
                 (CheckFiles::OnDemand, true, false),
             ] {
-                let out = new_check_to_run(
-                    "id",
-                    &with_files,
-                    "g",
-                    Some("svc".to_string()),
-                    files.clone(),
-                );
+                let out = new_check_to_run("id", &with_files, "g", files.clone());
                 assert_eq!(out.is_on_demand(), on_demand);
                 assert_eq!(out.is_skipped_no_files(), skipped);
 
                 // Without {files} the check is never skipped, only on-demand
-                let out =
-                    new_check_to_run("id", &without_files, "g", Some("svc".to_string()), files);
+                let out = new_check_to_run("id", &without_files, "g", files);
                 assert_eq!(out.is_on_demand(), on_demand);
                 assert!(!out.is_skipped_no_files());
             }
@@ -661,7 +630,7 @@ mod tests {
                 CheckFiles::OnDemand,
                 CheckFiles::RunAll,
             ] {
-                let out = new_check_to_run("id", &def, "g", Some("svc".to_string()), files);
+                let out = new_check_to_run("id", &def, "g", files);
                 assert_eq!(out.resolved_command, "cmd");
             }
         }
@@ -670,13 +639,7 @@ mod tests {
         #[test]
         fn paren_prefixed_path_is_kept() {
             let def = mk_check("run {files}", None, None, false);
-            let out = new_check_to_run(
-                "id",
-                &def,
-                "g",
-                Some("svc".to_string()),
-                CheckFiles::Files(vec!["(x).rs".into()]),
-            );
+            let out = new_check_to_run("id", &def, "g", CheckFiles::Files(vec!["(x).rs".into()]));
             assert_eq!(out.resolved_command, "run '(x).rs'");
         }
     }
@@ -689,19 +652,10 @@ mod tests {
             let cfg = base_config();
             let def = mk_check("cargo bench", None, None, false);
             let cf = changed(&[]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("default-svc"),
-            );
+            let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def);
             let run = out.expect("always-run should produce CheckToRun");
             assert!(run.files.paths().is_empty());
             assert_eq!(run.resolved_command, "cargo bench");
-            assert_eq!(run.service.as_deref(), Some("default-svc"));
         }
 
         #[test]
@@ -713,39 +667,13 @@ mod tests {
                 None,
                 false,
             );
-            let run = process(
-                &cfg,
-                &changed(&[]),
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            )
-            .unwrap();
+            let run =
+                process(&cfg, &changed(&[]), &PathBuf::from("/tmp"), "g", "id", &def).unwrap();
             assert_eq!(
                 run.resolved_fix_command.as_deref(),
                 Some("cargo clippy --fix")
             );
             assert!(!run.is_on_demand());
-        }
-
-        #[test]
-        fn service_override_wins_over_default() {
-            let cfg = base_config();
-            let mut def = mk_check("cmd", None, None, false);
-            def.service = Some("special".to_string());
-            let cf = changed(&[]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("default-svc"),
-            );
-            assert_eq!(out.unwrap().service.as_deref(), Some("special"));
         }
     }
 
@@ -764,15 +692,7 @@ mod tests {
             let cfg = base_config();
             let def = mk_check("cmd", None, Some(CheckTriggers::default()), false);
             let cf = changed(&["src/main.rs"]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            );
+            let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def);
             assert!(out.is_none());
         }
 
@@ -786,15 +706,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/main.rs", "README.md"]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            );
+            let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def);
             let run = out.expect("file_pattern match should produce CheckToRun");
             assert_eq!(
                 run.files,
@@ -814,15 +726,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            );
+            let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def);
             let run = out.expect("should produce skipped CheckToRun");
             assert!(run.is_on_demand());
             assert!(run.is_skipped_no_files());
@@ -839,16 +743,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["README.md"]);
-            let run = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            )
-            .unwrap();
+            let run = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def).unwrap();
             assert_eq!(run.files, CheckFiles::SkippedNoMatch);
             assert!(run.is_on_demand());
             assert!(!run.is_skipped_no_files());
@@ -864,16 +759,7 @@ mod tests {
                 false,
             );
             let cf = changed(&["src/a.rs", "src/b.rs", "src/a.rs"]);
-            let out = process(
-                &cfg,
-                &cf,
-                &PathBuf::from("/tmp"),
-                "g",
-                "id",
-                &def,
-                Some("svc"),
-            )
-            .unwrap();
+            let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def).unwrap();
             assert_eq!(
                 out.files,
                 CheckFiles::Files(vec!["src/a.rs".to_string(), "src/b.rs".to_string()])
@@ -904,7 +790,7 @@ mod tests {
                 /*on_demand=*/ true,
             );
             let cf = changed(&["src/foo.rs"]);
-            let out = process(&cfg, &cf, tmp.path(), "g", "id", &def, Some("svc")).unwrap();
+            let out = process(&cfg, &cf, tmp.path(), "g", "id", &def).unwrap();
             assert!(out.is_on_demand());
             assert_eq!(out.files, CheckFiles::OnDemand);
         }

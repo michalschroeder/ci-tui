@@ -32,7 +32,7 @@
 //! - [`run_fix_command`]: Execute a fix command for a check
 
 use crate::checks::CheckToRun;
-use crate::config::CiConfig;
+use crate::config::{CiConfig, ComposeConfig, DockerConfig, DockerMode, ImageConfig};
 use crate::utils::shell::quote;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -556,32 +556,24 @@ fn process_token() -> &'static str {
     })
 }
 
-/// `docker run` of `image` (plain-image mode): `docker run --rm --name
+/// `docker run` of `image.image` (plain-image mode): `docker run --rm --name
 /// <name> [-v mount] [--user <user>] [-e K='V' ...] -w <work_dir> <image>
 /// <shell> -c '<cmd>'`.
 /// `name` lets cancel/timeout `docker kill` the container.
 pub fn build_docker_run_command(
-    docker_config: &crate::config::DockerConfig,
-    image: &str,
+    image: &ImageConfig,
+    shell: &str,
     env: &HashMap<String, String>,
     command: &str,
     name: &str,
 ) -> String {
     let mut parts = vec![format!("docker run --rm --name {name}")];
-    parts.extend(docker_config.volume_args());
-    parts.extend(
-        docker_config
-            .run_user()
-            .map(|u| format!("--user {}", quote(&u))),
-    );
+    parts.extend(image.volume_args());
+    parts.extend(image.run_user().map(|u| format!("--user {}", quote(&u))));
     parts.extend(env_assignments(env).map(|a| format!("-e {a}")));
-    parts.push(format!("-w {}", docker_config.working_dir()));
-    parts.push(image.to_string());
-    parts.push(format!(
-        "{} -c {}",
-        docker_config.shell,
-        single_quote(command)
-    ));
+    parts.push(format!("-w {}", image.working_dir()));
+    parts.push(image.image.clone());
+    parts.push(format!("{shell} -c {}", single_quote(command)));
     parts.join(" ")
 }
 
@@ -591,19 +583,20 @@ pub fn build_docker_run_command(
 /// service's image, volumes and working_dir; `name` lets cancel/timeout
 /// `docker kill` the container.
 pub fn build_compose_run_command(
-    docker: &crate::config::DockerConfig,
+    compose: &ComposeConfig,
     service: &str,
+    shell: &str,
     env: &HashMap<String, String>,
     command: &str,
     name: &str,
 ) -> String {
-    let dir = quote(docker.compose_dir());
+    let dir = quote(&compose.project_dir);
     let mut parts = vec![format!(
         "docker compose --project-directory {dir} run --rm -T --name {name}"
     )];
     parts.extend(env_assignments(env).map(|a| format!("-e {a}")));
     parts.push(quote(service));
-    parts.push(format!("{} -c {}", docker.shell, single_quote(command)));
+    parts.push(format!("{shell} -c {}", single_quote(command)));
     parts.join(" ")
 }
 
@@ -656,11 +649,11 @@ impl ExecTarget {
                 DockerPlacement::Exec(id) => {
                     BuiltCommand::plain(build_docker_exec_command(&id, env, command, &docker.shell))
                 }
-                DockerPlacement::ComposeRun(service) => named_container(|name| {
-                    build_compose_run_command(docker, service, env, command, name)
+                DockerPlacement::ComposeRun(compose, service) => named_container(|name| {
+                    build_compose_run_command(compose, service, &docker.shell, env, command, name)
                 }),
                 DockerPlacement::Image(image) => named_container(|name| {
-                    build_docker_run_command(docker, image, env, command, name)
+                    build_docker_run_command(image, &docker.shell, env, command, name)
                 }),
             },
         }
@@ -672,29 +665,33 @@ impl ExecTarget {
 pub enum DockerPlacement<'a> {
     /// `docker exec` into this running container (id from `docker compose ps`)
     Exec(String),
-    /// `docker compose run` of this service: none of its containers runs
-    ComposeRun(&'a str),
+    /// `docker compose run` of this service (in that compose project):
+    /// none of its containers runs
+    ComposeRun(&'a ComposeConfig, &'a str),
     /// `docker run` of this image (plain-image mode, `docker.image`)
-    Image(&'a str),
+    Image(&'a ImageConfig),
 }
 
-/// Where a command for `service` (default `docker.service`) runs: the single
-/// resolution path for checks, pre-commands, fixes and preflight. Plain-image
-/// mode never asks compose; compose mode asks `executor` for the service's
-/// running container ([`CommandExecutor::running_container`], run in `root`).
+/// Where a command for `service` (default `docker.service`, applied only
+/// here and in preflight's per-service dedup) runs: the single resolution
+/// path for checks, pre-commands, fixes and preflight. Plain-image mode never
+/// asks compose; compose mode asks `executor` for the service's running
+/// container ([`CommandExecutor::running_container`], run in `root`).
 pub fn resolve_service<'a>(
-    docker: &'a crate::config::DockerConfig,
+    docker: &'a DockerConfig,
     service: Option<&'a str>,
     root: &Path,
     executor: &dyn CommandExecutor,
 ) -> DockerPlacement<'a> {
-    if let Some(image) = &docker.image {
-        return DockerPlacement::Image(image);
-    }
-    let service = service.unwrap_or(&docker.service);
-    match executor.running_container(docker.compose_dir(), service, root) {
-        Some(id) => DockerPlacement::Exec(id),
-        None => DockerPlacement::ComposeRun(service),
+    match &docker.mode {
+        DockerMode::Image(image) => DockerPlacement::Image(image),
+        DockerMode::Compose(compose) => {
+            let service = compose.service_for(service);
+            match executor.running_container(&compose.project_dir, service, root) {
+                Some(id) => DockerPlacement::Exec(id),
+                None => DockerPlacement::ComposeRun(compose, service),
+            }
+        }
     }
 }
 
@@ -1443,7 +1440,7 @@ pub async fn run_check_with_command_with_executor(
         check.id().to_string(),
         command,
         project_root,
-        check.service.as_deref(),
+        check.service(),
         target,
         &check.definition.env,
         executor,
@@ -1586,24 +1583,40 @@ mod tests {
         );
     }
 
+    /// Plain-image settings for `image` running as `user`
+    fn image_config(image: &str, user: Option<&str>) -> ImageConfig {
+        ImageConfig {
+            image: image.to_string(),
+            volume_mount: None,
+            work_dir: None,
+            user: user.map(str::to_owned),
+        }
+    }
+
     #[test]
     fn test_build_docker_run_command_skips_invalid_env_keys() {
-        let docker: crate::config::DockerConfig =
-            serde_yaml::from_str("shell: bash\nimage: img\n").unwrap();
         let env = HashMap::from([("BAD;rm -rf /".to_string(), "x".to_string())]);
-        let cmd = build_docker_run_command(&docker, "img", &env, "ls", "ci-tui-test-1");
+        let cmd = build_docker_run_command(
+            &image_config("img", None),
+            "bash",
+            &env,
+            "ls",
+            "ci-tui-test-1",
+        );
         assert!(!cmd.contains("BAD"), "got: {cmd}");
         assert!(!cmd.contains(" -e "), "got: {cmd}");
     }
 
     #[rstest::rstest]
-    #[case::unset("", None)]
-    #[case::spec("user: '1000:1000'\n", Some("1000:1000".to_string()))]
-    #[case::host("user: host\n", Some(crate::utils::docker::host_user()))]
-    fn test_build_docker_run_command_user(#[case] line: &str, #[case] user: Option<String>) {
-        let yaml = format!("shell: bash\nimage: img\n{line}");
-        let docker: crate::config::DockerConfig = serde_yaml::from_str(&yaml).unwrap();
-        let cmd = build_docker_run_command(&docker, "img", &HashMap::new(), "ls", "n");
+    #[case::unset(None, None)]
+    #[case::spec(Some("1000:1000"), Some("1000:1000".to_string()))]
+    #[case::host(Some("host"), Some(crate::utils::docker::host_user()))]
+    fn test_build_docker_run_command_user(
+        #[case] spec: Option<&str>,
+        #[case] user: Option<String>,
+    ) {
+        let image = image_config("img", spec);
+        let cmd = build_docker_run_command(&image, "bash", &HashMap::new(), "ls", "n");
         match user {
             Some(user) => assert!(cmd.contains(&format!(" --user {user} ")), "{cmd}"),
             None => assert!(!cmd.contains("--user"), "{cmd}"),
@@ -1620,14 +1633,16 @@ mod tests {
 
     /// Plain-image mode target (`docker.image`)
     fn image_target() -> ExecTarget {
-        let yaml = "shell: bash\nimage: test-img\n";
-        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+        ExecTarget::Docker(DockerConfig {
+            mode: DockerMode::Image(image_config("test-img", None)),
+            shell: "bash".to_string(),
+            env: HashMap::new(),
+        })
     }
 
     /// Compose mode target: project `./infra`, default service `app`
     fn compose_target() -> ExecTarget {
-        let yaml = "project_dir: ./infra\nservice: app\nshell: bash\n";
-        ExecTarget::Docker(serde_yaml::from_str(yaml).unwrap())
+        ExecTarget::Docker(DockerConfig::compose_for_test("./infra", "app"))
     }
 
     /// Mock whose compose `service` runs container `id` (others stopped);

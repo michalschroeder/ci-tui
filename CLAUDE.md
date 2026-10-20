@@ -142,9 +142,9 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 
 ### Module Responsibilities
 
-- **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching
+- **config.rs**: All config structs (`CiConfig`, `GroupConfig`, `CheckDefinition`, `TestDiscoveryConfig`), YAML deserialization, pattern compilation caching. `docker:` parses as `RawDockerConfig` (schema shape), converted at parse time (after the `version` check) to `DockerConfig { mode: DockerMode::Compose(ComposeConfig) | Image(ImageConfig), shell, env }`; wrong-mode keys rejected there, check / pre-command `service` outside compose in `validate_and_compile` (exit 2)
 - **checks/**: `CheckToRun` struct (`mod.rs`), `determine_checks()` logic (`determine.rs`), `group_checks()` for execution grouping
-- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants. `resolve_service()` is the only docker placement path (checks, pre-commands, fix, preflight): plain image (`docker.image`) → `docker run`; compose → `CommandExecutor::running_container` (`docker compose ps --status running <service>`, first non-one-off id) → `docker exec <id>`, else `docker compose run --rm -T --name ci-tui-<process token>-<n> <service>`. `CachingExecutor` caches the lookup per service for one run (each `CheckRunner`, simple, fix)
+- **runner.rs**: `CheckRunner`, `CheckResult`, `CheckStatus` enum, `ExecTarget` (docker/local dispatch) command execution, `RunnerEvent` variants. `resolve_service()` is the only docker placement path (checks, pre-commands, fix, preflight; `match` on `DockerMode`; default `docker.service` applied here via `ComposeConfig::service_for` (preflight's per-service dedup too), not at selection: `CheckToRun::service()` is the check's own `service`): plain image (`docker.image`) → `docker run`; compose → `CommandExecutor::running_container` (`docker compose ps --status running <service>`, first non-one-off id) → `docker exec <id>`, else `docker compose run --rm -T --name ci-tui-<process token>-<n> <service>`. `CachingExecutor` caches the lookup per service for one run (each `CheckRunner`, simple, fix)
 - **test_discovery.rs**: `find_related_tests()`, path mapping, grep search, placeholder expansion
 - **ui/app.rs**: `App` state struct with all UI state (selected check, results, filters, etc.)
 - **ui/dashboard.rs**: Rendering logic using ratatui widgets
@@ -170,10 +170,10 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 The tool expects a YAML config with:
 - `runner`: `docker` (default) or `local` — where checks execute
 - `docker.project_dir`: Path for `docker compose --project-directory` (required in compose mode, i.e. without `docker.image`)
-- `docker.service`: Default compose service (default `app`; checks / pre-commands override with `service`)
-- `docker.image`: plain-image mode — every command is `docker run` of it (with `volume_mount` / `work_dir`, allowed only here); no compose, check / pre-command `service` rejected
+- `docker.service`: Default compose service (compose mode only; default `app`; checks / pre-commands override with `service`)
+- `docker.image`: plain-image mode — every command is `docker run` of it (with `volume_mount` / `work_dir` / `user`, allowed only here); no compose; `docker.project_dir` / `docker.service` and check / pre-command `service` rejected
 - `docker.user`: plain-image only, `docker run --user`; `host` = ci-tui's real uid:gid (`utils::docker::host_user`)
-- `local.shell` / `local.env`: Shell and env vars for `runner: local` (docker section optional/ignored in this mode)
+- `local.shell` / `local.env`: Shell and env vars for `runner: local` (docker section optional/ignored in this mode, but validated if present)
 - `git.base_branch` / `git.fallback_branch`: For change detection
 - `file_patterns`: Named regex patterns with optional colors
 - `checks`: Groups containing check definitions with triggers

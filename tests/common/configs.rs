@@ -29,8 +29,9 @@
 //! ```
 
 use ci_tui::config::{
-    CheckDefinition, CheckTriggers, CiConfig, DockerConfig, FilePattern, GitConfig, GroupConfig,
-    PathMappingRule, PreCommand, TestDiscoveryConfig, TestDiscoveryStrategy,
+    CheckDefinition, CheckTriggers, CiConfig, ComposeConfig, DockerConfig, DockerMode, FilePattern,
+    GitConfig, GroupConfig, ImageConfig, PathMappingRule, PreCommand, TestDiscoveryConfig,
+    TestDiscoveryStrategy,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -252,12 +253,18 @@ impl ConfigBuilder {
         let mut config = CiConfig::new(
             self.version,
             DockerConfig {
-                project_dir: Some(self.docker_project_dir),
-                service: self.docker_service,
-                image: self.docker_image,
-                volume_mount: self.docker_volume_mount,
-                work_dir: self.docker_work_dir,
-                user: None,
+                mode: match self.docker_image {
+                    Some(image) => DockerMode::Image(ImageConfig {
+                        image,
+                        volume_mount: self.docker_volume_mount,
+                        work_dir: self.docker_work_dir,
+                        user: None,
+                    }),
+                    None => DockerMode::Compose(ComposeConfig {
+                        project_dir: self.docker_project_dir,
+                        service: self.docker_service,
+                    }),
+                },
                 shell: self.docker_shell,
                 env: self.docker_env,
             },
@@ -717,6 +724,14 @@ pub fn checks_test_config() -> CiConfig {
 mod tests {
     use super::*;
 
+    /// Compose settings of a builder config (default: compose mode)
+    fn compose(config: &CiConfig) -> &ComposeConfig {
+        match config.docker().map(|d| &d.mode) {
+            Some(DockerMode::Compose(compose)) => compose,
+            other => panic!("expected compose mode, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_fixtures_are_valid() {
         let _ = minimal_config();
@@ -731,11 +746,9 @@ mod tests {
     fn test_minimal_config_has_required_fields() {
         let config = minimal_config();
         assert_eq!(config.version, 2);
-        assert_eq!(
-            config.docker().unwrap().project_dir.as_deref(),
-            Some("./test")
-        );
-        assert_eq!(config.docker().unwrap().service, "app");
+        let compose = compose(&config);
+        assert_eq!(compose.project_dir, "./test");
+        assert_eq!(compose.service, "app");
         assert_eq!(config.git.base_branch, "main");
         assert_eq!(config.git.fallback_branch, "HEAD~1");
         assert!(config.checks.is_empty());
@@ -761,11 +774,9 @@ mod tests {
             .with_file_pattern("custom", r"\.custom$", Some("green"))
             .build();
 
-        assert_eq!(
-            config.docker().unwrap().project_dir.as_deref(),
-            Some("./custom")
-        );
-        assert_eq!(config.docker().unwrap().service, "web");
+        let compose = compose(&config);
+        assert_eq!(compose.project_dir, "./custom");
+        assert_eq!(compose.service, "web");
         assert_eq!(config.git.base_branch, "develop");
         assert_eq!(config.git.fallback_branch, "HEAD~5");
         assert!(config.file_patterns.contains_key("custom"));

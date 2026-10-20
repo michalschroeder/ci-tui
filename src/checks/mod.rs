@@ -97,9 +97,6 @@ pub struct CheckToRun {
     pub group: String,
     /// The check definition from configuration
     pub definition: CheckDefinition,
-    /// Docker service to use (resolved from check/group/global default); `None` in local and
-    /// plain-image mode
-    pub service: Option<String>,
     /// Files that triggered this check, or the explicit reason there are none
     pub files: CheckFiles,
     /// The fully resolved command to execute
@@ -125,6 +122,13 @@ impl CheckToRun {
     /// Get the execution group this check belongs to
     pub fn group(&self) -> &str {
         &self.group
+    }
+
+    /// The check's own compose `service`; `None` = `docker.service`
+    /// (applied by [`crate::runner::resolve_service`]; always `None` in
+    /// local and plain-image mode)
+    pub fn service(&self) -> Option<&str> {
+        self.definition.service.as_deref()
     }
 
     /// Check if this check has a fix command available
@@ -191,19 +195,12 @@ pub fn select_checks(
 ) -> Selected {
     let mut checks_to_run = Vec::new();
     let mut warnings = Vec::new();
-    let default_service = config.default_service();
 
     for (group_name, group_config) in config.groups() {
         for (check_id, check) in &group_config.checks {
             let selection = Selection::evaluate(config, changed_files, project_root, check);
             warnings.extend_from_slice(selection.warnings());
-            checks_to_run.extend(process_check(
-                selection,
-                group_name,
-                check_id,
-                check,
-                default_service,
-            ));
+            checks_to_run.extend(process_check(selection, group_name, check_id, check));
         }
     }
 
@@ -430,16 +427,10 @@ mod tests {
 
         CiConfig {
             version: 2,
-            runner: crate::config::ExecTarget::Docker(DockerConfig {
-                project_dir: Some("./infrastructure".to_string()),
-                service: "php".to_string(),
-                image: None,
-                volume_mount: None,
-                work_dir: None,
-                user: None,
-                shell: "bash".to_string(),
-                env: HashMap::new(),
-            }),
+            runner: crate::config::ExecTarget::Docker(DockerConfig::compose_for_test(
+                "./infrastructure",
+                "php",
+            )),
             git: GitConfig {
                 base_branch: "development".to_string(),
                 fallback_branch: "HEAD~1".to_string(),
@@ -479,7 +470,6 @@ mod tests {
                 timeout: None,
                 error_pattern: None,
             },
-            service: Some("php".to_string()),
             files: CheckFiles::Files(vec![]),
             resolved_command: command.to_string(),
             resolved_fix_command: None,

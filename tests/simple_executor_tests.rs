@@ -91,6 +91,39 @@ async fn check_service_execs_into_its_resolved_container() {
     run_check_with_executor(&c, Path::new("/app"), &cfg, &mock, DEFAULT_MAX_OUTPUT_LINES).await;
 }
 
+/// Selected check without `service` runs in `docker.service` (default
+/// applied by `resolve_service`, not at selection)
+#[tokio::test]
+async fn selected_check_without_service_runs_in_docker_service() {
+    use common::configs::{CheckBuilder, ConfigBuilder};
+    let config = ConfigBuilder::new()
+        .with_docker("./test", "php")
+        .with_check("g", "c", CheckBuilder::new("C", "true").build())
+        .build();
+    let changed = ci_tui::git::ChangedFiles {
+        files: vec!["a.rs".into()],
+        base_ref: "main".into(),
+    };
+    let checks = ci_tui::checks::determine_checks(&config, &changed, Path::new("/app"));
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_running_container()
+        .withf(|dir, service, _| dir == "./test" && service == "php")
+        .times(1)
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
+    mock.expect_execute()
+        .withf(|cmd, _, _| cmd.starts_with(&format!("docker exec {} ", common::RUNNING_ID)))
+        .times(1)
+        .returning(|_, _, _| CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+    let results = run_with_executor(config, checks, "/app".into(), Arc::new(mock))
+        .await
+        .unwrap();
+    assert_eq!(results[0].status, CheckStatus::Passed);
+}
+
 #[tokio::test]
 async fn simple_run_resolves_each_service_once() {
     let mut mock = MockCommandExecutor::new();

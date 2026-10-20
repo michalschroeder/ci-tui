@@ -439,7 +439,6 @@ mod tests {
                 timeout: None,
                 error_pattern: None,
             },
-            service: None,
             files: CheckFiles::Files(vec![]),
             resolved_command: command.into(),
             resolved_fix_command: None,
