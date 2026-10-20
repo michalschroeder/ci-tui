@@ -124,9 +124,11 @@ checks:
 2. Run it:
 
 ```bash
-ci-tui                     # uses ./ci-tui.yaml
+ci-tui                     # nearest ci-tui.yaml from cwd up to the repo root
 ci-tui --config other.yaml # or any path
 ```
+
+ci-tui runs from the found config's directory, so it works from any subdirectory. Personal settings (`docker.service`, `docker.env`, `local.env`, `max_parallel`, `notify`) go in a gitignored `ci-tui.local.yaml` next to the config (see [Local Overrides](docs/configuration.md#local-overrides-ci-tuilocalyaml)).
 
 Changed files are detected against `origin/{base_branch}`, then `{base_branch}`, then `{fallback_branch}`.
 

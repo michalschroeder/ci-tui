@@ -720,6 +720,40 @@ pub fn checks_test_config() -> CiConfig {
         .build()
 }
 
+// Raw YAML for tests that run the binary (it reads config files from disk).
+// `#[allow(dead_code)]`: only some integration test binaries use these.
+
+/// Config head shared by the YAML fixtures below
+#[allow(dead_code)]
+pub const YAML_HEAD: &str = "version: 2
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns: {}
+";
+
+/// YAML `checks:` with one always-run check `c` running `command`
+#[allow(dead_code)]
+pub fn yaml_check(command: &str) -> String {
+    format!("checks:\n  g:\n    checks:\n      c:\n        name: C\n        command: {command}\n")
+}
+
+/// Local-mode YAML config with one always-run check running `command`
+#[allow(dead_code)]
+pub fn local_yaml(command: &str) -> String {
+    format!("{YAML_HEAD}runner: local\n{}", yaml_check(command))
+}
+
+/// Docker-mode YAML config; `extra` adds fields to check `c`. Fine for tests
+/// that run no command in docker (no daemon needed).
+#[allow(dead_code)]
+pub fn docker_yaml(extra: &str) -> String {
+    format!(
+        "{YAML_HEAD}docker:\n  project_dir: .\n  service: app\n  shell: sh\n{}{extra}",
+        yaml_check("'true'")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

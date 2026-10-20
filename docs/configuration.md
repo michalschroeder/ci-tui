@@ -13,7 +13,29 @@ A configuration file defines:
 - Check definitions with commands and execution rules
 - Test discovery strategies for intelligent test selection
 
-Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it. Without `--config`, ci-tui uses `ci-tui.yaml` from the current directory.
+Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it.
+
+### Config Discovery
+
+Without `--config`, ci-tui uses the nearest `ci-tui.yaml` from the current directory up to the git repository root (only the current directory outside a repository), and runs as if launched from that file's directory: git detection, docker commands, a relative `docker.project_dir` and cwd-relative `--files` all resolve from there. With `--config`, nothing is searched and the current directory is used. `ci-tui validate` without a path checks the same file a run would use; `ci-tui init` writes `ci-tui.yaml` in the current directory.
+
+### Local Overrides (`ci-tui.local.yaml`)
+
+A `ci-tui.local.yaml` next to the config file (found or given with `--config`) is merged into it, for personal settings you don't commit (add it to your `.gitignore`). Same shape as the config, but only these keys:
+
+```yaml
+docker:
+  service: app-debug   # replaces docker.service (compose mode only)
+  env:                 # merged into docker.env, local wins per key
+    XDEBUG_MODE: debug
+local:
+  env:                 # merged into local.env, local wins per key
+    RUST_LOG: debug
+max_parallel: 2
+notify: true
+```
+
+Any other key, a wrong type or invalid YAML fails startup (exit 2) naming the file; mode rules still apply to the merged config (`docker.service` with `docker.image` is rejected). `docker` keys are ignored when the config has no `docker:` section (e.g. `runner: local`). CLI flags beat both files (`--jobs` replaces `max_parallel`, `--notify` enables `notify`). Overrides count toward the result cache like the config itself (`notify` excepted).
 
 ## Top-Level Structure
 
@@ -56,7 +78,7 @@ local:
     APP_ENV: testing
 ```
 
-With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so ci-tui works from any subdirectory; untracked-file detection and the default `ci-tui.yaml` lookup still use the current directory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` is rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
+With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so `{files}` paths resolve from any subdirectory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` is rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
 
 ## Docker Configuration
 

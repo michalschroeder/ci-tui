@@ -20,7 +20,8 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Path to config file [default: ci-tui.yaml if present; create one with `ci-tui init`]
+    /// Path to config file [default: nearest ci-tui.yaml from the current
+    /// directory up to the repo root; create one with `ci-tui init`]
     #[arg(short, long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -262,7 +263,7 @@ pub enum Command {
     },
     /// Validate a config file (exit non-zero if invalid)
     Validate {
-        /// Config path [default: --config value, else ci-tui.yaml]
+        /// Config path [default: --config value, else the discovered ci-tui.yaml]
         path: Option<PathBuf>,
     },
     /// Print the config JSON Schema (for editor autocomplete / validation)
@@ -273,7 +274,7 @@ pub enum Command {
 pub fn missing_config_error() -> clap::Error {
     Cli::command().error(
         clap::error::ErrorKind::MissingRequiredArgument,
-        "--config <CONFIG> is required: no ci-tui.yaml in the current directory (run `ci-tui init` to create one)",
+        "--config <CONFIG> is required: no ci-tui.yaml in the current directory or its parents up to the repo root (run `ci-tui init` to create one)",
     )
 }
 
@@ -284,27 +285,74 @@ pub fn filter_error(message: String) -> clap::Error {
 
 impl Command {
     /// Config path for `init` / `validate`: positional arg, then `--config`,
+    /// then (`validate` only) the config a run from `cwd` would discover,
     /// then `ci-tui.yaml`. `None` for `schema`, which reads no config.
-    pub fn config_path(&self, config: Option<PathBuf>) -> Option<PathBuf> {
+    pub fn config_path(&self, config: Option<PathBuf>, cwd: &Path) -> Option<PathBuf> {
         let (Self::Init { path } | Self::Validate { path }) = self else {
             return None;
+        };
+        let discovered = || match self {
+            Self::Validate { .. } => run_config(None, cwd).map(|found| found.path),
+            _ => None,
         };
         Some(
             path.clone()
                 .or(config)
+                .or_else(discovered)
                 .unwrap_or_else(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE)),
         )
     }
 }
 
-/// Config path for running checks: `--config`, else `ci-tui.yaml` in `cwd` if
-/// present. `None` means no config was given or found.
-pub fn run_config_path(config: Option<PathBuf>, cwd: &Path) -> Option<PathBuf> {
-    config.or_else(|| {
-        cwd.join(crate::commands::DEFAULT_CONFIG_FILE)
-            .is_file()
-            .then(|| PathBuf::from(crate::commands::DEFAULT_CONFIG_FILE))
-    })
+/// Config file for running checks and the directory ci-tui runs from (project
+/// root: git detection, docker cwd, exec root)
+#[derive(Debug, PartialEq, Eq)]
+pub struct RunConfig {
+    pub path: PathBuf,
+    pub root: PathBuf,
+}
+
+impl RunConfig {
+    fn new(path: impl Into<PathBuf>, root: &Path) -> Self {
+        Self {
+            path: path.into(),
+            root: root.to_path_buf(),
+        }
+    }
+}
+
+/// Config for running checks: `--config` (run from `cwd`), else the nearest
+/// `ci-tui.yaml` from `cwd` up to the git repo root (only `cwd` outside a
+/// repo), run from its dir. `None` means no config was given or found.
+pub fn run_config(config: Option<PathBuf>, cwd: &Path) -> Option<RunConfig> {
+    let file = crate::commands::DEFAULT_CONFIG_FILE;
+    if let Some(path) = config {
+        return Some(RunConfig::new(path, cwd));
+    }
+    // In cwd: no git call, and the path stays as short as before
+    if cwd.join(file).is_file() {
+        return Some(RunConfig::new(file, cwd));
+    }
+    let top = crate::git::repo_root(cwd).ok()?;
+    let dir = find_config_dir(cwd, &top)?;
+    Some(RunConfig::new(dir.join(file), dir))
+}
+
+/// Nearest dir from `cwd` up to `top` (inclusive) holding `ci-tui.yaml`;
+/// `None` if there is none or `cwd` is not under `top`
+fn find_config_dir<'a>(cwd: &'a Path, top: &Path) -> Option<&'a Path> {
+    cwd.ancestors()
+        .take_while(|dir| dir.starts_with(top))
+        .find(|dir| dir.join(crate::commands::DEFAULT_CONFIG_FILE).is_file())
+}
+
+impl Cli {
+    /// Apply CLI flags over the loaded config (base < `ci-tui.local.yaml` <
+    /// flags): `--jobs` replaces `max_parallel`, `--notify` enables `notify`
+    pub fn override_config(&self, config: &mut crate::config::CiConfig) {
+        config.max_parallel = self.jobs.or(config.max_parallel);
+        config.notify |= self.notify;
+    }
 }
 
 #[cfg(test)]
@@ -325,7 +373,7 @@ mod tests {
         let cli = Cli::try_parse_checked(args).unwrap();
         cli.command
             .expect("expected a subcommand")
-            .config_path(cli.config)
+            .config_path(cli.config, tempfile::tempdir().unwrap().path())
             .expect("init / validate resolve a path")
     }
 
@@ -629,29 +677,95 @@ mod tests {
         assert_eq!(resolved(args), PathBuf::from(expected));
     }
 
-    #[test]
-    fn test_run_config_path_none_without_config_or_default_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(run_config_path(None, dir.path()), None);
+    /// [`RunConfig`] of `path` run from `root`
+    fn found(path: impl Into<PathBuf>, root: &Path) -> Option<RunConfig> {
+        Some(RunConfig::new(path, root))
     }
 
     #[test]
-    fn test_run_config_path_falls_back_to_default_file() {
+    fn test_run_config_none_without_config_or_default_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(run_config(None, dir.path()), None);
+    }
+
+    #[test]
+    fn test_run_config_falls_back_to_default_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("ci-tui.yaml"), "").unwrap();
         assert_eq!(
-            run_config_path(None, dir.path()),
-            Some(PathBuf::from("ci-tui.yaml"))
+            run_config(None, dir.path()),
+            found("ci-tui.yaml", dir.path())
         );
     }
 
     #[test]
-    fn test_run_config_path_prefers_config_flag() {
+    fn test_run_config_prefers_config_flag() {
         let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
         std::fs::write(dir.path().join("ci-tui.yaml"), "").unwrap();
+        // No walk-up, root stays cwd
         assert_eq!(
-            run_config_path(Some("a.yaml".into()), dir.path()),
-            Some(PathBuf::from("a.yaml"))
+            run_config(Some("a.yaml".into()), &sub),
+            found("a.yaml", &sub)
         );
+    }
+
+    /// `<tmp>/a/b` with `ci-tui.yaml` in each of `with_config` (relative dirs)
+    fn tree(with_config: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        for sub in with_config {
+            std::fs::write(dir.path().join(sub).join("ci-tui.yaml"), "").unwrap();
+        }
+        dir
+    }
+
+    #[rstest::rstest]
+    #[case::cwd(&["", "a", "a/b"], "", Some("a/b"))]
+    #[case::nearest_wins(&["", "a"], "", Some("a"))]
+    #[case::top_inclusive(&[""], "", Some(""))]
+    #[case::not_above_top(&[""], "a", None)]
+    #[case::none(&[], "", None)]
+    fn test_find_config_dir(
+        #[case] with_config: &[&str],
+        #[case] top: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let dir = tree(with_config);
+        let (cwd, top) = (dir.path().join("a/b"), dir.path().join(top));
+        assert_eq!(
+            find_config_dir(&cwd, &top).map(|d| d.strip_prefix(dir.path()).unwrap()),
+            expected.map(Path::new)
+        );
+    }
+
+    #[test]
+    fn test_find_config_dir_cwd_outside_top() {
+        let dir = tree(&["a/b"]);
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(find_config_dir(&dir.path().join("a/b"), other.path()), None);
+    }
+
+    /// Precedence: `ci-tui.local.yaml` (merged into the config) < CLI flags
+    #[rstest::rstest]
+    #[case::no_flags(&["ci-tui"], Some(3), false)]
+    #[case::cli_beats_local(&["ci-tui", "-j", "2"], Some(2), false)]
+    #[case::notify_flag(&["ci-tui", "--notify"], Some(3), true)]
+    fn test_override_config_precedence(
+        #[case] args: &[&str],
+        #[case] max_parallel: Option<usize>,
+        #[case] notify: bool,
+    ) {
+        // As loaded with `max_parallel: 3` from `ci-tui.local.yaml`
+        let mut config: crate::config::CiConfig = serde_yaml::from_str(
+            "version: 2\nrunner: local\ngit:\n  base_branch: main\n  fallback_branch: HEAD~1\nfile_patterns: {}\nchecks: {}\nmax_parallel: 3\n",
+        )
+        .unwrap();
+        Cli::try_parse_checked(args)
+            .unwrap()
+            .override_config(&mut config);
+        assert_eq!(config.max_parallel.map(NonZeroUsize::get), max_parallel);
+        assert_eq!(config.notify, notify);
     }
 }
