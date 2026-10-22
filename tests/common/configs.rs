@@ -217,6 +217,7 @@ impl ConfigBuilder {
                 host: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
+                on_failure: Default::default(),
             });
         self
     }
@@ -244,6 +245,7 @@ impl ConfigBuilder {
                 host: true,
                 env: std::collections::HashMap::new(),
                 timeout: None,
+                on_failure: Default::default(),
             });
         self
     }

@@ -346,12 +346,12 @@ checks:
 
 **`allow_failure`** (default: `false`)
 - If `true`, a failure or timeout of this check's command is a **warning**: it doesn't fail the run, and the exit code stays `0` if nothing else failed
-- Only when the command ran: a check that never ran (its group pre-command failed, its task crashed, its `--fix` verification never reported) is a real failure
+- Only when the command ran: a check that never ran (a group pre-command failure kept it from running, its task crashed, its `--fix` verification never reported) is a real failure
 - Shown with a yellow `✗` / `⧗` (TUI list, `✗ FAILED (allowed)` in the output panel, `allowed failure` in `--simple`) and counted apart: `3/4 passed, 1 warning in 12s`
 - Still a failure for the TUI's `f` filter, `n` / `N` and `x` / `X`; never cached as a pass. At run end the TUI jumps to the first real failure, to an allowed one only when nothing else failed
 - Reports: JSON `checks[].allow_failure` and `summary.warnings` (not in `summary.failed`); JUnit `<skipped message="allowed failure: failed">` (counted as skipped); GitHub Actions `::warning` instead of `::error`
 - `--fix`: a failing verification re-run of it doesn't fail the run (a failing fix command still does); the summary turns yellow with `N warning(s)`
-- A failed group pre-command still fails the run (exit `1`)
+- A check a failed group pre-command keeps from running still fails the run (exit `1`)
 - For informational or flaky checks (mutation tests, audits)
 
 **`env`** (optional)
@@ -604,7 +604,7 @@ checks:
 
 ## Pre-Commands
 
-Pre-commands run before checks in a group. Useful for setup tasks like database initialization.
+Pre-commands run before checks in a group. Useful for setup tasks like database initialization. They (and their `on_failure`) apply in the TUI and in `--fix` verification; `--simple` / `--format` don't run pre-commands yet ([#244](https://github.com/michalschroeder/ci-tui/issues/244)).
 
 ```yaml
 checks:
@@ -620,10 +620,12 @@ checks:
       - name: Seed database
         command: php artisan db:seed --class=TestSeeder
         service: php
+        on_failure: skip_group   # skip only this group's tests
 
       - name: Ensure local cache dir
         command: mkdir -p .cache/tests
         host: true
+        on_failure: continue     # nice to have
     checks:
       # ... test checks
 ```
@@ -651,14 +653,23 @@ checks:
 
 **`timeout`** (optional)
 - Same format and fallback as the check `timeout`
-- Expiry counts as a pre-command failure (group skipped); output says "timed out after ..."
+- Expiry counts as a pre-command failure (handled per `on_failure`); output says "timed out after ..."
+
+**`on_failure`** (default: `abort`)
+- What a failure (non-zero exit or timeout) of this pre-command does:
+  - `abort`: the group's remaining pre-commands and checks don't run, nor do later groups
+  - `skip_group`: the group's remaining pre-commands and checks don't run; later groups run normally
+  - `continue`: the failure is ignored; the next pre-commands and the group's checks run as if it passed
+- Any other value is a config error (exit `2`)
 
 ### Execution
 
 Pre-commands run sequentially before any checks in the group:
-1. All pre-commands execute in order
-2. If any pre-command fails, group is skipped
-3. If all succeed, checks execute according to group's parallel setting
+1. Pre-commands execute in order (a group whose checks are all on-demand runs none)
+2. A failing one acts per its `on_failure`: `abort` / `skip_group` stop the group (`abort` the run too), `continue` goes on
+3. Then checks execute according to group's parallel setting
+
+Checks a failed pre-command kept from running fail without running, their output saying why: ``Not run: pre-command `migrate` of group `tests` failed``, or for later groups after an `abort`, ``Not run: run aborted by failed pre-command `migrate` of group `tests` ``. They count as failed (also with `allow_failure`); on-demand checks stay on-demand. In the TUI, pre-commands not run show `⊘` with the same reason, and the footer says ``Pre-command `migrate` (tests) failed: group skipped`` / `: run aborted`. An ignored (`continue`) failure shows a yellow `⚠` (`FAILED (ignored: on_failure: continue)`), keeps its group unfolded and shows under the `f` filter, but doesn't fail the run (not counted as a warning, and the run-end jump passes it by). `--fix` prints it as a yellow `⚠ pre-command X failed (ignored: on_failure: continue)` and pre-commands not run as `⊘ pre-command X skipped (reason)`. A single run (`r`, `t`, `a`, `x` / `X` verification, `--watch`) that runs its group's pre-commands first follows the same rules: a blocking failure fails just that check (``Not run: pre-command ... failed``, footer `: check not run`); after an ignored one the group's setup counts as done.
 
 ## Execution Modes
 
@@ -678,7 +689,7 @@ Full TUI interface with:
 
 End-of-run notification: `notify: true` (top-level config key) or `--notify` rings the terminal bell and sends an OSC 9 desktop notification with the run summary (e.g. `ci-tui: ✗ 12/13 passed, 1 failed in 1m 5s`) when a full run finishes — the initial run, `R` and `a`; single-check reruns (`r`, `t`) and fixes don't notify. Terminals without OSC 9 support ignore it. Inside tmux or GNU screen the notification is sent through DCS passthrough (tmux needs `set -g allow-passthrough on`). It waits while `$PAGER` / `$EDITOR` is open, and while a single rerun, fix or `R` refresh started during the run is still going. Toggling `notify` doesn't invalidate cached results.
 
-`--exit-on-finish` quits the TUI when the run finishes (after the notification, if enabled) and exits `0` if all run checks passed, `1` if any check or group pre-command failed. Not with `--simple`, `--list` or `--fix`.
+`--exit-on-finish` quits the TUI when the run finishes (after the notification, if enabled) and exits `0` if all run checks passed, `1` if any check failed (checks a failed group pre-command kept from running included). Not with `--simple`, `--list` or `--fix`.
 
 ### Simple Mode
 
@@ -702,7 +713,7 @@ Runs `fix_command` entries, verifying each fix:
 - Executes auto-fixers (formatters, auto-fixable linters)
 - Skips checks without fix_command
 - Useful before committing to auto-format code
-- Once all fixes ran, re-runs the checks whose fix passed (so a later fix cannot undo an earlier verification) and prints `verified` or `still failing` with the check's output. Only checks the run would select are re-run; on-demand / skipped ones print `not verified`. Re-runs go like a normal run: group order, `pre_commands` once per group, `parallel` / `max_parallel`; if a pre-command fails, the remaining re-runs count as failed
+- Once all fixes ran, re-runs the checks whose fix passed (so a later fix cannot undo an earlier verification) and prints `verified` or `still failing` with the check's output. Only checks the run would select are re-run; on-demand / skipped ones print `not verified`. Re-runs go like a normal run: group order, `pre_commands` once per group, `parallel` / `max_parallel`; a failing pre-command acts per its `on_failure` and the re-runs it kept from running count as failed
 - Summary lists fixes and verifications; exit `1` if a fix or a verification failed, else `0`
 - `--no-verify` skips the re-runs (fix commands only). It also applies to `x` / `X` in the TUI, which otherwise re-run each check whose fix passed, one at a time and without `r`'s git refresh (output streams, `s` cancels). Not with `--list`
 
@@ -934,6 +945,7 @@ After changing config structs, regenerate the committed file with `make schema` 
 - Added: `--files` flag for manual file selection (bypasses git detection)
 - Added: `timeout` (top-level default, per check, per pre-command)
 - Added: `allow_failure` check flag
+- Added: pre-command `on_failure` (`abort` / `skip_group` / `continue`)
 
 **Version 1** (legacy, not documented)
 - Basic docker-compose integration

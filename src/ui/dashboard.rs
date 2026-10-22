@@ -156,8 +156,8 @@ fn on_demand_suffix(counts: &super::app::StatusCounts) -> String {
 }
 
 /// Header label once all checks finished; also the end-of-run notification
-/// and the summary printed at quit. Checks that never ran (a failed group
-/// pre-command stopped the run) count as pending, not passed. Failures of
+/// and the summary printed at quit. Checks a failed group pre-command kept
+/// from running count as failed (the runner reports them). Failures of
 /// `allow_failure` checks are warnings (`N failed` left out when only
 /// warnings).
 pub(crate) fn finished_status_text(counts: &super::app::StatusCounts, elapsed: &str) -> String {
@@ -534,15 +534,7 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
 
 /// Render a pre-command as a list item
 fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> ListItem<'static> {
-    use super::app::PreCommandStatus;
-
-    let (icon, icon_style) = match pre_cmd.status {
-        PreCommandStatus::Pending => ("◦", Style::default().fg(Color::DarkGray)),
-        PreCommandStatus::Running => ("⚡", Style::default().fg(Color::Yellow)),
-        PreCommandStatus::Passed => ("✓", Style::default().fg(Color::Green)),
-        PreCommandStatus::Failed => ("✗", Style::default().fg(Color::Red)),
-        PreCommandStatus::Skipped => ("⊘", Style::default().fg(Color::DarkGray)),
-    };
+    let (icon, icon_style) = pre_command_icon(&pre_cmd.status);
 
     let duration = if pre_cmd.duration_ms > 0 {
         format!(" {}", time::format(pre_cmd.duration_ms))
@@ -567,6 +559,18 @@ fn render_pre_command_item(pre_cmd: &PreCommandState, is_selected: bool) -> List
         Span::styled(pre_cmd.name.clone(), name_style),
         Span::styled(duration, Style::default().fg(Color::DarkGray)),
     ]))
+}
+
+/// Icon and its style for a pre-command row
+fn pre_command_icon(status: &PreCommandStatus) -> (&'static str, Style) {
+    match status {
+        PreCommandStatus::Pending => ("◦", Style::default().fg(Color::DarkGray)),
+        PreCommandStatus::Running => ("⚡", Style::default().fg(Color::Yellow)),
+        PreCommandStatus::Passed => ("✓", Style::default().fg(Color::Green)),
+        PreCommandStatus::Failed => ("✗", Style::default().fg(Color::Red)),
+        PreCommandStatus::Ignored => ("⚠", Style::default().fg(Color::Yellow)),
+        PreCommandStatus::Skipped => ("⊘", Style::default().fg(Color::DarkGray)),
+    }
 }
 
 /// Duration span beside a check name: final `duration_ms` once finished,
@@ -1762,6 +1766,9 @@ fn pre_command_output_text(pre_cmd: &PreCommandState) -> String {
     let status_line = match pre_cmd.status {
         super::app::PreCommandStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
         super::app::PreCommandStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
+        super::app::PreCommandStatus::Ignored => {
+            "\x1b[33m⚠ FAILED (ignored: on_failure: continue)\x1b[0m"
+        }
         super::app::PreCommandStatus::Running => "\x1b[33m⚡ RUNNING...\x1b[0m",
         super::app::PreCommandStatus::Pending => "\x1b[90m◦ PENDING\x1b[0m",
         super::app::PreCommandStatus::Skipped => "\x1b[90m⊘ SKIPPED\x1b[0m",
@@ -2634,5 +2641,38 @@ mod tests {
         let text = Text::from(vec![Line::from("İ says foo")]);
         let highlighted = highlight_matches(&text, &[0], "foo");
         assert_eq!(line_plain_text(&highlighted.lines[0]), "İ says foo");
+    }
+
+    fn pre_command(status: PreCommandStatus, output: &str) -> PreCommandState {
+        PreCommandState {
+            group: "db".to_string(),
+            name: "seed".to_string(),
+            status,
+            output: output.to_string(),
+            duration_ms: 0,
+        }
+    }
+
+    /// #152: an ignored (`on_failure: continue`) failure is a yellow warning
+    #[test]
+    fn test_ignored_pre_command_row_is_yellow_warning() {
+        let (icon, style) = pre_command_icon(&PreCommandStatus::Ignored);
+        assert_eq!((icon, style.fg), ("⚠", Some(Color::Yellow)));
+        let text = pre_command_output_text(&pre_command(PreCommandStatus::Ignored, "boom"));
+        assert!(
+            text.contains("\x1b[33m⚠ FAILED (ignored: on_failure: continue)\x1b[0m"),
+            "{text:?}"
+        );
+        assert!(text.ends_with("boom"), "{text:?}");
+    }
+
+    /// #152: a row skipped by a failed pre-command shows why (guard: output
+    /// wins over the generic skipped text)
+    #[test]
+    fn test_skipped_pre_command_row_shows_its_reason() {
+        let reason = "Not run: pre-command `migrate` of group `db` failed";
+        let text = pre_command_output_text(&pre_command(PreCommandStatus::Skipped, reason));
+        assert!(text.ends_with(reason), "{text:?}");
+        assert!(!text.contains("no check of this group runs"), "{text:?}");
     }
 }

@@ -644,20 +644,13 @@ mod check_result_tests {
 
 mod check_runner_tests {
     use super::*;
-    use ci_tui::runner::{CheckRunner, CommandOutput, MockCommandExecutor, RunnerEvent};
+    use ci_tui::runner::{
+        CheckRunner, CommandOutput, MockCommandExecutor, PreCommandOutcome, RunnerEvent,
+    };
     use common::configs::ConfigBuilder;
-    use common::{make_on_demand_check, make_widget_check};
+    use common::{collect_events, make_on_demand_check, make_widget_check};
     use std::path::Path;
     use std::sync::Arc;
-
-    /// Helper to collect all events from a channel
-    async fn collect_events(mut rx: tokio::sync::mpsc::Receiver<RunnerEvent>) -> Vec<RunnerEvent> {
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-        events
-    }
 
     #[test]
     fn new_creates_runner_with_real_executor() {
@@ -829,8 +822,8 @@ mod check_runner_tests {
                 if group == "lint" && name == "warmup")
         });
         let has_pre_finished = events.iter().any(|e| {
-            matches!(e, RunnerEvent::PreCommandFinished { group, name, success, .. }
-                if group == "lint" && name == "warmup" && *success)
+            matches!(e, RunnerEvent::PreCommandFinished { group, name, outcome: PreCommandOutcome::Passed, .. }
+                if group == "lint" && name == "warmup")
         });
 
         assert!(has_pre_started, "Should have PreCommandStarted event");
@@ -919,7 +912,7 @@ mod check_runner_tests {
         let events = collect_events(rx).await;
         assert!(
             events.iter().any(|e| matches!(e,
-            RunnerEvent::PreCommandFinished { name, success, .. } if name == "warmup" && *success))
+            RunnerEvent::PreCommandFinished { name, outcome: PreCommandOutcome::Passed, .. } if name == "warmup"))
         );
     }
 
@@ -954,9 +947,15 @@ mod check_runner_tests {
         let events = collect_events(rx).await;
 
         // Verify pre-command failure stops execution
-        let has_pre_failed = events
-            .iter()
-            .any(|e| matches!(e, RunnerEvent::PreCommandFinished { success, .. } if !*success));
+        let has_pre_failed = events.iter().any(|e| {
+            matches!(
+                e,
+                RunnerEvent::PreCommandFinished {
+                    outcome: PreCommandOutcome::Failed { aborts: true },
+                    ..
+                }
+            )
+        });
         assert!(
             has_pre_failed,
             "Should have PreCommandFinished with success=false"
@@ -1018,8 +1017,8 @@ mod check_runner_tests {
                 if group == "lint" && name == "host-warmup")
         });
         let has_pre_failed = events.iter().any(|e| {
-            matches!(e, RunnerEvent::PreCommandFinished { group, name, success, .. }
-                if group == "lint" && name == "host-warmup" && !*success)
+            matches!(e, RunnerEvent::PreCommandFinished { group, name, outcome: PreCommandOutcome::Failed { .. }, .. }
+                if group == "lint" && name == "host-warmup")
         });
         assert!(has_pre_started, "Should have PreCommandStarted event");
         assert!(
@@ -1579,7 +1578,8 @@ mod run_fix_command_with_executor_tests {
 mod timeout_tests {
     use super::*;
     use ci_tui::runner::{
-        run_single_check_with_executor, CheckRunner, RealCommandExecutor, RunnerEvent,
+        run_single_check_with_executor, CheckRunner, PreCommandOutcome, RealCommandExecutor,
+        RunnerEvent,
     };
     use common::configs::{CheckBuilder, ConfigBuilder};
     use std::path::Path;
@@ -1656,7 +1656,7 @@ mod timeout_tests {
             events.push(e);
         }
         assert!(events.iter().any(|e| matches!(e,
-            RunnerEvent::PreCommandFinished { success: false, output, .. } if output.contains("timed out after"))));
+            RunnerEvent::PreCommandFinished { outcome: PreCommandOutcome::Failed { .. }, output, .. } if output.contains("timed out after"))));
         assert!(!events
             .iter()
             .any(|e| matches!(e, RunnerEvent::CheckStarted { .. })));

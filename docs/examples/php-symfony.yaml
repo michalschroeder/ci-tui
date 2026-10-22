@@ -151,6 +151,9 @@ checks:
         service: php
         env:
           APP_ENV: test
+        # On failure: abort (default) stops the run, skip_group skips only
+        # this group, continue runs the tests anyway
+        on_failure: skip_group
 
       # Optional: Load fixtures for test data
       # - name: Load test fixtures

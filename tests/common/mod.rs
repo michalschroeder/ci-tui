@@ -27,6 +27,27 @@ pub fn isolated_git_command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Loads `yaml` from a config file through the real loader
+#[allow(dead_code)]
+pub fn load(yaml: &str) -> anyhow::Result<CiConfig> {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("ci-tui.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    ci_tui::config::load_config(&path)
+}
+
+/// Every event sent on `rx` until all senders are dropped
+#[allow(dead_code)]
+pub async fn collect_events(
+    mut rx: tokio::sync::mpsc::Receiver<ci_tui::runner::RunnerEvent>,
+) -> Vec<ci_tui::runner::RunnerEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    events
+}
+
 /// Assert the process exit code, showing stdout / stderr on mismatch.
 #[allow(dead_code)]
 pub fn assert_code(out: &std::process::Output, code: i32) {

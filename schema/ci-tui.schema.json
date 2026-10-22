@@ -445,6 +445,26 @@
       },
       "additionalProperties": false
     },
+    "OnFailure": {
+      "description": "What a failed (or timed-out) pre-command does to the run",
+      "oneOf": [
+        {
+          "description": "Stop the run: the group's remaining pre-commands and checks and all\nlater groups do not run",
+          "type": "string",
+          "const": "abort"
+        },
+        {
+          "description": "Skip the group: its remaining pre-commands and checks do not run;\nlater groups run normally",
+          "type": "string",
+          "const": "skip_group"
+        },
+        {
+          "description": "Ignore the failure: the group's next pre-commands and checks run as\nif it passed",
+          "type": "string",
+          "const": "continue"
+        }
+      ]
+    },
     "PathMappingRule": {
       "description": "Rule for mapping source paths to test paths",
       "type": "object",
@@ -491,6 +511,11 @@
         "name": {
           "description": "Display name for the command",
           "type": "string"
+        },
+        "on_failure": {
+          "description": "What a failure or timeout does: `abort` (default) stops the run,\n`skip_group` skips the rest of this group, `continue` ignores it",
+          "$ref": "#/$defs/OnFailure",
+          "default": "abort"
         },
         "service": {
           "description": "Compose service to run in (default `docker.service`; not allowed with\n`docker.image` or `runner: local`)",

@@ -26,7 +26,7 @@ use crate::git::ChangedFiles;
 use crate::report;
 use crate::runner::{
     CachingExecutor, CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget,
-    RunnerEvent,
+    PreCommandOutcome, RunnerEvent,
 };
 use crate::utils::time;
 use anyhow::Result;
@@ -254,8 +254,9 @@ async fn run_group_fixes(
 
 /// Re-run the checks of the `fixed` ids the run `selected` (not on-demand)
 /// with `runner`, counting into `summary`; the others are only reported as
-/// not verified. Checks the runner did not reach (a pre-command
-/// failed) fail.
+/// not verified. Checks a failed pre-command kept from running fail (the
+/// runner reports them). The not-run fallback after the run is only a
+/// safety net for a check the runner reported nothing for (panicked task).
 async fn verify_fixes(
     runner: &CheckRunner,
     selected: &[CheckToRun],
@@ -290,12 +291,7 @@ async fn verify_fixes(
     tokio::join!(run, report);
 
     for id in not_run {
-        let result = CheckResult {
-            status: CheckStatus::Failed,
-            output: "Not run: a group pre-command failed".into(),
-            not_run: true,
-            ..CheckResult::pending(&id)
-        };
+        let result = CheckResult::blocked(&id, "Not run: the runner reported no result");
         verified_result(&result, selected, summary);
     }
     cprintln!();
@@ -323,10 +319,11 @@ fn unverified(check_id: &str, reason: &str, summary: &mut FixSummary) {
     summary.unverified_count += 1;
 }
 
-/// Print a verification run event (check started / finished, failed
-/// pre-command with its output; others are ignored), counting a finished
-/// check (of `checks`) into `summary` and dropping it from `not_run`; a
-/// failed pre-command fails the run
+/// Print a verification run event (check started / finished, failed or
+/// ignored pre-command with its output, skipped pre-command with the
+/// reason; others are ignored), counting a finished check (of `checks`)
+/// into `summary` and dropping it from `not_run`. A failed pre-command does
+/// not fail the run itself: the checks it kept from running do
 fn on_verify_event(
     event: RunnerEvent,
     checks: &[CheckToRun],
@@ -343,13 +340,22 @@ fn on_verify_event(
         }
         RunnerEvent::PreCommandFinished {
             name,
-            success: false,
+            outcome,
             output,
             ..
         } => {
-            summary.has_failures = true;
+            let (mark, note) = match outcome {
+                PreCommandOutcome::Passed => return,
+                PreCommandOutcome::Ignored => {
+                    ("\x1b[33m⚠\x1b[0m", " (ignored: on_failure: continue)")
+                }
+                PreCommandOutcome::Failed { .. } => ("\x1b[31m✗\x1b[0m", ""),
+            };
             let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
-            cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
+            cprint!("  {mark} pre-command {name} \x1b[90mfailed{note}\x1b[0m\n{output}");
+        }
+        RunnerEvent::PreCommandSkipped { name, reason, .. } => {
+            cprintln!("  \x1b[90m⊘ pre-command {name} skipped ({reason})\x1b[0m");
         }
         _ => {}
     }

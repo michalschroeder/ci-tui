@@ -31,7 +31,8 @@ use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
     run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
-    CheckRunner, CheckStatus, OutputSink, RealCommandExecutor, RunnerEvent,
+    CheckRunner, CheckStatus, OutputSink, PreCommandOutcome, RealCommandExecutor, RunnerEvent,
+    SetupFailure,
 };
 use crate::watch::WatchBatch;
 use anyhow::Result;
@@ -46,7 +47,7 @@ use crossterm::{
 };
 use external::Viewer;
 use ratatui::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -329,7 +330,8 @@ impl TaskCtx {
     }
 
     /// [`Self::run_streaming`], after the group's pre-commands with `setup`
-    /// (see [`GroupSetup::Run`]). `None` when one failed: the check did not
+    /// (see [`GroupSetup::Run`]). `None` when one stopped the group (an
+    /// ignored `on_failure: continue` failure does not): the check did not
     /// run, its failed result went to `tx` as
     /// [`TaskEvent::UnrecordedResult`] (a cached pass stays).
     async fn run_after_setup(
@@ -339,8 +341,8 @@ impl TaskCtx {
         setup: bool,
         tx: &mpsc::Sender<TaskEvent>,
     ) -> Option<CheckResult> {
-        if setup && !self.run_setup(check.group(), tx).await {
-            let result = CheckResult::setup_failed(check.id(), check.group());
+        if let Err(failure) = self.run_setup(check.group(), setup, tx).await {
+            let result = CheckResult::blocked(check.id(), failure.group_reason());
             let _ = tx.send(TaskEvent::UnrecordedResult(result)).await;
             return None;
         }
@@ -370,15 +372,23 @@ impl TaskCtx {
         result
     }
 
-    /// Run `group`'s pre-commands, their events to `tx` as
-    /// [`TaskEvent::Output`]; false when one failed
-    async fn run_setup(&self, group: &str, tx: &mpsc::Sender<TaskEvent>) -> bool {
+    /// With `setup`, run `group`'s pre-commands, their events to `tx` as
+    /// [`TaskEvent::Output`]; the failure when one stopped the group
+    async fn run_setup(
+        &self,
+        group: &str,
+        setup: bool,
+        tx: &mpsc::Sender<TaskEvent>,
+    ) -> std::result::Result<(), SetupFailure> {
+        if !setup {
+            return Ok(());
+        }
         let (out_tx, mut out_rx) = mpsc::channel(RUNNER_CHANNEL_CAPACITY);
         let runner = CheckRunner::new(Arc::clone(&self.config), &self.exec_root);
         // `out_tx` dropped at the end of this block, ending `forward`
         let setup = async move { runner.run_group_setup(group, &out_tx).await };
-        let (ok, ()) = tokio::join!(setup, forward_output(&mut out_rx, tx));
-        ok
+        let (outcome, ()) = tokio::join!(setup, forward_output(&mut out_rx, tx));
+        outcome
     }
 
     /// [`Self::run_after_setup`], cancellable with 's' (then reports
@@ -874,7 +884,13 @@ fn start_watch_runs(app: &mut App, tasks: &mut Tasks) {
                 app.run.watch_queue.push(queued);
                 continue;
             }
-            _ if queued.runner_owed => continue,
+            // A failed pre-command kept the runner from running it: the
+            // run never saw the save; start once the run ended
+            _ if queued.runner_owed && result.not_run && !app.run.all_finished => {
+                app.run.watch_queue.push(queued);
+                continue;
+            }
+            _ if queued.runner_owed && !result.not_run => continue,
             _ if !queued.cancel_sent && app.own_writes(&queued) => continue,
             CheckStatus::Running => {
                 cancel_once(&mut queued, &tasks.ctx.cancels);
@@ -986,7 +1002,7 @@ async fn run_verifications(
     jobs: Vec<(CheckToRun, bool)>,
 ) {
     let turn = tokio::sync::Semaphore::new(1);
-    let no_setup = std::sync::Mutex::new(HashSet::new());
+    let no_setup = std::sync::Mutex::new(HashMap::new());
     let mut runs: Vec<_> = jobs
         .iter()
         .map(|(check, setup)| Box::pin(verify_one(&ctx, &tx, check, *setup, &turn, &no_setup)))
@@ -1005,34 +1021,47 @@ async fn run_verifications(
 
 /// One verification of [`run_verifications`]: once it has the `turn`, its
 /// group's pre-commands with `setup`, then `check`. When those failed or
-/// were cancelled, the group is in `no_setup`: its later checks fail
-/// without running.
+/// were cancelled, the group is in `no_setup` with the reason: its later
+/// checks fail without running.
 async fn verify_one(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
     check: &CheckToRun,
     setup: bool,
     turn: &tokio::sync::Semaphore,
-    no_setup: &std::sync::Mutex<HashSet<String>>,
+    no_setup: &std::sync::Mutex<HashMap<String, String>>,
 ) {
     let group = check.group();
-    let mut set_up = !setup;
+    // `Some` while the check is blocked: `Some(None)` until its setup
+    // finished (cancelled, if it stays so), else the reason
+    let mut blocked = setup.then_some(None);
     let run = async {
         let _turn = turn.acquire().await;
-        let broken = no_setup.lock().unwrap().contains(group);
-        if broken || (setup && !ctx.run_setup(group, tx).await) {
+        if let Some(broken) = no_setup.lock().unwrap().get(group) {
+            blocked = Some(Some(broken.clone()));
             return None;
         }
-        set_up = true;
+        if let Err(failure) = ctx.run_setup(group, setup, tx).await {
+            blocked = Some(Some(failure.group_reason()));
+            return None;
+        }
+        blocked = None;
         Some(ctx.run_streaming(check, &check.resolved_command, tx).await)
     };
     let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
-    if !set_up {
-        no_setup.lock().unwrap().insert(group.to_string());
+    let reason = blocked.map(|r| r.unwrap_or_else(|| SetupFailure::cancelled_reason(group)));
+    if let Some(reason) = &reason {
+        let mut no_setup = no_setup.lock().unwrap();
+        no_setup
+            .entry(group.to_string())
+            .or_insert_with(|| reason.clone());
     }
     let event = match result {
         Some(result) => TaskEvent::RetryResult(result),
-        None => TaskEvent::UnrecordedResult(CheckResult::setup_failed(check.id(), group)),
+        None => {
+            let reason = reason.unwrap_or_default();
+            TaskEvent::UnrecordedResult(CheckResult::blocked(check.id(), reason))
+        }
     };
     let _ = tx.send(event).await;
 }
@@ -1350,8 +1379,12 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
         TaskEvent::Output(event) => app.handle_runner_event(event),
         TaskEvent::RetryResult(result) | TaskEvent::UnrecordedResult(result) => {
             let check_id = result.check_id.clone();
+            let blocked = result.not_run.then(|| result.clone());
             app.set_retry_result(result);
             app.finish_progress(&check_id);
+            if let Some(result) = blocked {
+                app.show_blocked_single_run(&result);
+            }
         }
         TaskEvent::RetryAllReady {
             changed_files,
@@ -1408,6 +1441,10 @@ impl Recorder {
         else {
             return;
         };
+        // Not run (a failed pre-command blocked it): its inputs' pass stands
+        if result.not_run {
+            return;
+        }
         // Only status and `cached` count: leave the output behind
         let result = CheckResult {
             status: result.status.clone(),
@@ -1479,6 +1516,15 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
         }
         Message::Mouse(mouse) => handle_mouse_event(app, mouse),
         Message::RunnerEvent(event) => {
+            if let RunnerEvent::PreCommandFinished {
+                group,
+                name,
+                outcome: PreCommandOutcome::Failed { aborts },
+                ..
+            } = &event
+            {
+                app.show_setup_failure(group, name, *aborts);
+            }
             app.handle_runner_event(event);
             Action::Continue
         }
@@ -1842,6 +1888,7 @@ fn quit_summary(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OnFailure;
 
     fn test_config() -> CiConfig {
         serde_yaml::from_str(
@@ -1881,6 +1928,17 @@ checks:
             project_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
+            cancels: CancelRegistry::default(),
+            key_root: None,
+        })
+    }
+
+    /// Task spawner running commands with `config` in `root`
+    fn make_test_tasks_in(config: CiConfig, root: &Path) -> (Tasks, mpsc::Receiver<TaskEvent>) {
+        Tasks::new(TaskCtx {
+            project_root: Arc::new(root.to_path_buf()),
+            exec_root: Arc::new(root.to_path_buf()),
+            config: Arc::new(config),
             cancels: CancelRegistry::default(),
             key_root: None,
         })
@@ -2477,13 +2535,13 @@ checks:
         app.handle_runner_event(RunnerEvent::PreCommandFinished {
             group: "db".to_string(),
             name: "seed".to_string(),
-            success: false,
+            outcome: PreCommandOutcome::Failed { aborts: true },
             output: String::new(),
             duration_ms: 1,
         });
         finish_run(&mut app, &config, None);
         app.reset_check_for_retry("lint");
-        let result = CheckResult::setup_failed("lint", "db");
+        let result = CheckResult::blocked("lint", DB_FAILED);
         handle_task_event(&mut app, TaskEvent::UnrecordedResult(result));
         let counts = app.count_by_status();
         assert_eq!((counts.failed, counts.warnings), (1, 0));
@@ -2498,24 +2556,24 @@ checks:
 
     #[test]
     fn test_exit_on_finish_fails_when_group_setup_failed() {
-        // A failed group pre-command stops the run: its checks never run
+        // A failed group pre-command stops the group: the runner reports its
+        // checks as not run
         let config = setup_config();
         let mut app = make_test_app_with_checks(&config, vec![make_test_check("lint", "db")]);
         app.handle_runner_event(RunnerEvent::PreCommandFinished {
             group: "db".to_string(),
             name: "seed".to_string(),
-            success: false,
+            outcome: PreCommandOutcome::Failed { aborts: true },
             output: String::new(),
             duration_ms: 1,
         });
+        let result = CheckResult::blocked("lint", DB_FAILED);
+        app.handle_runner_event(RunnerEvent::CheckFinished { result });
         finish_run(&mut app, &config, None);
         assert!(exit_due(&app, true, false));
         assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
         let text = finished_text(&app, &app.count_by_status());
-        assert!(
-            text.starts_with("0/1 passed, 0 failed, 1 pending in "),
-            "{text}"
-        );
+        assert!(text.starts_with("✗ 0/1 passed, 1 failed in "), "{text}");
     }
 
     #[rstest::rstest]
@@ -2678,6 +2736,32 @@ checks:
         );
     }
 
+    /// #152: a runner result for a check a failed pre-command blocked
+    /// (`not_run`) leaves the cached pass of its inputs alone
+    #[test]
+    fn test_recorder_ignores_not_run_results() {
+        let config = test_config();
+        let (dir, mut cache) = cache_in_tempdir("results.json");
+        let lint = keyed_check(&config, "php-lint", dir.path());
+        cache
+            .record(&lint, &with_status("php-lint", CheckStatus::Passed))
+            .unwrap();
+        let mut app = make_test_app_with_checks(&config, vec![lint.clone()]);
+        let recorder = Recorder::start(cache);
+
+        let blocked = CheckResult {
+            not_run: true,
+            ..with_status("php-lint", CheckStatus::Failed)
+        };
+        let msg = Message::RunnerEvent(RunnerEvent::CheckFinished { result: blocked });
+        recorder.record(&mut app, &msg);
+        drop(recorder);
+
+        let root = dir.path().to_path_buf();
+        let reopened = ResultCache::at(dir.path().join("results.json"), root, true);
+        assert!(reopened.is_fresh(&lint), "blocked result dropped the pass");
+    }
+
     #[test]
     fn test_recorder_write_error_sets_status_message() {
         let config = test_config();
@@ -2754,7 +2838,7 @@ checks:
         let finished = RunnerEvent::PreCommandFinished {
             group,
             name,
-            success: true,
+            outcome: PreCommandOutcome::Passed,
             output: String::new(),
             duration_ms: 1,
         };
@@ -2793,7 +2877,11 @@ checks:
     /// whether that result is one the result cache records, and whether the
     /// check's live timer started after the setup passed
     async fn retry_cached_lint(seed: &str) -> (App, bool, bool) {
-        let config = setup_config_with(seed);
+        retry_cached_lint_in(setup_config_with(seed)).await
+    }
+
+    /// [`retry_cached_lint`] with `config`
+    async fn retry_cached_lint_in(config: CiConfig) -> (App, bool, bool) {
         let dir = tempfile::tempdir().unwrap();
         let mut check = make_test_check("lint", "db");
         check.resolved_command = "test -e seeded".to_string();
@@ -2856,6 +2944,177 @@ checks:
         assert_eq!(app.results["lint"].status, CheckStatus::Failed);
         assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Failed);
         assert_eq!(app.group_setup("db"), GroupSetup::Run);
+    }
+
+    /// [`setup_config_with`] `command` whose `seed` has `on_failure: policy`
+    fn setup_config_policy(command: &str, policy: OnFailure) -> CiConfig {
+        let mut config = setup_config_with(command);
+        let group = config.checks.get_mut("db").unwrap();
+        group.pre_commands[0].on_failure = policy;
+        config
+    }
+
+    /// #152: a single run's `continue` setup failure does not block it
+    #[tokio::test]
+    async fn test_single_run_setup_continue_failure_runs_check() {
+        let config = setup_config_policy("echo seeded > seeded; exit 1", OnFailure::Continue);
+        let (app, recorded, _) = retry_cached_lint_in(config).await;
+
+        assert!(recorded);
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Ignored);
+        assert_eq!(app.group_setup("db"), GroupSetup::Ready, "settled");
+    }
+
+    /// #152: a single run's blocking setup failure names the pre-command
+    #[rstest::rstest]
+    #[case::abort(OnFailure::Abort)]
+    #[case::skip_group(OnFailure::SkipGroup)]
+    #[tokio::test]
+    async fn test_single_run_setup_failure_names_pre_command(#[case] policy: OnFailure) {
+        let (app, recorded, _) = retry_cached_lint_in(setup_config_policy("exit 1", policy)).await;
+
+        assert!(!recorded);
+        let result = &app.results["lint"];
+        assert_eq!(result.status, CheckStatus::Failed);
+        assert!(result.not_run);
+        assert_eq!(result.output, DB_FAILED);
+        let message = app.view.status_message.as_ref().expect("footer");
+        assert_eq!(
+            message.text,
+            "Pre-command `seed` (db) failed: check not run"
+        );
+    }
+
+    /// [`setup_config_policy`] plus pre-command `warm` in `db` and group
+    /// `later` (pre-command `prep`; check `unit`): every command but `seed`
+    /// passes
+    fn two_group_config(seed: &str, policy: OnFailure) -> CiConfig {
+        let mut config = setup_config_policy(seed, policy);
+        let warm = serde_yaml::from_str("{ name: warm, command: 'true' }").unwrap();
+        config.checks["db"].pre_commands.push(warm);
+        let later = "{ pre_commands: [{ name: prep, command: 'true' }], \
+                     checks: { unit: { name: Unit, command: 'true' } } }";
+        let later = serde_yaml::from_str(later).unwrap();
+        config.checks.insert("later".to_string(), later);
+        config
+    }
+
+    /// A full run of [`two_group_config`] through the real runner (`lint`
+    /// allowed to fail when `allow_lint`), every event fed to a fresh app
+    /// through `handle_message`
+    async fn full_run(config: CiConfig, allow_lint: bool) -> App {
+        let mut lint = make_test_check("lint", "db");
+        lint.definition.allow_failure = allow_lint;
+        let mut unit = make_test_check("unit", "later");
+        for check in [&mut lint, &mut unit] {
+            check.resolved_command = "true".to_string();
+        }
+        let checks = vec![lint, unit];
+        let mut app = make_test_app_with_checks(&config, checks.clone());
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let dir = tempfile::tempdir().unwrap();
+        let runner = CheckRunner::new(config, dir.path());
+        let (tx, mut rx) = mpsc::channel(100);
+        let run = async move { runner.run_checks(checks, tx).await.unwrap() };
+        let feed = async {
+            while let Some(event) = rx.recv().await {
+                handle_message(&mut app, Message::RunnerEvent(event), &mut tasks);
+            }
+        };
+        tokio::join!(run, feed);
+        app
+    }
+
+    fn row<'a>(app: &'a App, name: &str) -> &'a app::PreCommandState {
+        app.pre_commands.iter().find(|p| p.name == name).unwrap()
+    }
+
+    const DB_FAILED: &str = "Not run: pre-command `seed` of group `db` failed";
+    const ABORTED: &str = "Not run: run aborted by failed pre-command `seed` of group `db`";
+
+    /// #152 abort: blocked checks fail with the reason, rows not run are
+    /// skipped with it, the footer says the run aborted
+    #[tokio::test]
+    async fn test_abort_shows_blocked_checks_failed_and_rows_skipped() {
+        let app = full_run(two_group_config("exit 1", OnFailure::Abort), false).await;
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Failed);
+        assert_eq!(app.results["lint"].output, DB_FAILED);
+        assert_eq!(app.results["unit"].status, CheckStatus::Failed);
+        assert_eq!(app.results["unit"].output, ABORTED);
+        let counts = app.count_by_status();
+        assert_eq!((counts.failed, counts.pending), (2, 0));
+        let text = finished_text(&app, &counts);
+        assert!(text.starts_with("✗ 0/2 passed, 2 failed in "), "{text}");
+        assert_eq!(row(&app, "seed").status, app::PreCommandStatus::Failed);
+        for (name, reason) in [("warm", DB_FAILED), ("prep", ABORTED)] {
+            assert_eq!(row(&app, name).status, app::PreCommandStatus::Skipped);
+            assert_eq!(row(&app, name).output, reason);
+        }
+        let message = app.view.status_message.as_ref().expect("footer");
+        assert_eq!(message.text, "Pre-command `seed` (db) failed: run aborted");
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+    }
+
+    /// #152: after an abort, a single run of a later group's check runs its
+    /// skipped setup first (guard: unchanged)
+    #[tokio::test]
+    async fn test_abort_then_retry_of_later_group_runs_its_setup() {
+        let mut app = full_run(two_group_config("exit 1", OnFailure::Abort), false).await;
+        assert_eq!(app.claim_group_setup("later", "unit"), GroupSetup::Run);
+    }
+
+    /// #152: a blocked `allow_failure` check is a real failure
+    #[tokio::test]
+    async fn test_blocked_allowed_check_counts_failed() {
+        let app = full_run(two_group_config("exit 1", OnFailure::SkipGroup), true).await;
+
+        let counts = app.count_by_status();
+        assert_eq!((counts.failed, counts.warnings), (1, 0));
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+    }
+
+    /// #152 skip_group: the group's check fails with the reason, the later
+    /// group runs, the footer says the group was skipped
+    #[tokio::test]
+    async fn test_skip_group_runs_later_group() {
+        let app = full_run(two_group_config("exit 1", OnFailure::SkipGroup), false).await;
+
+        assert_eq!(app.results["lint"].output, DB_FAILED);
+        assert_eq!(app.results["unit"].status, CheckStatus::Passed);
+        assert_eq!(row(&app, "warm").status, app::PreCommandStatus::Skipped);
+        assert_eq!(row(&app, "prep").status, app::PreCommandStatus::Passed);
+        let message = app.view.status_message.as_ref().expect("footer");
+        assert_eq!(
+            message.text,
+            "Pre-command `seed` (db) failed: group skipped"
+        );
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+    }
+
+    /// #152 continue: row ignored, checks run, exit 0, the group
+    /// stays open and the row shows under the Failed filter
+    #[tokio::test]
+    async fn test_continue_failure_is_ignored() {
+        let mut app = full_run(two_group_config("exit 1", OnFailure::Continue), false).await;
+
+        assert_eq!(row(&app, "seed").status, app::PreCommandStatus::Ignored);
+        assert_eq!(row(&app, "warm").status, app::PreCommandStatus::Passed);
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+        assert!(app.view.status_message.is_none(), "no blocking footer");
+        assert!(!app.is_group_collapsed("db"), "warning stays visible");
+        assert!(app.is_group_collapsed("later"), "passed group folds");
+        app.view.status_filter = app::StatusFilter::Failed;
+        let shown: Vec<String> = app
+            .selectable_items()
+            .filter_map(|i| match i {
+                app::SelectableItem::PreCommand(pc) => Some(pc.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, ["seed"]);
     }
 
     /// 't' runs through the task channel; output streams as
@@ -3161,6 +3420,61 @@ checks:
         assert_eq!(seen, expected);
         assert_eq!(app.results["lint"].status, CheckStatus::Passed);
         assert_eq!(app.results["unit"].status, CheckStatus::Passed);
+    }
+
+    /// 'X' on fixed `lint` and `unit` of group `db` in `config` (setup due):
+    /// the app once both verification results arrived
+    async fn verify_all_in_db(config: CiConfig) -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = ["lint", "unit"].map(|id| {
+            let mut check = make_test_check(id, "db");
+            check.resolved_command = "true".to_string();
+            check.resolved_fix_command = Some("true".to_string());
+            check
+        });
+        let mut app = make_test_app_with_checks(&config, checks.to_vec());
+        finish_run(&mut app, &config, None);
+        for id in ["lint", "unit"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Failed;
+        }
+        app.fix.verify = true;
+        let (mut tasks, mut rx) = make_test_tasks_in(config, dir.path());
+        handle_fix_all(&mut app, &mut tasks);
+        let mut results = 0;
+        while results < 2 {
+            let event = rx.recv().await.expect("task event");
+            let result = matches!(
+                event,
+                TaskEvent::RetryResult(_) | TaskEvent::UnrecordedResult(_)
+            );
+            results += usize::from(result);
+            handle_message(&mut app, Message::Task(event), &mut tasks);
+        }
+        app
+    }
+
+    /// #152: verification after a blocking setup failure: both checks fail
+    /// without running, the reason names the pre-command
+    #[tokio::test]
+    async fn test_fix_verification_blocked_setup_names_pre_command() {
+        let app = verify_all_in_db(setup_config_policy("exit 1", OnFailure::SkipGroup)).await;
+
+        for id in ["lint", "unit"] {
+            let result = &app.results[id];
+            assert_eq!(result.status, CheckStatus::Failed, "{id}");
+            assert_eq!(result.output, DB_FAILED, "{id}");
+        }
+    }
+
+    /// #152: verification after an ignored (`continue`) setup failure runs
+    /// both checks
+    #[tokio::test]
+    async fn test_fix_verification_continue_setup_failure_runs_checks() {
+        let app = verify_all_in_db(setup_config_policy("exit 1", OnFailure::Continue)).await;
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
+        assert_eq!(app.results["unit"].status, CheckStatus::Passed);
+        assert_eq!(app.pre_commands[0].status, app::PreCommandStatus::Ignored);
     }
 
     /// The verification claims the group setup like a single run: it waits
@@ -4140,6 +4454,29 @@ checks:
 
         handle_message(&mut app, saved(dir.path(), &["src/Foo.php"]), &mut tasks);
         assert_eq!(app.run.watch_queue.len(), 1);
+        let finished = Message::RunnerEvent(RunnerEvent::AllFinished);
+        handle_message(&mut app, finished, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 1);
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// #152: a save for a check the runner owes, which a failed pre-command
+    /// then kept from running (not run), runs once the run ended
+    #[tokio::test]
+    async fn test_watch_save_for_runner_owed_check_runs_if_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["src/Foo.php"], |_| true);
+        app.run.all_finished = false;
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Pending;
+        handle_message(&mut app, saved(dir.path(), &["src/Foo.php"]), &mut tasks);
+        assert_eq!(app.run.watch_queue.len(), 1);
+
+        let result = CheckResult::blocked("php-lint", DB_FAILED);
+        let blocked = Message::RunnerEvent(RunnerEvent::CheckFinished { result });
+        handle_message(&mut app, blocked, &mut tasks);
+        assert_eq!(app.run.watch_queue.len(), 1, "kept until the run ends");
         let finished = Message::RunnerEvent(RunnerEvent::AllFinished);
         handle_message(&mut app, finished, &mut tasks);
 

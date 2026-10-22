@@ -32,7 +32,9 @@
 //! - [`run_fix_command`]: Execute a fix command for a check
 
 use crate::checks::CheckToRun;
-use crate::config::{CiConfig, ComposeConfig, DockerConfig, DockerMode, ImageConfig};
+use crate::config::{
+    CiConfig, ComposeConfig, DockerConfig, DockerMode, ImageConfig, OnFailure, PreCommand,
+};
 use crate::utils::shell::quote;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -815,12 +817,13 @@ impl CheckResult {
         }
     }
 
-    /// Create a failed result for a check whose group pre-commands failed
-    /// (the check did not run)
-    pub fn setup_failed(check_id: &str, group: &str) -> Self {
+    /// Create a failed result for a check that did not run (a failed
+    /// pre-command blocked it, no result was reported), `reason` as its
+    /// output; sets the `not_run` field
+    pub fn blocked(check_id: &str, reason: impl Into<String>) -> Self {
         Self {
             status: CheckStatus::Failed,
-            output: format!("Pre-command of group `{group}` failed"),
+            output: reason.into(),
             not_run: true,
             ..Self::pending(check_id)
         }
@@ -851,6 +854,36 @@ impl CheckResult {
             output: "Press 't' to run this test".to_string(),
             ..Self::pending(check_id)
         }
+    }
+}
+
+/// A failed pre-command that stopped its group (`on_failure: abort` /
+/// `skip_group`); also home of every not-run reason text
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupFailure {
+    pub group: String,
+    pub pre_command: String,
+    /// `on_failure: abort`: the run stops too
+    pub aborts: bool,
+}
+
+impl SetupFailure {
+    /// Why a single run's check did not run: its group's pre-commands were
+    /// cancelled before they finished
+    pub fn cancelled_reason(group: &str) -> String {
+        format!("Not run: pre-commands of group `{group}` were cancelled")
+    }
+
+    /// Why the rest of the failed group did not run
+    pub fn group_reason(&self) -> String {
+        let (name, group) = (&self.pre_command, &self.group);
+        format!("Not run: pre-command `{name}` of group `{group}` failed")
+    }
+
+    /// Why later groups did not run (`on_failure: abort`)
+    pub fn abort_reason(&self) -> String {
+        let (name, group) = (&self.pre_command, &self.group);
+        format!("Not run: run aborted by failed pre-command `{name}` of group `{group}`")
     }
 }
 
@@ -933,12 +966,44 @@ pub enum RunnerEvent {
     PreCommandFinished {
         group: String,
         name: String,
-        success: bool,
+        outcome: PreCommandOutcome,
         output: String,
         duration_ms: u64,
     },
+    /// A pre-command did not run: an earlier one failed with `on_failure:
+    /// abort` / `skip_group`; `reason` says which (see [`SetupFailure`])
+    PreCommandSkipped {
+        group: String,
+        name: String,
+        reason: String,
+    },
     /// All checks have completed
     AllFinished,
+}
+
+/// How a finished pre-command went, its `on_failure` applied
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreCommandOutcome {
+    Passed,
+    /// Failed with `on_failure: continue`: the group goes on as if it passed
+    Ignored,
+    /// Failed and stopped its group; `aborts` (`on_failure: abort`) the run too
+    Failed {
+        aborts: bool,
+    },
+}
+
+impl PreCommandOutcome {
+    /// Outcome of a pre-command that exited with `success` under `on_failure`
+    pub fn of(success: bool, on_failure: OnFailure) -> Self {
+        match (success, on_failure) {
+            (true, _) => Self::Passed,
+            (false, OnFailure::Continue) => Self::Ignored,
+            (false, on_failure) => Self::Failed {
+                aborts: on_failure == OnFailure::Abort,
+            },
+        }
+    }
 }
 
 /// Executes CI checks in Docker containers
@@ -1002,32 +1067,33 @@ impl CheckRunner {
         run_check_groups(self, grouped, &event_tx).await
     }
 
-    /// Run `group`'s pre-commands, sending their events to `event_tx`; false
-    /// when one fails. For a single check run whose group setup never ran.
-    pub async fn run_group_setup(&self, group: &str, event_tx: &mpsc::Sender<RunnerEvent>) -> bool {
+    /// Run `group`'s pre-commands, sending their events to `event_tx`; the
+    /// failure when one stops the group (`continue` failures do not). For a
+    /// single check run whose group setup never ran.
+    pub async fn run_group_setup(
+        &self,
+        group: &str,
+        event_tx: &mpsc::Sender<RunnerEvent>,
+    ) -> std::result::Result<(), SetupFailure> {
         let pre_commands = self.config.pre_commands(group);
         run_all_pre_commands(self, group, pre_commands, event_tx).await
     }
 
-    /// Execute a single group: run pre-commands, then checks (parallel or sequential)
-    /// Returns Ok(true) to continue, Ok(false) to stop execution
+    /// Execute a single group: run pre-commands, then checks (parallel or
+    /// sequential). A pre-command failure that stops the group reports its
+    /// checks as not run; returns it when it aborts the run.
     async fn execute_group(
         &self,
         group_name: &str,
         group_checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> Result<bool> {
+    ) -> Result<Option<SetupFailure>> {
         let group_config = self.config.get_group(group_name);
-
-        let has_runnable = group_checks.iter().any(|c| !c.is_on_demand());
-        let pre_commands = if has_runnable {
-            self.config.pre_commands(group_name)
-        } else {
-            &[]
-        };
-
-        if !run_all_pre_commands(self, group_name, pre_commands, event_tx).await {
-            return Ok(false);
+        let pre_commands = self.group_pre_commands(group_name, &group_checks);
+        if let Err(failure) = run_all_pre_commands(self, group_name, pre_commands, event_tx).await {
+            let reason = failure.group_reason();
+            report_not_run(&group_checks, &reason, event_tx).await;
+            return Ok(failure.aborts.then_some(failure));
         }
 
         let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
@@ -1038,7 +1104,16 @@ impl CheckRunner {
             self.run_sequential(group_checks, event_tx).await?;
         }
 
-        Ok(true)
+        Ok(None)
+    }
+
+    /// `group`'s pre-commands a run of `checks` runs: none when all are
+    /// on-demand (nothing runs automatically)
+    fn group_pre_commands(&self, group: &str, checks: &[&CheckToRun]) -> &[PreCommand] {
+        match checks.iter().all(|c| c.is_on_demand()) {
+            true => &[],
+            false => self.config.pre_commands(group),
+        }
     }
 
     async fn run_sequential(
@@ -1126,7 +1201,7 @@ impl CheckRunner {
 
     /// Run a pre-command for a group (e.g., DB initialization)
     /// Returns (success, output, duration_ms)
-    async fn run_pre_command(&self, pre_cmd: &crate::config::PreCommand) -> (bool, String, u64) {
+    async fn run_pre_command(&self, pre_cmd: &PreCommand) -> (bool, String, u64) {
         let start = std::time::Instant::now();
 
         let cmd = if pre_cmd.host {
@@ -1145,7 +1220,7 @@ impl CheckRunner {
         .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Timeout → failure, same as a non-zero exit (group aborted)
+        // Timeout → failure, same as a non-zero exit (per `on_failure`)
         let output = match output {
             Ok(output) => output,
             Err(message) => return (false, message, duration_ms),
@@ -1163,7 +1238,7 @@ impl CheckRunner {
 
     /// Shell command for a non-host pre-command, in its `service` (compose
     /// mode; rejected at load in local / plain-image mode).
-    fn build_pre_command_cmd(&self, pre_cmd: &crate::config::PreCommand) -> BuiltCommand {
+    fn build_pre_command_cmd(&self, pre_cmd: &PreCommand) -> BuiltCommand {
         let env = merged_env(self.target(), &pre_cmd.env);
         self.target().build_command(
             pre_cmd.service.as_deref(),
@@ -1175,20 +1250,22 @@ impl CheckRunner {
     }
 }
 
-/// Run check groups sequentially, sending events via the channel
+/// Run check groups sequentially, sending events via the channel; after a
+/// pre-command aborts the run, later groups are reported as not run
 async fn run_check_groups<'a>(
     runner: &CheckRunner,
     grouped: Vec<(&'a str, Vec<&'a CheckToRun>)>,
     event_tx: &mpsc::Sender<RunnerEvent>,
 ) -> Result<()> {
-    for (group_name, group_checks) in grouped {
+    let mut groups = grouped.into_iter();
+    for (group_name, group_checks) in groups.by_ref() {
         let _ = event_tx
             .send(RunnerEvent::GroupStarted {
                 group: group_name.to_string(),
             })
             .await;
 
-        let should_continue = runner
+        let aborted = runner
             .execute_group(group_name, group_checks, event_tx)
             .await?;
 
@@ -1198,7 +1275,8 @@ async fn run_check_groups<'a>(
             })
             .await;
 
-        if !should_continue {
+        if let Some(failure) = aborted {
+            report_aborted(runner, &failure, groups, event_tx).await;
             break;
         }
     }
@@ -1206,14 +1284,62 @@ async fn run_check_groups<'a>(
     Ok(())
 }
 
-/// Run pre-commands for a group, returns true if all succeeded (or none to run)
+/// Report the `groups` an aborting pre-command `failure` kept from running:
+/// the pre-commands they would have run skipped, checks not run
+async fn report_aborted<'a>(
+    runner: &CheckRunner,
+    failure: &SetupFailure,
+    groups: impl Iterator<Item = (&'a str, Vec<&'a CheckToRun>)>,
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) {
+    let reason = failure.abort_reason();
+    for (group, checks) in groups {
+        let pre_commands = runner.group_pre_commands(group, &checks);
+        report_skipped(group, pre_commands, &reason, event_tx).await;
+        report_not_run(&checks, &reason, event_tx).await;
+    }
+}
+
+/// Report `checks` (not on-demand ones: those stay on-demand) as not run
+/// for `reason`
+async fn report_not_run(
+    checks: &[&CheckToRun],
+    reason: &str,
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) {
+    for check in checks.iter().filter(|c| !c.is_on_demand()) {
+        let result = CheckResult::blocked(check.id(), reason);
+        let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
+    }
+}
+
+/// Report `group`'s `pre_commands` as skipped for `reason`
+async fn report_skipped(
+    group: &str,
+    pre_commands: &[PreCommand],
+    reason: &str,
+    event_tx: &mpsc::Sender<RunnerEvent>,
+) {
+    for pre_cmd in pre_commands {
+        let event = RunnerEvent::PreCommandSkipped {
+            group: group.to_string(),
+            name: pre_cmd.name.clone(),
+            reason: reason.to_string(),
+        };
+        let _ = event_tx.send(event).await;
+    }
+}
+
+/// Run pre-commands for a group in order. A failure with `on_failure:
+/// continue` is ignored; any other stops: the remaining ones are reported
+/// skipped and the failure returned.
 async fn run_all_pre_commands(
     runner: &CheckRunner,
     group_name: &str,
-    pre_commands: &[crate::config::PreCommand],
+    pre_commands: &[PreCommand],
     event_tx: &mpsc::Sender<RunnerEvent>,
-) -> bool {
-    for pre_cmd in pre_commands {
+) -> std::result::Result<(), SetupFailure> {
+    for (i, pre_cmd) in pre_commands.iter().enumerate() {
         let _ = event_tx
             .send(RunnerEvent::PreCommandStarted {
                 group: group_name.to_string(),
@@ -1222,22 +1348,31 @@ async fn run_all_pre_commands(
             .await;
 
         let (success, output, duration_ms) = runner.run_pre_command(pre_cmd).await;
+        let outcome = PreCommandOutcome::of(success, pre_cmd.on_failure);
 
         let _ = event_tx
             .send(RunnerEvent::PreCommandFinished {
                 group: group_name.to_string(),
                 name: pre_cmd.name.clone(),
-                success,
+                outcome,
                 output,
                 duration_ms,
             })
             .await;
 
-        if !success {
-            return false;
-        }
+        let PreCommandOutcome::Failed { aborts } = outcome else {
+            continue;
+        };
+        let failure = SetupFailure {
+            group: group_name.to_string(),
+            pre_command: pre_cmd.name.clone(),
+            aborts,
+        };
+        let rest = &pre_commands[i + 1..];
+        report_skipped(group_name, rest, &failure.group_reason(), event_tx).await;
+        return Err(failure);
     }
-    true
+    Ok(())
 }
 
 /// Run `check`, cancellable via `cancels`. With `permits` (parallel group) it
