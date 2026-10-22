@@ -352,6 +352,6 @@ async fn failed_container_start_shows_docker_error(
         "{}",
         result.error_output
     );
-    let shown = ci_tui::simple::format_failed_check(&result, None);
+    let shown = ci_tui::simple::format_failed_check(&result, None, ci_tui::checks::Severity::Error);
     assert!(shown.contains(NAME_CONFLICT), "{shown}");
 }

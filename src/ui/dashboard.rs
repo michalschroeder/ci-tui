@@ -17,7 +17,7 @@
 //! renders. With color off every cell's fg/bg is reset after drawing.
 
 use super::app::{App, PreCommandState, PreCommandStatus, SelectableItem, StatusKind};
-use crate::checks::CheckFiles;
+use crate::checks::{CheckFiles, Severity};
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
 use ansi_to_tui::IntoText;
@@ -125,9 +125,14 @@ fn get_usage_color(usage: f32) -> Color {
     }
 }
 
-/// Get status icon and style for a check status
-fn get_status_display(status: Option<&CheckStatus>) -> (&'static str, Style) {
+/// Get status icon and style for a check status; a [`Severity::Warning`]
+/// failure is yellow
+fn get_status_display(status: Option<&CheckStatus>, severity: Severity) -> (&'static str, Style) {
+    let warning = Style::default().fg(Color::Yellow);
+    let allowed = severity == Severity::Warning;
     match status {
+        Some(CheckStatus::Failed) if allowed => ("✗", warning),
+        Some(CheckStatus::TimedOut) if allowed => ("⧗", warning),
         Some(CheckStatus::Passed) => ("✓", Style::default().fg(Color::Green)),
         Some(CheckStatus::Failed) => ("✗", Style::default().fg(Color::Red)),
         Some(CheckStatus::TimedOut) => ("⧗", Style::default().fg(Color::Magenta)),
@@ -152,28 +157,31 @@ fn on_demand_suffix(counts: &super::app::StatusCounts) -> String {
 
 /// Header label once all checks finished; also the end-of-run notification
 /// and the summary printed at quit. Checks that never ran (a failed group
-/// pre-command stopped the run) count as pending, not passed.
+/// pre-command stopped the run) count as pending, not passed. Failures of
+/// `allow_failure` checks are warnings (`N failed` left out when only
+/// warnings).
 pub(crate) fn finished_status_text(counts: &super::app::StatusCounts, elapsed: &str) -> String {
-    let (passed, failed, cancelled, pending) = (
+    let (passed, failed, warnings, cancelled, pending) = (
         counts.passed,
         counts.failed,
+        counts.warnings,
         counts.cancelled,
         counts.pending,
     );
     let total = counts.auto_run();
     let on_demand = on_demand_suffix(counts);
-    if failed == 0 && cancelled == 0 && pending == 0 {
+    if failed == 0 && warnings == 0 && cancelled == 0 && pending == 0 {
         return format!("✓ All {total} checks passed in {elapsed}{on_demand}");
     }
     let mark = if failed > 0 { "✗ " } else { "" };
-    let mut rest = String::new();
+    let mut rest = crate::report::outcome_tail(failed, warnings);
     if cancelled > 0 {
         rest += &format!(", {cancelled} cancelled");
     }
     if pending > 0 {
         rest += &format!(", {pending} pending");
     }
-    format!("{mark}{passed}/{total} passed, {failed} failed{rest} in {elapsed}{on_demand}")
+    format!("{mark}{passed}/{total} passed{rest} in {elapsed}{on_demand}")
 }
 
 /// Longest prefix of `s` at most `max` terminal columns wide (wide CJK/emoji
@@ -411,7 +419,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let color = if app.run.all_finished {
         if counts.failed > 0 {
             Color::Red
-        } else if counts.cancelled > 0 || counts.pending > 0 {
+        } else if counts.warnings > 0 || counts.cancelled > 0 || counts.pending > 0 {
             Color::Yellow
         } else {
             Color::Green
@@ -571,7 +579,7 @@ fn check_duration_span(result: &CheckResult, now: Instant) -> Span<'static> {
     }
     if let Some(since) = result.live_since() {
         // Dimmed running icon color: still ticking, not a final duration
-        let live_style = get_status_display(Some(&CheckStatus::Running))
+        let live_style = get_status_display(Some(&CheckStatus::Running), Severity::Ok)
             .1
             .add_modifier(Modifier::DIM);
         let elapsed = time::format(now.saturating_duration_since(since).as_millis() as u64);
@@ -593,7 +601,8 @@ fn render_check_item(
     now: Instant,
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
-    let (icon, icon_style) = get_status_display(result.map(|r| &r.status));
+    let severity = result.map_or(Severity::Ok, |r| check.severity(r));
+    let (icon, icon_style) = get_status_display(result.map(|r| &r.status), severity);
 
     let duration = result
         .map(|r| check_duration_span(r, now))
@@ -1608,7 +1617,10 @@ fn build_check_output_text(
     raw_output.push_str("\x1b[0m\n\n");
 
     // Status header
+    let allowed = check.severity(result) == Severity::Warning;
     let status_line = match result.status {
+        CheckStatus::Failed if allowed => "\x1b[33m✗ FAILED (allowed)\x1b[0m",
+        CheckStatus::TimedOut if allowed => "\x1b[33m⧗ TIMED OUT (allowed)\x1b[0m",
         CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
         CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
         CheckStatus::TimedOut => "\x1b[35m⧗ TIMED OUT\x1b[0m",

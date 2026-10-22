@@ -772,6 +772,10 @@ pub struct CheckResult {
     /// Not executed: passed on an earlier run with identical inputs
     /// (`status` is `Passed`), see [`crate::cache`]
     pub cached: bool,
+    /// Failed without its command reporting a result (group pre-command
+    /// failed, verification never reported, task panicked): always a real
+    /// failure, even with `allow_failure` (see [`crate::checks::Severity`])
+    pub not_run: bool,
 }
 
 impl CheckResult {
@@ -787,6 +791,7 @@ impl CheckResult {
             finished_at: None,
             running_since: None,
             cached: false,
+            not_run: false,
         }
     }
 
@@ -816,6 +821,7 @@ impl CheckResult {
         Self {
             status: CheckStatus::Failed,
             output: format!("Pre-command of group `{group}` failed"),
+            not_run: true,
             ..Self::pending(check_id)
         }
     }

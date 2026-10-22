@@ -1,13 +1,14 @@
 //! Machine-readable simple-mode output (#147): `--format json|junit`
 //! reports (to stdout, or `--output <file>` next to the text output) and
-//! GitHub Actions workflow commands (`::group::` / `::error`) when
-//! `GITHUB_ACTIONS=true` and stdout carries the text output.
+//! GitHub Actions workflow commands (`::group::` / `::error`, `::warning`
+//! for `allow_failure` checks) when `GITHUB_ACTIONS=true` and stdout
+//! carries the text output.
 //!
 //! Reports cover the checks simple mode ran (cached ones included, on-demand
 //! ones never run there). Output text is ANSI-stripped; JUnit is hand-rolled
 //! XML (escaped, XML-invalid control chars dropped) to avoid a dependency.
 
-use crate::checks::CheckToRun;
+use crate::checks::{severity_in, CheckToRun, Severity};
 use crate::runner::{CheckResult, CheckStatus};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -124,7 +125,7 @@ pub struct Report<'a> {
     pub checks: &'a [CheckToRun],
     /// Results in group order
     pub results: &'a [CheckResult],
-    /// Counts of `results` ([`Summary::of`])
+    /// Counts of `results` ([`Summary::of`] with `checks`)
     pub summary: Summary,
 }
 
@@ -139,11 +140,13 @@ struct JsonReport<'a> {
 }
 
 /// Result counts shared by the text summary and the reports
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct Summary {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Failures of `allow_failure` checks (not in `failed`)
+    pub warnings: usize,
     pub cached: usize,
     /// JUnit `skipped`, not in the JSON summary
     #[serde(skip)]
@@ -151,16 +154,48 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn of(results: &[CheckResult]) -> Self {
-        let count = |f: fn(&CheckResult) -> bool| results.iter().filter(|r| f(r)).count();
-        Self {
+    /// Counts of `results`; failures of `allow_failure` checks (looked up
+    /// in `checks`) are warnings
+    pub fn of(checks: &[CheckToRun], results: &[CheckResult]) -> Self {
+        let mut summary = Self {
             total: results.len(),
-            passed: count(|r| r.status == CheckStatus::Passed),
-            failed: count(|r| r.status.is_failure()),
-            cached: count(|r| r.cached),
-            cancelled: count(|r| r.status == CheckStatus::Cancelled),
+            ..Self::default()
+        };
+        for result in results {
+            summary.cached += usize::from(result.cached);
+            let bucket = match (severity_in(checks, result), &result.status) {
+                (Severity::Error, _) => &mut summary.failed,
+                (Severity::Warning, _) => &mut summary.warnings,
+                (_, CheckStatus::Passed) => &mut summary.passed,
+                (_, CheckStatus::Cancelled) => &mut summary.cancelled,
+                _ => continue,
+            };
+            *bucket += 1;
         }
+        summary
     }
+}
+
+/// `1 warning` / `N warnings`
+pub fn warning_count(n: usize) -> String {
+    if n == 1 {
+        "1 warning".to_string()
+    } else {
+        format!("{n} warnings")
+    }
+}
+
+/// Run outcome tail: `, N failed` (left out when there are only warnings)
+/// and `, M warning(s)` (when any)
+pub fn outcome_tail(failed: usize, warnings: usize) -> String {
+    let mut tail = String::new();
+    if failed > 0 || warnings == 0 {
+        tail += &format!(", {failed} failed");
+    }
+    if warnings > 0 {
+        tail += &format!(", {}", warning_count(warnings));
+    }
+    tail
 }
 
 #[derive(Serialize)]
@@ -169,6 +204,8 @@ struct JsonCheck<'a> {
     name: &'a str,
     group: &'a str,
     status: &'static str,
+    /// The check's `allow_failure` (a failure is a warning)
+    allow_failure: bool,
     duration_ms: u64,
     cached: bool,
     output: Cow<'a, str>,
@@ -196,6 +233,7 @@ impl Report<'_> {
                 name: check.map_or(&r.check_id, |c| c.name()),
                 group: check.map_or("", CheckToRun::group),
                 status: status_name(&r.status),
+                allow_failure: check.is_some_and(CheckToRun::allow_failure),
                 duration_ms: r.duration_ms,
                 cached: r.cached,
                 // Not the TUI's "cached" hint: `cached` says it
@@ -222,7 +260,8 @@ impl Report<'_> {
 
     /// JUnit XML document: one `<testsuite>` per group (in run order), one
     /// `<testcase>` per result; failures / timeouts carry `<failure>` with
-    /// the output, cancelled checks `<skipped/>`
+    /// the output (`<skipped message="allowed failure: ..">` for
+    /// `allow_failure` checks), cancelled checks `<skipped/>`
     pub fn junit(&self) -> String {
         let mut buf = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         let _ = writeln!(
@@ -233,7 +272,7 @@ impl Report<'_> {
         );
         // Results arrive group by group
         for results in self.results.chunk_by(|a, b| self.group(a) == self.group(b)) {
-            write_testsuite(&mut buf, self.group(&results[0]), results);
+            write_testsuite(&mut buf, self.checks, self.group(&results[0]), results);
         }
         buf.push_str("</testsuites>\n");
         buf
@@ -276,24 +315,26 @@ fn failure_body(result: &CheckResult) -> String {
     parts.join("\n")
 }
 
-/// One `<testsuite>` element for `group`'s `results`; `time` sums them
-fn write_testsuite(buf: &mut String, group: &str, results: &[CheckResult]) {
+/// One `<testsuite>` element for `group`'s `results` (of `checks`); `time`
+/// sums them
+fn write_testsuite(buf: &mut String, checks: &[CheckToRun], group: &str, results: &[CheckResult]) {
     let time: u64 = results.iter().map(|r| r.duration_ms).sum();
     let _ = writeln!(
         buf,
         "  <testsuite name=\"{}\" {} time=\"{}\">",
         xml(group),
-        counts(&Summary::of(results)),
+        counts(&Summary::of(checks, results)),
         secs(time)
     );
     for result in results {
-        write_testcase(buf, group, result);
+        write_testcase(buf, group, result, severity_in(checks, result));
     }
     buf.push_str("  </testsuite>\n");
 }
 
-/// One `<testcase>` element for `result` in `group`
-fn write_testcase(buf: &mut String, group: &str, result: &CheckResult) {
+/// One `<testcase>` element for `result` in `group`; a
+/// [`Severity::Warning`] failure is skipped, not failed
+fn write_testcase(buf: &mut String, group: &str, result: &CheckResult, severity: Severity) {
     let _ = write!(
         buf,
         "    <testcase name=\"{}\" classname=\"{}\" time=\"{}\"",
@@ -301,10 +342,15 @@ fn write_testcase(buf: &mut String, group: &str, result: &CheckResult) {
         xml(group),
         secs(result.duration_ms)
     );
-    if let Some(message) = failure_label(&result.status) {
+    if let Some(label) = failure_label(&result.status) {
+        let (tag, message) = if severity == Severity::Warning {
+            ("skipped", format!("allowed failure: {label}"))
+        } else {
+            ("failure", label.to_string())
+        };
         let _ = writeln!(
             buf,
-            ">\n      <failure message=\"{message}\">{}</failure>\n    </testcase>",
+            ">\n      <{tag} message=\"{message}\">{}</{tag}>\n    </testcase>",
             xml(&failure_body(result))
         );
     } else if result.status == CheckStatus::Cancelled {
@@ -316,11 +362,13 @@ fn write_testcase(buf: &mut String, group: &str, result: &CheckResult) {
 
 /// JUnit `tests` / `failures` / `errors` / `skipped` attributes; no check
 /// counts as an error (that is for broken test harnesses), cancelled ones
-/// are skipped
+/// and allowed failures are skipped
 fn counts(summary: &Summary) -> String {
     format!(
         "tests=\"{}\" failures=\"{}\" errors=\"0\" skipped=\"{}\"",
-        summary.total, summary.failed, summary.cancelled
+        summary.total,
+        summary.failed,
+        summary.cancelled + summary.warnings
     )
 }
 
@@ -361,9 +409,15 @@ pub fn github_group(name: &str) -> String {
 /// `::endgroup::` closing [`github_group`]
 pub const GITHUB_ENDGROUP: &str = "::endgroup::";
 
-/// `::error title=<id>::<message>` annotation for a failed check: status
-/// line plus its ANSI-stripped output
-pub fn github_error(result: &CheckResult) -> String {
+/// `::error title=<id>::<message>` annotation for a failed check
+/// (`::warning` for a [`Severity::Warning`] one): status line plus its
+/// ANSI-stripped output
+pub fn github_annotation(result: &CheckResult, severity: Severity) -> String {
+    let command = if severity == Severity::Warning {
+        "warning"
+    } else {
+        "error"
+    };
     let status = failure_label(&result.status).unwrap_or("failed");
     let mut message = format!("{} {status}", result.check_id);
     let body = failure_body(result);
@@ -372,7 +426,7 @@ pub fn github_error(result: &CheckResult) -> String {
         message.push_str(&body);
     }
     format!(
-        "::error title={}::{}",
+        "::{command} title={}::{}",
         github_property(&result.check_id),
         github_data(&message)
     )
@@ -408,6 +462,7 @@ mod tests {
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -454,7 +509,7 @@ mod tests {
             duration_ms: 5000,
             checks,
             results,
-            summary: Summary::of(results),
+            summary: Summary::of(checks, results),
         }
     }
 
@@ -469,7 +524,7 @@ mod tests {
         assert_eq!(doc["duration_ms"], 5000);
         assert_eq!(
             doc["summary"],
-            serde_json::json!({"total": 3, "passed": 1, "failed": 2, "cached": 1})
+            serde_json::json!({"total": 3, "passed": 1, "failed": 2, "warnings": 0, "cached": 1})
         );
         let lint = &doc["checks"][0];
         assert_eq!(lint["id"], "lint");
@@ -486,6 +541,83 @@ mod tests {
         assert_eq!(doc["checks"][1]["status"], "passed");
         assert_eq!(doc["checks"][1]["fix_command"], serde_json::Value::Null);
         assert_eq!(doc["checks"][2]["status"], "timed_out");
+    }
+
+    /// `warn` (allow_failure) failed, `slow` (allow_failure) timed out, `bad` failed
+    fn allowed_fixture() -> (Vec<CheckToRun>, Vec<CheckResult>) {
+        let mut checks = vec![
+            check("warn", "g", None),
+            check("slow", "g", None),
+            check("bad", "g", None),
+        ];
+        checks[0].definition.allow_failure = true;
+        checks[1].definition.allow_failure = true;
+        let results = vec![
+            result("warn", CheckStatus::Failed, "warn out"),
+            result("slow", CheckStatus::TimedOut, ""),
+            result("bad", CheckStatus::Failed, ""),
+        ];
+        (checks, results)
+    }
+
+    #[test]
+    fn test_allowed_failures_count_as_warnings() {
+        let (checks, results) = allowed_fixture();
+        let doc: serde_json::Value =
+            serde_json::from_str(&report(&checks, &results).json()).unwrap();
+        assert_eq!(doc["version"], 1);
+        assert_eq!(
+            doc["summary"],
+            serde_json::json!({"total": 3, "passed": 0, "failed": 1, "warnings": 2, "cached": 0})
+        );
+        assert_eq!(doc["checks"][0]["allow_failure"], true);
+        assert_eq!(doc["checks"][0]["status"], "failed");
+        assert_eq!(doc["checks"][1]["status"], "timed_out");
+        assert_eq!(doc["checks"][2]["allow_failure"], false);
+    }
+
+    #[test]
+    fn test_junit_allowed_failures_are_skipped() {
+        let (checks, results) = allowed_fixture();
+        let doc = report(&checks, &results).junit();
+        assert!(
+            doc.contains(
+                "<testsuites name=\"ci-tui\" tests=\"3\" failures=\"1\" errors=\"0\" skipped=\"2\""
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "<testsuite name=\"g\" tests=\"3\" failures=\"1\" errors=\"0\" skipped=\"2\""
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("<testcase name=\"warn\" classname=\"g\" time=\"1.234\">\n      <skipped message=\"allowed failure: failed\">warn out</skipped>\n    </testcase>"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("<skipped message=\"allowed failure: timed out\"></skipped>"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("<failure message=\"failed\"></failure>"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn test_github_warning() {
+        let warned = result("w:1", CheckStatus::Failed, "out\n");
+        assert_eq!(
+            github_annotation(&warned, Severity::Warning),
+            "::warning title=w%3A1::w:1 failed%0Aout"
+        );
+        let timed_out = result("t", CheckStatus::TimedOut, "");
+        assert_eq!(
+            github_annotation(&timed_out, Severity::Warning),
+            "::warning title=t::t timed out"
+        );
     }
 
     #[test]
@@ -561,11 +693,14 @@ mod tests {
         );
         failed.error_output = "err".into();
         assert_eq!(
-            github_error(&failed),
+            github_annotation(&failed, Severity::Error),
             "::error title=a%3Ab%2Cc::a:b,c failed%0A100%25%0D%0Aline 2%0Aerr"
         );
         let timed_out = result("t", CheckStatus::TimedOut, "");
-        assert_eq!(github_error(&timed_out), "::error title=t::t timed out");
+        assert_eq!(
+            github_annotation(&timed_out, Severity::Error),
+            "::error title=t::t timed out"
+        );
     }
 
     #[test]

@@ -119,6 +119,11 @@
       "description": "Definition of a single CI check.\n\nContains the command to run, optional fix command, triggers for when\nto run, and other configuration options.",
       "type": "object",
       "properties": {
+        "allow_failure": {
+          "description": "If true, a failure or timeout of this check is a warning: shown in\nyellow, counted apart, and does not fail the run or the exit code",
+          "type": "boolean",
+          "default": false
+        },
         "command": {
           "type": "string"
         },

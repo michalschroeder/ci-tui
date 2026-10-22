@@ -11,7 +11,7 @@
 //! - [`PreCommandState`]: State tracking for pre-commands
 
 use crate::cache::{file_hash, input_paths};
-use crate::checks::{CheckToRun, Decision};
+use crate::checks::{CheckToRun, Decision, Severity};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
@@ -501,7 +501,10 @@ pub struct App {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatusCounts {
     pub passed: usize,
+    /// Failed or timed out, `allow_failure` checks excluded
     pub failed: usize,
+    /// Failed or timed-out `allow_failure` checks
+    pub warnings: usize,
     /// Pending or running
     pub pending: usize,
     pub on_demand: usize,
@@ -510,9 +513,9 @@ pub struct StatusCounts {
 }
 
 impl StatusCounts {
-    /// Checks that ran to an outcome (passed, failed or cancelled)
+    /// Checks that ran to an outcome (passed, failed, warning or cancelled)
     pub fn completed(&self) -> usize {
-        self.passed + self.failed + self.cancelled
+        self.passed + self.failed + self.warnings + self.cancelled
     }
 
     /// Checks the run covers: all but skipped and untriggered on-demand ones
@@ -1324,8 +1327,9 @@ impl App {
     }
 
     /// Indices (in the filtered list) of checks whose result is a failure,
-    /// i.e. `CheckStatus::Failed` or `CheckStatus::TimedOut` — the same
-    /// predicate used for the failed count in [`Self::count_by_status`].
+    /// i.e. `CheckStatus::Failed` or `CheckStatus::TimedOut`, allowed
+    /// failures included (the failed + warnings counts of
+    /// [`Self::count_by_status`]).
     fn failed_indices(&self) -> Vec<usize> {
         self.selectable_items()
             .enumerate()
@@ -1358,24 +1362,33 @@ impl App {
     }
 
     /// First failed pre-command or check in display order, including rows
-    /// hidden by a folded group
+    /// hidden by a folded group; an allowed failure only when nothing else
+    /// failed
     fn first_failed_key(&self) -> Option<ItemKey> {
+        self.first_item_with(Severity::Error)
+            .or_else(|| self.first_item_with(Severity::Warning))
+    }
+
+    /// First pre-command or check of `severity` in display order
+    fn first_item_with(&self, severity: Severity) -> Option<ItemKey> {
         self.groups().into_iter().find_map(|group| {
             self.group_children(group)
-                .find(|item| self.is_failed_item(item))
+                .find(|item| self.item_severity(item) == severity)
                 .map(|item| ItemKey::of(&item))
         })
     }
 
-    /// Failed pre-command, or check whose result is a failure
-    fn is_failed_item(&self, item: &SelectableItem<'_>) -> bool {
+    /// [`Severity`] of a pre-command (failed: error) or check row
+    fn item_severity(&self, item: &SelectableItem<'_>) -> Severity {
         match item {
-            SelectableItem::PreCommand(pc) => pc.status == PreCommandStatus::Failed,
+            SelectableItem::PreCommand(pc) if pc.status == PreCommandStatus::Failed => {
+                Severity::Error
+            }
             SelectableItem::Check(check) => self
                 .results
                 .get(check.id())
-                .is_some_and(|r| r.status.is_failure()),
-            SelectableItem::Group(_) => false,
+                .map_or(Severity::Ok, |r| check.severity(r)),
+            _ => Severity::Ok,
         }
     }
 
@@ -1640,27 +1653,35 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Count check results per status bucket (skipped checks are not counted)
+    /// Count check results per status bucket (skipped checks are not
+    /// counted; [`Severity::Warning`] failures are warnings)
     pub fn count_by_status(&self) -> StatusCounts {
         use CheckStatus as S;
         let mut counts = StatusCounts::default();
-        for result in self.results.values() {
-            match result.status {
-                S::Passed => counts.passed += 1,
-                S::Failed | S::TimedOut => counts.failed += 1,
-                S::Pending | S::Queued | S::Running => counts.pending += 1,
-                S::OnDemand => counts.on_demand += 1,
-                S::Cancelled => counts.cancelled += 1,
-                S::Skipped => (),
-            }
+        let results = self
+            .checks
+            .iter()
+            .filter_map(|c| self.results.get(c.id()).map(|r| (c, r)));
+        for (check, result) in results {
+            let bucket = match (check.severity(result), &result.status) {
+                (Severity::Error, _) => &mut counts.failed,
+                (Severity::Warning, _) => &mut counts.warnings,
+                (_, S::Passed) => &mut counts.passed,
+                (_, S::Pending | S::Queued | S::Running) => &mut counts.pending,
+                (_, S::OnDemand) => &mut counts.on_demand,
+                (_, S::Cancelled) => &mut counts.cancelled,
+                (_, S::Skipped | S::Failed | S::TimedOut) => continue,
+            };
+            *bucket += 1;
         }
         counts
     }
 
     /// Process exit code at quit: [`CHECKS_FAILED`](crate::exit::CHECKS_FAILED)
-    /// if any check or group pre-command failed (a failed one stops the run,
-    /// its checks never run), else [`SUCCESS`](crate::exit::SUCCESS) (matches
-    /// simple mode). Pending and cancelled checks do not fail it.
+    /// if any check without `allow_failure` or group pre-command failed (a
+    /// failed one stops the run, its checks never run), else
+    /// [`SUCCESS`](crate::exit::SUCCESS) (matches simple mode). Pending and
+    /// cancelled checks and allowed failures do not fail it.
     pub fn exit_code(&self) -> i32 {
         let pre_command_failed = self
             .pre_commands
@@ -1939,6 +1960,7 @@ checks:
                 },
                 triggers: None,
                 on_demand: false,
+                allow_failure: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -2147,6 +2169,53 @@ checks:
         assert!(caps.can_retry && caps.can_run_all_files);
     }
 
+    /// [`make_app`] with php-lint and phpunit (has a fix) marked
+    /// `allow_failure`
+    fn make_allowed_app() -> App {
+        let mut app = make_app();
+        for check in &mut app.checks {
+            check.definition.allow_failure = check.id() != "behat";
+        }
+        app
+    }
+
+    #[test]
+    fn test_allowed_failures_count_as_warnings() {
+        let mut app = make_allowed_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::TimedOut;
+
+        let counts = app.count_by_status();
+        assert_eq!((counts.failed, counts.warnings), (0, 2));
+        assert_eq!(counts.completed(), 2);
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    /// Allowed failures stay failures for the `f` filter, `n` / `N` and
+    /// fix eligibility
+    #[test]
+    fn test_allowed_failures_stay_in_filter_navigation_and_fix() {
+        let mut app = make_allowed_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.results.get_mut("phpunit").unwrap().status = CheckStatus::Failed;
+
+        app.view.selected_check = 1; // php-lint
+        app.select_next_failed();
+        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+        assert!(app.selected_capabilities().can_fix);
+
+        app.view.status_filter = StatusFilter::Failed;
+        let visible: Vec<_> = app.get_selectable_items();
+        for id in ["php-lint", "phpunit"] {
+            assert!(
+                visible
+                    .iter()
+                    .any(|i| matches!(i, SelectableItem::Check(c) if c.id() == id)),
+                "{id}"
+            );
+        }
+    }
+
     #[test]
     fn test_cancelled_is_not_failure_and_retryable() {
         let mut app = make_app();
@@ -2218,6 +2287,7 @@ checks:
             StatusCounts {
                 passed: 0,
                 failed: 0,
+                warnings: 0,
                 pending: 2,
                 on_demand: 1,
                 cancelled: 0
@@ -2233,6 +2303,7 @@ checks:
             StatusCounts {
                 passed: 1,
                 failed: 0,
+                warnings: 0,
                 pending: 1,
                 on_demand: 1,
                 cancelled: 0
@@ -2248,6 +2319,7 @@ checks:
             StatusCounts {
                 passed: 1,
                 failed: 1,
+                warnings: 0,
                 pending: 0,
                 on_demand: 1,
                 cancelled: 0
@@ -2511,6 +2583,34 @@ checks:
         finish(&mut app, "phpunit", CheckStatus::Failed, output);
         render(&mut app);
         app
+    }
+
+    #[test]
+    fn test_all_finished_jumps_to_allowed_failure_error() {
+        let mut app = make_app();
+        app.checks[1].definition.allow_failure = true; // phpunit
+        finish(&mut app, "php-lint", CheckStatus::Passed, "ok\n");
+        finish(&mut app, "phpunit", CheckStatus::Failed, &error_output());
+        render(&mut app);
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+        render(&mut app);
+
+        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+        assert_eq!(app.view.output_scroll, ERROR_LINE, "scrolled to error");
+    }
+
+    #[test]
+    fn test_all_finished_selects_real_failure_before_allowed_one() {
+        let mut app = make_app();
+        app.checks[0].definition.allow_failure = true; // php-lint, group fast
+        finish(&mut app, "php-lint", CheckStatus::Failed, &error_output());
+        finish(&mut app, "phpunit", CheckStatus::Failed, &error_output());
+        render(&mut app);
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
     }
 
     #[test]
@@ -3895,6 +3995,15 @@ checks:
             let mut app = make_app();
             finish(&mut app, "php-lint", CheckStatus::Skipped, "");
             assert!(!app.is_group_collapsed("fast"), "needs one Passed");
+        }
+
+        #[test]
+        fn test_no_auto_collapse_for_allowed_failure() {
+            let mut app = make_app();
+            app.checks[0].definition.allow_failure = true; // php-lint
+            app.view.selected_check = 3; // phpunit, outside fast
+            finish(&mut app, "php-lint", CheckStatus::Failed, "");
+            assert!(!app.is_group_collapsed("fast"));
         }
 
         #[test]

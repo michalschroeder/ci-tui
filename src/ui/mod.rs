@@ -26,7 +26,7 @@ pub mod external;
 pub mod notify;
 
 use crate::cache::{stamp_keys, ResultCache};
-use crate::checks::{select_checks, CheckToRun, Decision, Selected};
+use crate::checks::{select_checks, CheckToRun, Decision, Selected, Severity};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
@@ -1808,28 +1808,35 @@ fn finished_text(app: &App, counts: &app::StatusCounts) -> String {
     dashboard::finished_status_text(counts, &elapsed)
 }
 
-/// Print the final summary: same wording as the dashboard header, colored
-/// green (all passed), yellow (some cancelled / pending) or red (exit code
-/// 1: a check or group pre-command failed); plain with color off
+/// Print [`quit_summary`] (plain with color off)
 fn print_summary(app: &App) {
+    println!("{}", crate::color::paint(&quit_summary(app), app.color));
+}
+
+/// Final summary: same wording as the dashboard header, colored green (all
+/// passed), yellow (some warnings / cancelled / pending) or red (exit code
+/// 1: a check or group pre-command failed), then the failed checks' ids in
+/// list order (`(allowed)` for [`Severity::Warning`] ones)
+fn quit_summary(app: &App) -> String {
     let counts = app.count_by_status();
     let text = finished_text(app, &counts);
     let color = if app.exit_code() != crate::exit::SUCCESS {
         31
-    } else if counts.cancelled > 0 || counts.pending > 0 {
+    } else if counts.warnings > 0 || counts.cancelled > 0 || counts.pending > 0 {
         33
     } else {
         32
     };
-    let line = format!("\n\x1b[{}m{}\x1b[0m", color, text);
-    println!("{}", crate::color::paint(&line, app.color));
-
-    // Show failed checks
-    for (id, result) in &app.results {
-        if result.status.is_failure() {
-            println!("  - {}", id);
-        }
+    let mut out = format!("\n\x1b[{}m{}\x1b[0m", color, text);
+    for check in &app.checks {
+        let note = match app.results.get(check.id()).map(|r| check.severity(r)) {
+            Some(Severity::Error) => "",
+            Some(Severity::Warning) => " (allowed)",
+            _ => continue,
+        };
+        out.push_str(&format!("\n  - {}{note}", check.id()));
     }
+    out
 }
 
 #[cfg(test)]
@@ -1911,6 +1918,7 @@ checks:
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
+                allow_failure: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -2393,6 +2401,99 @@ checks:
         finish_run(&mut app, &config, None);
         assert!(exit_due(&app, true, false));
         assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+    }
+
+    /// [`make_test_check`] marked `allow_failure`
+    fn allowed_check(id: &str, group: &str) -> CheckToRun {
+        let mut check = make_test_check(id, group);
+        check.definition.allow_failure = true;
+        check
+    }
+
+    #[rstest::rstest]
+    #[case::failed(CheckStatus::Failed)]
+    #[case::timed_out(CheckStatus::TimedOut)]
+    fn test_allowed_failure_exits_0_with_warning(#[case] status: CheckStatus) {
+        let config = test_config();
+        let checks = vec![
+            make_test_check("ok", "fast"),
+            allowed_check("php-lint", "fast"),
+        ];
+        let mut app = make_test_app_with_checks(&config, checks);
+        app.results.get_mut("ok").unwrap().status = CheckStatus::Passed;
+        finish_run(&mut app, &config, Some(("php-lint", status)));
+        assert!(exit_due(&app, true, false));
+        assert_eq!(app.exit_code(), crate::exit::SUCCESS);
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(text.starts_with("1/2 passed, 1 warning in "), "{text}");
+        let summary = quit_summary(&app);
+        assert!(
+            summary.starts_with("\n\x1b[33m1/2 passed, 1 warning in "),
+            "{summary:?}"
+        );
+        assert!(summary.ends_with("\n  - php-lint (allowed)"), "{summary:?}");
+    }
+
+    #[test]
+    fn test_finished_text_mixed_failures_and_warnings() {
+        let config = test_config();
+        let checks = vec![
+            make_test_check("ok", "fast"),
+            make_test_check("bad", "fast"),
+            allowed_check("w1", "fast"),
+            allowed_check("w2", "fast"),
+        ];
+        let mut app = make_test_app_with_checks(&config, checks);
+        for (id, status) in [
+            ("ok", CheckStatus::Passed),
+            ("bad", CheckStatus::Failed),
+            ("w1", CheckStatus::Failed),
+            ("w2", CheckStatus::TimedOut),
+        ] {
+            app.results.get_mut(id).unwrap().status = status;
+        }
+        finish_run(&mut app, &config, None);
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+        let text = finished_text(&app, &app.count_by_status());
+        assert!(
+            text.starts_with("✗ 1/4 passed, 1 failed, 2 warnings in "),
+            "{text}"
+        );
+        let summary = quit_summary(&app);
+        assert!(summary.starts_with("\n\x1b[31m✗ "), "{summary:?}");
+        assert!(
+            summary.contains("\n  - bad\n") || summary.ends_with("\n  - bad"),
+            "{summary:?}"
+        );
+        assert!(summary.contains("\n  - w2 (allowed)"), "{summary:?}");
+    }
+
+    #[test]
+    fn test_allowed_check_setup_failed_still_exits_1() {
+        // Group pre-command failed, then `r` on the allowed check: its
+        // setup-failed result never ran, so it is a real failure
+        let config = setup_config();
+        let mut app = make_test_app_with_checks(&config, vec![allowed_check("lint", "db")]);
+        app.handle_runner_event(RunnerEvent::PreCommandFinished {
+            group: "db".to_string(),
+            name: "seed".to_string(),
+            success: false,
+            output: String::new(),
+            duration_ms: 1,
+        });
+        finish_run(&mut app, &config, None);
+        app.reset_check_for_retry("lint");
+        let result = CheckResult::setup_failed("lint", "db");
+        handle_task_event(&mut app, TaskEvent::UnrecordedResult(result));
+        let counts = app.count_by_status();
+        assert_eq!((counts.failed, counts.warnings), (1, 0));
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+        let summary = quit_summary(&app);
+        assert!(
+            summary.starts_with("\n\x1b[31m✗ 0/1 passed, 1 failed"),
+            "{summary:?}"
+        );
+        assert!(summary.ends_with("\n  - lint"), "{summary:?}");
     }
 
     #[test]

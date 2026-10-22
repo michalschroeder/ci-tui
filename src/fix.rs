@@ -14,13 +14,16 @@
 //!
 //! # Exit Codes
 //!
-//! - `0`: All fix commands (and verifications) passed
-//! - `1`: One or more fix commands or verifications failed
+//! - `0`: All fix commands (and verifications) passed; a failing
+//!   verification of an `allow_failure` check is not a failure
+//! - `1`: One or more fix commands, verifications or verification group
+//!   pre-commands failed
 
-use crate::checks::{keeps, CheckToRun, Decision, FilePatternEval};
+use crate::checks::{keeps, severity_in, CheckToRun, Decision, FilePatternEval, Severity};
 use crate::color::{cprint, cprintln};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
+use crate::report;
 use crate::runner::{
     CachingExecutor, CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget,
     RunnerEvent,
@@ -40,12 +43,14 @@ pub struct FixSummary {
     /// Verification on (not `--no-verify`)
     pub verify: bool,
     /// Passed fixes whose check was re-run and passed / failed (or whose
-    /// group setup failed)
+    /// group setup failed) / failed as an allowed failure (warning)
     pub verify_pass_count: usize,
     pub verify_fail_count: usize,
+    pub verify_warning_count: usize,
     /// Passed fixes not verified: check not selected, or on-demand
     pub unverified_count: usize,
-    /// A fix or a verification failed
+    /// A fix, a verification (not of an `allow_failure` check) or a
+    /// verification pre-command failed
     pub has_failures: bool,
     pub elapsed: std::time::Duration,
 }
@@ -53,7 +58,7 @@ pub struct FixSummary {
 impl FixSummary {
     /// Passed fixes whose check was re-run (or whose group setup failed)
     pub fn verify_count(&self) -> usize {
-        self.verify_pass_count + self.verify_fail_count
+        self.verify_pass_count + self.verify_fail_count + self.verify_warning_count
     }
 }
 
@@ -140,11 +145,19 @@ fn format_summary(summary: &FixSummary) -> String {
         if summary.unverified_count > 0 {
             verified += &format!(", {} not verified", summary.unverified_count);
         }
+        if summary.verify_warning_count > 0 {
+            verified += &format!(", {}", report::warning_count(summary.verify_warning_count));
+        }
     }
     if summary.has_failures {
         format!(
             "\x1b[31m✗ {}/{} fixes passed, {} failed{verified} in {elapsed}\x1b[0m",
             summary.pass_count, summary.fix_count, summary.fail_count,
+        )
+    } else if summary.verify_warning_count > 0 {
+        format!(
+            "\x1b[33mAll {} fixes passed{verified} in {elapsed}\x1b[0m",
+            summary.fix_count
         )
     } else {
         format!(
@@ -271,7 +284,7 @@ async fn verify_fixes(
     };
     let report = async {
         while let Some(event) = rx.recv().await {
-            on_verify_event(event, &mut not_run, summary);
+            on_verify_event(event, selected, &mut not_run, summary);
         }
     };
     tokio::join!(run, report);
@@ -280,20 +293,28 @@ async fn verify_fixes(
         let result = CheckResult {
             status: CheckStatus::Failed,
             output: "Not run: a group pre-command failed".into(),
+            not_run: true,
             ..CheckResult::pending(&id)
         };
-        count_verification(&result, summary);
-        cprint!("{}", format_verify_result(&result));
+        verified_result(&result, selected, summary);
     }
     cprintln!();
 }
 
-/// Count a verification `result` into `summary`
-fn count_verification(result: &CheckResult, summary: &mut FixSummary) {
-    let passed = result.status == CheckStatus::Passed;
-    summary.verify_pass_count += usize::from(passed);
-    summary.verify_fail_count += usize::from(!passed);
-    summary.has_failures |= !passed;
+/// Count a verification `result` into `summary` and print it; a
+/// [`Severity::Warning`] (check looked up in `checks`) does not fail the run
+fn verified_result(result: &CheckResult, checks: &[CheckToRun], summary: &mut FixSummary) {
+    let severity = severity_in(checks, result);
+    let count = match severity {
+        _ if result.status == CheckStatus::Passed => &mut summary.verify_pass_count,
+        Severity::Warning => &mut summary.verify_warning_count,
+        _ => {
+            summary.has_failures = true;
+            &mut summary.verify_fail_count
+        }
+    };
+    *count += 1;
+    cprint!("{}", format_verify_result(result, severity));
 }
 
 /// Count and print a passing fix not verified, with the `reason`
@@ -304,16 +325,21 @@ fn unverified(check_id: &str, reason: &str, summary: &mut FixSummary) {
 
 /// Print a verification run event (check started / finished, failed
 /// pre-command with its output; others are ignored), counting a finished
-/// check into `summary` and dropping it from `not_run`
-fn on_verify_event(event: RunnerEvent, not_run: &mut Vec<String>, summary: &mut FixSummary) {
+/// check (of `checks`) into `summary` and dropping it from `not_run`; a
+/// failed pre-command fails the run
+fn on_verify_event(
+    event: RunnerEvent,
+    checks: &[CheckToRun],
+    not_run: &mut Vec<String>,
+    summary: &mut FixSummary,
+) {
     match event {
         RunnerEvent::CheckStarted { check_id } => {
             cprintln!("  \x1b[33m●\x1b[0m {check_id} \x1b[90m(verifying...)\x1b[0m");
         }
         RunnerEvent::CheckFinished { result } => {
             not_run.retain(|id| *id != result.check_id);
-            count_verification(&result, summary);
-            cprint!("{}", format_verify_result(&result));
+            verified_result(&result, checks, summary);
         }
         RunnerEvent::PreCommandFinished {
             name,
@@ -321,6 +347,7 @@ fn on_verify_event(event: RunnerEvent, not_run: &mut Vec<String>, summary: &mut 
             output,
             ..
         } => {
+            summary.has_failures = true;
             let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
             cprint!("  \x1b[31m✗\x1b[0m pre-command {name} \x1b[90mfailed\x1b[0m\n{output}");
         }
@@ -333,16 +360,21 @@ fn format_unverified(check_id: &str, reason: &str) -> String {
     format!("  \x1b[90m○ {check_id} not verified ({reason})\x1b[0m")
 }
 
-/// Verification result: green "verified", or red "still failing" plus the
-/// check's output
-fn format_verify_result(result: &CheckResult) -> String {
+/// Verification result: green "verified", or red "still failing" (yellow
+/// "still failing (allowed)" for a [`Severity::Warning`]) plus the check's
+/// output
+fn format_verify_result(result: &CheckResult, severity: Severity) -> String {
     let (id, duration) = (&result.check_id, time::format(result.duration_ms));
     if result.status == CheckStatus::Passed {
         return format!("  \x1b[32m✓\x1b[0m {id} \x1b[90mverified {duration}\x1b[0m\n");
     }
-    let failed = crate::simple::format_failed_check(result, None);
+    let (color, note) = match severity {
+        Severity::Warning => (33, " (allowed)"),
+        _ => (31, ""),
+    };
+    let failed = crate::simple::format_failed_check(result, None, severity);
     format!(
-        "  \x1b[31m✗\x1b[0m {id} \x1b[31mstill failing\x1b[0m \x1b[90m{duration}\x1b[0m\n{failed}"
+        "  \x1b[{color}m✗\x1b[0m {id} \x1b[{color}mstill failing{note}\x1b[0m \x1b[90m{duration}\x1b[0m\n{failed}"
     )
 }
 
@@ -488,16 +520,23 @@ mod tests {
             status: CheckStatus::Passed,
             ..CheckResult::pending("fmt")
         };
-        assert!(paint(&format_verify_result(&passed)).starts_with("  ✓ fmt verified "));
+        assert!(
+            paint(&format_verify_result(&passed, Severity::Ok)).starts_with("  ✓ fmt verified ")
+        );
 
         let failed = CheckResult {
             status: CheckStatus::Failed,
             output: "diff in src/main.rs".into(),
             ..CheckResult::pending("fmt")
         };
-        let text = paint(&format_verify_result(&failed));
+        let text = paint(&format_verify_result(&failed, Severity::Error));
         assert!(text.starts_with("  ✗ fmt still failing "), "{text}");
         assert!(text.contains("diff in src/main.rs"), "output shown: {text}");
+        let text = paint(&format_verify_result(&failed, Severity::Warning));
+        assert!(
+            text.starts_with("  ✗ fmt still failing (allowed) "),
+            "{text}"
+        );
 
         let line = paint(&format_unverified("fmt", "on-demand"));
         assert_eq!(line, "  ○ fmt not verified (on-demand)");
@@ -527,6 +566,22 @@ mod tests {
         let line = format_summary(&summary);
         let line = crate::color::paint(&line, false);
         assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn test_summary_line_allowed_verify_failure_is_yellow_warning() {
+        let summary = FixSummary {
+            fix_count: 2,
+            pass_count: 2,
+            verify: true,
+            verify_pass_count: 1,
+            verify_warning_count: 1,
+            ..FixSummary::default()
+        };
+        assert_eq!(
+            format_summary(&summary),
+            "\x1b[33mAll 2 fixes passed, 1/2 verified, 1 warning in 0s\x1b[0m"
+        );
     }
 
     fn cfg_with_pattern(key: &str, pattern: &str) -> CiConfig {
@@ -559,6 +614,7 @@ mod tests {
             fix_command: Some("fix {files}".into()),
             triggers,
             on_demand: false,
+            allow_failure: false,
             env: HashMap::new(),
             timeout: None,
             error_pattern: None,
