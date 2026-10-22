@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.7.0](https://github.com/michalschroeder/ci-tui/compare/v0.6.0...v0.7.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* typed docker mode (compose vs plain image) ([#239](https://github.com/michalschroeder/ci-tui/issues/239))
+* resolve service containers via docker compose ([#233](https://github.com/michalschroeder/ci-tui/issues/233))
+
+### Features
+
+* add --color auto|always|never, no color when stdout is not a terminal ([#223](https://github.com/michalschroeder/ci-tui/issues/223)) ([22efe34](https://github.com/michalschroeder/ci-tui/commit/22efe349c6d5d783f53274cdb1a556e6fc2118db))
+* config discovery (walk up to repo root) and ci-tui.local.yaml overrides ([#240](https://github.com/michalschroeder/ci-tui/issues/240)) ([43c8538](https://github.com/michalschroeder/ci-tui/commit/43c853870c7ba8b6087f98e34395761e5fd9cc54))
+* configurable pre_command failure behavior (on_failure) ([#246](https://github.com/michalschroeder/ci-tui/issues/246)) ([a0855fa](https://github.com/michalschroeder/ci-tui/commit/a0855fa38ffa88260812a8267e85a9266e518f4d))
+* per-check allow_failure ([#243](https://github.com/michalschroeder/ci-tui/issues/243)) ([67bd898](https://github.com/michalschroeder/ci-tui/commit/67bd8985b22a1aaa2ac7657cc92c0b3f78a79b9c))
+* run image as project owner, add docker.user ([#236](https://github.com/michalschroeder/ci-tui/issues/236)) ([#238](https://github.com/michalschroeder/ci-tui/issues/238)) ([379e8b0](https://github.com/michalschroeder/ci-tui/commit/379e8b042f303666b7841f1dab051a28bbdfbdfc))
+
+
+### Bug Fixes
+
+* normalize --files from config dir, drop redundant notify OR ([#241](https://github.com/michalschroeder/ci-tui/issues/241)) ([2ba675e](https://github.com/michalschroeder/ci-tui/commit/2ba675e39ec337a5f2cde48b77c12abe1aceee6d))
+* resolve service containers via docker compose ([#233](https://github.com/michalschroeder/ci-tui/issues/233)) ([e0a10b2](https://github.com/michalschroeder/ci-tui/commit/e0a10b2885c98f33037f2aec0b8052b79e01bd84))
+* run checks in their service container ([#231](https://github.com/michalschroeder/ci-tui/issues/231)) ([a265fb3](https://github.com/michalschroeder/ci-tui/commit/a265fb3072801da9124ff990ab0f6decdcae1fe4))
+* unique container names per process, skip one-off containers ([#237](https://github.com/michalschroeder/ci-tui/issues/237)) ([771b4ab](https://github.com/michalschroeder/ci-tui/commit/771b4ab42324a6c806381565ed5f583a29940d2c))
+* **watch:** tell own writes from user saves by content, not time ([#224](https://github.com/michalschroeder/ci-tui/issues/224)) ([2f87497](https://github.com/michalschroeder/ci-tui/commit/2f874972ff3eb7a411e5a05b9cd11ab0e689bb0b))
+
+
+### Code Refactoring
+
+* typed docker mode (compose vs plain image) ([#239](https://github.com/michalschroeder/ci-tui/issues/239)) ([5d1ff69](https://github.com/michalschroeder/ci-tui/commit/5d1ff697bdfca5a5bcad57f4b9642270b85fde64))
+
 ## [0.6.0](https://github.com/michalschroeder/ci-tui/compare/v0.5.0...v0.6.0) (2026-10-03)
 
 
