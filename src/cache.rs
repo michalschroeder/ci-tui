@@ -598,6 +598,26 @@ checks:
         assert!(!no_cache.is_fresh(&lint), "--no-cache");
     }
 
+    /// A not-run failure (simple mode's panicked check task) drops the pass
+    /// like any failure
+    #[test]
+    fn not_run_failure_drops_the_pass() {
+        let dir = root();
+        let lint = keyed("lint", "lint a.rs", dir.path());
+        let mut cache = cache_at(dir.path().join("results.json"), dir.path());
+        cache
+            .record(&lint, &result("lint", CheckStatus::Passed))
+            .unwrap();
+
+        let panicked = CheckResult {
+            not_run: true,
+            ..result("lint", CheckStatus::Failed)
+        };
+        cache.record(&lint, &panicked).unwrap();
+
+        assert!(!cache.is_fresh(&lint));
+    }
+
     #[test]
     fn pass_after_files_changed_since_stamping_is_not_stored() {
         let dir = root();

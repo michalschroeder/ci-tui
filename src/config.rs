@@ -757,10 +757,31 @@ pub struct PreCommand {
     /// Additional environment variables for this command (merged with global env)
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
-    /// Max runtime; expiry fails the pre-command (and so the group). `None` = unbounded.
+    /// Max runtime; expiry fails the pre-command (handled per `on_failure`).
+    /// `None` = unbounded.
     #[serde(default, deserialize_with = "deserialize_timeout")]
     #[schemars(schema_with = "timeout_schema", description = TIMEOUT_DESCRIPTION)]
     pub timeout: Option<Duration>,
+    /// What a failure or timeout does: `abort` (default) stops the run,
+    /// `skip_group` skips the rest of this group, `continue` ignores it
+    #[serde(default)]
+    pub on_failure: OnFailure,
+}
+
+/// What a failed (or timed-out) pre-command does to the run
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    /// Stop the run: the group's remaining pre-commands and checks and all
+    /// later groups do not run
+    #[default]
+    Abort,
+    /// Skip the group: its remaining pre-commands and checks do not run;
+    /// later groups run normally
+    SkipGroup,
+    /// Ignore the failure: the group's next pre-commands and checks run as
+    /// if it passed
+    Continue,
 }
 
 /// Config schema version this build understands.

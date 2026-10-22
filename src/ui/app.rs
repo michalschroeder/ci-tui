@@ -14,7 +14,7 @@ use crate::cache::{file_hash, input_paths};
 use crate::checks::{CheckToRun, Decision, Severity};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
-use crate::runner::{append_output, CheckResult, CheckStatus, RunnerEvent};
+use crate::runner::{append_output, CheckResult, CheckStatus, PreCommandOutcome, RunnerEvent};
 use crate::watch::WatchBatch;
 use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -67,9 +67,20 @@ pub enum PreCommandStatus {
     Running,
     Passed,
     Failed,
+    /// Failed with `on_failure: continue`: the group went on as if it passed
+    Ignored,
     /// Not run: no check of the group runs (served from the result cache,
-    /// or on-demand only); a single run of one of them runs it first
+    /// or on-demand only), or an earlier pre-command stopped the group / run
+    /// (reason in its output); a single run of one of them runs it first
     Skipped,
+}
+
+impl PreCommandStatus {
+    /// Failed, ignored (`on_failure: continue`) or not: shown under the
+    /// Failed filter, keeps its group from auto-collapsing
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed | Self::Ignored)
+    }
 }
 
 /// What a single check run (retry, on-demand, all files) does about its
@@ -917,10 +928,17 @@ impl App {
         self.clamp_selection();
     }
 
-    /// State of `group`'s pre-commands for a single check run
+    /// State of `group`'s pre-commands for a single check run; ignored
+    /// failures count as done (the group went on without them)
     pub fn group_setup(&self, group: &str) -> GroupSetup {
         let mut rows = self.pre_commands.iter().filter(|p| p.group == group);
-        if rows.clone().all(|p| p.status == PreCommandStatus::Passed) {
+        let done = |p: &PreCommandState| {
+            matches!(
+                p.status,
+                PreCommandStatus::Passed | PreCommandStatus::Ignored
+            )
+        };
+        if rows.clone().all(done) {
             return GroupSetup::Ready;
         }
         let running = rows.any(|p| p.status == PreCommandStatus::Running);
@@ -1183,12 +1201,17 @@ impl App {
             RunnerEvent::PreCommandFinished {
                 group,
                 name,
-                success,
+                outcome,
                 output,
                 duration_ms,
             } => {
-                self.on_pre_command_finished(&group, &name, success, output, duration_ms);
+                self.on_pre_command_finished(&group, &name, outcome, output, duration_ms);
             }
+            RunnerEvent::PreCommandSkipped {
+                group,
+                name,
+                reason,
+            } => self.on_pre_command_skipped(&group, &name, reason),
             RunnerEvent::AllFinished => {
                 self.run.all_finished = true;
                 self.run.current_group = None;
@@ -1247,13 +1270,30 @@ impl App {
     }
 
     fn on_pre_command_started(&mut self, group: &str, name: &str) {
-        if let Some(idx) = self
-            .pre_commands
+        if let Some(idx) = self.pre_command_index(group, name) {
+            let row = &mut self.pre_commands[idx];
+            row.status = PreCommandStatus::Running;
+            // A skip reason or an earlier run's output is stale now
+            row.output.clear();
+            self.run.current_pre_command = Some(idx);
+        }
+    }
+
+    /// Index of `group`'s pre-command row `name`
+    fn pre_command_index(&self, group: &str, name: &str) -> Option<usize> {
+        self.pre_commands
             .iter()
             .position(|p| p.group == group && p.name == name)
-        {
-            self.pre_commands[idx].status = PreCommandStatus::Running;
-            self.run.current_pre_command = Some(idx);
+    }
+
+    /// A pre-command the runner did not run: an earlier one stopped the
+    /// group or the run; `reason` shows as its output
+    fn on_pre_command_skipped(&mut self, group: &str, name: &str, reason: String) {
+        if let Some(idx) = self.pre_command_index(group, name) {
+            let row = &mut self.pre_commands[idx];
+            row.status = PreCommandStatus::Skipped;
+            row.output = reason;
+            row.duration_ms = 0;
         }
     }
 
@@ -1261,25 +1301,52 @@ impl App {
         &mut self,
         group: &str,
         name: &str,
-        success: bool,
+        outcome: PreCommandOutcome,
         output: String,
         duration_ms: u64,
     ) {
         self.run.current_pre_command = None;
-        let Some(idx) = self
-            .pre_commands
-            .iter()
-            .position(|p| p.group == group && p.name == name)
-        else {
+        let Some(idx) = self.pre_command_index(group, name) else {
             return;
         };
-        self.pre_commands[idx].status = if success {
-            PreCommandStatus::Passed
-        } else {
-            PreCommandStatus::Failed
+        let row = &mut self.pre_commands[idx];
+        row.status = match outcome {
+            PreCommandOutcome::Passed => PreCommandStatus::Passed,
+            PreCommandOutcome::Ignored => PreCommandStatus::Ignored,
+            PreCommandOutcome::Failed { .. } => PreCommandStatus::Failed,
         };
-        self.pre_commands[idx].output = output;
-        self.pre_commands[idx].duration_ms = duration_ms;
+        row.output = output;
+        row.duration_ms = duration_ms;
+    }
+
+    /// Footer for a pre-command failure that stopped a group: the runner's
+    /// (`aborts` the run, or skips the group)
+    pub fn show_setup_failure(&mut self, group: &str, name: &str, aborts: bool) {
+        let outcome = if aborts {
+            "run aborted"
+        } else {
+            "group skipped"
+        };
+        let text = format!("Pre-command `{name}` ({group}) failed: {outcome}");
+        self.set_status_message(StatusKind::Error, text);
+    }
+
+    /// Footer for a single run's check that a failed pre-command of its
+    /// group kept from running (`result` is [`CheckResult::not_run`]); none
+    /// when no row failed (setup cancelled)
+    pub fn show_blocked_single_run(&mut self, result: &CheckResult) {
+        let check = self.checks.iter().find(|c| c.id() == result.check_id);
+        let Some(group) = check.map(|c| c.group().to_string()) else {
+            return;
+        };
+        let failed = self
+            .pre_commands
+            .iter()
+            .find(|p| p.group == group && p.status == PreCommandStatus::Failed);
+        if let Some(row) = failed {
+            let text = format!("Pre-command `{}` ({group}) failed: check not run", row.name);
+            self.set_status_message(StatusKind::Error, text);
+        }
     }
 
     /// Get the selected check, if a check (not a pre-command) is selected
@@ -1378,7 +1445,8 @@ impl App {
         })
     }
 
-    /// [`Severity`] of a pre-command (failed: error) or check row
+    /// [`Severity`] of a pre-command (failed: error; ignored counts as ok:
+    /// no warning) or check row
     fn item_severity(&self, item: &SelectableItem<'_>) -> Severity {
         match item {
             SelectableItem::PreCommand(pc) if pc.status == PreCommandStatus::Failed => {
@@ -1678,16 +1746,12 @@ impl App {
     }
 
     /// Process exit code at quit: [`CHECKS_FAILED`](crate::exit::CHECKS_FAILED)
-    /// if any check without `allow_failure` or group pre-command failed (a
-    /// failed one stops the run, its checks never run), else
+    /// if any check without `allow_failure` failed (checks a failed group
+    /// pre-command blocked included), else
     /// [`SUCCESS`](crate::exit::SUCCESS) (matches simple mode). Pending and
     /// cancelled checks and allowed failures do not fail it.
     pub fn exit_code(&self) -> i32 {
-        let pre_command_failed = self
-            .pre_commands
-            .iter()
-            .any(|p| p.status == PreCommandStatus::Failed);
-        if self.count_by_status().failed > 0 || pre_command_failed {
+        if self.count_by_status().failed > 0 {
             crate::exit::CHECKS_FAILED
         } else {
             crate::exit::SUCCESS
@@ -1838,12 +1902,13 @@ impl App {
     }
 
     /// Every check in `group` is Passed or Skipped, at least one Passed, and
-    /// no pre-command failed (a folded group would hide the failure)
+    /// no pre-command failed, ignored ones included (a folded group would
+    /// hide the failure)
     fn group_passed(&self, group: &str) -> bool {
         let pre_command_failed = self
             .pre_commands
             .iter()
-            .any(|p| p.group == group && p.status == PreCommandStatus::Failed);
+            .any(|p| p.group == group && p.status.is_failure());
         if pre_command_failed {
             return false;
         }
@@ -1860,7 +1925,7 @@ impl App {
     fn should_show_pre_command(&self, pre_cmd: &PreCommandState) -> bool {
         match self.view.status_filter {
             StatusFilter::All => true,
-            StatusFilter::Failed => pre_cmd.status == PreCommandStatus::Failed,
+            StatusFilter::Failed => pre_cmd.status.is_failure(),
         }
     }
 
@@ -2670,6 +2735,48 @@ checks:
         app.handle_runner_event(RunnerEvent::AllFinished);
 
         assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+    }
+
+    /// [`make_app`] plus a `tests` pre-command whose failure was ignored
+    /// (`on_failure: continue`)
+    fn app_with_ignored_setup() -> App {
+        let mut app = make_app();
+        app.pre_commands.push(PreCommandState {
+            group: "tests".to_string(),
+            name: "seed".to_string(),
+            status: PreCommandStatus::Ignored,
+            output: String::new(),
+            duration_ms: 0,
+        });
+        app
+    }
+
+    /// #152: an ignored pre-command is no warning: the run-end jump goes
+    /// to a later allowed failure
+    #[test]
+    fn test_all_finished_skips_ignored_pre_command_for_allowed_failure() {
+        let mut app = app_with_ignored_setup();
+        app.checks[1].definition.allow_failure = true;
+        finish(&mut app, "php-lint", CheckStatus::Passed, "");
+        finish(&mut app, "phpunit", CheckStatus::Failed, "");
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert_eq!(app.selected_check().unwrap().id(), "phpunit");
+    }
+
+    /// #152: all passed and an ignored pre-command: selection stays put
+    #[test]
+    fn test_all_finished_ignored_pre_command_alone_keeps_selection() {
+        let mut app = app_with_ignored_setup();
+        let before = app.view.selected_check;
+        finish(&mut app, "php-lint", CheckStatus::Passed, "");
+        finish(&mut app, "phpunit", CheckStatus::Passed, "");
+
+        app.handle_runner_event(RunnerEvent::AllFinished);
+
+        assert_eq!(app.view.selected_check, before);
+        assert_eq!(app.selected_check().unwrap().id(), "php-lint");
     }
 
     #[test]

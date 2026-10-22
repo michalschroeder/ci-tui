@@ -6,7 +6,7 @@ use ci_tui::exit;
 
 mod common;
 use common::configs::YAML_HEAD;
-use common::{assert_code, run_config, stdout};
+use common::{assert_code, load, run_config, stdout};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config, group `g` (sequential): `ok` passes, `warn`
@@ -39,14 +39,6 @@ fn warn_and_bad() -> String {
         "",
         "      bad: { name: Bad, command: 'false' }\n",
     )
-}
-
-/// Loads `config` from a file through the real loader
-fn load(config: &str) -> anyhow::Result<ci_tui::config::CiConfig> {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("ci-tui.yaml");
-    std::fs::write(&path, config).unwrap();
-    ci_tui::config::load_config(&path)
 }
 
 #[test]
