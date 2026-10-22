@@ -288,6 +288,11 @@ checks:
                     tests:
                       - "tests/Unit/{path}Test.php"
                       - "tests/Feature/{path}Test.php"
+      mutation:
+        name: Mutation tests
+        command: vendor/bin/infection --only-covered
+        service: php
+        allow_failure: true  # informational: a failure is a warning, not a failed run
 ```
 
 ### Group Options
@@ -338,6 +343,16 @@ checks:
 - Only takes effect on a check with a `test_discovery` trigger; ignored otherwise
 - If `true`, and test discovery finds no related tests, check waits for the 't' key instead of skipping or running the full command
 - Useful for expensive checks when test discovery finds no specific tests
+
+**`allow_failure`** (default: `false`)
+- If `true`, a failure or timeout of this check's command is a **warning**: it doesn't fail the run, and the exit code stays `0` if nothing else failed
+- Only when the command ran: a check that never ran (its group pre-command failed, its task crashed, its `--fix` verification never reported) is a real failure
+- Shown with a yellow `✗` / `⧗` (TUI list, `✗ FAILED (allowed)` in the output panel, `allowed failure` in `--simple`) and counted apart: `3/4 passed, 1 warning in 12s`
+- Still a failure for the TUI's `f` filter, `n` / `N` and `x` / `X`; never cached as a pass. At run end the TUI jumps to the first real failure, to an allowed one only when nothing else failed
+- Reports: JSON `checks[].allow_failure` and `summary.warnings` (not in `summary.failed`); JUnit `<skipped message="allowed failure: failed">` (counted as skipped); GitHub Actions `::warning` instead of `::error`
+- `--fix`: a failing verification re-run of it doesn't fail the run (a failing fix command still does); the summary turns yellow with `N warning(s)`
+- A failed group pre-command still fails the run (exit `1`)
+- For informational or flaky checks (mutation tests, audits)
 
 **`env`** (optional)
 - Additional environment variables for this check
@@ -918,6 +933,7 @@ After changing config structs, regenerate the committed file with `make schema` 
 - Added: `fix_command` and `--fix` mode
 - Added: `--files` flag for manual file selection (bypasses git detection)
 - Added: `timeout` (top-level default, per check, per pre-command)
+- Added: `allow_failure` check flag
 
 **Version 1** (legacy, not documented)
 - Basic docker-compose integration

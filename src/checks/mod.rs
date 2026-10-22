@@ -15,6 +15,7 @@
 
 use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
+use crate::runner::CheckResult;
 use std::path::Path;
 
 mod determine;
@@ -136,6 +137,17 @@ impl CheckToRun {
         self.resolved_fix_command.is_some()
     }
 
+    /// A failure or timeout of this check is a warning (config
+    /// `allow_failure`), not a failed run
+    pub fn allow_failure(&self) -> bool {
+        self.definition.allow_failure
+    }
+
+    /// [`Severity`] of this check's `result`
+    pub fn severity(&self, result: &CheckResult) -> Severity {
+        Severity::of(result, self.allow_failure())
+    }
+
     /// Check if this is an on-demand check (requires manual trigger)
     pub fn is_on_demand(&self) -> bool {
         self.files.is_on_demand()
@@ -158,6 +170,41 @@ impl CheckToRun {
     pub fn get_command_for_all_files(&self) -> String {
         resolve_command(&self.definition, &[], false)
     }
+}
+
+/// How a check result counts in summaries, reports and the exit code
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Not a failure (passed, cancelled, skipped, not finished)
+    Ok,
+    /// Failed or timed out after running, check has `allow_failure`: shown
+    /// in yellow, does not fail the run
+    Warning,
+    /// Any other failure, including one that never ran
+    /// ([`CheckResult::not_run`])
+    Error,
+}
+
+impl Severity {
+    /// Severity of `result` of a check with `allow_failure`
+    pub fn of(result: &CheckResult, allow_failure: bool) -> Self {
+        if !result.status.is_failure() {
+            Self::Ok
+        } else if allow_failure && !result.not_run {
+            Self::Warning
+        } else {
+            Self::Error
+        }
+    }
+}
+
+/// [`Severity`] of `result`, its check looked up by id in `checks`
+/// (unknown: no `allow_failure`)
+pub fn severity_in(checks: &[CheckToRun], result: &CheckResult) -> Severity {
+    let allow = checks
+        .iter()
+        .any(|c| c.id() == result.check_id && c.allow_failure());
+    Severity::of(result, allow)
 }
 
 /// Determine which checks should run based on changed files.
@@ -317,6 +364,7 @@ mod tests {
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -345,6 +393,7 @@ mod tests {
                     ..Default::default()
                 }),
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -362,6 +411,7 @@ mod tests {
                     ..Default::default()
                 }),
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -390,6 +440,7 @@ mod tests {
                     ..Default::default()
                 }),
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -418,6 +469,7 @@ mod tests {
                     ..Default::default()
                 }),
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -466,6 +518,7 @@ mod tests {
                 fix_command: None,
                 triggers: None,
                 on_demand: false,
+                allow_failure: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
                 error_pattern: None,
@@ -1408,6 +1461,7 @@ checks:
                 fix_command: fix.map(String::from),
                 triggers: Some(crate::config::CheckTriggers::default()),
                 on_demand: false,
+                allow_failure: false,
                 env: std::collections::HashMap::new(),
                 timeout: None,
                 error_pattern: None,

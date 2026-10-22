@@ -360,6 +360,53 @@ async fn failed_group_setup_fails_its_verifications() {
     assert!(summary.has_failures);
 }
 
+/// A verification that never reports (its task panicked) is a real
+/// failure, even for an `allow_failure` check
+#[tokio::test]
+async fn unreported_verification_of_allowed_check_fails_the_run() {
+    let config = common::configs::ConfigBuilder::new()
+        .with_file_pattern("rust", r"\.rs$", None)
+        .with_parallel_group("lint")
+        .with_check(
+            "lint",
+            "fmt",
+            common::configs::CheckBuilder::new("Format", "cargo fmt --check {files}")
+                .with_fix_command("cargo fmt {files}")
+                .with_file_pattern_trigger("rust")
+                .allow_failure()
+                .build(),
+        )
+        .build();
+    let checks = selected(&config);
+    let mut mock = MockCommandExecutor::new();
+    mock.expect_running_container()
+        .returning(|_, _, _| Some(common::RUNNING_ID.into()));
+    mock.expect_execute().returning(|cmd, _, _| {
+        assert_ne!(kind(cmd), "check", "verification task panics");
+        CommandOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    });
+
+    let summary = run_with_executor(
+        config,
+        main_rs_changed(),
+        "/app".into(),
+        Some(checks),
+        Arc::new(mock),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        (summary.verify_fail_count, summary.verify_warning_count),
+        (1, 0)
+    );
+    assert!(summary.has_failures);
+}
+
 #[tokio::test]
 async fn no_setup_without_verification() {
     let config = common::configs::fixable_group_with_setup_config();

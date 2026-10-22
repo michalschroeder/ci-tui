@@ -656,6 +656,10 @@ pub struct CheckDefinition {
     /// If true, check requires manual trigger when source files change but no specific tests found
     #[serde(default)]
     pub on_demand: bool,
+    /// If true, a failure or timeout of this check is a warning: shown in
+    /// yellow, counted apart, and does not fail the run or the exit code
+    #[serde(default)]
+    pub allow_failure: bool,
     /// Additional environment variables for this check (merged with global env)
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
@@ -1420,6 +1424,7 @@ mod tests {
                 fix_command: self.fix_command,
                 triggers: self.triggers,
                 on_demand: false,
+                allow_failure: false,
                 env: HashMap::new(),
                 timeout: None,
                 error_pattern: None,

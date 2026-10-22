@@ -77,6 +77,26 @@ pub fn run_ci_tui_env(
         .unwrap()
 }
 
+/// Tempdir holding `ci-tui.yaml` = `config`; runs the binary in it with
+/// `args` (see [`run_ci_tui`])
+#[allow(dead_code)]
+pub fn run_config(config: &str, args: &[&str]) -> (tempfile::TempDir, std::process::Output) {
+    run_config_env(config, args, &[])
+}
+
+/// [`run_config`] with `env` set (see [`run_ci_tui_env`])
+#[allow(dead_code)]
+pub fn run_config_env(
+    config: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> (tempfile::TempDir, std::process::Output) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("ci-tui.yaml"), config).unwrap();
+    let out = run_ci_tui_env(tmp.path(), args, env);
+    (tmp, out)
+}
+
 /// Run `git args` in `dir` against the real git binary, panicking on failure.
 #[allow(dead_code)]
 pub fn git(dir: &std::path::Path, args: &[&str]) {
@@ -189,6 +209,7 @@ pub fn make_check_with_options(
             },
             triggers: None,
             on_demand,
+            allow_failure: false,
             env: std::collections::HashMap::new(),
             timeout: None,
             error_pattern: None,
@@ -263,6 +284,7 @@ pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckT
             fix_command: None,
             triggers: None,
             on_demand: false,
+            allow_failure: false,
             env: std::collections::HashMap::new(),
             timeout: None,
             error_pattern: None,

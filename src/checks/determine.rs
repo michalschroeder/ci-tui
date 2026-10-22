@@ -404,6 +404,7 @@ mod tests {
             fix_command: fix.map(String::from),
             triggers,
             on_demand,
+            allow_failure: false,
             env: HashMap::new(),
             timeout: None,
             error_pattern: None,

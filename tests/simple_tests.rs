@@ -6,6 +6,7 @@
 //! run()/run_sequential()/run_parallel() orchestration is covered in
 //! tests/simple_executor_tests.rs via run_with_executor + MockCommandExecutor.
 
+use ci_tui::checks::Severity;
 use ci_tui::runner::{CheckResult, CheckStatus};
 use ci_tui::simple::{format_failed_check, format_result, print_result};
 use rstest::rstest;
@@ -51,7 +52,7 @@ fn print_result_handles_all_status_variants(
 ) {
     let result = make_result(check_id, status, duration_ms);
     // Should complete without panic
-    print_result(&result);
+    print_result(&result, Severity::of(&result, false));
 }
 
 // --- format_failed_check tests ---
@@ -61,7 +62,7 @@ fn format_failed_check_shows_full_stdout() {
     let output = "Compiling ci-tui v0.1.0\nwarning: unused variable\nerror: aborting";
     let result = make_failed_result("clippy", output, "");
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     // All stdout lines must be present (no truncation)
     assert!(formatted.contains("Compiling ci-tui v0.1.0"));
@@ -74,7 +75,7 @@ fn format_failed_check_shows_full_stderr() {
     let stderr = "error[E0433]: failed to resolve\nerror: could not compile";
     let result = make_failed_result("build", "", stderr);
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     assert!(formatted.contains("error[E0433]: failed to resolve"));
     assert!(formatted.contains("error: could not compile"));
@@ -84,7 +85,7 @@ fn format_failed_check_shows_full_stderr() {
 fn format_failed_check_shows_both_stdout_and_stderr() {
     let result = make_failed_result("test", "stdout line", "stderr line");
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     assert!(formatted.contains("stdout line"));
     assert!(formatted.contains("stderr line"));
@@ -102,7 +103,7 @@ fn format_failed_check_no_truncation_for_long_output() {
     let output = lines.join("\n");
 
     let result = make_failed_result("clippy", &output, "");
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     // Both download noise AND actual errors must be present
     assert!(formatted.contains("Downloaded crate-0 v0.1.0"));
@@ -119,7 +120,7 @@ fn format_failed_check_no_truncation_for_long_output() {
 fn format_failed_check_includes_box_frame() {
     let result = make_failed_result("clippy", "some output", "");
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     assert!(formatted.contains("┌─ clippy ─┐"));
     assert!(formatted.contains("└──────────┘"));
@@ -129,7 +130,7 @@ fn format_failed_check_includes_box_frame() {
 fn format_failed_check_includes_fix_command() {
     let result = make_failed_result("fmt", "bad formatting", "");
 
-    let formatted = format_failed_check(&result, Some("cargo fmt"));
+    let formatted = format_failed_check(&result, Some("cargo fmt"), Severity::Error);
 
     assert!(formatted.contains("Fix command:"));
     assert!(formatted.contains("cargo fmt"));
@@ -139,7 +140,7 @@ fn format_failed_check_includes_fix_command() {
 fn format_failed_check_omits_fix_when_none() {
     let result = make_failed_result("clippy", "warning", "");
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     assert!(!formatted.contains("Fix command:"));
 }
@@ -148,7 +149,7 @@ fn format_failed_check_omits_fix_when_none() {
 fn format_failed_check_empty_output() {
     let result = make_failed_result("check", "", "");
 
-    let formatted = format_failed_check(&result, None);
+    let formatted = format_failed_check(&result, None, Severity::Error);
 
     // Should still have the box frame
     assert!(formatted.contains("┌─ check ─┐"));
@@ -157,7 +158,10 @@ fn format_failed_check_empty_output() {
 
 #[test]
 fn format_result_timed_out_shows_label_and_duration() {
-    let line = format_result(&make_result("hang", CheckStatus::TimedOut, 1000));
+    let line = format_result(
+        &make_result("hang", CheckStatus::TimedOut, 1000),
+        Severity::Error,
+    );
     assert!(line.contains("hang"), "got: {line}");
     assert!(line.contains("timed out"), "got: {line}");
     assert!(line.contains("1.0s"), "got: {line}");
@@ -165,13 +169,19 @@ fn format_result_timed_out_shows_label_and_duration() {
 
 #[test]
 fn format_result_failed_is_not_timed_out() {
-    let line = format_result(&make_result("x", CheckStatus::Failed, 1000));
+    let line = format_result(
+        &make_result("x", CheckStatus::Failed, 1000),
+        Severity::Error,
+    );
     assert!(!line.contains("timed out"), "got: {line}");
 }
 
 #[test]
 fn format_result_cancelled_says_cancelled() {
-    let line = format_result(&make_result("slow", CheckStatus::Cancelled, 1000));
+    let line = format_result(
+        &make_result("slow", CheckStatus::Cancelled, 1000),
+        Severity::Error,
+    );
     assert!(
         line.contains("slow") && line.contains("cancelled"),
         "got: {line}"

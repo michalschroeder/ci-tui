@@ -967,3 +967,72 @@ fn test_cached_check_row_shows_cached_and_check_mark() {
     let buffer = render_at(&mut app, WIDTH, HEIGHT);
     assert!(buffer_contains(&buffer, "✓ Clippy cached"));
 }
+
+// ============================================================================
+// allow_failure (#151)
+// ============================================================================
+
+/// Mark check `id` of `app` `allow_failure`
+fn allow_failure(app: &mut ci_tui::ui::app::App, id: &str) {
+    let check = app.checks.iter_mut().find(|c| c.id() == id).unwrap();
+    check.definition.allow_failure = true;
+}
+
+#[test]
+fn test_allowed_failure_icons_are_yellow() {
+    let mut app = make_test_app(); // unit failed
+    allow_failure(&mut app, "unit");
+    allow_failure(&mut app, "clippy");
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::TimedOut;
+    app.next_check(); // fmt selected: the panel shows no failure icon
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(find_symbol_color(buffer, '✗'), Some(Color::Yellow));
+    assert_eq!(find_symbol_color(buffer, '⧗'), Some(Color::Yellow));
+}
+
+#[test]
+fn test_output_panel_shows_allowed_failure() {
+    let mut app = make_test_app();
+    allow_failure(&mut app, "unit");
+    // No error lines: the panel would open scrolled to the first one
+    app.results.get_mut("unit").unwrap().error_output = "boom\n".to_string();
+    app.next_check(); // fmt
+    app.next_check(); // test group header
+    app.next_check(); // unit
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(buffer_contains(buffer, "✗ FAILED (allowed)"));
+    let colors = find_all_symbol_colors(buffer, '✗');
+    assert_eq!(colors, [Color::Yellow, Color::Yellow], "list and panel");
+}
+
+#[test]
+fn test_output_panel_shows_allowed_timeout() {
+    let mut app = make_test_app(); // clippy selected
+    allow_failure(&mut app, "clippy");
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::TimedOut;
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    assert!(buffer_contains(
+        terminal.backend().buffer(),
+        "⧗ TIMED OUT (allowed)"
+    ));
+}
+
+#[test]
+fn test_header_allowed_failure_only_is_yellow_warning() {
+    let mut app = make_test_app_all_passed();
+    allow_failure(&mut app, "unit");
+    app.results.get_mut("unit").unwrap().status = ci_tui::runner::CheckStatus::Failed;
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(buffer_contains(buffer, "2/3 passed, 1 warning in "));
+    assert_eq!(buffer[(1, 1)].fg, Color::Yellow, "gauge fill");
+}

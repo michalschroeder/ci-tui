@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{assert_code, run_ci_tui_env, stdout};
+use common::{assert_code, run_ci_tui_env, run_config_env, stdout};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config: group `lint` with passing `ok`, group `tests` with
@@ -44,21 +44,9 @@ fn failing() -> String {
     config("echo 'bad <x>' && false")
 }
 
-/// Tempdir holding `ci-tui.yaml` = `config`; runs the binary with `args` and `env`
-fn run(
-    config: &str,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> (tempfile::TempDir, std::process::Output) {
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("ci-tui.yaml"), config).unwrap();
-    let out = run_ci_tui_env(tmp.path(), args, env);
-    (tmp, out)
-}
-
 #[test]
 fn json_on_stdout_is_only_the_report_and_exits_1() {
-    let (_tmp, out) = run(&failing(), &["--format", "json", "-f", "a.rs"], &[]);
+    let (_tmp, out) = run_config_env(&failing(), &["--format", "json", "-f", "a.rs"], &[]);
     assert_code(&out, exit::CHECKS_FAILED);
     let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(doc["version"], 1);
@@ -73,7 +61,7 @@ fn json_on_stdout_is_only_the_report_and_exits_1() {
 #[test]
 fn junit_output_file_keeps_text_on_stdout() {
     let args = ["--format", "junit", "--output", "r.xml", "-f", "a.rs"];
-    let (tmp, out) = run(&failing(), &args, &[]);
+    let (tmp, out) = run_config_env(&failing(), &args, &[]);
     assert_code(&out, exit::CHECKS_FAILED);
     let doc = std::fs::read_to_string(tmp.path().join("r.xml")).unwrap();
     assert!(doc.starts_with("<?xml"), "{doc}");
@@ -93,7 +81,7 @@ fn junit_output_file_keeps_text_on_stdout() {
 #[test]
 fn passing_json_output_file_exits_0() {
     let args = ["--format", "json", "--output", "r.json", "-f", "a.rs"];
-    let (tmp, out) = run(&config("'true'"), &args, &[]);
+    let (tmp, out) = run_config_env(&config("'true'"), &args, &[]);
     assert_code(&out, exit::SUCCESS);
     let doc = std::fs::read_to_string(tmp.path().join("r.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&doc).unwrap();
@@ -103,11 +91,11 @@ fn passing_json_output_file_exits_0() {
 #[test]
 fn no_checks_run_still_writes_valid_docs() {
     // Nothing matches `.rs`: both checks wait on-demand, which simple mode never runs
-    let (_tmp, out) = run(&failing(), &["--format", "json", "-f", "README.md"], &[]);
+    let (_tmp, out) = run_config_env(&failing(), &["--format", "json", "-f", "README.md"], &[]);
     assert_code(&out, exit::SUCCESS);
     let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(doc["checks"], serde_json::json!([]));
-    let (_tmp, out) = run(&failing(), &["--format", "junit", "-f", "README.md"], &[]);
+    let (_tmp, out) = run_config_env(&failing(), &["--format", "junit", "-f", "README.md"], &[]);
     assert_code(&out, exit::SUCCESS);
     assert!(stdout(&out).trim_end().ends_with("</testsuites>"));
 }
@@ -122,7 +110,7 @@ fn unwritable_output_file_is_an_error() {
         "-f",
         "a.rs",
     ];
-    let (_tmp, out) = run(&config("'true'"), &args, &[]);
+    let (_tmp, out) = run_config_env(&config("'true'"), &args, &[]);
     assert_code(&out, exit::ENV_ERROR);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Failed to write report"), "{stderr}");
@@ -131,7 +119,7 @@ fn unwritable_output_file_is_an_error() {
 #[test]
 fn failed_checks_exit_1_even_if_report_write_fails() {
     let args = ["--format", "json", "--output", "no/such/dir/r.json"];
-    let (_tmp, out) = run(&failing(), &[&args[..], &["-f", "a.rs"]].concat(), &[]);
+    let (_tmp, out) = run_config_env(&failing(), &[&args[..], &["-f", "a.rs"]].concat(), &[]);
     assert_code(&out, exit::CHECKS_FAILED);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Failed to write report"), "{stderr}");
@@ -152,14 +140,14 @@ fn stale_output_file_is_removed_when_run_stops_early() {
 
 #[test]
 fn format_with_list_is_a_usage_error() {
-    let (_tmp, out) = run(&failing(), &["--format", "json", "--list"], &[]);
+    let (_tmp, out) = run_config_env(&failing(), &["--format", "json", "--list"], &[]);
     assert_code(&out, exit::CONFIG_ERROR);
 }
 
 #[test]
 fn github_actions_annotates_text_output() {
     let env = [("GITHUB_ACTIONS", "true")];
-    let (_tmp, out) = run(&failing(), &["-s", "-f", "a.rs"], &env);
+    let (_tmp, out) = run_config_env(&failing(), &["-s", "-f", "a.rs"], &env);
     assert_code(&out, exit::CHECKS_FAILED);
     let text = stdout(&out);
     assert!(text.contains("::group::LINT\n"), "{text}");
@@ -174,7 +162,7 @@ fn github_actions_annotates_text_output() {
 #[test]
 fn github_actions_does_not_annotate_report_on_stdout() {
     let env = [("GITHUB_ACTIONS", "true")];
-    let (_tmp, out) = run(&failing(), &["--format", "json", "-f", "a.rs"], &env);
+    let (_tmp, out) = run_config_env(&failing(), &["--format", "json", "-f", "a.rs"], &env);
     assert_code(&out, exit::CHECKS_FAILED);
     let text = stdout(&out);
     assert!(!text.contains("::"), "{text}");
@@ -183,7 +171,7 @@ fn github_actions_does_not_annotate_report_on_stdout() {
 
 #[test]
 fn text_output_without_github_actions_has_no_annotations() {
-    let (_tmp, out) = run(&failing(), &["-s", "-f", "a.rs"], &[]);
+    let (_tmp, out) = run_config_env(&failing(), &["-s", "-f", "a.rs"], &[]);
     assert_code(&out, exit::CHECKS_FAILED);
     let text = stdout(&out);
     assert!(

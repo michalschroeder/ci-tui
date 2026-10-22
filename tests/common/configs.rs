@@ -297,6 +297,7 @@ pub struct CheckBuilder {
     fix_command: Option<String>,
     triggers: Option<CheckTriggers>,
     on_demand: bool,
+    allow_failure: bool,
     env: HashMap<String, String>,
 }
 
@@ -310,6 +311,7 @@ impl CheckBuilder {
             fix_command: None,
             triggers: None,
             on_demand: false,
+            allow_failure: false,
             env: HashMap::new(),
         }
     }
@@ -355,6 +357,13 @@ impl CheckBuilder {
         self
     }
 
+    /// Mark this check `allow_failure` (a failure is a warning)
+    #[allow(dead_code)]
+    pub fn allow_failure(mut self) -> Self {
+        self.allow_failure = true;
+        self
+    }
+
     /// Build the final CheckDefinition
     pub fn build(self) -> CheckDefinition {
         CheckDefinition {
@@ -364,6 +373,7 @@ impl CheckBuilder {
             fix_command: self.fix_command,
             triggers: self.triggers,
             on_demand: self.on_demand,
+            allow_failure: self.allow_failure,
             env: self.env,
             timeout: None,
             error_pattern: None,
