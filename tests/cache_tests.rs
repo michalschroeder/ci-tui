@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{assert_code, git, project, run_ci_tui, simple_run, stdout, write};
+use common::{assert_code, commit, git, project, run_ci_tui, simple_run, stdout, write};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config: `lint` (triggered by `.rs` files) appends to
@@ -241,11 +241,7 @@ fn linked_worktree_caches_in_its_git_dir() {
     write(&main, "ci-tui.yaml", CONFIG);
     write(&main, "a.rs", "fn a() {}\n");
     git(&main, &["add", "."]);
-    let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
-    git(
-        &main,
-        &[&identity[..], &["commit", "-q", "-m", "init"]].concat(),
-    );
+    commit(&main, "init");
     git(&main, &["worktree", "add", "-q", "../wt"]);
 
     let wt = outer.path().join("wt");

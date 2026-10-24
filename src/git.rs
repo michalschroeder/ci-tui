@@ -16,6 +16,7 @@
 
 use crate::config::GitConfig;
 use anyhow::{Context, Result};
+use indexmap::IndexSet;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -92,7 +93,7 @@ impl NonUtf8Output {
 
 /// True when `err` is (or wraps) [`NonUtf8Output`]
 pub fn is_non_utf8(err: &anyhow::Error) -> bool {
-    err.chain().any(|e| e.is::<NonUtf8Output>())
+    err.downcast_ref::<NonUtf8Output>().is_some()
 }
 
 /// Sentinel `base_ref` used when files come from the `--files` CLI flag
@@ -188,7 +189,7 @@ pub fn detect_changes_with_executor(
     let base_refs = base_ref_candidates(git_config);
 
     // Find the first base ref whose committed diff resolves.
-    let mut resolved: Option<(String, String)> = None;
+    let mut resolved: Option<(String, Vec<String>)> = None;
     for base_ref in &base_refs {
         match run_committed_diff(project_root, base_ref, executor) {
             Ok(out) => {
@@ -213,7 +214,7 @@ pub fn detect_changes_with_executor(
     let untracked = run_untracked_list(project_root, executor)?;
 
     Ok(ChangedFiles {
-        files: union_paths(&[&committed, &uncommitted, &untracked]),
+        files: union_paths([committed, uncommitted, untracked]),
         base_ref,
     })
 }
@@ -239,7 +240,7 @@ pub fn get_changed_files_with_executor(
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {
-        files: union_paths(&[&committed, &uncommitted, &untracked]),
+        files: union_paths([committed, uncommitted, untracked]),
         base_ref: base_ref.to_string(),
     })
 }
@@ -262,31 +263,16 @@ pub fn get_staged_files_with_executor(
     project_root: &Path,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let args = vec![
-        "diff".to_string(),
-        "--cached".to_string(),
-        "--name-only".to_string(),
-        "-z".to_string(),
-        DIFF_FILTER.to_string(),
-    ];
-    let staged = executor
-        .run_command(project_root, &args)
+    let args = ["--cached", "--name-only", DIFF_FILTER];
+    let mut files = list_paths(project_root, executor, "diff", &args)
         .context("could not read staged files from the git index")?;
     // Checks read the working tree: drop staged paths since deleted on disk.
     // `--full-name -- :/` keeps paths repo-relative like `git diff` from subdirs.
-    let args = vec![
-        "ls-files".to_string(),
-        "--deleted".to_string(),
-        "--full-name".to_string(),
-        "-z".to_string(),
-        "--".to_string(),
-        ":/".to_string(),
-    ];
-    let deleted = executor
-        .run_command(project_root, &args)
-        .context("could not list staged files deleted from the working tree")?;
-    let deleted: HashSet<String> = union_paths(&[&deleted]).into_iter().collect();
-    let mut files = union_paths(&[&staged]);
+    let args = ["--deleted", "--full-name", "--", ":/"];
+    let deleted: HashSet<String> = list_paths(project_root, executor, "ls-files", &args)
+        .context("could not list staged files deleted from the working tree")?
+        .into_iter()
+        .collect();
     files.retain(|f| !deleted.contains(f));
     Ok(ChangedFiles {
         files,
@@ -300,21 +286,19 @@ fn run_committed_diff(
     project_root: &Path,
     base_ref: &str,
     executor: &impl GitExecutor,
-) -> Result<String> {
-    let args = vec![
-        "diff".to_string(),
-        "--name-only".to_string(),
-        "-z".to_string(),
-        DIFF_FILTER.to_string(),
-        "--merge-base".to_string(),
+) -> Result<Vec<String>> {
+    let args = [
+        "--name-only",
+        DIFF_FILTER,
+        "--merge-base",
         // Refs come from config / `--base`: a leading `-` must not parse as an
         // option, and `--` keeps a ref that is also a path unambiguous.
-        "--end-of-options".to_string(),
-        base_ref.to_string(),
-        "HEAD".to_string(),
-        "--".to_string(),
+        "--end-of-options",
+        base_ref,
+        "HEAD",
+        "--",
     ];
-    executor.run_command(project_root, &args).map_err(|e| {
+    list_paths(project_root, executor, "diff", &args).map_err(|e| {
         if is_non_utf8(&e) {
             e
         } else {
@@ -323,42 +307,39 @@ fn run_committed_diff(
     })
 }
 
-fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
-    let args = vec![
-        "diff".to_string(),
-        "--name-only".to_string(),
-        "-z".to_string(),
-        DIFF_FILTER.to_string(),
-        "HEAD".to_string(),
-    ];
-    executor.run_command(project_root, &args)
+fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
+    let args = ["--name-only", DIFF_FILTER, "HEAD"];
+    list_paths(project_root, executor, "diff", &args)
 }
 
-fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
-    let args = vec![
-        "ls-files".to_string(),
-        "--others".to_string(),
-        "--exclude-standard".to_string(),
-        "-z".to_string(),
-    ];
-    executor.run_command(project_root, &args)
+fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
+    let args = ["--others", "--exclude-standard"];
+    list_paths(project_root, executor, "ls-files", &args)
 }
 
-/// Paths from NUL-terminated (`-z`) git listings, deduped in order. `-z`
-/// prints names verbatim: without it git C-quotes names with non-ASCII bytes,
-/// `"`, `\` or control chars, so they match no pattern and skip their checks.
-fn union_paths(sources: &[&str]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut files = Vec::new();
-    for path in sources.iter().flat_map(|s| s.split('\0')) {
-        if path.is_empty() {
-            continue;
-        }
-        if seen.insert(path.to_string()) {
-            files.push(path.to_string());
-        }
-    }
-    files
+/// Paths `git <subcommand> -z <args>` lists. `-z` prints names verbatim,
+/// NUL-terminated: without it git C-quotes names with non-ASCII bytes, `"`,
+/// `\` or control chars, so they match no pattern and skip their checks.
+fn list_paths(
+    project_root: &Path,
+    executor: &impl GitExecutor,
+    subcommand: &str,
+    args: &[&str],
+) -> Result<Vec<String>> {
+    let args: Vec<String> = [subcommand, "-z"]
+        .iter()
+        .chain(args)
+        .map(|a| a.to_string())
+        .collect();
+    let out = executor.run_command(project_root, &args)?;
+    let paths = out.split('\0').filter(|path| !path.is_empty());
+    Ok(paths.map(str::to_string).collect())
+}
+
+/// `lists` concatenated, deduped in first-seen order
+fn union_paths<const N: usize>(lists: [Vec<String>; N]) -> Vec<String> {
+    let paths: IndexSet<String> = lists.into_iter().flatten().collect();
+    paths.into_iter().collect()
 }
 
 /// Get the current branch name.
@@ -802,9 +783,9 @@ mod tests {
             .withf(|_, args: &[String]| {
                 args == [
                     "diff",
+                    "-z",
                     "--cached",
                     "--name-only",
-                    "-z",
                     "--diff-filter=ACMR",
                 ]
             })
@@ -812,7 +793,7 @@ mod tests {
             .returning(|_, _| Ok("a.rs\0src/b.rs\0gone.rs\0".to_string()));
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                args == ["ls-files", "--deleted", "--full-name", "-z", "--", ":/"]
+                args == ["ls-files", "-z", "--deleted", "--full-name", "--", ":/"]
             })
             .times(1)
             .returning(|_, _| Ok("gone.rs\0".to_string()));
@@ -829,8 +810,9 @@ mod tests {
     #[test]
     fn path_listings_are_nul_separated() {
         let mut mock = MockGitExecutor::new();
+        // Right after the subcommand: before `--end-of-options` / `--`
         mock.expect_run_command()
-            .withf(|_, args: &[String]| args.iter().any(|a| a == "-z"))
+            .withf(|_, args: &[String]| args[1] == "-z")
             .times(3)
             .returning(|_, _| Ok(String::new()));
         get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
@@ -906,6 +888,17 @@ mod tests {
             !format!("{err:#}").contains("could not resolve"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn is_non_utf8_sees_through_context() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
+
+        let err = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap_err();
+        assert!(format!("{err:#}").starts_with("could not read staged files"));
+        assert!(is_non_utf8(&err), "got: {err:#}");
     }
 
     #[test]

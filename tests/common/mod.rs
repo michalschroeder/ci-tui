@@ -244,6 +244,16 @@ pub fn git(dir: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// `git commit` of what is staged in `dir`, with a throwaway identity
+#[allow(dead_code)]
+pub fn commit(dir: &std::path::Path, message: &str) {
+    let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+    git(
+        dir,
+        &[&identity[..], &["commit", "-q", "-m", message]].concat(),
+    );
+}
+
 /// Create a mock that returns the given output for any command
 #[allow(dead_code)]
 pub fn mock_git_with_output(output: &str) -> ci_tui::git::MockGitExecutor {

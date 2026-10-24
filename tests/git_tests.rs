@@ -10,7 +10,10 @@ use ci_tui::git::{
     current_branch_with_executor, detect_changes_with_executor, get_changed_files_with_executor,
     short_commit_with_executor, MockGitExecutor,
 };
-use common::{assert_code, git, mock_git_error, mock_git_with_output, run_ci_tui_env, write};
+use common::{
+    assert_code, commit, git, mock_git_error, mock_git_with_output, run_ci_tui_env, stderr, stdout,
+    write,
+};
 use rstest::rstest;
 use std::path::Path;
 
@@ -338,16 +341,14 @@ checks:
     fn feature_repo() -> tempfile::TempDir {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path();
-        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
-        let commit = [&identity[..], &["commit", "-q", "-m", "c"]].concat();
         git(dir, &["init", "-q", "-b", "main"]);
         write(dir, "ci-tui.yaml", CONFIG);
         git(dir, &["add", "."]);
-        git(dir, &commit);
+        commit(dir, "base");
         git(dir, &["checkout", "-q", "-b", "feature"]);
         write(dir, "src/café.py", "bad\n");
         git(dir, &["add", "."]);
-        git(dir, &commit);
+        commit(dir, "feature");
         write(dir, "src/a\"b.py", "bad\n");
         tmp
     }
@@ -357,7 +358,7 @@ checks:
         let tmp = feature_repo();
         let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &QUOTE_PATH);
         assert_code(&out, exit::CHECKS_FAILED);
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stdout = stdout(&out);
         assert!(stdout.contains("[src/café.py]"), "{stdout}");
         assert!(stdout.contains("[src/a\"b.py]"), "{stdout}");
     }
@@ -373,7 +374,7 @@ checks:
 
         let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &QUOTE_PATH);
         assert_code(&out, exit::ENV_ERROR);
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = stderr(&out);
         assert!(
             stderr.contains("non-UTF-8 path `src/caf\u{fffd}.py`"),
             "{stderr}"

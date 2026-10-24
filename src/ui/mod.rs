@@ -426,40 +426,61 @@ impl TaskCtx {
     /// Blocking (git + file system): call from `spawn_blocking`.
     /// `--files` lists are kept as-is (no git base to diff against); only
     /// the checks are re-determined. `--staged` re-reads the git index.
-    fn refresh(
-        &self,
-        previous: ChangedFiles,
-        only: Option<&str>,
-    ) -> Result<(ChangedFiles, Selected)> {
-        let changed_files = if previous.is_cli_files() {
-            previous
-        } else {
-            let mut changed = self.redetect(&previous)?;
-            changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
-            changed
+    /// When git fails, `previous` is kept (none would skip every check).
+    fn refresh(&self, previous: ChangedFiles, only: Option<&str>) -> Refreshed {
+        let redetected = (!previous.is_cli_files()).then(|| self.redetect(&previous));
+        let (changed_files, git_error) = match redetected {
+            None => (previous, None),
+            Some(Ok(changed)) => (changed, None),
+            Some(Err(e)) => (previous, Some(git_refresh_failed(&e))),
         };
         let selected = self.select(&changed_files, only);
-        Ok((changed_files, selected))
-    }
-
-    /// Git re-detection for [`Self::refresh`]: the index for `--staged`,
-    /// else a diff against the previous base ref.
-    fn redetect(&self, previous: &ChangedFiles) -> Result<ChangedFiles> {
-        if previous.is_staged() {
-            get_staged_files(&self.project_root)
-        } else {
-            get_changed_files(&self.project_root, &previous.base_ref)
+        Refreshed {
+            changed_files,
+            selected,
+            git_error,
         }
     }
 
-    /// [`Self::refresh`] on the blocking pool
+    /// Git re-detection for [`Self::refresh`], minus `ignore_patterns`: the
+    /// index for `--staged`, else a diff against the previous base ref.
+    fn redetect(&self, previous: &ChangedFiles) -> Result<ChangedFiles> {
+        let mut changed = if previous.is_staged() {
+            get_staged_files(&self.project_root)
+        } else {
+            get_changed_files(&self.project_root, &previous.base_ref)
+        }?;
+        changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
+        Ok(changed)
+    }
+
+    /// [`Self::refresh`] on the blocking pool; errs only if it panicked
     async fn refresh_async(
         &self,
         previous: ChangedFiles,
         only: Option<String>,
-    ) -> Result<(ChangedFiles, Selected)> {
+    ) -> Result<Refreshed> {
         let ctx = self.clone();
-        tokio::task::spawn_blocking(move || ctx.refresh(previous, only.as_deref())).await?
+        Ok(tokio::task::spawn_blocking(move || ctx.refresh(previous, only.as_deref())).await?)
+    }
+}
+
+/// [`TaskCtx::refresh`] result
+struct Refreshed {
+    changed_files: ChangedFiles,
+    selected: Selected,
+    /// Git re-detection failed ([`git_refresh_failed`] message);
+    /// `changed_files` is the previous list
+    git_error: Option<String>,
+}
+
+impl Refreshed {
+    /// Files and checks, or the git error
+    fn ok(self) -> Result<(ChangedFiles, Selected), String> {
+        match self.git_error {
+            Some(message) => Err(message),
+            None => Ok((self.changed_files, self.selected)),
+        }
     }
 }
 
@@ -569,7 +590,9 @@ async fn refresh_and_run(
     auto_only: bool,
 ) -> Option<CheckResult> {
     let only = Some(check.id().to_string());
-    let check = match ctx.refresh_async(changed_files, only).await {
+    let refreshed = ctx.refresh_async(changed_files, only).await;
+    let refreshed = refreshed.map_err(|e| git_refresh_failed(&e));
+    let check = match refreshed.and_then(Refreshed::ok) {
         Ok((changed_files, selected)) => {
             let Some(new_check) = selected.checks.into_iter().find(|c| c.id() == check.id()) else {
                 let _ = tx.send(TaskEvent::CheckNotApplicable(previous)).await;
@@ -589,10 +612,8 @@ async fn refresh_and_run(
             new_check
         }
         // Git refresh failed - run with the existing check
-        Err(e) => {
-            let _ = tx
-                .send(TaskEvent::GitRefreshFailed(git_refresh_failed(&e)))
-                .await;
+        Err(message) => {
+            let _ = tx.send(TaskEvent::GitRefreshFailed(message)).await;
             check
         }
     };
@@ -1147,18 +1168,27 @@ fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
         return Action::Continue;
     }
     let previous = app.changed_files.clone();
+    let base_ref = previous.base_ref.clone();
     app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
         let (changed_files, Selected { checks, warnings }) =
-            match ctx.refresh_async(previous.clone(), None).await {
-                Ok(refreshed) => refreshed,
-                // Git refresh failed - restart with the previous file list
-                // (none would skip every check); the reset clears status
-                // messages, so the error goes first in the warnings
+            match ctx.refresh_async(previous, None).await {
+                // The reset clears status messages: a git error goes first
+                // in the warnings
+                Ok(mut refreshed) => {
+                    let warnings = &mut refreshed.selected.warnings;
+                    warnings.splice(0..0, refreshed.git_error);
+                    (refreshed.changed_files, refreshed.selected)
+                }
+                // Refresh panicked - restart with no changed files
                 Err(e) => {
-                    let mut selected = ctx.select(&previous, None);
+                    let changed_files = ChangedFiles {
+                        files: vec![],
+                        base_ref,
+                    };
+                    let mut selected = ctx.select(&changed_files, None);
                     selected.warnings.insert(0, git_refresh_failed(&e));
-                    (previous, selected)
+                    (changed_files, selected)
                 }
             };
         let _ = tx
@@ -2052,11 +2082,16 @@ checks:
             checks.iter().any(|c| c.id() == "php-lint"),
             "checks of the previous files still run"
         );
-        assert!(
-            warnings[0].starts_with("Git refresh failed: ")
-                && warnings[0].ends_with(" - retrying with previous file list"),
-            "{warnings:?}"
+        assert_refresh_failed(&warnings[0]);
+    }
+
+    /// `text` is a [`git_refresh_failed`] message
+    fn assert_refresh_failed(text: &str) {
+        let (prefix, suffix) = (
+            "Git refresh failed: ",
+            " - retrying with previous file list",
         );
+        assert!(text.starts_with(prefix) && text.ends_with(suffix), "{text}");
     }
 
     fn cli_files() -> ChangedFiles {
@@ -2125,7 +2160,7 @@ checks:
             base_ref: crate::git::STAGED_BASE_REF.to_string(),
         };
 
-        let (changed_files, _) = tasks.ctx.refresh(previous, None).unwrap();
+        let (changed_files, _) = tasks.ctx.refresh(previous, None).ok().unwrap();
 
         assert_eq!(changed_files.files, vec!["Staged.php".to_string()]);
         assert!(changed_files.is_staged());
@@ -4671,12 +4706,7 @@ checks:
         })
         .await;
 
-        let status = status_text(&app).unwrap();
-        assert!(
-            status.starts_with("Git refresh failed: ")
-                && status.ends_with(" - retrying with previous file list"),
-            "{status}"
-        );
+        assert_refresh_failed(status_text(&app).unwrap());
         let result = &app.results["php-lint"];
         assert_eq!(result.status, CheckStatus::Passed);
         assert!(
