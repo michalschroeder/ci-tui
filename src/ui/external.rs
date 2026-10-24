@@ -5,16 +5,16 @@
 //! editors show clean text.
 
 use crate::runner::CheckResult;
+use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
+use rustix::io::Errno;
 use std::fs;
 use std::io::{self, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// Log directory for `w`, relative to the project root (git cwd)
 pub const LOG_DIR: &str = ".ci-tui/logs";
-
-/// Ignores everything under `.ci-tui/` (written by [`save_log`])
-const GITIGNORE: &str = ".ci-tui/.gitignore";
 
 /// `sh` exit code for "command not found"
 const EXIT_NOT_FOUND: i32 = 127;
@@ -175,43 +175,84 @@ pub fn log_path(root: &Path, check_id: &str) -> PathBuf {
 /// previous log; returns the path written. Also writes `.ci-tui/.gitignore`
 /// (`*`) if missing, so git change detection never sees saved logs.
 ///
-/// The repo (or a container sharing it) may plant symlinks under
-/// `.ci-tui/`, so nothing is written through one: a symlinked `.ci-tui` /
-/// `.ci-tui/logs` is an error, `.gitignore` is created exclusively (a
-/// dangling link counts as present) and the log is written to a fresh temp
-/// file renamed over `<id>.log`, replacing a link instead of following it.
+/// The repo (or a container sharing it, even mid-save) may plant symlinks
+/// under `.ci-tui/`, so nothing below `root` is resolved by path: each dir
+/// is opened relative to its parent's handle without following links (a
+/// symlinked `.ci-tui` / `logs` is an error), `.gitignore` is created
+/// exclusively (a dangling link counts as present) and the log is written
+/// to a fresh file renamed over `<id>.log` inside the `logs` handle,
+/// replacing a link instead of following it.
 pub fn save_log(root: &Path, check_id: &str, text: &str) -> io::Result<PathBuf> {
     let path = log_path(root, check_id);
-    let log_dir = root.join(LOG_DIR);
-    real_dir(log_dir.parent().expect("LOG_DIR has a parent"))?;
-    real_dir(&log_dir)?;
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(root.join(GITIGNORE))
-    {
-        Ok(mut file) => file.write_all(b"*\n")?,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+    let name = path
+        .file_name()
+        .expect("log file name")
+        .to_str()
+        .expect("sanitized id");
+    let root_dir = rfs::open(root, DIR_FLAGS, Mode::empty())?;
+    let ci_tui = open_real_dir(&root_dir, root, ".ci-tui")?;
+    let logs = open_real_dir(&ci_tui, root, LOG_DIR)?;
+    // Ignores everything under `.ci-tui/`, so git never sees saved logs
+    match rfs::openat(
+        &ci_tui,
+        ".gitignore",
+        NEW_FILE_FLAGS,
+        Mode::from_raw_mode(0o666),
+    ) {
+        Ok(fd) => fs::File::from(fd).write_all(b"*\n")?,
+        Err(Errno::EXIST) => {}
+        Err(e) => return Err(e.into()),
     }
-    let mut file = tempfile::NamedTempFile::new_in(&log_dir)?;
-    file.write_all(text.as_bytes())?;
-    file.persist(&path).map_err(|e| e.error)?;
-    Ok(path)
+    let tmp = format!(".{name}.{}.tmp", temp_suffix());
+    let written = rfs::openat(&logs, &tmp, NEW_FILE_FLAGS, Mode::from_raw_mode(0o600))
+        .map_err(io::Error::from)
+        .and_then(|fd| fs::File::from(fd).write_all(text.as_bytes()))
+        .and_then(|()| rfs::renameat(&logs, &tmp, &logs, name).map_err(io::Error::from));
+    if written.is_err() {
+        let _ = rfs::unlinkat(&logs, &tmp, AtFlags::empty());
+    }
+    written.map(|()| path)
 }
 
-/// Create dir `path` if missing; error if it is anything but a real dir
-/// (a symlink to one included)
-fn real_dir(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(io::Error::other(format!(
+/// Dirs opened by [`save_log`]: never through a symlink
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
+
+/// Files created by [`save_log`]: only new ones (`EXCL` never follows a link)
+const NEW_FILE_FLAGS: OFlags = OFlags::WRONLY
+    .union(OFlags::CREATE)
+    .union(OFlags::EXCL)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Dir `rel` (relative to `root`; last component opened in `parent`),
+/// created if missing; error if it is anything but a real dir (a symlink to
+/// one included)
+fn open_real_dir(parent: &OwnedFd, root: &Path, rel: &str) -> io::Result<OwnedFd> {
+    let name = Path::new(rel).file_name().expect("dir name");
+    let flags = DIR_FLAGS | OFlags::NOFOLLOW;
+    let opened = match rfs::openat(parent, name, flags, Mode::empty()) {
+        Err(Errno::NOENT) => rfs::mkdirat(parent, name, Mode::from_raw_mode(0o777))
+            .and_then(|()| rfs::openat(parent, name, flags, Mode::empty())),
+        opened => opened,
+    };
+    opened.map_err(|e| match e {
+        Errno::LOOP | Errno::NOTDIR => io::Error::other(format!(
             "{} is not a directory (symlink?)",
-            path.display()
-        ))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(path),
-        Err(e) => Err(e),
-    }
+            root.join(rel).display()
+        )),
+        e => e.into(),
+    })
+}
+
+/// Unpredictable-enough temp name part: pid + clock nanos (`EXCL` rejects
+/// a clash rather than reusing a planted file)
+fn temp_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("{}-{nanos:09}", std::process::id())
 }
 
 /// Private (0700) temp dir for viewer files, removed when dropped (TUI exit)
@@ -436,7 +477,7 @@ mod tests {
         let (root, outside, _victim) = root_and_victim();
         fs::create_dir(root.path().join(".ci-tui")).unwrap();
         let target = outside.path().join("created.txt");
-        std::os::unix::fs::symlink(&target, root.path().join(GITIGNORE)).unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join(".ci-tui/.gitignore")).unwrap();
         save_log(root.path(), "unit", "x").unwrap();
         assert!(!target.exists(), "link not followed");
     }
