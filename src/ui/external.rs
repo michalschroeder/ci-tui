@@ -6,7 +6,7 @@
 
 use crate::runner::CheckResult;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -171,18 +171,47 @@ pub fn log_path(root: &Path, check_id: &str) -> PathBuf {
         .join(format!("{}.log", sanitize_id(check_id)))
 }
 
-/// Write `text` to [`log_path`], creating the log dir and overwriting any
+/// Write `text` to [`log_path`], creating the log dir and replacing any
 /// previous log; returns the path written. Also writes `.ci-tui/.gitignore`
 /// (`*`) if missing, so git change detection never sees saved logs.
+///
+/// The repo (or a container sharing it) may plant symlinks under
+/// `.ci-tui/`, so nothing is written through one: a symlinked `.ci-tui` /
+/// `.ci-tui/logs` is an error, `.gitignore` is created exclusively (a
+/// dangling link counts as present) and the log is written to a fresh temp
+/// file renamed over `<id>.log`, replacing a link instead of following it.
 pub fn save_log(root: &Path, check_id: &str, text: &str) -> io::Result<PathBuf> {
     let path = log_path(root, check_id);
-    fs::create_dir_all(root.join(LOG_DIR))?;
-    let gitignore = root.join(GITIGNORE);
-    if !gitignore.exists() {
-        fs::write(gitignore, "*\n")?;
+    let log_dir = root.join(LOG_DIR);
+    real_dir(log_dir.parent().expect("LOG_DIR has a parent"))?;
+    real_dir(&log_dir)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(root.join(GITIGNORE))
+    {
+        Ok(mut file) => file.write_all(b"*\n")?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
     }
-    fs::write(&path, text)?;
+    let mut file = tempfile::NamedTempFile::new_in(&log_dir)?;
+    file.write_all(text.as_bytes())?;
+    file.persist(&path).map_err(|e| e.error)?;
     Ok(path)
+}
+
+/// Create dir `path` if missing; error if it is anything but a real dir
+/// (a symlink to one included)
+fn real_dir(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(io::Error::other(format!(
+            "{} is not a directory (symlink?)",
+            path.display()
+        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(path),
+        Err(e) => Err(e),
+    }
 }
 
 /// Private (0700) temp dir for viewer files, removed when dropped (TUI exit)
@@ -361,6 +390,55 @@ mod tests {
         let file = dir.path().join("not-a-dir");
         fs::write(&file, "").unwrap();
         assert!(save_log(&file, "php-lint", "x").is_err());
+    }
+
+    /// Root with `ORIGINAL` in `victim.txt` of a separate outside dir
+    #[cfg(unix)]
+    fn root_and_victim() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "ORIGINAL").unwrap();
+        (root, outside, victim)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_log_replaces_symlinked_log_file() {
+        let (root, _outside, victim) = root_and_victim();
+        fs::create_dir_all(root.path().join(LOG_DIR)).unwrap();
+        let link = root.path().join(".ci-tui/logs/unit.log");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        save_log(root.path(), "unit", "attacker log").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "ORIGINAL");
+        assert!(!fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&link).unwrap(), "attacker log");
+    }
+
+    #[cfg(unix)]
+    #[rstest::rstest]
+    #[case::ci_tui_dir(".ci-tui")]
+    #[case::logs_dir(".ci-tui/logs")]
+    fn test_save_log_refuses_symlinked_dir(#[case] dir: &str) {
+        let (root, outside, _victim) = root_and_victim();
+        let link = root.path().join(dir);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), link).unwrap();
+        let err = save_log(root.path(), "unit", "x").unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        let names: Vec<_> = fs::read_dir(outside.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "only victim.txt outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_log_keeps_dangling_gitignore_link() {
+        let (root, outside, _victim) = root_and_victim();
+        fs::create_dir(root.path().join(".ci-tui")).unwrap();
+        let target = outside.path().join("created.txt");
+        std::os::unix::fs::symlink(&target, root.path().join(GITIGNORE)).unwrap();
+        save_log(root.path(), "unit", "x").unwrap();
+        assert!(!target.exists(), "link not followed");
     }
 
     #[test]
