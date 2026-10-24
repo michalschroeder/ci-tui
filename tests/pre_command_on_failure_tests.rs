@@ -15,7 +15,8 @@ use std::time::Duration;
 mod common;
 use common::configs::{on_failure_groups, G1_ABORTED, G1_FAILED, YAML_HEAD};
 use common::{
-    assert_code, collect_events, load, make_exec_check, make_on_demand_check, run_config, stdout,
+    assert_code, collect_events, finished, load, make_exec_check, make_on_demand_check, run_config,
+    skipped_reason, stdout,
 };
 
 // Edge case: raw YAML, the loader is under test.
@@ -66,19 +67,6 @@ async fn run_two_groups(config: CiConfig) -> Vec<RunnerEvent> {
     collect_events(rx).await
 }
 
-/// `(status, not_run, output)` of each `CheckFinished` for `id`
-fn finished(events: &[RunnerEvent], id: &str) -> Vec<(CheckStatus, bool, String)> {
-    events
-        .iter()
-        .filter_map(|e| match e {
-            RunnerEvent::CheckFinished { result } if result.check_id == id => {
-                Some((result.status.clone(), result.not_run, result.output.clone()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 fn started(events: &[RunnerEvent], id: &str) -> bool {
     events
         .iter()
@@ -89,14 +77,6 @@ fn pre_started(events: &[RunnerEvent], pre: &str) -> bool {
     events
         .iter()
         .any(|e| matches!(e, RunnerEvent::PreCommandStarted { name, .. } if name == pre))
-}
-
-/// Reason of the `PreCommandSkipped` event for `pre`, if any
-fn skipped_reason(events: &[RunnerEvent], pre: &str) -> Option<String> {
-    events.iter().find_map(|e| match e {
-        RunnerEvent::PreCommandSkipped { name, reason, .. } if name == pre => Some(reason.clone()),
-        _ => None,
-    })
 }
 
 #[tokio::test]

@@ -31,7 +31,7 @@
 //! - [`run_single_check`]: Execute a single check (for retry operations)
 //! - [`run_fix_command`]: Execute a fix command for a check
 
-use crate::checks::CheckToRun;
+use crate::checks::{CheckToRun, Severity};
 use crate::config::{
     CiConfig, ComposeConfig, DockerConfig, DockerMode, ImageConfig, OnFailure, PreCommand,
 };
@@ -885,6 +885,46 @@ impl SetupFailure {
         let (name, group) = (&self.pre_command, &self.group);
         format!("Not run: run aborted by failed pre-command `{name}` of group `{group}`")
     }
+
+    /// Why later groups did not run: `check` of `stop_on_failure` `group`
+    /// failed
+    pub fn stopped_reason(group: &str, check: &str) -> String {
+        format!(
+            "Not run: run stopped by failed check `{check}` of group `{group}` (stop_on_failure)"
+        )
+    }
+}
+
+/// Why a full run stopped before its later groups (their checks fail as
+/// not run with [`Self::reason`]). Single runs never stop a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunStop {
+    /// A pre-command failed with `on_failure: abort`
+    Aborted(SetupFailure),
+    /// A check of a `stop_on_failure` group ran and failed
+    CheckFailed { group: String, check: String },
+}
+
+impl RunStop {
+    /// The stop `result` of `check` causes: its group has `stop_on_failure`
+    /// and the check ran and failed as a [`Severity::Error`] (an allowed
+    /// failure, a cancel or a check kept from running does not stop)
+    pub fn after(config: &CiConfig, check: &CheckToRun, result: &CheckResult) -> Option<Self> {
+        let group = config.get_group(check.group());
+        let failed = !result.not_run && check.severity(result) == Severity::Error;
+        (failed && group.is_some_and(|g| g.stop_on_failure)).then(|| Self::CheckFailed {
+            group: check.group().to_string(),
+            check: check.id().to_string(),
+        })
+    }
+
+    /// Why later groups did not run
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Aborted(failure) => failure.abort_reason(),
+            Self::CheckFailed { group, check } => SetupFailure::stopped_reason(group, check),
+        }
+    }
 }
 
 /// Per-check cancel switches for running commands, keyed by check id.
@@ -971,12 +1011,17 @@ pub enum RunnerEvent {
         duration_ms: u64,
     },
     /// A pre-command did not run: an earlier one failed with `on_failure:
-    /// abort` / `skip_group`; `reason` says which (see [`SetupFailure`])
+    /// abort` / `skip_group`, or a check stopped the run; `reason` says
+    /// which (see [`SetupFailure`])
     PreCommandSkipped {
         group: String,
         name: String,
         reason: String,
     },
+    /// Check `check_id` of `stop_on_failure` group `group` failed (sent
+    /// after its `GroupFinished`): later groups are reported not run next
+    /// ([`RunStop::CheckFailed`])
+    RunStopped { group: String, check_id: String },
     /// All checks have completed
     AllFinished,
 }
@@ -1095,31 +1140,31 @@ impl CheckRunner {
     }
 
     /// Execute a single group: run pre-commands, then checks (parallel or
-    /// sequential). A pre-command failure that stops the group reports its
-    /// checks as not run; returns it when it aborts the run.
+    /// sequential; all of them run to completion). A pre-command failure
+    /// that stops the group reports its checks as not run. Returns the stop
+    /// of the run: an aborting pre-command, or a failed check of a
+    /// `stop_on_failure` group (see [`RunStop::after`]).
     async fn execute_group(
         &self,
         group_name: &str,
         group_checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> Result<Option<SetupFailure>> {
+    ) -> Result<Option<RunStop>> {
         let group_config = self.config.get_group(group_name);
         let pre_commands = self.group_pre_commands(group_name, &group_checks);
         if let Err(failure) = run_all_pre_commands(self, group_name, pre_commands, event_tx).await {
             let reason = failure.group_reason();
             report_not_run(&group_checks, &reason, event_tx).await;
-            return Ok(failure.aborts.then_some(failure));
+            return Ok(failure.aborts.then_some(RunStop::Aborted(failure)));
         }
 
         let parallel = group_config.map(|g| g.parallel).unwrap_or(false);
         if parallel {
             let limit = self.config.group_parallel_limit(group_config);
-            self.run_parallel(group_checks, limit, event_tx).await?;
+            self.run_parallel(group_checks, limit, event_tx).await
         } else {
-            self.run_sequential(group_checks, event_tx).await?;
+            self.run_sequential(group_checks, event_tx).await
         }
-
-        Ok(None)
     }
 
     /// `group`'s pre-commands a run of `checks` runs: none when all are
@@ -1131,26 +1176,32 @@ impl CheckRunner {
         }
     }
 
+    /// Run `checks` one after another; the stop of the first that stops the
+    /// run ([`RunStop::after`])
     async fn run_sequential(
         &self,
         checks: Vec<&CheckToRun>,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> Result<()> {
+    ) -> Result<Option<RunStop>> {
         let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
+        let mut stop = None;
         for check in runnable {
             let result = self.run_single_check(check, event_tx).await;
+            stop = stop.or_else(|| RunStop::after(&self.config, check, &result));
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
         }
-        Ok(())
+        Ok(stop)
     }
 
-    /// Run `checks` concurrently, at most `limit` at a time
+    /// Run `checks` concurrently, at most `limit` at a time; the stop of the
+    /// first in input order that stops the run ([`RunStop::after`]), not
+    /// the first to finish, so every mode names the same check
     async fn run_parallel(
         &self,
         checks: Vec<&CheckToRun>,
         limit: usize,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> Result<()> {
+    ) -> Result<Option<RunStop>> {
         let runnable: Vec<_> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         // JoinSet, not detached spawns: aborting the runner (quit, retry-all)
         // drops the set, which aborts the checks and kills their commands.
@@ -1158,21 +1209,27 @@ impl CheckRunner {
         // before `CheckStarted`, see `run_check_with_target`.
         let permits = Arc::new(tokio::sync::Semaphore::new(limit));
         let mut set = tokio::task::JoinSet::new();
-        for check in runnable {
-            set.spawn(self.check_task(check, Arc::clone(&permits), event_tx));
+        for (i, check) in runnable.into_iter().enumerate() {
+            set.spawn(self.check_task(check, i, Arc::clone(&permits), event_tx));
         }
-        while set.join_next().await.is_some() {}
-        Ok(())
+        let mut stops = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            stops.extend(joined.ok().flatten());
+        }
+        let first = stops.into_iter().min_by_key(|(i, _)| *i);
+        Ok(first.map(|(_, stop)| stop))
     }
 
     /// Owned future running `check` (once it holds a `permits` slot) and
-    /// reporting its result
+    /// reporting its result; its stop of the run ([`RunStop::after`]) with
+    /// its `index` in the group
     fn check_task(
         &self,
         check: &CheckToRun,
+        index: usize,
         permits: Arc<tokio::sync::Semaphore>,
         event_tx: &mpsc::Sender<RunnerEvent>,
-    ) -> impl Future<Output = ()> + Send + 'static {
+    ) -> impl Future<Output = Option<(usize, RunStop)>> + Send + 'static {
         let check = check.clone();
         let event_tx = event_tx.clone();
         let project_root = self.project_root.clone();
@@ -1192,7 +1249,9 @@ impl CheckRunner {
                 Some(&permits),
             )
             .await;
+            let stop = RunStop::after(&config, &check, &result);
             let _ = event_tx.send(RunnerEvent::CheckFinished { result }).await;
+            stop.map(|stop| (index, stop))
         }
     }
 
@@ -1265,8 +1324,10 @@ impl CheckRunner {
     }
 }
 
-/// Run check groups sequentially, sending events via the channel; after a
-/// pre-command aborts the run, later groups are reported as not run
+/// Run check groups sequentially, sending events via the channel; once the
+/// run stops (aborting pre-command, failed check of a `stop_on_failure`
+/// group: [`RunStop`]; the latter sends [`RunnerEvent::RunStopped`] after
+/// its `GroupFinished`), later groups are reported as not run
 async fn run_check_groups<'a>(
     runner: &CheckRunner,
     grouped: Vec<(&'a str, Vec<&'a CheckToRun>)>,
@@ -1280,7 +1341,7 @@ async fn run_check_groups<'a>(
             })
             .await;
 
-        let aborted = runner
+        let stop = runner
             .execute_group(group_name, group_checks, event_tx)
             .await?;
 
@@ -1290,24 +1351,33 @@ async fn run_check_groups<'a>(
             })
             .await;
 
-        if let Some(failure) = aborted {
-            report_aborted(runner, &failure, groups, event_tx).await;
-            break;
+        let Some(stop) = stop else {
+            continue;
+        };
+        if let RunStop::CheckFailed { group, check } = &stop {
+            let event = RunnerEvent::RunStopped {
+                group: group.clone(),
+                check_id: check.clone(),
+            };
+            let _ = event_tx.send(event).await;
         }
+        report_stopped(runner, &stop, groups, event_tx).await;
+        break;
     }
     let _ = event_tx.send(RunnerEvent::AllFinished).await;
     Ok(())
 }
 
-/// Report the `groups` an aborting pre-command `failure` kept from running:
-/// the pre-commands they would have run skipped, checks not run
-async fn report_aborted<'a>(
+/// Report the `groups` the run's `stop` kept from running: the
+/// pre-commands they would have run skipped, checks not run (both with
+/// [`RunStop::reason`])
+async fn report_stopped<'a>(
     runner: &CheckRunner,
-    failure: &SetupFailure,
+    stop: &RunStop,
     groups: impl Iterator<Item = (&'a str, Vec<&'a CheckToRun>)>,
     event_tx: &mpsc::Sender<RunnerEvent>,
 ) {
-    let reason = failure.abort_reason();
+    let reason = stop.reason();
     for (group, checks) in groups {
         let pre_commands = runner.group_pre_commands(group, &checks);
         report_skipped(group, pre_commands, &reason, event_tx).await;

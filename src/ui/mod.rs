@@ -3001,12 +3001,16 @@ checks:
     /// allowed to fail when `allow_lint`), every event fed to a fresh app
     /// through `handle_message`
     async fn full_run(config: CiConfig, allow_lint: bool) -> App {
+        full_run_with(config, allow_lint, "true").await
+    }
+
+    /// [`full_run`] with `lint` running `lint_cmd`
+    async fn full_run_with(config: CiConfig, allow_lint: bool, lint_cmd: &str) -> App {
         let mut lint = make_test_check("lint", "db");
         lint.definition.allow_failure = allow_lint;
+        lint.resolved_command = lint_cmd.to_string();
         let mut unit = make_test_check("unit", "later");
-        for check in [&mut lint, &mut unit] {
-            check.resolved_command = "true".to_string();
-        }
+        unit.resolved_command = "true".to_string();
         let checks = vec![lint, unit];
         let mut app = make_test_app_with_checks(&config, checks.clone());
         let (mut tasks, _rx) = make_test_tasks(&config);
@@ -3088,6 +3092,77 @@ checks:
             "Pre-command `seed` (db) failed: group skipped"
         );
         assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+    }
+
+    /// [`two_group_config`] (setup passes) with `db` set to
+    /// `stop_on_failure: true`
+    fn stop_config() -> CiConfig {
+        let mut config = two_group_config("true", OnFailure::Abort);
+        config.checks["db"].stop_on_failure = true;
+        config
+    }
+
+    const STOPPED: &str =
+        "Not run: run stopped by failed check `lint` of group `db` (stop_on_failure)";
+
+    /// #245: a failed check of a `stop_on_failure` group blocks later
+    /// groups (rows not run skipped), the footer says the run stopped
+    #[tokio::test]
+    async fn test_stop_on_failure_blocks_later_groups() {
+        let app = full_run_with(stop_config(), false, "exit 1").await;
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Failed);
+        assert!(!app.results["lint"].not_run);
+        assert_eq!(app.results["unit"].status, CheckStatus::Failed);
+        assert!(app.results["unit"].not_run);
+        assert_eq!(app.results["unit"].output, STOPPED);
+        assert_eq!(row(&app, "prep").status, app::PreCommandStatus::Skipped);
+        assert_eq!(row(&app, "prep").output, STOPPED);
+        let message = app.view.status_message.as_ref().expect("footer");
+        assert_eq!(message.text, "Check `lint` (db) failed: run stopped");
+        assert_eq!(message.kind, StatusKind::Error);
+        assert_eq!(app.exit_code(), crate::exit::CHECKS_FAILED);
+    }
+
+    /// #245: an allowed failure does not stop the run (guard)
+    #[tokio::test]
+    async fn test_stop_on_failure_ignores_allowed_failure() {
+        let app = full_run_with(stop_config(), true, "exit 1").await;
+
+        assert_eq!(app.results["unit"].status, CheckStatus::Passed);
+        assert!(app.view.status_message.is_none());
+    }
+
+    /// #245: a single run ('r') of a failing check in a `stop_on_failure`
+    /// group blocks nothing (guard: only full runs stop)
+    #[tokio::test]
+    async fn test_stop_on_failure_single_run_blocks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lint = make_test_check("lint", "db");
+        lint.resolved_command = "exit 1".to_string();
+        let checks = vec![lint, make_test_check("unit", "later")];
+        let mut app = make_test_app_with_checks(&stop_config(), checks);
+        app.mark_cached(["lint", "unit"]);
+        // Past the `db` header and its pre-command rows `seed`, `warm`
+        app.select_first();
+        for _ in 0..3 {
+            app.next_check();
+        }
+        assert_eq!(app.selected_check().map(CheckToRun::id), Some("lint"));
+        let (mut tasks, mut rx) = make_test_tasks_in(stop_config(), dir.path());
+
+        handle_retry_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+
+        assert_eq!(app.results["lint"].status, CheckStatus::Failed);
+        assert_eq!(app.results["unit"].status, CheckStatus::Passed);
+        assert!(app.results["unit"].cached, "unit untouched");
+        assert_ne!(row(&app, "prep").output, STOPPED);
+        let footer = app.view.status_message.as_ref().map(|m| m.text.clone());
+        assert!(!footer.unwrap_or_default().contains("run stopped"));
     }
 
     /// #152 continue: row ignored, checks run, exit 0, the group

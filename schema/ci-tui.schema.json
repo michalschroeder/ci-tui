@@ -415,7 +415,7 @@
           }
         },
         "stop_on_failure": {
-          "description": "Stop all execution if any check in this group fails",
+          "description": "Stop the run when a check of this group that ran fails as an error\n(not `allow_failure`, not cancelled): the group finishes, later\ngroups' checks fail as not run. Full runs only, not single re-runs.",
           "type": "boolean",
           "default": false
         }
