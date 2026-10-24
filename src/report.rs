@@ -9,7 +9,7 @@
 //! XML (escaped, XML-invalid control chars dropped) to avoid a dependency.
 
 use crate::checks::{severity_in, CheckToRun, Severity};
-use crate::runner::{CheckResult, CheckStatus};
+use crate::runner::{CheckResult, CheckStatus, PreCommandOutcome, RunnerEvent};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::borrow::Cow;
@@ -442,6 +442,37 @@ fn github_data(s: &str) -> String {
 /// Workflow command property escaping: message escaping plus `:` and `,`
 fn github_property(s: &str) -> String {
     github_data(s).replace(':', "%3A").replace(',', "%2C")
+}
+
+/// Console line(s) for a pre-command event, newline-terminated: a failed
+/// one (red ✗, yellow ⚠ when ignored by `on_failure: continue`) with its
+/// output indented, a skipped one with the reason; `None` for a passed one
+/// and other events. Shared by `--simple` and `--fix` verification.
+pub fn format_pre_command_event(event: &RunnerEvent) -> Option<String> {
+    match event {
+        RunnerEvent::PreCommandFinished {
+            name,
+            outcome,
+            output,
+            ..
+        } => {
+            let (mark, note) = match outcome {
+                PreCommandOutcome::Passed => return None,
+                PreCommandOutcome::Ignored => {
+                    ("\x1b[33m⚠\x1b[0m", " (ignored: on_failure: continue)")
+                }
+                PreCommandOutcome::Failed { .. } => ("\x1b[31m✗\x1b[0m", ""),
+            };
+            let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
+            Some(format!(
+                "  {mark} pre-command {name} \x1b[90mfailed{note}\x1b[0m\n{output}"
+            ))
+        }
+        RunnerEvent::PreCommandSkipped { name, reason, .. } => Some(format!(
+            "  \x1b[90m⊘ pre-command {name} skipped ({reason})\x1b[0m\n"
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

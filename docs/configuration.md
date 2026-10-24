@@ -604,7 +604,7 @@ checks:
 
 ## Pre-Commands
 
-Pre-commands run before checks in a group. Useful for setup tasks like database initialization. They (and their `on_failure`) apply in the TUI and in `--fix` verification; `--simple` / `--format` don't run pre-commands yet ([#244](https://github.com/michalschroeder/ci-tui/issues/244)).
+Pre-commands run before checks in a group. Useful for setup tasks like database initialization. They (and their `on_failure`) apply in the TUI, `--simple` / `--format` and `--fix` verification.
 
 ```yaml
 checks:
@@ -665,11 +665,11 @@ checks:
 ### Execution
 
 Pre-commands run sequentially before any checks in the group:
-1. Pre-commands execute in order (a group whose checks are all on-demand runs none)
+1. Pre-commands execute in order (a group whose checks are all on-demand runs none; in `--simple` neither does one whose checks are all cached)
 2. A failing one acts per its `on_failure`: `abort` / `skip_group` stop the group (`abort` the run too), `continue` goes on
 3. Then checks execute according to group's parallel setting
 
-Checks a failed pre-command kept from running fail without running, their output saying why: ``Not run: pre-command `migrate` of group `tests` failed``, or for later groups after an `abort`, ``Not run: run aborted by failed pre-command `migrate` of group `tests` ``. They count as failed (also with `allow_failure`); on-demand checks stay on-demand. In the TUI, pre-commands not run show `⊘` with the same reason, and the footer says ``Pre-command `migrate` (tests) failed: group skipped`` / `: run aborted`. An ignored (`continue`) failure shows a yellow `⚠` (`FAILED (ignored: on_failure: continue)`), keeps its group unfolded and shows under the `f` filter, but doesn't fail the run (not counted as a warning, and the run-end jump passes it by). `--fix` prints it as a yellow `⚠ pre-command X failed (ignored: on_failure: continue)` and pre-commands not run as `⊘ pre-command X skipped (reason)`. A single run (`r`, `t`, `a`, `x` / `X` verification, `--watch`) that runs its group's pre-commands first follows the same rules: a blocking failure fails just that check (``Not run: pre-command ... failed``, footer `: check not run`); after an ignored one the group's setup counts as done.
+Checks a failed pre-command kept from running fail without running, their output saying why: ``Not run: pre-command `migrate` of group `tests` failed``, or for later groups after an `abort`, ``Not run: run aborted by failed pre-command `migrate` of group `tests` ``. They count as failed (also with `allow_failure`); on-demand checks stay on-demand. In the TUI, pre-commands not run show `⊘` with the same reason, and the footer says ``Pre-command `migrate` (tests) failed: group skipped`` / `: run aborted`. An ignored (`continue`) failure shows a yellow `⚠` (`FAILED (ignored: on_failure: continue)`), keeps its group unfolded and shows under the `f` filter, but doesn't fail the run (not counted as a warning, and the run-end jump passes it by). `--simple` and `--fix` print a failed pre-command as `✗ pre-command X failed` (an ignored one as a yellow `⚠ pre-command X failed (ignored: on_failure: continue)`) with its output, and pre-commands not run as `⊘ pre-command X skipped (reason)`, under the group header (`--simple` prints the blocked checks as `✗ <id> not run`); with a `--format json|junit` report on stdout these lines go to stderr (the report lists the blocked checks with the reason, not the pre-commands). A single run (`r`, `t`, `a`, `x` / `X` verification, `--watch`) that runs its group's pre-commands first follows the same rules: a blocking failure fails just that check (``Not run: pre-command ... failed``, footer `: check not run`); after an ignored one the group's setup counts as done.
 
 ## Execution Modes
 
@@ -700,7 +700,8 @@ ci-tui --config ci-tui.yaml --simple
 Non-interactive mode for CI pipelines:
 - Plain text output
 - No TUI, suitable for CI logs
-- Exit code 0 if all checks pass, 1 if any fail
+- Runs each group's `pre_commands` before its checks (see [Pre-Commands](#pre-commands)): failed / skipped ones print under the group header, passing ones print nothing
+- Exit code 0 if all checks pass, 1 if any fail (also when a failed pre-command kept one from running)
 - Useful in GitHub Actions, GitLab CI, etc.
 
 ### Fix Mode

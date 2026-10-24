@@ -20,12 +20,13 @@
 //! invalidate a pass. `--no-cache`, or `r` in the TUI, runs it anyway.
 //!
 //! Store ([`ResultCache`]): `<git dir>/ci-tui/results.json` maps check id to
-//! the key of its latest pass. A pass overwrites the entry, a failure removes
-//! it, so the store holds at most one entry per check (config validation
-//! keeps ids unique). Each change re-reads the file under a lock and applies
-//! only itself, so concurrent runs in one worktree keep each other's
-//! changes. Cache problems (not a git repo, unreadable / corrupt file, write
-//! error) never fail a run: they only turn caching off.
+//! the key of its latest pass. A pass overwrites the entry, a failure (not a
+//! check that did not run) removes it, so the store holds at most one entry
+//! per check (config validation keeps ids unique). Each change re-reads the
+//! file under a lock and applies only itself, so concurrent runs in one
+//! worktree keep each other's changes. Cache problems (not a git repo,
+//! unreadable / corrupt file, write error) never fail a run: they only turn
+//! caching off.
 //!
 //! Hashing uses std's `DefaultHasher` (SipHash with fixed keys, stable across
 //! runs): no extra dependency. A toolchain changing the algorithm only costs
@@ -262,14 +263,15 @@ impl ResultCache {
 
     /// Record a finished run of `check`: a pass stores its key (replacing the
     /// previous one) if its files still hash to it, a failure drops the
-    /// entry; cached / cancelled results change nothing. Saves on change. A
-    /// write error is returned once, then the cache is off for the rest of
-    /// the run.
+    /// entry; cached / cancelled / not-run ([`CheckResult::not_run`]: a failed
+    /// pre-command blocked it, its task panicked) results change nothing, so
+    /// the pass of its inputs stands. Saves on change. A write error is
+    /// returned once, then the cache is off for the rest of the run.
     pub fn record(&mut self, check: &CheckToRun, result: &CheckResult) -> io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if result.cached {
+        if result.cached || result.not_run {
             return Ok(());
         }
         let passed = result.status == CheckStatus::Passed;
@@ -598,10 +600,10 @@ checks:
         assert!(!no_cache.is_fresh(&lint), "--no-cache");
     }
 
-    /// A not-run failure (simple mode's panicked check task) drops the pass
-    /// like any failure
+    /// A not-run failure (a failed pre-command blocked the check, simple
+    /// mode's panicked check task) leaves the pass of its inputs alone
     #[test]
-    fn not_run_failure_drops_the_pass() {
+    fn not_run_failure_keeps_the_pass() {
         let dir = root();
         let lint = keyed("lint", "lint a.rs", dir.path());
         let mut cache = cache_at(dir.path().join("results.json"), dir.path());
@@ -615,7 +617,9 @@ checks:
         };
         cache.record(&lint, &panicked).unwrap();
 
-        assert!(!cache.is_fresh(&lint));
+        assert!(cache.is_fresh(&lint));
+        let reopened = cache_at(dir.path().join("results.json"), dir.path());
+        assert!(reopened.is_fresh(&lint), "not saved as dropped either");
     }
 
     #[test]

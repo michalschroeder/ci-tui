@@ -18,7 +18,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 
 - Live TUI (ratatui) with per-check status, output shown on completion, and timing
 - Jump to failure: when the run ends the first failed check is selected and opened at its first error line; error lines are highlighted (per-check `error_pattern` regex overrides the default)
-- Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init) with per-command `on_failure: abort | skip_group | continue` (checks they keep from running fail, showing why; TUI and `--fix` only, `--simple` doesn't run pre-commands yet)
+- Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init) with per-command `on_failure: abort | skip_group | continue` (checks they keep from running fail, showing why)
 - Test discovery via `path_mapping` and `grep_search` strategies
 - On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests
 - `allow_failure: true` per check: its failure or timeout is a yellow warning (`1/2 passed, 1 warning`) that doesn't fail the run or the exit code
@@ -187,7 +187,7 @@ The exit code tells scripts why a run failed, so `ci-tui && git push` is safe:
 | Code | Meaning |
 |------|---------|
 | `0` | All selected checks passed (also `--list`, and runs with nothing to check) |
-| `1` | A check without `allow_failure` failed (TUI, `--simple`; in the TUI also one a failed group pre-command kept from running), or a fix command or its verification re-run failed (`--fix`; not for `allow_failure` checks) |
+| `1` | A check without `allow_failure` failed (TUI, `--simple`; also one a failed group pre-command kept from running), or a fix command or its verification re-run failed (`--fix`; not for `allow_failure` checks) |
 | `2` | Config error: missing / unparsable / invalid config (also `ci-tui validate`), `ci-tui init` refusing to overwrite, bad flag value (e.g. unknown `--only` id) |
 | `3` | Git or environment error: base ref / `--staged` detection failed, Docker unreachable or not answering within 10s when non-on-demand checks / fix commands would run in docker mode, `--watch` file watcher failed to start (e.g. inotify watch limit), other runtime errors |
 | `130` | Interrupted (Ctrl-C) |

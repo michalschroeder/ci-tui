@@ -155,11 +155,11 @@ async fn succeeded(fut: impl std::future::Future<Output = Result<()>>) -> Result
     fut.await.map(|()| exit::SUCCESS)
 }
 
-/// Set the console color switch and install color-eyre for better panic
+/// Set the console color switches and install color-eyre for better panic
 /// reports (errors are ignored if it fails), themeless with color off
-fn init_color(color: bool) {
-    ci_tui::color::set_enabled(color);
-    let hook = if color {
+fn init_color(colors: ci_tui::color::ConsoleColor) {
+    ci_tui::color::set_enabled(colors);
+    let hook = if colors.stdout {
         color_eyre::config::HookBuilder::default()
     } else {
         color_eyre::config::HookBuilder::blank()
@@ -170,7 +170,7 @@ fn init_color(color: bool) {
 /// Process exit code of the whole run
 async fn run() -> Result<i32> {
     let cli = Cli::parse_checked();
-    init_color(cli.color_enabled());
+    init_color(cli.color());
 
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.config).map(|()| exit::SUCCESS);

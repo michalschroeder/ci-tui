@@ -1053,6 +1053,21 @@ impl CheckRunner {
         &self.config.runner
     }
 
+    /// Config of the run
+    pub(crate) fn config(&self) -> &CiConfig {
+        &self.config
+    }
+
+    /// Where commands run from
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// The run's executor (container lookups cached per service)
+    pub(crate) fn executor(&self) -> &Arc<dyn CommandExecutor> {
+        &self.executor
+    }
+
     /// Run all checks, grouped by execution group, sending events via the channel
     ///
     /// Note: Channel send errors are silently ignored because they indicate the

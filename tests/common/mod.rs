@@ -98,6 +98,37 @@ pub fn run_ci_tui_env(
         .unwrap()
 }
 
+/// Tempdir with `ci-tui.yaml` = `config` and `a.rs`; a git repo if `git_init`
+#[allow(dead_code)]
+pub fn project(config: &str, git_init: bool) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if git_init {
+        git(tmp.path(), &["init", "-q"]);
+    }
+    write(tmp.path(), "ci-tui.yaml", config);
+    write(tmp.path(), "a.rs", "fn a() {}\n");
+    tmp
+}
+
+/// Write `content` to `path` under `dir`, creating parent dirs
+#[allow(dead_code)]
+pub fn write(dir: &std::path::Path, path: &str, content: &str) {
+    let path = dir.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+/// `--simple` run in `dir` on `--files` (default `a.rs`) plus `extra` args
+#[allow(dead_code)]
+pub fn simple_run(dir: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    let mut args = vec!["--simple"];
+    if !extra.contains(&"--files") {
+        args.extend(["--files", "a.rs"]);
+    }
+    args.extend(extra);
+    run_ci_tui(dir, &args)
+}
+
 /// Tempdir holding `ci-tui.yaml` = `config`; runs the binary in it with
 /// `args` (see [`run_ci_tui`])
 #[allow(dead_code)]
