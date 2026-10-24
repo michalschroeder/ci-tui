@@ -62,8 +62,32 @@ impl GitExecutor for RealGitExecutor {
             );
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        String::from_utf8(output.stdout).map_err(|e| NonUtf8Output::new(e.as_bytes()).into())
     }
+}
+
+/// Git printed bytes that are not UTF-8, e.g. a non-UTF-8 file name. Change
+/// detection fails on it (exit 3) instead of dropping or mangling the path,
+/// which would let the file skip its checks.
+#[derive(Debug, thiserror::Error)]
+#[error("git printed a non-UTF-8 path `{0}`: ci-tui needs UTF-8 file names, rename it")]
+pub struct NonUtf8Output(String);
+
+impl NonUtf8Output {
+    /// From git's raw stdout: names the first NUL / newline separated entry
+    /// that is not UTF-8 (lossy, for the message)
+    pub fn new(stdout: &[u8]) -> Self {
+        let entry = stdout
+            .split(|b| *b == 0 || *b == b'\n')
+            .find(|entry| std::str::from_utf8(entry).is_err())
+            .unwrap_or(stdout);
+        Self(String::from_utf8_lossy(entry).into_owned())
+    }
+}
+
+/// True when `err` is (or wraps) [`NonUtf8Output`]
+pub fn is_non_utf8(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| e.is::<NonUtf8Output>())
 }
 
 /// Sentinel `base_ref` used when files come from the `--files` CLI flag
@@ -161,9 +185,14 @@ pub fn detect_changes_with_executor(
     // Find the first base ref whose committed diff resolves.
     let mut resolved: Option<(String, String)> = None;
     for base_ref in &base_refs {
-        if let Ok(out) = run_committed_diff(project_root, base_ref, executor) {
-            resolved = Some((base_ref.clone(), out));
-            break;
+        match run_committed_diff(project_root, base_ref, executor) {
+            Ok(out) => {
+                resolved = Some((base_ref.clone(), out));
+                break;
+            }
+            // The ref resolved: falling back would diff against the wrong base
+            Err(e) if is_non_utf8(&e) => return Err(e),
+            Err(_) => {}
         }
     }
 
@@ -179,7 +208,7 @@ pub fn detect_changes_with_executor(
     let untracked = run_untracked_list(project_root, executor)?;
 
     Ok(ChangedFiles {
-        files: union_lines(&[&committed, &uncommitted, &untracked]),
+        files: union_paths(&[&committed, &uncommitted, &untracked]),
         base_ref,
     })
 }
@@ -201,12 +230,17 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let committed = run_committed_diff(project_root, base_ref, executor)
-        .with_context(|| format!("could not resolve git base ref `{base_ref}`"))?;
+    let committed = run_committed_diff(project_root, base_ref, executor).map_err(|e| {
+        if is_non_utf8(&e) {
+            e
+        } else {
+            e.context(format!("could not resolve git base ref `{base_ref}`"))
+        }
+    })?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {
-        files: union_lines(&[&committed, &uncommitted, &untracked]),
+        files: union_paths(&[&committed, &uncommitted, &untracked]),
         base_ref: base_ref.to_string(),
     })
 }
@@ -233,6 +267,7 @@ pub fn get_staged_files_with_executor(
         "diff".to_string(),
         "--cached".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         DIFF_FILTER.to_string(),
     ];
     let staged = executor
@@ -244,14 +279,15 @@ pub fn get_staged_files_with_executor(
         "ls-files".to_string(),
         "--deleted".to_string(),
         "--full-name".to_string(),
+        "-z".to_string(),
         "--".to_string(),
         ":/".to_string(),
     ];
     let deleted = executor
         .run_command(project_root, &args)
         .context("could not list staged files deleted from the working tree")?;
-    let deleted: HashSet<&str> = deleted.lines().collect();
-    let mut files = union_lines(&[&staged]);
+    let deleted: HashSet<&str> = deleted.split('\0').collect();
+    let mut files = union_paths(&[&staged]);
     files.retain(|f| !deleted.contains(f.as_str()));
     Ok(ChangedFiles {
         files,
@@ -267,6 +303,7 @@ fn run_committed_diff(
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         DIFF_FILTER.to_string(),
         "--merge-base".to_string(),
         // Refs come from config / `--base`: a leading `-` must not parse as an
@@ -283,6 +320,7 @@ fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Res
     let args = vec![
         "diff".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         DIFF_FILTER.to_string(),
         "HEAD".to_string(),
     ];
@@ -294,19 +332,23 @@ fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Resul
         "ls-files".to_string(),
         "--others".to_string(),
         "--exclude-standard".to_string(),
+        "-z".to_string(),
     ];
     executor.run_command(project_root, &args)
 }
 
-fn union_lines(sources: &[&str]) -> Vec<String> {
+/// Paths from NUL-terminated (`-z`) git listings, deduped in order. `-z`
+/// prints names verbatim: without it git C-quotes names with non-ASCII bytes,
+/// `"`, `\` or control chars, so they match no pattern and skip their checks.
+fn union_paths(sources: &[&str]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for line in sources.iter().flat_map(|s| s.lines()) {
-        if line.is_empty() {
+    for path in sources.iter().flat_map(|s| s.split('\0')) {
+        if path.is_empty() {
             continue;
         }
-        if seen.insert(line.to_string()) {
-            files.push(line.to_string());
+        if seen.insert(path.to_string()) {
+            files.push(path.to_string());
         }
     }
     files
@@ -627,7 +669,7 @@ mod tests {
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _| Ok("a.rs\nb.rs\n".to_string()));
+            .returning(|_, _| Ok("a.rs\0b.rs\0".to_string()));
 
         // Second call: uncommitted — returns b.rs, c.rs
         mock.expect_run_command()
@@ -638,7 +680,7 @@ mod tests {
             })
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _| Ok("b.rs\nc.rs\n".to_string()));
+            .returning(|_, _| Ok("b.rs\0c.rs\0".to_string()));
 
         // Third call: untracked (ls-files --others --exclude-standard) — returns c.rs, d.rs
         mock.expect_run_command()
@@ -649,7 +691,7 @@ mod tests {
             })
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _| Ok("c.rs\nd.rs\n".to_string()));
+            .returning(|_, _| Ok("c.rs\0d.rs\0".to_string()));
 
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
 
@@ -672,7 +714,7 @@ mod tests {
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
             .times(1)
-            .returning(|_, _| Ok("new_file.rs\nsrc/new_mod.rs\n".to_string()));
+            .returning(|_, _| Ok("new_file.rs\0src/new_mod.rs\0".to_string()));
 
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
         assert_eq!(result.files, vec!["new_file.rs", "src/new_mod.rs"]);
@@ -703,7 +745,7 @@ mod tests {
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
-            .returning(|_, _| Ok("committed.rs\n".to_string()));
+            .returning(|_, _| Ok("committed.rs\0".to_string()));
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
@@ -725,7 +767,7 @@ mod tests {
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
-            .returning(|_, _| Ok("a.rs\n".to_string()));
+            .returning(|_, _| Ok("a.rs\0".to_string()));
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
@@ -751,16 +793,22 @@ mod tests {
         // Index diff + deleted-on-disk list only: no base ref, unstaged diff or untracked
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                args == ["diff", "--cached", "--name-only", "--diff-filter=ACMR"]
+                args == [
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "-z",
+                    "--diff-filter=ACMR",
+                ]
             })
             .times(1)
-            .returning(|_, _| Ok("a.rs\nsrc/b.rs\ngone.rs\n".to_string()));
+            .returning(|_, _| Ok("a.rs\0src/b.rs\0gone.rs\0".to_string()));
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                args == ["ls-files", "--deleted", "--full-name", "--", ":/"]
+                args == ["ls-files", "--deleted", "--full-name", "-z", "--", ":/"]
             })
             .times(1)
-            .returning(|_, _| Ok("gone.rs\n".to_string()));
+            .returning(|_, _| Ok("gone.rs\0".to_string()));
 
         let result = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap();
 
@@ -769,6 +817,75 @@ mod tests {
         assert_eq!(result.base_ref, STAGED_BASE_REF);
         assert!(result.is_staged());
         assert!(!result.is_cli_files());
+    }
+
+    #[test]
+    fn path_listings_are_nul_separated() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "-z"))
+            .times(3)
+            .returning(|_, _| Ok(String::new()));
+        get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+    }
+
+    #[test]
+    fn nul_separated_paths_keep_quotes_newlines_and_unicode() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .returning(|_, _| Ok("src/café.py\0src/new\nline.py\0".to_string()));
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| !args.iter().any(|a| a == "--merge-base"))
+            .returning(|_, _| Ok("src/a\"b.py\0src/back\\slash.py\0".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+        assert_eq!(
+            result.files,
+            vec![
+                "src/café.py",
+                "src/new\nline.py",
+                "src/a\"b.py",
+                "src/back\\slash.py"
+            ]
+        );
+    }
+
+    #[test]
+    fn non_utf8_output_names_the_bad_entry() {
+        let err = NonUtf8Output::new(b"ok.rs\0src/caf\xff.py\0");
+        assert_eq!(
+            err.to_string(),
+            "git printed a non-UTF-8 path `src/caf\u{fffd}.py`: ci-tui needs UTF-8 file names, rename it"
+        );
+    }
+
+    #[test]
+    fn detect_changes_does_not_fall_back_past_non_utf8_output() {
+        let mut mock = MockGitExecutor::new();
+        // Only origin/main is diffed: falling back would use the wrong base
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
+
+        let err = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock)
+            .unwrap_err();
+        assert!(is_non_utf8(&err), "got: {err:#}");
+    }
+
+    #[test]
+    fn get_changed_files_non_utf8_is_not_a_bad_ref() {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .times(1)
+            .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
+
+        let err = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap_err();
+        assert!(is_non_utf8(&err));
+        assert!(
+            !format!("{err:#}").contains("could not resolve"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

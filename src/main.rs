@@ -30,7 +30,12 @@ fn git_detect_changes_or_exit(
         ),
     };
     result.unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}\n\n{hint}");
+        // The message says what to do; the hint would blame the base ref
+        if git::is_non_utf8(&e) {
+            eprintln!("Error: {e:#}");
+        } else {
+            eprintln!("Error: {e:#}\n\n{hint}");
+        }
         std::process::exit(exit::ENV_ERROR);
     })
 }
