@@ -48,6 +48,90 @@ pub async fn collect_events(
     events
 }
 
+/// Reason of the `PreCommandSkipped` event for pre-command `pre`, if any
+#[allow(dead_code)]
+pub fn skipped_reason(events: &[ci_tui::runner::RunnerEvent], pre: &str) -> Option<String> {
+    use ci_tui::runner::RunnerEvent;
+    events.iter().find_map(|e| match e {
+        RunnerEvent::PreCommandSkipped { name, reason, .. } if name == pre => Some(reason.clone()),
+        _ => None,
+    })
+}
+
+/// `(status, not_run, output)` of `result`; output only when not run (the
+/// reason)
+#[allow(dead_code)]
+pub fn outcome(result: &ci_tui::runner::CheckResult) -> (CheckStatus, bool, String) {
+    let output = if result.not_run {
+        &result.output[..]
+    } else {
+        ""
+    };
+    (result.status.clone(), result.not_run, output.to_string())
+}
+
+/// [`outcome`] of each `CheckFinished` event for `id`
+#[allow(dead_code)]
+pub fn finished(
+    events: &[ci_tui::runner::RunnerEvent],
+    id: &str,
+) -> Vec<(CheckStatus, bool, String)> {
+    use ci_tui::runner::RunnerEvent;
+    let results = events.iter().filter_map(|e| match e {
+        RunnerEvent::CheckFinished { result } if result.check_id == id => Some(result),
+        _ => None,
+    });
+    results.map(outcome).collect()
+}
+
+/// `(id, status, not_run, output)` of each result (see [`outcome`])
+#[allow(dead_code)]
+pub fn outcomes(
+    results: &[ci_tui::runner::CheckResult],
+) -> Vec<(String, CheckStatus, bool, String)> {
+    let with_id = |r: &ci_tui::runner::CheckResult| {
+        let (status, not_run, output) = outcome(r);
+        (r.check_id.clone(), status, not_run, output)
+    };
+    results.iter().map(with_id).collect()
+}
+
+/// Every check `config` selects for changed file `a.txt` in `dir`
+#[allow(dead_code)]
+pub fn select_for_a_txt(config: &CiConfig, dir: &std::path::Path) -> Vec<CheckToRun> {
+    let changed = ChangedFiles {
+        files: vec!["a.txt".into()],
+        base_ref: "main".into(),
+    };
+    ci_tui::checks::determine_checks(config, &changed, dir)
+}
+
+/// Text commands appended to `log` in `dir` (see [`configs::logged`])
+#[allow(dead_code)]
+pub fn log(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join("log")).unwrap_or_default()
+}
+
+/// Lines of [`log`]
+#[allow(dead_code)]
+pub fn log_lines(dir: &std::path::Path) -> Vec<String> {
+    log(dir).lines().map(str::to_owned).collect()
+}
+
+/// `simple::run_with_executor` (real commands) of [`select_for_a_txt`] in a
+/// fresh dir; the results and the dir's [`log_lines`]
+#[allow(dead_code)]
+pub async fn run_simple(config: CiConfig) -> (Vec<ci_tui::runner::CheckResult>, Vec<String>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let checks = select_for_a_txt(&config, tmp.path());
+    let executor = std::sync::Arc::new(ci_tui::runner::RealCommandExecutor);
+    let root = tmp.path().to_path_buf();
+    let results = ci_tui::simple::run_with_executor(config, checks, root, executor)
+        .await
+        .unwrap();
+    (results, log_lines(tmp.path()))
+}
+
 /// Assert the process exit code, showing stdout / stderr on mismatch.
 #[allow(dead_code)]
 pub fn assert_code(out: &std::process::Output, code: i32) {

@@ -3,68 +3,30 @@
 //! `simple::run_with_executor` (real local-mode commands) and the binary
 //! (text, `--format json|junit`, result cache).
 
-use ci_tui::checks::{determine_checks, CheckToRun};
 use ci_tui::config::{CiConfig, OnFailure};
 use ci_tui::exit;
-use ci_tui::git::ChangedFiles;
-use ci_tui::runner::{CheckResult, CheckStatus, RealCommandExecutor};
-use ci_tui::simple::run_with_executor;
+use ci_tui::runner::CheckStatus;
 use std::path::Path;
-use std::sync::Arc;
 
 mod common;
 use common::configs::{
     logged, on_failure_groups, CheckBuilder, ConfigBuilder, G1_ABORTED, G1_FAILED, NEVER_PATTERN,
     YAML_HEAD,
 };
-use common::{assert_code, local_sh, project, run_config, simple_run, stderr, stdout, write};
+use common::{
+    assert_code, local_sh, log, outcomes, project, run_config, run_simple, simple_run, stderr,
+    stdout, write,
+};
 
 /// [`on_failure_groups`] with every command logging its name
 fn two_groups(p1_cmd: &str, policy: OnFailure) -> CiConfig {
     on_failure_groups(p1_cmd, policy, true)
 }
 
-/// `run_with_executor` of every check `config` selects for `a.txt`, in a
-/// fresh project dir; the results and the dir's `log` lines
-async fn run_simple(config: CiConfig) -> (Vec<CheckResult>, Vec<String>) {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let changed = ChangedFiles {
-        files: vec!["a.txt".into()],
-        base_ref: "main".into(),
-    };
-    let checks: Vec<CheckToRun> = determine_checks(&config, &changed, tmp.path());
-    let executor = Arc::new(RealCommandExecutor);
-    let results = run_with_executor(config, checks, tmp.path().to_path_buf(), executor)
-        .await
-        .unwrap();
-    let log = log(tmp.path());
-    (results, log.lines().map(str::to_owned).collect())
-}
-
-/// Lines commands appended to `log` in `dir`
-fn log(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join("log")).unwrap_or_default()
-}
-
 /// Byte offset of `s` in `text`, panicking with `text` when missing
 fn pos(text: &str, s: &str) -> usize {
     text.find(s)
         .unwrap_or_else(|| panic!("{s:?} missing: {text}"))
-}
-
-/// `(id, status, not_run, output)` of each result
-fn outcomes(results: &[CheckResult]) -> Vec<(String, CheckStatus, bool, String)> {
-    results
-        .iter()
-        .map(|r| {
-            let output = if r.not_run {
-                r.output.clone()
-            } else {
-                String::new()
-            };
-            (r.check_id.clone(), r.status.clone(), r.not_run, output)
-        })
-        .collect()
 }
 
 fn passed(id: &str) -> (String, CheckStatus, bool, String) {

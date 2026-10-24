@@ -430,6 +430,23 @@ pub fn on_failure_groups(p1_cmd: &str, policy: OnFailure, log: bool) -> CiConfig
     config
 }
 
+/// Why later groups did not run after check `c1` of `stop_on_failure`
+/// group `g1` failed ([`stop_on_failure_groups`])
+#[allow(dead_code)]
+pub const G1_STOPPED: &str =
+    "Not run: run stopped by failed check `c1` of group `g1` (stop_on_failure)";
+
+/// [`on_failure_groups`] (pre-commands pass) with `g1` set to
+/// `stop_on_failure: true` and its check `c1` running `c1_cmd`
+#[allow(dead_code)]
+pub fn stop_on_failure_groups(c1_cmd: &str, log: bool) -> CiConfig {
+    let mut config = on_failure_groups("true", OnFailure::Abort, log);
+    let g1 = &mut config.checks["g1"];
+    g1.stop_on_failure = true;
+    g1.checks["c1"].command = logged("c1", c1_cmd, log);
+    config
+}
+
 /// Minimal valid config with docker, git, no checks
 pub fn minimal_config() -> CiConfig {
     ConfigBuilder::new().build()

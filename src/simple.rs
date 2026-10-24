@@ -10,8 +10,9 @@
 //! (through [`CheckRunner::run_group_setup`], `on_failure` as in the TUI;
 //! none when every check of the group is on-demand or cached), then its
 //! checks sequentially or in parallel (per group config), and prints results
-//! with colored output. Checks a failed pre-command kept from running fail
-//! as [`CheckResult::blocked`]; failed / skipped pre-commands print under
+//! with colored output. Checks a failed pre-command or an earlier
+//! `stop_on_failure` group's failed check ([`RunStop`]) kept from running
+//! fail as [`CheckResult::blocked`]; failed / skipped pre-commands print under
 //! the group header (on stderr when a report document owns stdout).
 //! `--format json|junit` adds a report document ([`crate::report`]): on
 //! stdout instead of the text, or in `--output <file>`; under GitHub Actions
@@ -31,7 +32,8 @@ use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::report::{self, format_pre_command_event, Report, ReportOptions, Summary};
 use crate::runner::{
-    CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget, RunnerEvent, SetupFailure,
+    CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget, RunStop, RunnerEvent,
+    SetupFailure,
 };
 use crate::utils::time;
 use anyhow::Result;
@@ -185,14 +187,14 @@ impl SimpleRun {
     /// group and recording its results in `cache`; all results in order
     async fn run_groups(&self, checks: &[CheckToRun], cache: &mut ResultCache) -> Vec<CheckResult> {
         let mut all_results = Vec::new();
-        let mut aborted = None;
+        let mut stopped = None;
         for (group_name, group_checks) in group_checks(checks) {
             self.print_group_start(group_name);
             // Unchanged since their last pass: listed first as cached, not run
             let (cached, group_checks) = cache.split_fresh(group_checks);
             let mut results: Vec<CheckResult> =
                 cached.iter().map(|c| CheckResult::cached(c.id())).collect();
-            let ran = self.run_group(group_name, group_checks, &mut aborted).await;
+            let ran = self.run_group(group_name, group_checks, &mut stopped).await;
             record(cache, checks, &ran);
             results.extend(ran);
             self.print_results(checks, &results);
@@ -204,15 +206,16 @@ impl SimpleRun {
 
     /// Run `group`'s `checks` (on-demand ones skipped): its pre-commands
     /// first when one is left, and only then the checks. A pre-command
-    /// stopping the group, or an earlier one having `aborted` the run (its
-    /// reason; then the group's pre-commands print skipped), blocks them
-    /// ([`CheckResult::blocked`]). Sets `aborted` when this group's failure
-    /// aborts the run.
+    /// stopping the group, or an earlier group having `stopped` the run
+    /// (then the group's pre-commands print skipped), blocks them
+    /// ([`CheckResult::blocked`], with [`RunStop::reason`]). Sets `stopped`
+    /// when this group stops the run: aborting pre-command, or a failed
+    /// check of a `stop_on_failure` group after all its checks finished.
     async fn run_group(
         &self,
         group: &str,
         checks: Vec<&CheckToRun>,
-        aborted: &mut Option<String>,
+        stopped: &mut Option<RunStop>,
     ) -> Vec<CheckResult> {
         let checks: Vec<&CheckToRun> = checks.into_iter().filter(|c| !c.is_on_demand()).collect();
         if checks.is_empty() {
@@ -222,20 +225,25 @@ impl SimpleRun {
             let results = checks.iter().map(|c| CheckResult::blocked(c.id(), reason));
             results.collect()
         };
-        if let Some(reason) = aborted.as_deref() {
-            self.print_setup_skipped(group, reason);
-            return blocked(reason);
+        if let Some(stop) = stopped {
+            let reason = stop.reason();
+            self.print_setup_skipped(group, &reason);
+            return blocked(&reason);
         }
         if let Err(failure) = setup(&self.runner, self.console, group).await {
-            *aborted = failure.aborts.then(|| failure.abort_reason());
-            return blocked(&failure.group_reason());
+            let reason = failure.group_reason();
+            *stopped = failure.aborts.then_some(RunStop::Aborted(failure));
+            return blocked(&reason);
         }
-        self.run_checks(group, checks).await
+        let results = self.run_checks(group, &checks).await;
+        let mut stops = checks.iter().zip(&results);
+        *stopped = stops.find_map(|(c, r)| RunStop::after(self.config(), c, r));
+        results
     }
 
     /// Run `checks` of `group`, in parallel when it says so; results in
     /// input order
-    async fn run_checks(&self, group: &str, checks: Vec<&CheckToRun>) -> Vec<CheckResult> {
+    async fn run_checks(&self, group: &str, checks: &[&CheckToRun]) -> Vec<CheckResult> {
         let config = self.config();
         let group = config.get_group(group);
         let (target, root) = (&config.runner, self.runner.project_root());
@@ -494,14 +502,14 @@ pub fn format_failed_check(
 }
 
 async fn run_sequential(
-    checks: Vec<&CheckToRun>,
+    checks: &[&CheckToRun],
     project_root: &Path,
     target: &ExecTarget,
     executor: &dyn CommandExecutor,
     max_output_lines: usize,
 ) -> Vec<CheckResult> {
     let mut results = Vec::new();
-    for check in checks {
+    for &check in checks {
         let result =
             run_check_with_executor(check, project_root, target, executor, max_output_lines).await;
         results.push(result);
@@ -511,7 +519,7 @@ async fn run_sequential(
 
 /// Run `checks` concurrently, at most `limit` at a time; results in input order.
 async fn run_parallel(
-    checks: Vec<&CheckToRun>,
+    checks: &[&CheckToRun],
     project_root: &Path,
     target: &ExecTarget,
     executor: Arc<dyn CommandExecutor>,
@@ -521,7 +529,7 @@ async fn run_parallel(
     let permits = Arc::new(tokio::sync::Semaphore::new(limit));
     let mut handles = Vec::new();
 
-    for check in checks {
+    for &check in checks {
         let check = check.clone();
         let id = check.id().to_string();
         let project_root = project_root.to_path_buf();
@@ -764,7 +772,7 @@ mod tests {
             .returning(|_, _, _| panic!("executor blew up"));
         let target = ExecTarget::Local(LocalConfig::default());
         let results = run_parallel(
-            vec![&check("ls")],
+            &[&check("ls")],
             Path::new("."),
             &target,
             std::sync::Arc::new(mock),
@@ -791,7 +799,7 @@ mod tests {
         allowed.definition.allow_failure = true;
         let target = ExecTarget::Local(LocalConfig::default());
         let results = run_parallel(
-            vec![&allowed],
+            &[&allowed],
             Path::new("."),
             &target,
             std::sync::Arc::new(mock),

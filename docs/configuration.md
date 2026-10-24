@@ -306,7 +306,12 @@ checks:
 - If `false`, checks run sequentially
 
 **`stop_on_failure`** (default: `false`)
-- If `true`, stops all execution if any check in this group fails
+- If `true`, a check of this group that ran and failed (non-zero exit or timeout) stops the run once the group finishes: later groups don't run
+- The group itself finishes: its other checks (sequential, or running / queued in a `parallel` group) still run and report real results
+- Doesn't stop: a failure of an `allow_failure: true` check (a warning), a cancelled check, checks a failed pre-command kept from running (`on_failure: skip_group`; `abort` stops the run on its own)
+- Later groups' checks fail as not run with the reason (``Not run: run stopped by failed check `<id>` of group `<group>` (stop_on_failure)``), their `pre_commands` are skipped, on-demand checks stay on-demand; exit code 1
+- TUI, `--simple` (every `--format`) and `--fix` verification; the TUI footer says ``Check `<id>` (<group>) failed: run stopped``
+- Full runs only (initial run, `R`): a single run (`r`, `t`, `--watch` re-runs, `x` / `X` verification) never stops other groups
 - Useful for critical validation that blocks further checks
 
 **`pre_commands`** (optional)

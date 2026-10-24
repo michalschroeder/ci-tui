@@ -1212,6 +1212,10 @@ impl App {
                 name,
                 reason,
             } => self.on_pre_command_skipped(&group, &name, reason),
+            // Footer only; the not-run results follow
+            RunnerEvent::RunStopped { group, check_id } => {
+                self.show_run_stopped(&group, &check_id);
+            }
             RunnerEvent::AllFinished => {
                 self.run.all_finished = true;
                 self.run.current_group = None;
@@ -1328,6 +1332,13 @@ impl App {
             "group skipped"
         };
         let text = format!("Pre-command `{name}` ({group}) failed: {outcome}");
+        self.set_status_message(StatusKind::Error, text);
+    }
+
+    /// Footer for a failed check of `stop_on_failure` `group` that stopped
+    /// the full run (the runner's [`RunnerEvent::RunStopped`])
+    fn show_run_stopped(&mut self, group: &str, check_id: &str) {
+        let text = format!("Check `{check_id}` ({group}) failed: run stopped");
         self.set_status_message(StatusKind::Error, text);
     }
 

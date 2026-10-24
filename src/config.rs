@@ -622,7 +622,9 @@ pub struct GroupConfig {
     /// Run checks in this group in parallel
     #[serde(default)]
     pub parallel: bool,
-    /// Stop all execution if any check in this group fails
+    /// Stop the run when a check of this group that ran fails as an error
+    /// (not `allow_failure`, not cancelled): the group finishes, later
+    /// groups' checks fail as not run. Full runs only, not single re-runs.
     #[serde(default)]
     pub stop_on_failure: bool,
     /// Commands to run before checks in this group (e.g., DB init)
