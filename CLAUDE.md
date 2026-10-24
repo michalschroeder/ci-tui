@@ -123,7 +123,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 ### Core Flow
 1. **main.rs** - CLI entry point using clap. Loads config, detects git changes (or accepts `--files` to bypass git), determines checks, launches UI or simple mode
 2. **config.rs** - YAML config parsing with `CiConfig` as the root type. Uses `IndexMap` to preserve YAML key ordering for group execution order
-3. **git.rs** - Git change detection comparing against base branch (tries `origin/{base}`, `{base}`, fallback in order)
+3. **git.rs** - Git change detection comparing against base branch (tries `origin/{base}`, `{base}`, fallback in order). Path listings use `-z` (no C-quoting); non-UTF-8 output → `NonUtf8Output`, exit 3, no base-ref fallback
 4. **checks/** - `determine_checks()` matches changed files against file patterns and test discovery rules to build `CheckToRun` list (`mod.rs` + `determine.rs`)
 5. **runner.rs** - `CheckRunner` executes checks via `ExecTarget` (docker exec / docker run, or host shell in local mode) with event streaming through mpsc channels
 6. **ui/mod.rs** - Main TUI event loop using ratatui. Keyboard input runs on dedicated OS thread for responsiveness under high CPU load

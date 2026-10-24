@@ -1,7 +1,7 @@
-//! Mock-based tests for git operations
+//! Tests for git operations
 //!
-//! These tests use MockGitExecutor to verify git command parsing logic
-//! without requiring an actual Git repository.
+//! Most use MockGitExecutor to verify git command parsing logic without a
+//! Git repository; `real_repo` runs the binary against one.
 
 mod common;
 
@@ -10,7 +10,10 @@ use ci_tui::git::{
     current_branch_with_executor, detect_changes_with_executor, get_changed_files_with_executor,
     short_commit_with_executor, MockGitExecutor,
 };
-use common::{mock_git_error, mock_git_with_output};
+use common::{
+    assert_code, commit, git, mock_git_error, mock_git_with_output, run_ci_tui_env, stderr, stdout,
+    write,
+};
 use rstest::rstest;
 use std::path::Path;
 
@@ -21,7 +24,7 @@ mod get_changed_files {
 
     #[test]
     fn success_with_multiple_files() {
-        let mock = mock_git_with_output("src/foo.rs\nsrc/bar.rs\ntests/test.rs\n");
+        let mock = mock_git_with_output("src/foo.rs\0src/bar.rs\0tests/test.rs\0");
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
 
         assert_eq!(result.files.len(), 3);
@@ -41,11 +44,11 @@ mod get_changed_files {
     }
 
     #[test]
-    fn handles_trailing_newlines() {
-        let mock = mock_git_with_output("file1.rs\n\nfile2.rs\n\n\n");
+    fn skips_empty_entries() {
+        let mock = mock_git_with_output("file1.rs\0\0file2.rs\0\0\0");
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
 
-        // Empty lines should be filtered out
+        // Empty entries should be filtered out
         assert_eq!(result.files.len(), 2);
         assert!(result.files.contains(&"file1.rs".to_string()));
         assert!(result.files.contains(&"file2.rs".to_string()));
@@ -90,7 +93,7 @@ mod get_changed_files {
     #[case("main", vec!["src/bar.rs", "tests/test.rs"])]
     #[case("HEAD~1", vec![])]
     fn various_base_refs(#[case] base_ref: &str, #[case] expected_files: Vec<&str>) {
-        let output = expected_files.join("\n");
+        let output = expected_files.join("\0");
         let mock = mock_git_with_output(&output);
 
         let result = get_changed_files_with_executor(Path::new("/tmp"), base_ref, &mock).unwrap();
@@ -123,7 +126,7 @@ mod detect_changes {
                 args.iter().any(|a| a == "master") && args.iter().any(|a| a == "--merge-base")
             })
             .times(1)
-            .returning(|_, _| Ok("file1.rs\n".to_string()));
+            .returning(|_, _| Ok("file1.rs\0".to_string()));
 
         // Then: uncommitted diff + untracked ls-files (no --merge-base) — succeed.
         mock.expect_run_command()
@@ -162,7 +165,7 @@ mod detect_changes {
                 args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == "HEAD~1")
             })
             .times(1)
-            .returning(|_, _| Ok("file2.rs\n".to_string()));
+            .returning(|_, _| Ok("file2.rs\0".to_string()));
 
         // Uncommitted + untracked — succeed with no output.
         mock.expect_run_command()
@@ -210,7 +213,7 @@ mod detect_changes {
                     && args.iter().any(|a| a == "origin/development")
             })
             .times(1)
-            .returning(|_, _| Ok("src/main.rs\n".to_string()));
+            .returning(|_, _| Ok("src/main.rs\0".to_string()));
 
         // Uncommitted + untracked follow.
         mock.expect_run_command()
@@ -299,5 +302,83 @@ mod short_commit {
         let result = short_commit_with_executor(Path::new("/tmp"), &mock).unwrap();
 
         assert_eq!(result, expected);
+    }
+}
+
+mod real_repo {
+    use super::*;
+    use ci_tui::exit;
+
+    // Edge case: `py` fails on every run and prints each file it gets
+    const CONFIG: &str = r#"version: 2
+runner: local
+git:
+  base_branch: main
+  fallback_branch: HEAD~1
+file_patterns:
+  py:
+    pattern: '^src/.*\.py$'
+checks:
+  g:
+    checks:
+      py:
+        name: Py
+        command: "printf '[%s]\n' {files}; false"
+        triggers:
+          file_pattern: py
+"#;
+
+    /// git's default, which C-quotes non-ASCII names, set even if the user's
+    /// global config turns it off
+    const QUOTE_PATH: [(&str, &str); 3] = [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "core.quotePath"),
+        ("GIT_CONFIG_VALUE_0", "true"),
+    ];
+
+    /// Repo on branch `feature` off `main` (which has the config), committing
+    /// `src/café.py` and leaving `src/a"b.py` untracked
+    fn feature_repo() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        write(dir, "ci-tui.yaml", CONFIG);
+        git(dir, &["add", "."]);
+        commit(dir, "base");
+        git(dir, &["checkout", "-q", "-b", "feature"]);
+        write(dir, "src/café.py", "bad\n");
+        git(dir, &["add", "."]);
+        commit(dir, "feature");
+        write(dir, "src/a\"b.py", "bad\n");
+        tmp
+    }
+
+    #[test]
+    fn quoted_names_reach_their_check() {
+        let tmp = feature_repo();
+        let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &QUOTE_PATH);
+        assert_code(&out, exit::CHECKS_FAILED);
+        let stdout = stdout(&out);
+        assert!(stdout.contains("[src/café.py]"), "{stdout}");
+        assert!(stdout.contains("[src/a\"b.py]"), "{stdout}");
+    }
+
+    /// Linux file systems accept non-UTF-8 names (macOS ones don't)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_name_fails_detection() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = feature_repo();
+        let name = std::ffi::OsStr::from_bytes(b"caf\xff.py");
+        std::fs::write(tmp.path().join("src").join(name), "bad\n").unwrap();
+
+        let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &QUOTE_PATH);
+        assert_code(&out, exit::ENV_ERROR);
+        let stderr = stderr(&out);
+        assert!(
+            stderr.contains("non-UTF-8 path `src/caf\u{fffd}.py`"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("No base ref"), "{stderr}");
     }
 }
