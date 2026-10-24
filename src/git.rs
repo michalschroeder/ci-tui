@@ -104,8 +104,10 @@ pub const CLI_FILES_BASE_REF: &str = "--files (manual)";
 /// git index only. Rendered in headers as "vs --staged (git index)".
 pub const STAGED_BASE_REF: &str = "--staged (git index)";
 
-/// Change types every `git diff` path reports: added, copied, modified, renamed.
-const DIFF_FILTER: &str = "--diff-filter=ACMR";
+/// Change types every `git diff` path reports: all but deletions (lowercase
+/// `d` excludes), so type changes (file <-> symlink, `T`) and unmerged paths
+/// (`U`) still reach their checks; an allow-list would drop new classes silently.
+const DIFF_FILTER: &str = "--diff-filter=d";
 
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone)]
@@ -609,10 +611,10 @@ mod tests {
     }
 
     #[test]
-    fn get_changed_files_passes_diff_filter_acmr() {
+    fn get_changed_files_passes_diff_filter_excluding_deletions() {
         let mut mock = MockGitExecutor::new();
         mock.expect_run_command()
-            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=d"))
             .times(2)
             .returning(|_, _| Ok(String::new()));
 
@@ -664,7 +666,7 @@ mod tests {
             .withf(|_, args: &[String]| {
                 !args.iter().any(|a| a == "--merge-base")
                     && args.iter().any(|a| a == "HEAD")
-                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+                    && args.iter().any(|a| a == DIFF_FILTER)
             })
             .times(1)
             .in_sequence(&mut seq)
@@ -693,7 +695,7 @@ mod tests {
         let mut mock = MockGitExecutor::new();
 
         mock.expect_run_command()
-            .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=ACMR"))
+            .withf(|_, args: &[String]| args.iter().any(|a| a == DIFF_FILTER))
             .times(2)
             .returning(|_, _| Ok(String::new()));
 
@@ -737,8 +739,7 @@ mod tests {
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                !args.iter().any(|a| a == "--merge-base")
-                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+                !args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == DIFF_FILTER)
             })
             .times(1)
             .returning(|_, _| Err(anyhow::anyhow!("uncommitted diff blew up")));
@@ -759,8 +760,7 @@ mod tests {
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                !args.iter().any(|a| a == "--merge-base")
-                    && args.iter().any(|a| a == "--diff-filter=ACMR")
+                !args.iter().any(|a| a == "--merge-base") && args.iter().any(|a| a == DIFF_FILTER)
             })
             .times(1)
             .returning(|_, _| Ok(String::new()));
@@ -781,13 +781,7 @@ mod tests {
         // Index diff + deleted-on-disk list only: no base ref, unstaged diff or untracked
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                args == [
-                    "diff",
-                    "-z",
-                    "--cached",
-                    "--name-only",
-                    "--diff-filter=ACMR",
-                ]
+                args == ["diff", "-z", "--cached", "--name-only", DIFF_FILTER]
             })
             .times(1)
             .returning(|_, _| Ok("a.rs\0src/b.rs\0gone.rs\0".to_string()));

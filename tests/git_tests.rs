@@ -339,17 +339,9 @@ checks:
     /// Repo on branch `feature` off `main` (which has the config), committing
     /// `src/café.py` and leaving `src/a"b.py` untracked
     fn feature_repo() -> tempfile::TempDir {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
-        git(dir, &["init", "-q", "-b", "main"]);
-        write(dir, "ci-tui.yaml", CONFIG);
-        git(dir, &["add", "."]);
-        commit(dir, "base");
-        git(dir, &["checkout", "-q", "-b", "feature"]);
-        write(dir, "src/café.py", "bad\n");
-        git(dir, &["add", "."]);
-        commit(dir, "feature");
-        write(dir, "src/a\"b.py", "bad\n");
+        let tmp = base_repo(|_| {});
+        commit_feature(tmp.path(), |dir| write(dir, "src/café.py", "bad\n"));
+        write(tmp.path(), "src/a\"b.py", "bad\n");
         tmp
     }
 
@@ -380,5 +372,168 @@ checks:
             "{stderr}"
         );
         assert!(!stderr.contains("No base ref"), "{stderr}");
+    }
+
+    /// Repo on `main` whose one commit has the config plus what `setup` writes
+    fn base_repo(setup: impl FnOnce(&Path)) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        write(dir, "ci-tui.yaml", CONFIG);
+        setup(dir);
+        git(dir, &["add", "."]);
+        commit(dir, "base");
+        tmp
+    }
+
+    /// Commit everything in `dir` on a new `feature` branch after `change`
+    fn commit_feature(dir: &Path, change: impl FnOnce(&Path)) {
+        git(dir, &["checkout", "-q", "-b", "feature"]);
+        change(dir);
+        git(dir, &["add", "-A"]);
+        commit(dir, "feature");
+    }
+
+    /// Replace `path` in `dir` with a symlink to `target` (relative to it)
+    #[cfg(unix)]
+    fn symlink(dir: &Path, path: &str, target: &str) {
+        let link = dir.join(path);
+        if link.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link).unwrap();
+        }
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// Base with regular `src/app.py` and `docs/notes.txt`
+    #[cfg(unix)]
+    fn app_repo() -> tempfile::TempDir {
+        base_repo(|dir| {
+            write(dir, "src/app.py", "ok\n");
+            write(dir, "docs/notes.txt", "bad\n");
+        })
+    }
+
+    fn assert_py_ran_on(out: &std::process::Output, file: &str) {
+        assert_code(out, exit::CHECKS_FAILED);
+        let stdout = stdout(out);
+        assert!(stdout.contains(&format!("[{file}]")), "{stdout}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_file_to_symlink_reaches_its_check() {
+        let tmp = base_repo(|dir| write(dir, "src/app.py", "ok\n"));
+        commit_feature(tmp.path(), |dir| {
+            write(dir, "docs/notes.txt", "bad\n");
+            symlink(dir, "src/app.py", "../docs/notes.txt");
+        });
+
+        let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &[]);
+        assert_py_ran_on(&out, "src/app.py");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_symlink_to_file_reaches_its_check() {
+        let tmp = base_repo(|dir| {
+            write(dir, "docs/notes.txt", "ok\n");
+            symlink(dir, "src/link.py", "../docs/notes.txt");
+        });
+        commit_feature(tmp.path(), |dir| {
+            std::fs::remove_file(dir.join("src/link.py")).unwrap();
+            write(dir, "src/link.py", "bad\n");
+        });
+
+        let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &[]);
+        assert_py_ran_on(&out, "src/link.py");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncommitted_type_change_reaches_its_check() {
+        let tmp = app_repo();
+        symlink(tmp.path(), "src/app.py", "../docs/notes.txt");
+
+        let out = run_ci_tui_env(tmp.path(), &["--simple", "--no-color"], &[]);
+        assert_py_ran_on(&out, "src/app.py");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_type_change_reaches_its_check() {
+        let tmp = app_repo();
+        symlink(tmp.path(), "src/app.py", "../docs/notes.txt");
+        git(tmp.path(), &["add", "src/app.py"]);
+
+        let out = run_ci_tui_env(tmp.path(), &["--staged", "--simple", "--no-color"], &[]);
+        assert_py_ran_on(&out, "src/app.py");
+    }
+
+    #[test]
+    fn deleted_files_are_not_reported() {
+        let tmp = base_repo(|dir| {
+            for file in [
+                "src/gone.py",
+                "src/keep.py",
+                "src/unstaged.py",
+                "src/staged.py",
+            ] {
+                write(dir, file, "ok\n");
+            }
+        });
+        commit_feature(tmp.path(), |dir| {
+            std::fs::remove_file(dir.join("src/gone.py")).unwrap();
+            write(dir, "src/keep.py", "bad\n");
+        });
+        std::fs::remove_file(tmp.path().join("src/unstaged.py")).unwrap();
+        git(tmp.path(), &["rm", "-q", "src/staged.py"]);
+        // Staged edit: `--staged` has a file to run on besides the deletion
+        write(tmp.path(), "src/keep.py", "worse\n");
+        git(tmp.path(), &["add", "src/keep.py"]);
+
+        for args in [
+            &["--simple", "--no-color"][..],
+            &["--staged", "--simple", "--no-color"][..],
+        ] {
+            let out = run_ci_tui_env(tmp.path(), args, &[]);
+            assert_py_ran_on(&out, "src/keep.py");
+            let stdout = stdout(&out);
+            for gone in ["gone", "unstaged", "staged"] {
+                assert!(!stdout.contains(&format!("[src/{gone}.py]")), "{stdout}");
+            }
+        }
+    }
+
+    #[test]
+    fn staged_merge_conflict_reaches_its_check_once() {
+        let tmp = base_repo(|dir| write(dir, "src/x.py", "base\n"));
+        let dir = tmp.path();
+        commit_feature(dir, |dir| write(dir, "src/x.py", "feature\n"));
+        git(dir, &["checkout", "-q", "main"]);
+        write(dir, "src/x.py", "main\n");
+        git(dir, &["add", "src/x.py"]);
+        commit(dir, "main");
+        git(dir, &["checkout", "-q", "feature"]);
+        let merge = common::isolated_git_command("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "-q",
+                "main",
+            ])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "merge must conflict");
+
+        let out = run_ci_tui_env(dir, &["--staged", "--simple", "--no-color"], &[]);
+        assert_py_ran_on(&out, "src/x.py");
+        let stdout = stdout(&out);
+        assert!(stdout.contains("1 files changed"), "{stdout}");
+        assert_eq!(stdout.matches("[src/x.py]").count(), 1, "{stdout}");
     }
 }

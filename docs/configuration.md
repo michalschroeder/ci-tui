@@ -749,7 +749,8 @@ Bypass git change detection and run checks on specific files:
 ci-tui --config ci-tui.yaml --staged --simple   # e.g. in .git/hooks/pre-commit
 ```
 
-Checks only files staged in the git index (`git diff --cached --name-only --diff-filter=ACMR`):
+Checks only files staged in the git index (`git diff --cached`):
+- Every change except deletions (`--diff-filter=d`): incl. file ↔ symlink type changes and unmerged paths
 - No base-branch diff, unstaged changes, or untracked files
 - Ignore patterns still apply
 - Headers show `vs --staged (git index)`; TUI refresh (`r` / `R`) re-reads the index
