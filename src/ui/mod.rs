@@ -119,8 +119,9 @@ enum TaskEvent {
     },
     /// Check dropped out after git refresh; carries its previous result
     CheckNotApplicable(CheckResult),
-    /// Git refresh failed; the retry runs with the previous file list
-    GitRefreshFailed,
+    /// Git refresh failed ([`git_refresh_failed`] message); the retry runs
+    /// with the previous file list
+    GitRefreshFailed(String),
     /// Retry / on-demand result
     RetryResult(CheckResult),
     /// Result the result cache does not record: a run-all-files run (its
@@ -588,8 +589,10 @@ async fn refresh_and_run(
             new_check
         }
         // Git refresh failed - run with the existing check
-        Err(_) => {
-            let _ = tx.send(TaskEvent::GitRefreshFailed).await;
+        Err(e) => {
+            let _ = tx
+                .send(TaskEvent::GitRefreshFailed(git_refresh_failed(&e)))
+                .await;
             check
         }
     };
@@ -1133,26 +1136,29 @@ fn handle_cancel_selected(app: &mut App, tasks: &mut Tasks) -> Action {
     Action::Continue
 }
 
+/// Status message for a failed git refresh (`r` / `R` / `--watch`)
+fn git_refresh_failed(err: &anyhow::Error) -> String {
+    format!("Git refresh failed: {err:#} - retrying with previous file list")
+}
+
 /// Handle 'R' key: retry all checks after a git refresh (runs off the event loop)
 fn handle_retry_all(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.can_retry_all() {
         return Action::Continue;
     }
     let previous = app.changed_files.clone();
-    let base_ref = previous.base_ref.clone();
     app.start_refresh();
     tasks.spawn(|ctx, tx| async move {
         let (changed_files, Selected { checks, warnings }) =
-            match ctx.refresh_async(previous, None).await {
+            match ctx.refresh_async(previous.clone(), None).await {
                 Ok(refreshed) => refreshed,
-                // Git refresh failed - restart with no changed files
-                Err(_) => {
-                    let changed_files = ChangedFiles {
-                        files: vec![],
-                        base_ref,
-                    };
-                    let selected = ctx.select(&changed_files, None);
-                    (changed_files, selected)
+                // Git refresh failed - restart with the previous file list
+                // (none would skip every check); the reset clears status
+                // messages, so the error goes first in the warnings
+                Err(e) => {
+                    let mut selected = ctx.select(&previous, None);
+                    selected.warnings.insert(0, git_refresh_failed(&e));
+                    (previous, selected)
                 }
             };
         let _ = tx
@@ -1372,10 +1378,7 @@ fn handle_task_event(app: &mut App, event: TaskEvent) -> Action {
                 "Check no longer applicable after refresh",
             );
         }
-        TaskEvent::GitRefreshFailed => app.set_status_message(
-            StatusKind::Error,
-            "Git refresh failed - retrying with previous file list",
-        ),
+        TaskEvent::GitRefreshFailed(message) => app.set_status_message(StatusKind::Error, message),
         TaskEvent::Output(event) => app.handle_runner_event(event),
         TaskEvent::RetryResult(result) | TaskEvent::UnrecordedResult(result) => {
             let check_id = result.check_id.clone();
@@ -2001,7 +2004,7 @@ checks:
             crate::runner::CheckStatus::Running
         );
         let event = rx.recv().await.expect("refresh task must report");
-        assert!(matches!(event, TaskEvent::GitRefreshFailed));
+        assert!(matches!(event, TaskEvent::GitRefreshFailed(_)));
         handle_task_event(&mut app, event);
         assert!(
             app.view.status_message.is_some(),
@@ -2021,6 +2024,39 @@ checks:
         let event = rx.recv().await.expect("refresh task must report");
         let action = handle_task_event(&mut app, event);
         assert!(matches!(action, Action::RestartRunner { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_retry_all_git_failure_keeps_file_list_and_says_why() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        app.changed_files = ChangedFiles {
+            files: vec!["src/Foo.php".to_string()],
+            base_ref: "main".to_string(),
+        };
+        let (mut tasks, mut rx) = make_test_tasks(&config); // project_root does not exist -> git fails
+
+        handle_retry_all(&mut app, &mut tasks);
+
+        let event = rx.recv().await.expect("refresh task must report");
+        let TaskEvent::RetryAllReady {
+            changed_files,
+            checks,
+            warnings,
+        } = event
+        else {
+            panic!("expected RetryAllReady, got {:?}", event);
+        };
+        assert_eq!(changed_files.files, vec!["src/Foo.php".to_string()]);
+        assert!(
+            checks.iter().any(|c| c.id() == "php-lint"),
+            "checks of the previous files still run"
+        );
+        assert!(
+            warnings[0].starts_with("Git refresh failed: ")
+                && warnings[0].ends_with(" - retrying with previous file list"),
+            "{warnings:?}"
+        );
     }
 
     fn cli_files() -> ChangedFiles {
@@ -4635,9 +4671,11 @@ checks:
         })
         .await;
 
-        assert_eq!(
-            status_text(&app),
-            Some("Git refresh failed - retrying with previous file list")
+        let status = status_text(&app).unwrap();
+        assert!(
+            status.starts_with("Git refresh failed: ")
+                && status.ends_with(" - retrying with previous file list"),
+            "{status}"
         );
         let result = &app.results["php-lint"];
         assert_eq!(result.status, CheckStatus::Passed);

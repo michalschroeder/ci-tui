@@ -70,17 +70,22 @@ impl GitExecutor for RealGitExecutor {
 /// detection fails on it (exit 3) instead of dropping or mangling the path,
 /// which would let the file skip its checks.
 #[derive(Debug, thiserror::Error)]
-#[error("git printed a non-UTF-8 path `{0}`: ci-tui needs UTF-8 file names, rename it")]
+#[error(
+    "git printed a non-UTF-8 path `{0}`: ci-tui needs UTF-8 file names, \
+     rename it (or bypass git with --files)"
+)]
 pub struct NonUtf8Output(String);
 
 impl NonUtf8Output {
-    /// From git's raw stdout: names the first NUL / newline separated entry
-    /// that is not UTF-8 (lossy, for the message)
+    /// From git's raw stdout: names the first NUL-separated entry that is
+    /// not UTF-8 (lossy, for the message). Not split on newlines: `-z`
+    /// names may contain them; a trailing one (non-`-z` output) is dropped.
     pub fn new(stdout: &[u8]) -> Self {
         let entry = stdout
-            .split(|b| *b == 0 || *b == b'\n')
+            .split(|b| *b == 0)
             .find(|entry| std::str::from_utf8(entry).is_err())
             .unwrap_or(stdout);
+        let entry = entry.strip_suffix(b"\n").unwrap_or(entry);
         Self(String::from_utf8_lossy(entry).into_owned())
     }
 }
@@ -230,13 +235,7 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let committed = run_committed_diff(project_root, base_ref, executor).map_err(|e| {
-        if is_non_utf8(&e) {
-            e
-        } else {
-            e.context(format!("could not resolve git base ref `{base_ref}`"))
-        }
-    })?;
+    let committed = run_committed_diff(project_root, base_ref, executor)?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
     Ok(ChangedFiles {
@@ -286,15 +285,17 @@ pub fn get_staged_files_with_executor(
     let deleted = executor
         .run_command(project_root, &args)
         .context("could not list staged files deleted from the working tree")?;
-    let deleted: HashSet<&str> = deleted.split('\0').collect();
+    let deleted: HashSet<String> = union_paths(&[&deleted]).into_iter().collect();
     let mut files = union_paths(&[&staged]);
-    files.retain(|f| !deleted.contains(f.as_str()));
+    files.retain(|f| !deleted.contains(f));
     Ok(ChangedFiles {
         files,
         base_ref: STAGED_BASE_REF.to_string(),
     })
 }
 
+/// Paths changed between the merge base of `base_ref` and HEAD. Errors say
+/// the ref did not resolve, except [`NonUtf8Output`] (the ref did).
 fn run_committed_diff(
     project_root: &Path,
     base_ref: &str,
@@ -313,7 +314,13 @@ fn run_committed_diff(
         "HEAD".to_string(),
         "--".to_string(),
     ];
-    executor.run_command(project_root, &args)
+    executor.run_command(project_root, &args).map_err(|e| {
+        if is_non_utf8(&e) {
+            e
+        } else {
+            e.context(format!("could not resolve git base ref `{base_ref}`"))
+        }
+    })
 }
 
 fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<String> {
@@ -856,7 +863,20 @@ mod tests {
         let err = NonUtf8Output::new(b"ok.rs\0src/caf\xff.py\0");
         assert_eq!(
             err.to_string(),
-            "git printed a non-UTF-8 path `src/caf\u{fffd}.py`: ci-tui needs UTF-8 file names, rename it"
+            "git printed a non-UTF-8 path `src/caf\u{fffd}.py`: ci-tui needs UTF-8 file names, \
+             rename it (or bypass git with --files)"
+        );
+    }
+
+    #[test]
+    fn non_utf8_output_keeps_newlines_inside_names() {
+        // `-z` entry with a newline: named whole, not just its last line
+        let err = NonUtf8Output::new(b"ok.rs\0dir\nsub/caf\xff.py\0");
+        assert_eq!(err.0, "dir\nsub/caf\u{fffd}.py");
+        // Non-`-z` output (rev-parse): trailing newline dropped
+        assert_eq!(
+            NonUtf8Output::new(b"/caf\xff/repo\n").0,
+            "/caf\u{fffd}/repo"
         );
     }
 
