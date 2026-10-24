@@ -65,13 +65,13 @@ checks:
     checks:
       unit:
         name: Unit Tests
-        command: script -q -c "cargo nextest run --lib --status-level all --color always" /dev/null
+        command: script -q -e -c "cargo nextest run --lib --status-level all --color always" /dev/null
         triggers:
           file_pattern: crate
 
       integration:
         name: Integration Tests
-        command: script -q -c "cargo nextest run --features test --test '*' --status-level all --color always" /dev/null
+        command: script -q -e -c "cargo nextest run --features test --test '*' --status-level all --color always" /dev/null
         triggers:
           file_pattern: crate
 
