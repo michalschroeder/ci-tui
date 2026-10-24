@@ -26,7 +26,7 @@ use crate::git::ChangedFiles;
 use crate::report;
 use crate::runner::{
     CachingExecutor, CheckResult, CheckRunner, CheckStatus, CommandExecutor, ExecTarget,
-    PreCommandOutcome, RunnerEvent,
+    RunnerEvent,
 };
 use crate::utils::time;
 use anyhow::Result;
@@ -338,26 +338,11 @@ fn on_verify_event(
             not_run.retain(|id| *id != result.check_id);
             verified_result(&result, checks, summary);
         }
-        RunnerEvent::PreCommandFinished {
-            name,
-            outcome,
-            output,
-            ..
-        } => {
-            let (mark, note) = match outcome {
-                PreCommandOutcome::Passed => return,
-                PreCommandOutcome::Ignored => {
-                    ("\x1b[33m⚠\x1b[0m", " (ignored: on_failure: continue)")
-                }
-                PreCommandOutcome::Failed { .. } => ("\x1b[31m✗\x1b[0m", ""),
-            };
-            let output: String = output.lines().map(|l| format!("    {l}\n")).collect();
-            cprint!("  {mark} pre-command {name} \x1b[90mfailed{note}\x1b[0m\n{output}");
+        event => {
+            if let Some(line) = report::format_pre_command_event(&event) {
+                cprint!("{line}");
+            }
         }
-        RunnerEvent::PreCommandSkipped { name, reason, .. } => {
-            cprintln!("  \x1b[90m⊘ pre-command {name} skipped ({reason})\x1b[0m");
-        }
-        _ => {}
     }
 }
 

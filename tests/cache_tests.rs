@@ -4,7 +4,7 @@
 use ci_tui::exit;
 
 mod common;
-use common::{assert_code, git, run_ci_tui, stdout};
+use common::{assert_code, git, project, run_ci_tui, simple_run, stdout, write};
 
 // Edge case: the binary reads a YAML file from disk, so configs stay raw YAML.
 /// Local-mode config: `lint` (triggered by `.rs` files) appends to
@@ -64,33 +64,6 @@ checks:
                       - "tests/{path}_test.rs"
 "#;
 
-/// Tempdir with `ci-tui.yaml` = `config` and `a.rs`; a git repo if `git_init`
-fn project(config: &str, git_init: bool) -> tempfile::TempDir {
-    let tmp = tempfile::TempDir::new().unwrap();
-    if git_init {
-        git(tmp.path(), &["init", "-q"]);
-    }
-    write(tmp.path(), "ci-tui.yaml", config);
-    write(tmp.path(), "a.rs", "fn a() {}\n");
-    tmp
-}
-
-fn write(dir: &std::path::Path, path: &str, content: &str) {
-    let path = dir.join(path);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-}
-
-/// `--simple` run on `files` (default `a.rs`) plus `extra` args
-fn run(dir: &std::path::Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["--simple"];
-    if !extra.contains(&"--files") {
-        args.extend(["--files", "a.rs"]);
-    }
-    args.extend(extra);
-    run_ci_tui(dir, &args)
-}
-
 /// How often check `id` executed (lines it appended to `runs.log`)
 fn runs(dir: &std::path::Path, id: &str) -> usize {
     std::fs::read_to_string(dir.join("runs.log"))
@@ -103,10 +76,10 @@ fn runs(dir: &std::path::Path, id: &str) -> usize {
 #[test]
 fn unchanged_check_is_cached_on_second_run() {
     let tmp = project(CONFIG, true);
-    assert_code(&run(tmp.path(), &[]), exit::SUCCESS);
+    assert_code(&simple_run(tmp.path(), &[]), exit::SUCCESS);
     assert!(tmp.path().join(".git/ci-tui/results.json").is_file());
 
-    let out = run(tmp.path(), &[]);
+    let out = simple_run(tmp.path(), &[]);
     assert_code(&out, exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "lint"), 1, "second run served from cache");
     let lint_line = stdout(&out)
@@ -128,17 +101,17 @@ fn unchanged_check_is_cached_on_second_run() {
 #[test]
 fn always_run_check_is_never_cached() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     assert_eq!(runs(tmp.path(), "always"), 2);
 }
 
 #[test]
 fn editing_a_matched_file_reruns() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     write(tmp.path(), "a.rs", "fn a() { changed() }\n");
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     assert_eq!(runs(tmp.path(), "lint"), 2);
 }
 
@@ -146,8 +119,8 @@ fn editing_a_matched_file_reruns() {
 fn different_matched_files_rerun() {
     let tmp = project(CONFIG, true);
     write(tmp.path(), "b.rs", "fn b() {}\n");
-    run(tmp.path(), &[]);
-    run(tmp.path(), &["--files", "a.rs", "b.rs"]);
+    simple_run(tmp.path(), &[]);
+    simple_run(tmp.path(), &["--files", "a.rs", "b.rs"]);
     assert_eq!(runs(tmp.path(), "lint"), 2);
 }
 
@@ -157,9 +130,9 @@ fn different_matched_files_rerun() {
 #[case::ui_only_notify("notify: true\n", 1)]
 fn config_change_reruns_unless_irrelevant(#[case] added: &str, #[case] lint_runs: usize) {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     write(tmp.path(), "ci-tui.yaml", &format!("{CONFIG}{added}"));
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     assert_eq!(runs(tmp.path(), "lint"), lint_runs);
 }
 
@@ -169,9 +142,9 @@ fn config_change_reruns_unless_irrelevant(#[case] added: &str, #[case] lint_runs
 #[case::ui_only_notify("notify: true\n", 1)]
 fn local_override_change_reruns_unless_irrelevant(#[case] local: &str, #[case] lint_runs: usize) {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     write(tmp.path(), "ci-tui.local.yaml", local);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     assert_eq!(runs(tmp.path(), "lint"), lint_runs);
 }
 
@@ -181,25 +154,25 @@ fn editing_only_the_discovery_source_reruns() {
     write(tmp.path(), "src/a.rs", "fn a() {}\n");
     write(tmp.path(), "tests/a_test.rs", "fn t() {}\n");
     let files = ["--files", "src/a.rs"];
-    run(tmp.path(), &files);
-    run(tmp.path(), &files);
+    simple_run(tmp.path(), &files);
+    simple_run(tmp.path(), &files);
     assert_eq!(runs(tmp.path(), "unit"), 1, "unchanged: cached");
 
     write(tmp.path(), "src/a.rs", "fn a() { changed() }\n");
-    run(tmp.path(), &files);
+    simple_run(tmp.path(), &files);
     assert_eq!(runs(tmp.path(), "unit"), 2, "source edited: rerun");
 }
 
 #[test]
 fn no_cache_flag_runs_every_check_but_still_records_passes() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &["--no-cache"]);
-    let out = run(tmp.path(), &["--no-cache"]);
+    simple_run(tmp.path(), &["--no-cache"]);
+    let out = simple_run(tmp.path(), &["--no-cache"]);
     assert_code(&out, exit::SUCCESS);
     assert!(!stdout(&out).contains("cached"), "{}", stdout(&out));
     assert_eq!(runs(tmp.path(), "lint"), 2);
 
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     assert_eq!(
         runs(tmp.path(), "lint"),
         2,
@@ -211,28 +184,31 @@ fn no_cache_flag_runs_every_check_but_still_records_passes() {
 fn failed_run_is_not_cached() {
     let tmp = project(CONFIG, true);
     write(tmp.path(), "fail", "");
-    assert_code(&run(tmp.path(), &[]), exit::CHECKS_FAILED);
-    assert_code(&run(tmp.path(), &[]), exit::CHECKS_FAILED);
+    assert_code(&simple_run(tmp.path(), &[]), exit::CHECKS_FAILED);
+    assert_code(&simple_run(tmp.path(), &[]), exit::CHECKS_FAILED);
     assert_eq!(runs(tmp.path(), "lint"), 2);
 }
 
 #[test]
 fn failure_after_cached_pass_invalidates_entry() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     write(tmp.path(), "fail", "");
-    assert_code(&run(tmp.path(), &["--no-cache"]), exit::CHECKS_FAILED);
+    assert_code(
+        &simple_run(tmp.path(), &["--no-cache"]),
+        exit::CHECKS_FAILED,
+    );
     std::fs::remove_file(tmp.path().join("fail")).unwrap();
 
-    assert_code(&run(tmp.path(), &[]), exit::SUCCESS);
+    assert_code(&simple_run(tmp.path(), &[]), exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "lint"), 3, "entry dropped by the failure");
 }
 
 #[test]
 fn outside_git_repo_runs_without_cache() {
     let tmp = project(CONFIG, false);
-    assert_code(&run(tmp.path(), &[]), exit::SUCCESS);
-    let out = run(tmp.path(), &[]);
+    assert_code(&simple_run(tmp.path(), &[]), exit::SUCCESS);
+    let out = simple_run(tmp.path(), &[]);
     assert_code(&out, exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "lint"), 2);
 }
@@ -241,8 +217,8 @@ fn outside_git_repo_runs_without_cache() {
 fn corrupt_cache_file_is_ignored_and_replaced() {
     let tmp = project(CONFIG, true);
     write(tmp.path(), ".git/ci-tui/results.json", "{not json");
-    assert_code(&run(tmp.path(), &[]), exit::SUCCESS);
-    assert_code(&run(tmp.path(), &[]), exit::SUCCESS);
+    assert_code(&simple_run(tmp.path(), &[]), exit::SUCCESS);
+    assert_code(&simple_run(tmp.path(), &[]), exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "lint"), 1);
 }
 
@@ -251,7 +227,7 @@ fn unwritable_cache_dir_does_not_fail_the_run() {
     let tmp = project(CONFIG, true);
     // A file where the cache dir should be: every write fails
     write(tmp.path(), ".git/ci-tui", "");
-    let out = run(tmp.path(), &[]);
+    let out = simple_run(tmp.path(), &[]);
     assert_code(&out, exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "lint"), 1);
 }
@@ -273,8 +249,8 @@ fn linked_worktree_caches_in_its_git_dir() {
     git(&main, &["worktree", "add", "-q", "../wt"]);
 
     let wt = outer.path().join("wt");
-    run(&wt, &[]);
-    run(&wt, &[]);
+    simple_run(&wt, &[]);
+    simple_run(&wt, &[]);
     assert_eq!(runs(&wt, "lint"), 1);
     assert!(main.join(".git/worktrees/wt/ci-tui/results.json").is_file());
 }
@@ -282,7 +258,7 @@ fn linked_worktree_caches_in_its_git_dir() {
 #[test]
 fn list_shows_cached_checks() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     let out = run_ci_tui(tmp.path(), &["--list", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
     assert!(stdout(&out).contains("cached     lint"), "{}", stdout(&out));
@@ -292,7 +268,7 @@ fn list_shows_cached_checks() {
 #[test]
 fn fix_mode_ignores_cache() {
     let tmp = project(CONFIG, true);
-    run(tmp.path(), &[]);
+    simple_run(tmp.path(), &[]);
     let out = run_ci_tui(tmp.path(), &["--fix", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
     assert_eq!(runs(tmp.path(), "fix"), 1);

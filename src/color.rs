@@ -3,7 +3,8 @@
 //! (`--simple`, `--fix`).
 //!
 //! Console modes keep their inline `\x1b[..m` escapes and print through
-//! [`cprintln!`], which strips them when color is off. A process-wide switch
+//! [`cprintln!`] ([`ceprint!`] on stderr, decided by whether stderr is a
+//! terminal), which strips them when color is off. A process-wide switch
 //! (set once in `main`) avoids threading a flag through every print site.
 //! The TUI takes the flag explicitly (`App::color`) instead.
 
@@ -14,8 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Env var that disables color when set to a non-empty value
 pub const NO_COLOR_ENV: &str = "NO_COLOR";
 
-/// Console color switch; on by default (tests, library callers)
+/// Console color switches (stdout, stderr); on by default (tests, library
+/// callers)
 static ENABLED: AtomicBool = AtomicBool::new(true);
+static STDERR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// `--color` value
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -41,14 +44,44 @@ pub fn should_color(choice: ColorChoice, stdout_tty: bool, no_color_env: Option<
     }
 }
 
-/// Set the console color switch read by [`cprintln!`]
-pub fn set_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
+/// Color decision per console stream
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleColor {
+    /// [`cprintln!`] / [`cprint!`]
+    pub stdout: bool,
+    /// [`ceprint!`]
+    pub stderr: bool,
 }
 
-/// Current console color switch
+impl ConsoleColor {
+    /// [`should_color`] for each stream, by whether it is a terminal
+    pub fn decide(
+        choice: ColorChoice,
+        stdout_tty: bool,
+        stderr_tty: bool,
+        no_color_env: Option<&OsStr>,
+    ) -> Self {
+        Self {
+            stdout: should_color(choice, stdout_tty, no_color_env),
+            stderr: should_color(choice, stderr_tty, no_color_env),
+        }
+    }
+}
+
+/// Set the console color switches read by [`cprintln!`] / [`ceprint!`]
+pub fn set_enabled(colors: ConsoleColor) {
+    ENABLED.store(colors.stdout, Ordering::Relaxed);
+    STDERR_ENABLED.store(colors.stderr, Ordering::Relaxed);
+}
+
+/// Current stdout color switch
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
+}
+
+/// Current stderr color switch
+pub fn stderr_enabled() -> bool {
+    STDERR_ENABLED.load(Ordering::Relaxed)
 }
 
 /// `s` as is with color on; with color off, without ANSI CSI sequences
@@ -118,6 +151,17 @@ macro_rules! cprint {
 }
 pub(crate) use cprint;
 
+/// `eprint!` honoring the stderr color switch ([`stderr_enabled`])
+macro_rules! ceprint {
+    ($($arg:tt)*) => {
+        eprint!(
+            "{}",
+            $crate::color::paint(&format!($($arg)*), $crate::color::stderr_enabled())
+        )
+    };
+}
+pub(crate) use ceprint;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +190,21 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(should_color(choice, tty, env.map(OsStr::new)), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::stdout_tty_stderr_piped(Auto, true, false, (true, false))]
+    #[case::stdout_piped_stderr_tty(Auto, false, true, (false, true))]
+    #[case::always_both_piped(Always, false, false, (true, true))]
+    #[case::never_both_tty(Never, true, true, (false, false))]
+    fn test_console_color_decides_per_stream(
+        #[case] choice: ColorChoice,
+        #[case] stdout_tty: bool,
+        #[case] stderr_tty: bool,
+        #[case] expected: (bool, bool),
+    ) {
+        let colors = ConsoleColor::decide(choice, stdout_tty, stderr_tty, None);
+        assert_eq!((colors.stdout, colors.stderr), expected);
     }
 
     #[test]

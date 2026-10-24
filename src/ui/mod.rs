@@ -1441,14 +1441,11 @@ impl Recorder {
         else {
             return;
         };
-        // Not run (a failed pre-command blocked it): its inputs' pass stands
-        if result.not_run {
-            return;
-        }
-        // Only status and `cached` count: leave the output behind
+        // Only status, `cached` and `not_run` count: leave the output behind
         let result = CheckResult {
             status: result.status.clone(),
             cached: result.cached,
+            not_run: result.not_run,
             ..CheckResult::pending(&result.check_id)
         };
         let check = app.checks.iter().find(|c| c.id() == result.check_id);

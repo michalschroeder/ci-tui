@@ -243,12 +243,14 @@ impl Cli {
     }
 
     /// Color decision for this process: [`Self::color_choice`], whether
-    /// stdout is a terminal and `NO_COLOR` (see [`crate::color::should_color`])
-    pub fn color_enabled(&self) -> bool {
+    /// stdout / stderr are terminals and `NO_COLOR` (see
+    /// [`crate::color::ConsoleColor::decide`])
+    pub fn color(&self) -> crate::color::ConsoleColor {
         use std::io::IsTerminal;
-        crate::color::should_color(
+        crate::color::ConsoleColor::decide(
             self.color_choice(),
             std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
             std::env::var_os(crate::color::NO_COLOR_ENV).as_deref(),
         )
     }

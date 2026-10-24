@@ -13,10 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod common;
-use common::configs::{CheckBuilder, ConfigBuilder, YAML_HEAD};
+use common::configs::{on_failure_groups, G1_ABORTED, G1_FAILED, YAML_HEAD};
 use common::{
-    assert_code, collect_events, load, local_sh, make_exec_check, make_on_demand_check, run_config,
-    stdout,
+    assert_code, collect_events, load, make_exec_check, make_on_demand_check, run_config, stdout,
 };
 
 // Edge case: raw YAML, the loader is under test.
@@ -53,29 +52,7 @@ fn unknown_on_failure_value_is_a_config_error_naming_the_field() {
     assert!(err.contains("skip_group"), "lists valid values: {err}");
 }
 
-/// Two local-mode groups: `g1` runs pre-commands `p1` (`p1_cmd`, with
-/// `policy`) and `p2`, then check `c1` (plus on-demand `od`); `g2` runs
-/// pre-command `p3`, then check `c2`
-fn two_groups(p1_cmd: &str, policy: OnFailure) -> CiConfig {
-    let check = || CheckBuilder::new("C", "true").build();
-    let mut config = ConfigBuilder::new()
-        .with_pre_command("g1", "p1", p1_cmd)
-        .with_pre_command("g1", "p2", "true")
-        .with_check("g1", "c1", check())
-        .with_check(
-            "g1",
-            "od",
-            CheckBuilder::new("Od", "true").on_demand().build(),
-        )
-        .with_pre_command("g2", "p3", "true")
-        .with_check("g2", "c2", check())
-        .build();
-    config.checks["g1"].pre_commands[0].on_failure = policy;
-    config.runner = local_sh();
-    config
-}
-
-/// Events of a full run of [`two_groups`]' checks
+/// Events of a full run of [`on_failure_groups`]' checks
 async fn run_two_groups(config: CiConfig) -> Vec<RunnerEvent> {
     let mut c1 = make_exec_check("c1", "true", None);
     c1.group = "g1".into();
@@ -122,24 +99,21 @@ fn skipped_reason(events: &[RunnerEvent], pre: &str) -> Option<String> {
     })
 }
 
-const G1_FAILED: &str = "Not run: pre-command `p1` of group `g1` failed";
-const ABORTED: &str = "Not run: run aborted by failed pre-command `p1` of group `g1`";
-
 #[tokio::test]
 async fn abort_reports_the_rest_of_the_run_as_not_run() {
-    let events = run_two_groups(two_groups("false", OnFailure::Abort)).await;
+    let events = run_two_groups(on_failure_groups("false", OnFailure::Abort, false)).await;
 
     assert!(!pre_started(&events, "p2") && !pre_started(&events, "p3"));
     assert!(!started(&events, "c1") && !started(&events, "c2"));
     assert_eq!(skipped_reason(&events, "p2").as_deref(), Some(G1_FAILED));
-    assert_eq!(skipped_reason(&events, "p3").as_deref(), Some(ABORTED));
+    assert_eq!(skipped_reason(&events, "p3").as_deref(), Some(G1_ABORTED));
     assert_eq!(
         finished(&events, "c1"),
         [(CheckStatus::Failed, true, G1_FAILED.to_string())]
     );
     assert_eq!(
         finished(&events, "c2"),
-        [(CheckStatus::Failed, true, ABORTED.to_string())]
+        [(CheckStatus::Failed, true, G1_ABORTED.to_string())]
     );
     assert!(
         finished(&events, "od").is_empty(),
@@ -150,7 +124,7 @@ async fn abort_reports_the_rest_of_the_run_as_not_run() {
 
 #[tokio::test]
 async fn skip_group_skips_its_group_and_runs_later_groups() {
-    let events = run_two_groups(two_groups("false", OnFailure::SkipGroup)).await;
+    let events = run_two_groups(on_failure_groups("false", OnFailure::SkipGroup, false)).await;
 
     assert!(!pre_started(&events, "p2") && !started(&events, "c1"));
     assert_eq!(skipped_reason(&events, "p2").as_deref(), Some(G1_FAILED));
@@ -168,7 +142,7 @@ async fn skip_group_skips_its_group_and_runs_later_groups() {
 
 #[tokio::test]
 async fn continue_runs_the_group_as_if_it_passed() {
-    let events = run_two_groups(two_groups("false", OnFailure::Continue)).await;
+    let events = run_two_groups(on_failure_groups("false", OnFailure::Continue, false)).await;
 
     assert!(events.iter().any(|e| matches!(e,
         RunnerEvent::PreCommandFinished { name, outcome: PreCommandOutcome::Ignored, .. } if name == "p1")));
@@ -180,7 +154,7 @@ async fn continue_runs_the_group_as_if_it_passed() {
 
 #[tokio::test]
 async fn timed_out_pre_command_follows_its_on_failure() {
-    let mut config = two_groups("sleep 5", OnFailure::SkipGroup);
+    let mut config = on_failure_groups("sleep 5", OnFailure::SkipGroup, false);
     config.checks["g1"].pre_commands[0].timeout = Some(Duration::from_millis(100));
 
     let events = run_two_groups(config).await;
@@ -195,7 +169,7 @@ async fn timed_out_pre_command_follows_its_on_failure() {
 #[tokio::test]
 async fn passing_pre_commands_report_nothing_skipped() {
     // Guard: no failure, no skip events or not-run results
-    let events = run_two_groups(two_groups("true", OnFailure::Abort)).await;
+    let events = run_two_groups(on_failure_groups("true", OnFailure::Abort, false)).await;
 
     assert!(!events
         .iter()

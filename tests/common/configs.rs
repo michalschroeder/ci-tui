@@ -30,8 +30,8 @@
 
 use ci_tui::config::{
     CheckDefinition, CheckTriggers, CiConfig, ComposeConfig, DockerConfig, DockerMode, FilePattern,
-    GitConfig, GroupConfig, ImageConfig, PathMappingRule, PreCommand, TestDiscoveryConfig,
-    TestDiscoveryStrategy,
+    GitConfig, GroupConfig, ImageConfig, OnFailure, PathMappingRule, PreCommand,
+    TestDiscoveryConfig, TestDiscoveryStrategy,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -381,6 +381,53 @@ impl CheckBuilder {
             error_pattern: None,
         }
     }
+}
+
+/// Why [`on_failure_groups`]' checks did not run after `p1` failed: the
+/// rest of `g1`, and later groups after an `abort`
+#[allow(dead_code)]
+pub const G1_FAILED: &str = "Not run: pre-command `p1` of group `g1` failed";
+#[allow(dead_code)]
+pub const G1_ABORTED: &str = "Not run: run aborted by failed pre-command `p1` of group `g1`";
+
+/// File pattern `never` (in [`on_failure_groups`]): no changed file
+/// matches it, so checks it triggers are selected on-demand
+#[allow(dead_code)]
+pub const NEVER_PATTERN: &str = r"\.never$";
+
+/// `command`, first appending `name` to `log` in the working dir with `log`
+#[allow(dead_code)]
+pub fn logged(name: &str, command: &str, log: bool) -> String {
+    match log {
+        true => format!("echo {name} >> log; {command}"),
+        false => command.to_string(),
+    }
+}
+
+/// Two local-mode (`sh`) groups for pre-command `on_failure` tests: `g1`
+/// runs pre-commands `p1` (`p1_cmd`, with `policy`) and `p2`, then check
+/// `c1` (plus `od`, on-demand: triggered by [`NEVER_PATTERN`]); `g2` runs
+/// pre-command `p3`, then check `c2`. Commands pass; with `log` each one
+/// logs its name first (see [`logged`]).
+#[allow(dead_code)]
+pub fn on_failure_groups(p1_cmd: &str, policy: OnFailure, log: bool) -> CiConfig {
+    let check = |id: &str| CheckBuilder::new(id, &logged(id, "true", log));
+    let mut config = ConfigBuilder::new()
+        .with_file_pattern("never", NEVER_PATTERN, None)
+        .with_pre_command("g1", "p1", &logged("p1", p1_cmd, log))
+        .with_pre_command("g1", "p2", &logged("p2", "true", log))
+        .with_check("g1", "c1", check("c1").build())
+        .with_check(
+            "g1",
+            "od",
+            check("od").with_file_pattern_trigger("never").build(),
+        )
+        .with_pre_command("g2", "p3", &logged("p3", "true", log))
+        .with_check("g2", "c2", check("c2").build())
+        .build();
+    config.checks["g1"].pre_commands[0].on_failure = policy;
+    config.runner = super::local_sh();
+    config
 }
 
 /// Minimal valid config with docker, git, no checks
