@@ -5,16 +5,19 @@
 //! editors show clean text.
 
 use crate::runner::CheckResult;
+use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
+use rustix::io::Errno;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-/// Log directory for `w`, relative to the project root (git cwd)
-pub const LOG_DIR: &str = ".ci-tui/logs";
+/// ci-tui's dir for `w` logs, in the project root (git cwd)
+const CI_TUI_DIR: &str = ".ci-tui";
 
-/// Ignores everything under `.ci-tui/` (written by [`save_log`])
-const GITIGNORE: &str = ".ci-tui/.gitignore";
+/// Log dir for `w`, in [`CI_TUI_DIR`]
+const LOGS_DIR: &str = "logs";
 
 /// `sh` exit code for "command not found"
 const EXIT_NOT_FOUND: i32 = 127;
@@ -167,22 +170,95 @@ fn fnv1a(s: &str) -> u32 {
 
 /// Log file of `check_id` under `root`: `<root>/.ci-tui/logs/<id>.log`
 pub fn log_path(root: &Path, check_id: &str) -> PathBuf {
-    root.join(LOG_DIR)
-        .join(format!("{}.log", sanitize_id(check_id)))
+    root.join(CI_TUI_DIR)
+        .join(LOGS_DIR)
+        .join(log_file_name(check_id))
 }
 
-/// Write `text` to [`log_path`], creating the log dir and overwriting any
+/// File name of `check_id`'s log: `<id>.log`, id sanitized
+fn log_file_name(check_id: &str) -> String {
+    format!("{}.log", sanitize_id(check_id))
+}
+
+/// Write `text` to [`log_path`], creating the log dir and replacing any
 /// previous log; returns the path written. Also writes `.ci-tui/.gitignore`
 /// (`*`) if missing, so git change detection never sees saved logs.
+///
+/// The repo (or a container sharing it, even mid-save) may plant symlinks
+/// under `.ci-tui/`, so nothing below `root` is resolved by path: each dir
+/// is opened relative to its parent's handle without following links (a
+/// symlinked `.ci-tui` / `logs` is an error), `.gitignore` is created
+/// exclusively (a dangling link counts as present) and the log is written
+/// to a fresh file renamed over `<id>.log` inside the `logs` handle,
+/// replacing a link instead of following it.
 pub fn save_log(root: &Path, check_id: &str, text: &str) -> io::Result<PathBuf> {
-    let path = log_path(root, check_id);
-    fs::create_dir_all(root.join(LOG_DIR))?;
-    let gitignore = root.join(GITIGNORE);
-    if !gitignore.exists() {
-        fs::write(gitignore, "*\n")?;
+    let ci_tui_path = root.join(CI_TUI_DIR);
+    let root_dir = rfs::open(root, DIR_FLAGS, Mode::empty())?;
+    let ci_tui = open_real_dir(&root_dir, CI_TUI_DIR, &ci_tui_path)?;
+    let logs = open_real_dir(&ci_tui, LOGS_DIR, &ci_tui_path.join(LOGS_DIR))?;
+    // Ignores everything under `.ci-tui/`, so git never sees saved logs
+    match rfs::openat(
+        &ci_tui,
+        ".gitignore",
+        NEW_FILE_FLAGS,
+        Mode::from_raw_mode(0o666),
+    ) {
+        Ok(fd) => fs::File::from(fd).write_all(b"*\n")?,
+        Err(Errno::EXIST) => {}
+        Err(e) => return Err(e.into()),
     }
-    fs::write(&path, text)?;
-    Ok(path)
+    // Temp name without the id: fits NAME_MAX whenever `<id>.log` does
+    let name = log_file_name(check_id);
+    let tmp = format!(".{}.tmp", temp_suffix());
+    let written = rfs::openat(&logs, &tmp, NEW_FILE_FLAGS, Mode::from_raw_mode(0o666))
+        .map_err(io::Error::from)
+        .and_then(|fd| fs::File::from(fd).write_all(text.as_bytes()))
+        .and_then(|()| rfs::renameat(&logs, &tmp, &logs, &name).map_err(io::Error::from));
+    if written.is_err() {
+        let _ = rfs::unlinkat(&logs, &tmp, AtFlags::empty());
+    }
+    written.map(|()| log_path(root, check_id))
+}
+
+/// Dirs opened by [`save_log`]: never through a symlink
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
+
+/// Files created by [`save_log`]: only new ones (`EXCL` never follows a link)
+const NEW_FILE_FLAGS: OFlags = OFlags::WRONLY
+    .union(OFlags::CREATE)
+    .union(OFlags::EXCL)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Dir `name` in `parent` (at `shown`, for errors), created if missing
+/// (a concurrent create counts as present); error if it is anything but a
+/// real dir (a symlink to one included)
+fn open_real_dir(parent: &OwnedFd, name: &str, shown: &Path) -> io::Result<OwnedFd> {
+    let flags = DIR_FLAGS | OFlags::NOFOLLOW;
+    let opened = match rfs::openat(parent, name, flags, Mode::empty()) {
+        Err(Errno::NOENT) => match rfs::mkdirat(parent, name, Mode::from_raw_mode(0o777)) {
+            Ok(()) | Err(Errno::EXIST) => rfs::openat(parent, name, flags, Mode::empty()),
+            Err(e) => Err(e),
+        },
+        opened => opened,
+    };
+    opened.map_err(|e| match e {
+        Errno::LOOP | Errno::NOTDIR => {
+            io::Error::other(format!("{} is not a directory (symlink?)", shown.display()))
+        }
+        e => e.into(),
+    })
+}
+
+/// Unpredictable-enough temp name part: pid + clock nanos (`EXCL` rejects
+/// a clash rather than reusing a planted file)
+fn temp_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("{}-{nanos:09}", std::process::id())
 }
 
 /// Private (0700) temp dir for viewer files, removed when dropped (TUI exit)
@@ -356,11 +432,68 @@ mod tests {
     }
 
     #[test]
+    fn test_save_log_long_id_within_name_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "a".repeat(250); // `<id>.log` = 254 bytes
+        let path = save_log(dir.path(), &id, "x").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "x");
+    }
+
+    #[test]
     fn test_save_log_error_when_root_unwritable() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("not-a-dir");
         fs::write(&file, "").unwrap();
         assert!(save_log(&file, "php-lint", "x").is_err());
+    }
+
+    /// Root with `ORIGINAL` in `victim.txt` of a separate outside dir
+    #[cfg(unix)]
+    fn root_and_victim() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "ORIGINAL").unwrap();
+        (root, outside, victim)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_log_replaces_symlinked_log_file() {
+        let (root, _outside, victim) = root_and_victim();
+        fs::create_dir_all(root.path().join(".ci-tui/logs")).unwrap();
+        let link = root.path().join(".ci-tui/logs/unit.log");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        save_log(root.path(), "unit", "attacker log").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "ORIGINAL");
+        assert!(!fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&link).unwrap(), "attacker log");
+    }
+
+    #[cfg(unix)]
+    #[rstest::rstest]
+    #[case::ci_tui_dir(".ci-tui")]
+    #[case::logs_dir(".ci-tui/logs")]
+    fn test_save_log_refuses_symlinked_dir(#[case] dir: &str) {
+        let (root, outside, _victim) = root_and_victim();
+        let link = root.path().join(dir);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), link).unwrap();
+        let err = save_log(root.path(), "unit", "x").unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        let names: Vec<_> = fs::read_dir(outside.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "only victim.txt outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_log_keeps_dangling_gitignore_link() {
+        let (root, outside, _victim) = root_and_victim();
+        fs::create_dir(root.path().join(".ci-tui")).unwrap();
+        let target = outside.path().join("created.txt");
+        std::os::unix::fs::symlink(&target, root.path().join(".ci-tui/.gitignore")).unwrap();
+        save_log(root.path(), "unit", "x").unwrap();
+        assert!(!target.exists(), "link not followed");
     }
 
     #[test]
