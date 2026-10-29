@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.7.0](https://github.com/michalschroeder/ci-tui/compare/v0.6.0...v0.7.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* typed docker mode (compose vs plain image) ([#239](https://github.com/michalschroeder/ci-tui/issues/239))
+* resolve service containers via docker compose ([#233](https://github.com/michalschroeder/ci-tui/issues/233))
+
+### Features
+
+* add --color auto|always|never, no color when stdout is not a terminal ([#223](https://github.com/michalschroeder/ci-tui/issues/223)) ([22efe34](https://github.com/michalschroeder/ci-tui/commit/22efe349c6d5d783f53274cdb1a556e6fc2118db))
+* config discovery (walk up to repo root) and ci-tui.local.yaml overrides ([#240](https://github.com/michalschroeder/ci-tui/issues/240)) ([43c8538](https://github.com/michalschroeder/ci-tui/commit/43c853870c7ba8b6087f98e34395761e5fd9cc54))
+* configurable pre_command failure behavior (on_failure) ([#246](https://github.com/michalschroeder/ci-tui/issues/246)) ([a0855fa](https://github.com/michalschroeder/ci-tui/commit/a0855fa38ffa88260812a8267e85a9266e518f4d))
+* per-check allow_failure ([#243](https://github.com/michalschroeder/ci-tui/issues/243)) ([67bd898](https://github.com/michalschroeder/ci-tui/commit/67bd8985b22a1aaa2ac7657cc92c0b3f78a79b9c))
+* run image as project owner, add docker.user ([#236](https://github.com/michalschroeder/ci-tui/issues/236)) ([#238](https://github.com/michalschroeder/ci-tui/issues/238)) ([379e8b0](https://github.com/michalschroeder/ci-tui/commit/379e8b042f303666b7841f1dab051a28bbdfbdfc))
+
+
+### Bug Fixes
+
+* apply group stop_on_failure ([#250](https://github.com/michalschroeder/ci-tui/issues/250)) ([cabad85](https://github.com/michalschroeder/ci-tui/commit/cabad85e1be4b8fbe86e6918d75a55bf6925be31))
+* **deps:** update rust crate sysinfo to 0.40 ([#260](https://github.com/michalschroeder/ci-tui/issues/260)) ([6c88dfa](https://github.com/michalschroeder/ci-tui/commit/6c88dfaf55de7531bc0ead8318b29cb06b851b0e))
+* detect file &lt;-&gt; symlink type changes in git diff ([#255](https://github.com/michalschroeder/ci-tui/issues/255)) ([4b5b260](https://github.com/michalschroeder/ci-tui/commit/4b5b260bd2a7e98e14682f0fda6bff65193ef129))
+* don't follow symlinks when saving logs ([#252](https://github.com/michalschroeder/ci-tui/issues/252)) ([60da83e](https://github.com/michalschroeder/ci-tui/commit/60da83eace6ff32247cf8969fc366635cf368167))
+* normalize --files from config dir, drop redundant notify OR ([#241](https://github.com/michalschroeder/ci-tui/issues/241)) ([2ba675e](https://github.com/michalschroeder/ci-tui/commit/2ba675e39ec337a5f2cde48b77c12abe1aceee6d))
+* read git paths NUL-separated so quoted names don't skip checks ([#253](https://github.com/michalschroeder/ci-tui/issues/253)) ([8d9bb15](https://github.com/michalschroeder/ci-tui/commit/8d9bb151bdf7b6114e643e3647daad641013b489))
+* resolve service containers via docker compose ([#233](https://github.com/michalschroeder/ci-tui/issues/233)) ([e0a10b2](https://github.com/michalschroeder/ci-tui/commit/e0a10b2885c98f33037f2aec0b8052b79e01bd84))
+* run checks in their service container ([#231](https://github.com/michalschroeder/ci-tui/issues/231)) ([a265fb3](https://github.com/michalschroeder/ci-tui/commit/a265fb3072801da9124ff990ab0f6decdcae1fe4))
+* run group pre_commands in --simple ([#249](https://github.com/michalschroeder/ci-tui/issues/249)) ([a81989e](https://github.com/michalschroeder/ci-tui/commit/a81989eb4e9ffc148fca1680d21b8e86950242ba))
+* unique container names per process, skip one-off containers ([#237](https://github.com/michalschroeder/ci-tui/issues/237)) ([771b4ab](https://github.com/michalschroeder/ci-tui/commit/771b4ab42324a6c806381565ed5f583a29940d2c))
+* **watch:** tell own writes from user saves by content, not time ([#224](https://github.com/michalschroeder/ci-tui/issues/224)) ([2f87497](https://github.com/michalschroeder/ci-tui/commit/2f874972ff3eb7a411e5a05b9cd11ab0e689bb0b))
+
+
+### Code Refactoring
+
+* typed docker mode (compose vs plain image) ([#239](https://github.com/michalschroeder/ci-tui/issues/239)) ([5d1ff69](https://github.com/michalschroeder/ci-tui/commit/5d1ff697bdfca5a5bcad57f4b9642270b85fde64))
+
 ## [0.6.0](https://github.com/michalschroeder/ci-tui/compare/v0.5.0...v0.6.0) (2026-10-03)
 
 
