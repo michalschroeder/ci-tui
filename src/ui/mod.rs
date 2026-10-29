@@ -227,7 +227,10 @@ impl KeyboardThread {
 /// The UI thread never blocks on syscalls for memory/CPU stats.
 fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut system = System::new();
+        // Stats are optional: without sysinfo the header just shows none
+        let Ok(mut system) = System::new() else {
+            return;
+        };
         let mut interval = tokio::time::interval(STATS_UPDATE_INTERVAL);
 
         loop {
@@ -238,7 +241,7 @@ fn spawn_stats_worker(tx: mpsc::Sender<SystemStats>) -> JoinHandle<()> {
             system.refresh_cpu_usage();
             system.refresh_memory();
 
-            let cpu_usage: f32 = system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>()
+            let cpu_usage: f32 = system.cpus().iter().map(|cpu| cpu.usage()).sum::<f32>()
                 / system.cpus().len().max(1) as f32;
 
             let stats = SystemStats {
