@@ -30,9 +30,8 @@ use crate::checks::{select_checks, CheckToRun, Decision, Selected, Severity};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
-    run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
-    CheckRunner, CheckStatus, OutputSink, PreCommandOutcome, RealCommandExecutor, RunnerEvent,
-    SetupFailure,
+    run_check_with_command_with_executor, CancelRegistry, CancelSwitch, CheckResult, CheckRunner,
+    CheckStatus, OutputSink, PreCommandOutcome, RealCommandExecutor, RunnerEvent, SetupFailure,
 };
 use crate::watch::WatchBatch;
 use anyhow::Result;
@@ -395,18 +394,20 @@ impl TaskCtx {
         outcome
     }
 
-    /// [`Self::run_after_setup`], cancellable with 's' (then reports
+    /// [`Self::run_after_setup`], cancellable with 's' through `switch`,
+    /// which the caller registered before spawning this (then reports
     /// `Cancelled`); sends the result to `tx` as `done(result)`
     async fn run_cancellable(
         &self,
         check: &CheckToRun,
         command: &str,
         setup: bool,
+        switch: CancelSwitch,
         tx: &mpsc::Sender<TaskEvent>,
         done: fn(CheckResult) -> TaskEvent,
     ) {
         let run = self.run_after_setup(check, command, setup, tx);
-        if let Some(result) = run_check_cancellable(&self.cancels, check.id(), run).await {
+        if let Some(result) = switch.run(run).await {
             let _ = tx.send(done(result)).await;
         }
     }
@@ -531,17 +532,22 @@ impl Tasks {
     /// [`Self::spawn_check`], but 's' only acts on a `Running` check, which
     /// a fixed (failed) check is not.
     fn spawn_fix(&mut self, check: CheckToRun, command: String) {
-        self.spawn(|ctx, tx| async move {
-            let sink = OutputSink::none();
-            let run = ctx.run(&check, &command, &sink);
-            let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
-            let _ = tx.send(TaskEvent::FixResult(result)).await;
+        self.spawn(|ctx, tx| {
+            let switch = ctx.cancels.register(check.id());
+            async move {
+                let sink = OutputSink::none();
+                let run = ctx.run(&check, &command, &sink);
+                let result = switch.run(run).await;
+                let _ = tx.send(TaskEvent::FixResult(result)).await;
+            }
         });
     }
 
     /// Spawn a task running `command` as `check` (after its group's
     /// pre-commands with `setup`), streaming its output, cancellable with
-    /// 's'; reports the result as `done(result)` (a failed setup as
+    /// 's' from now on: the switch is registered here, not in the task, which
+    /// may be first polled after the check shows as running. Reports the
+    /// result as `done(result)` (a failed setup as
     /// [`TaskEvent::UnrecordedResult`]).
     fn spawn_check(
         &mut self,
@@ -550,9 +556,12 @@ impl Tasks {
         setup: bool,
         done: fn(CheckResult) -> TaskEvent,
     ) {
-        self.spawn(|ctx, tx| async move {
-            ctx.run_cancellable(&check, &command, setup, &tx, done)
-                .await;
+        self.spawn(|ctx, tx| {
+            let switch = ctx.cancels.register(check.id());
+            async move {
+                ctx.run_cancellable(&check, &command, setup, switch, &tx, done)
+                    .await;
+            }
         });
     }
 }
@@ -561,9 +570,10 @@ impl Tasks {
 /// `setup`). `previous` is restored if the check no longer applies to the
 /// refreshed file list. With `auto_only` (`--watch`), a check the refresh
 /// leaves on-demand / skipped shows that instead of running. Cancellable
-/// with 's' from the start (the check shows as running during the refresh
-/// too).
-async fn retry_with_refresh(
+/// with 's' as of this call (the check shows as running during the refresh
+/// too): not an `async fn`, so the switch is registered here, not when the
+/// task is first polled.
+fn retry_with_refresh(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
     check: CheckToRun,
@@ -571,12 +581,14 @@ async fn retry_with_refresh(
     changed_files: ChangedFiles,
     setup: bool,
     auto_only: bool,
-) {
-    let check_id = check.id().to_string();
-    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
-    // None: not applicable or failed setup, already reported
-    if let Some(result) = run_check_cancellable(&ctx.cancels, &check_id, run).await {
-        let _ = tx.send(TaskEvent::RetryResult(result)).await;
+) -> impl std::future::Future<Output = ()> {
+    let switch = ctx.cancels.register(check.id());
+    async move {
+        let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
+        // None: not applicable or failed setup, already reported
+        if let Some(result) = switch.run(run).await {
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+        }
     }
 }
 
@@ -989,10 +1001,11 @@ fn fixes_to_verify(app: &App, event: &TaskEvent) -> Vec<String> {
 }
 
 /// Re-run the fixed checks `check_ids` that are not running again: marked
-/// running now (the fix result stays shown), run by [`run_verifications`],
-/// results recorded like 'r'. No git refresh: a fix does not change which
-/// checks apply. The first check of a group whose pre-commands are due runs
-/// them for the group; skipped while they are busy ([`claim_setup`]).
+/// running now (the fix result stays shown) with their cancel switches
+/// registered, run by [`run_verifications`], results recorded like 'r'. No
+/// git refresh: a fix does not change which checks apply. The first check of
+/// a group whose pre-commands are due runs them for the group; skipped while
+/// they are busy ([`claim_setup`]).
 fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
     let mut jobs = Vec::new();
     let mut setup_groups = HashSet::new();
@@ -1013,7 +1026,8 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
             setup_groups.insert(check.group().to_string());
         }
         app.mark_verifying(check.id());
-        jobs.push((check, setup));
+        let switch = tasks.ctx.cancels.register(check.id());
+        jobs.push((check, setup, switch));
     }
     if !jobs.is_empty() {
         tasks.spawn(|ctx, tx| run_verifications(ctx, tx, jobs));
@@ -1022,17 +1036,21 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
 
 /// [`verify_fixes`] task: one check at a time in `jobs` order, so groups'
 /// `parallel: false` / `max_parallel` hold. All are cancellable with 's'
-/// from the start (waiting too).
+/// from the start (waiting too): `jobs` carry their registered switches.
 async fn run_verifications(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
-    jobs: Vec<(CheckToRun, bool)>,
+    jobs: Vec<(CheckToRun, bool, CancelSwitch)>,
 ) {
     let turn = tokio::sync::Semaphore::new(1);
     let no_setup = std::sync::Mutex::new(HashMap::new());
     let mut runs: Vec<_> = jobs
-        .iter()
-        .map(|(check, setup)| Box::pin(verify_one(&ctx, &tx, check, *setup, &turn, &no_setup)))
+        .into_iter()
+        .map(|(check, setup, switch)| {
+            Box::pin(verify_one(
+                &ctx, &tx, check, setup, switch, &turn, &no_setup,
+            ))
+        })
         .collect();
     // Join all; first polled in `jobs` order, so queued in that order on the
     // fair `turn`
@@ -1053,8 +1071,9 @@ async fn run_verifications(
 async fn verify_one(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
-    check: &CheckToRun,
+    check: CheckToRun,
     setup: bool,
+    switch: CancelSwitch,
     turn: &tokio::sync::Semaphore,
     no_setup: &std::sync::Mutex<HashMap<String, String>>,
 ) {
@@ -1073,9 +1092,9 @@ async fn verify_one(
             return None;
         }
         blocked = None;
-        Some(ctx.run_streaming(check, &check.resolved_command, tx).await)
+        Some(ctx.run_streaming(&check, &check.resolved_command, tx).await)
     };
-    let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
+    let result = switch.run(run).await;
     let reason = blocked.map(|r| r.unwrap_or_else(|| SetupFailure::cancelled_reason(group)));
     if let Some(reason) = &reason {
         let mut no_setup = no_setup.lock().unwrap();
@@ -1149,7 +1168,9 @@ fn claim_setup(app: &mut App, check: &CheckToRun) -> Option<bool> {
 }
 
 /// Handle 's' key: cancel the selected running check. Its runner or retry
-/// task then reports `Cancelled`; other checks keep running.
+/// task then reports `Cancelled`; other checks keep running. Every execution
+/// shown as cancellable has registered, so `cancel` returning false only
+/// means it already finished and its result is on its way.
 fn handle_cancel_selected(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.selected_capabilities().can_cancel {
         return Action::Continue;
@@ -2389,7 +2410,7 @@ checks:
     fn spawn_cancellable(tasks: &mut Tasks, check_id: &'static str) {
         tasks.spawn(move |ctx, tx| async move {
             let run = std::future::pending::<CheckResult>();
-            let result = run_check_cancellable(&ctx.cancels, check_id, run).await;
+            let result = ctx.cancels.register(check_id).run(run).await;
             let _ = tx.send(TaskEvent::RetryResult(result)).await;
         });
     }
@@ -5190,6 +5211,40 @@ checks:
         assert_eq!(command_runs(dir.path(), "php-lint"), 1);
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
         assert!(!app.fixing());
+    }
+
+    /// #262: cancelling, before the start, the verification that owns its
+    /// group's pre-commands: they never ran, so the group's next verification
+    /// fails without running; the claim is released
+    #[tokio::test]
+    async fn test_cancel_before_start_of_verification_owning_group_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = r#"pre_commands: [{ name: seed, command: "echo seeded > seeded" }]"#;
+        let config = marker_config(group);
+        let (mut app, mut tasks, mut rx) = watch_app_with(config, dir.path(), &["a.php"], |_| true);
+        for id in ["a", "b"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Failed;
+        }
+        app.select_last();
+        app.previous_check();
+        assert_eq!(app.selected_check().unwrap().id(), "a");
+
+        let ids = vec!["a".to_string(), "b".to_string()];
+        verify_fixes(&mut app, &mut tasks, ids);
+        assert!(app.run.setup_claims.contains_key("a"));
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert!(!dir.path().join("seeded").exists(), "pre-command ran");
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "a"), 0, "cancelled one ran");
+        let blocked = &app.results["b"];
+        assert_eq!(blocked.status, CheckStatus::Failed);
+        assert!(blocked.not_run);
+        assert_eq!(blocked.output, SetupFailure::cancelled_reason("fast"));
+        assert_eq!(command_runs(dir.path(), "b"), 0, "blocked one ran");
+        assert!(!app.fixing());
+        assert!(app.run.setup_claims.is_empty(), "claim released");
     }
 
     /// #262: `tokio::select!` polls in random order unless biased: a cancel
