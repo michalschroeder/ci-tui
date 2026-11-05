@@ -265,14 +265,46 @@ pub fn mock_git_with_output(output: &str) -> ci_tui::git::MockGitExecutor {
     mock
 }
 
-/// Create a mock that returns an error
+/// [`ci_tui::git::GitFailed`] as the real executor reports it; `code` `None`
+/// when a signal killed git
 #[allow(dead_code)]
-pub fn mock_git_error(error_msg: &str) -> ci_tui::git::MockGitExecutor {
-    use ci_tui::git::MockGitExecutor;
-    let error_msg = error_msg.to_string();
-    let mut mock = MockGitExecutor::new();
-    mock.expect_run_command()
-        .returning(move |_, _| Err(anyhow::anyhow!("{}", error_msg)));
+pub fn git_failed(code: Option<i32>, stderr: &str) -> anyhow::Error {
+    ci_tui::git::GitFailed {
+        code,
+        stderr: stderr.to_string(),
+    }
+    .into()
+}
+
+/// Mock expecting exactly one `git rev-parse` per `(ref, exists)` of `refs`,
+/// in that order: a sha if it exists, else git's exit 1. Add the listings
+/// after it: mocks match in FIFO order.
+#[allow(dead_code)]
+pub fn mock_resolving(refs: &[(&str, bool)]) -> ci_tui::git::MockGitExecutor {
+    let mut mock = ci_tui::git::MockGitExecutor::new();
+    let mut seq = mockall::Sequence::new();
+    for &(reference, exists) in refs {
+        let reference = reference.to_string();
+        mock.expect_run_command()
+            .withf(move |_, args: &[String]| {
+                args == [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    reference.as_str(),
+                ]
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(move |_, _| {
+                if exists {
+                    Ok("0123456789abcdef0123456789abcdef01234567\n".to_string())
+                } else {
+                    Err(git_failed(Some(1), ""))
+                }
+            });
+    }
     mock
 }
 

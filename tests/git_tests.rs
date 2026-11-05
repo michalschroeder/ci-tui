@@ -8,11 +8,11 @@ mod common;
 use ci_tui::config::GitConfig;
 use ci_tui::git::{
     current_branch_with_executor, detect_changes_with_executor, get_changed_files_with_executor,
-    short_commit_with_executor, MockGitExecutor,
+    short_commit_with_executor, BaseRefNotFound, MockGitExecutor,
 };
 use common::{
-    assert_code, commit, git, mock_git_error, mock_git_with_output, run_ci_tui_env, stderr, stdout,
-    write,
+    assert_code, commit, git, git_failed, mock_git_with_output, mock_resolving, run_ci_tui_env,
+    stderr, stdout, write,
 };
 use rstest::rstest;
 use std::path::Path;
@@ -55,19 +55,22 @@ mod get_changed_files {
     }
 
     #[test]
-    fn error_propagation() {
-        let mock = mock_git_error("fatal: bad revision 'invalid-ref'");
-        let result = get_changed_files_with_executor(Path::new("/tmp"), "invalid-ref", &mock);
+    fn missing_ref_is_base_ref_not_found() {
+        let mock = mock_resolving(&[("nosuch", false)]);
 
-        assert!(result.is_err());
-        let err_msg = format!("{:#}", result.unwrap_err());
-        assert!(err_msg.contains("bad revision"));
-        assert!(err_msg.contains("invalid-ref"), "error should name the ref");
+        let err = get_changed_files_with_executor(Path::new("/tmp"), "nosuch", &mock).unwrap_err();
+
+        assert!(err.is::<BaseRefNotFound>(), "got: {err:#}");
+        assert_eq!(
+            err.to_string(),
+            "could not resolve git base ref (tried: nosuch)"
+        );
     }
 
     #[test]
     fn committed_diff_guards_ref_against_options_and_paths() {
-        let mut mock = MockGitExecutor::new();
+        // The resolve step guards it too: `--cached` after `--end-of-options`
+        let mut mock = mock_resolving(&[("--cached", true)]);
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 args.iter().any(|a| a == "--merge-base")
@@ -110,17 +113,19 @@ mod detect_changes {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    fn master_config() -> GitConfig {
+        GitConfig {
+            base_branch: "master".to_string(),
+            fallback_branch: "HEAD~1".to_string(),
+        }
+    }
+
     #[test]
     fn fallback_from_origin_to_base() {
-        let mut mock = MockGitExecutor::new();
+        // origin/master does not exist; master does, so HEAD~1 is not tried.
+        let mut mock = mock_resolving(&[("origin/master", false), ("master", true)]);
 
-        // First call: committed diff against origin/master — fails.
-        mock.expect_run_command()
-            .withf(|_, args: &[String]| args.iter().any(|a| a == "origin/master"))
-            .times(1)
-            .returning(|_, _| Err(anyhow::anyhow!("Reference not found")));
-
-        // Next: committed diff against master — succeeds.
+        // Committed diff against master — succeeds.
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 args.iter().any(|a| a == "master") && args.iter().any(|a| a == "--merge-base")
@@ -134,12 +139,8 @@ mod detect_changes {
             .times(2)
             .returning(|_, _| Ok(String::new()));
 
-        let config = GitConfig {
-            base_branch: "master".to_string(),
-            fallback_branch: "HEAD~1".to_string(),
-        };
-
-        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
+        let result =
+            detect_changes_with_executor(Path::new("/tmp"), &master_config(), &mock).unwrap();
 
         assert_eq!(result.files, vec!["file1.rs"]);
         assert_eq!(result.base_ref, "master");
@@ -147,17 +148,12 @@ mod detect_changes {
 
     #[test]
     fn fallback_to_fallback_branch() {
-        let mut mock = MockGitExecutor::new();
-
-        // First two committed calls (origin/master, master) fail.
-        mock.expect_run_command()
-            .withf(|_, args: &[String]| {
-                args.iter().any(|a| a == "--merge-base")
-                    && (args.iter().any(|a| a == "origin/master")
-                        || args.iter().any(|a| a == "master"))
-            })
-            .times(2)
-            .returning(|_, _| Err(anyhow::anyhow!("Reference not found")));
+        // origin/master and master do not exist, tried in that order.
+        let mut mock = mock_resolving(&[
+            ("origin/master", false),
+            ("master", false),
+            ("HEAD~1", true),
+        ]);
 
         // Committed against HEAD~1 — succeeds.
         mock.expect_run_command()
@@ -173,12 +169,8 @@ mod detect_changes {
             .times(2)
             .returning(|_, _| Ok(String::new()));
 
-        let config = GitConfig {
-            base_branch: "master".to_string(),
-            fallback_branch: "HEAD~1".to_string(),
-        };
-
-        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock).unwrap();
+        let result =
+            detect_changes_with_executor(Path::new("/tmp"), &master_config(), &mock).unwrap();
 
         assert_eq!(result.files, vec!["file2.rs"]);
         assert_eq!(result.base_ref, "HEAD~1");
@@ -186,25 +178,62 @@ mod detect_changes {
 
     #[test]
     fn errors_when_all_refs_fail_listing_refs_tried() {
-        let mock = mock_git_error("fatal: not a git repository");
+        let mock = mock_resolving(&[
+            ("origin/master", false),
+            ("master", false),
+            ("HEAD~1", false),
+        ]);
 
-        let config = GitConfig {
-            base_branch: "master".to_string(),
-            fallback_branch: "HEAD~1".to_string(),
-        };
+        let err =
+            detect_changes_with_executor(Path::new("/tmp"), &master_config(), &mock).unwrap_err();
 
-        let result = detect_changes_with_executor(Path::new("/tmp"), &config, &mock);
+        assert!(err.is::<BaseRefNotFound>(), "got: {err:#}");
+        assert_eq!(
+            err.to_string(),
+            "could not resolve git base ref (tried: origin/master, master, HEAD~1)"
+        );
+    }
 
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("origin/master"), "msg was: {msg}");
-        assert!(msg.contains("master"), "msg was: {msg}");
-        assert!(msg.contains("HEAD~1"), "msg was: {msg}");
+    /// `rev-parse` of the first candidate fails other than with exit 1: no
+    /// other command runs and the error comes back unchanged
+    #[rstest]
+    #[case::git_missing(anyhow::anyhow!("Failed to run git command"))]
+    #[case::not_a_repo(git_failed(Some(128), "fatal: not a git repository"))]
+    #[case::killed_by_signal(git_failed(None, ""))]
+    fn other_failures_stop_resolving(#[case] error: anyhow::Error) {
+        let message = format!("{error:#}");
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .times(1)
+            .return_once(move |_, _| Err(error));
+
+        let err =
+            detect_changes_with_executor(Path::new("/tmp"), &master_config(), &mock).unwrap_err();
+
+        assert_eq!(format!("{err:#}"), message);
+    }
+
+    #[test]
+    fn no_merge_base_does_not_try_the_next_candidate() {
+        let mut mock = mock_resolving(&[("origin/master", true)]);
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
+            .times(1)
+            .returning(|_, _| Err(git_failed(Some(128), "fatal: no merge base found")));
+
+        let err =
+            detect_changes_with_executor(Path::new("/tmp"), &master_config(), &mock).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "git command failed: fatal: no merge base found"
+        );
     }
 
     #[test]
     fn uses_origin_base_first() {
-        let mut mock = MockGitExecutor::new();
+        // One rev-parse: the later candidates are not resolved.
+        let mut mock = mock_resolving(&[("origin/development", true)]);
 
         // Committed against origin/development succeeds on first try.
         mock.expect_run_command()
