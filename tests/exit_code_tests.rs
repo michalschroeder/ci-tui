@@ -5,7 +5,11 @@ use ci_tui::exit;
 
 mod common;
 use common::configs::{docker_yaml, local_yaml, yaml_check, YAML_HEAD};
-use common::{assert_code, git, run_ci_tui, run_config};
+use common::{
+    assert_code, commit, git, run_ci_tui, run_config, run_config_env, stderr, stdout, write,
+};
+use std::path::Path;
+use std::process::Output;
 
 #[test]
 fn passing_checks_exit_0() {
@@ -104,12 +108,148 @@ fn validate_valid_config_exits_0() {
     assert_code(&out, exit::SUCCESS);
 }
 
+/// Exit 3 with `error` on stderr, nothing blaming the base ref: not the
+/// "could not resolve" message, neither hint
+fn assert_git_error(out: &Output, error: &str) {
+    assert_code(out, exit::ENV_ERROR);
+    let stderr = stderr(out);
+    assert!(stderr.contains(error), "{stderr}");
+    for blame in ["could not resolve", "No base ref", "exists locally"] {
+        assert!(!stderr.contains(blame), "{stderr}");
+    }
+}
+
+/// Git repo on `branch` with the config (base `main`, fallback `HEAD~1`) and
+/// no commits
+fn new_repo(branch: &str) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    git(tmp.path(), &["init", "-q", "-b", branch]);
+    write(tmp.path(), "ci-tui.yaml", &local_yaml("'true'"));
+    tmp
+}
+
+/// Commit everything in `dir` plus new `file`
+fn commit_file(dir: &Path, file: &str) {
+    write(dir, file, "change\n");
+    git(dir, &["add", "."]);
+    commit(dir, file);
+}
+
+/// Repo on `other` with two commits, sharing no history with `main`'s one
+fn unrelated_repo() -> tempfile::TempDir {
+    let tmp = new_repo("main");
+    let dir = tmp.path();
+    commit_file(dir, "main.txt");
+    git(dir, &["checkout", "-q", "--orphan", "other"]);
+    commit_file(dir, "first.txt");
+    commit_file(dir, "second.txt");
+    tmp
+}
+
 #[test]
 fn git_detection_outside_repo_exits_3() {
     let (_tmp, out) = run_config(&local_yaml("'true'"), &["--list"]);
+    assert_git_error(
+        &out,
+        "Error: git command failed: fatal: not a git repository",
+    );
+}
+
+#[test]
+fn missing_git_exits_3() {
+    let env = [("PATH", "")];
+    let (_tmp, out) = run_config_env(&local_yaml("'true'"), &["--list"], &env);
+    assert_git_error(&out, "Error: Failed to run git command");
+}
+
+#[test]
+fn missing_base_refs_fall_back_to_head_parent() {
+    let tmp = new_repo("trunk");
+    commit_file(tmp.path(), "first.txt");
+    commit_file(tmp.path(), "second.txt");
+
+    let out = run_ci_tui(tmp.path(), &["--list"]);
+
+    assert_code(&out, exit::SUCCESS);
+    let stdout = stdout(&out);
+    assert!(stdout.contains("Base ref: HEAD~1 (fallback:"), "{stdout}");
+}
+
+#[test]
+fn no_existing_base_ref_exits_3_with_hint() {
+    let tmp = new_repo("trunk");
+    let out = run_ci_tui(tmp.path(), &["--list"]);
     assert_code(&out, exit::ENV_ERROR);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr(&out);
+    assert!(stderr.contains("could not resolve"), "{stderr}");
+    assert!(
+        stderr.contains("(tried: origin/main, main, HEAD~1)"),
+        "{stderr}"
+    );
     assert!(stderr.contains("No base ref could be resolved"), "{stderr}");
+}
+
+#[test]
+fn no_merge_base_exits_3_without_fallback() {
+    let tmp = unrelated_repo();
+    let out = run_ci_tui(tmp.path(), &["--list"]);
+    assert_git_error(&out, "no merge base");
+}
+
+#[test]
+fn base_ref_at_missing_object_exits_3_without_fallback() {
+    let tmp = new_repo("trunk");
+    commit_file(tmp.path(), "first.txt");
+    commit_file(tmp.path(), "second.txt");
+    write(
+        tmp.path(),
+        ".git/refs/remotes/origin/main",
+        "1234567890123456789012345678901234567890\n",
+    );
+
+    let out = run_ci_tui(tmp.path(), &["--list"]);
+
+    assert_git_error(&out, "bad object");
+}
+
+#[test]
+fn base_text_search_ref_resolves() {
+    let tmp = new_repo("trunk");
+    commit_file(tmp.path(), "first.txt");
+    commit_file(tmp.path(), "second.txt");
+
+    let out = run_ci_tui(tmp.path(), &["--list", "--base", ":/first.txt"]);
+
+    assert_code(&out, exit::SUCCESS);
+}
+
+#[test]
+fn shallow_clone_without_merge_base_exits_3() {
+    let source = new_repo("main");
+    let dir = source.path();
+    commit_file(dir, "base.txt");
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    commit_file(dir, "feature.txt");
+    git(dir, &["checkout", "-q", "main"]);
+    commit_file(dir, "main.txt");
+
+    let clone = tempfile::TempDir::new().unwrap();
+    let url = format!("file://{}", dir.display());
+    let args = [
+        "clone",
+        "-q",
+        "--depth",
+        "1",
+        "--no-single-branch",
+        "--branch",
+        "feature",
+        url.as_str(),
+        ".",
+    ];
+    git(clone.path(), &args);
+
+    let out = run_ci_tui(clone.path(), &["--list"]);
+    assert_git_error(&out, "no merge base");
 }
 
 #[test]
@@ -119,6 +259,20 @@ fn unknown_base_ref_exits_3() {
     std::fs::write(tmp.path().join("ci-tui.yaml"), local_yaml("'true'")).unwrap();
     let out = run_ci_tui(tmp.path(), &["--list", "--base", "no-such-ref"]);
     assert_code(&out, exit::ENV_ERROR);
+    let stderr = stderr(&out);
+    assert!(stderr.contains("could not resolve"), "{stderr}");
+    assert!(stderr.contains("no-such-ref"), "{stderr}");
+    assert!(
+        stderr.contains("Check that `no-such-ref` exists locally"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn base_without_merge_base_exits_3_without_hint() {
+    let tmp = unrelated_repo();
+    let out = run_ci_tui(tmp.path(), &["--list", "--base", "main"]);
+    assert_git_error(&out, "no merge base");
 }
 
 #[test]
