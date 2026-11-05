@@ -502,6 +502,7 @@ mod tests {
             resolved_command: "true".into(),
             resolved_fix_command: fix.map(Into::into),
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 

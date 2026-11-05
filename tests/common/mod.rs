@@ -372,6 +372,7 @@ pub fn make_check_with_options(
             None
         },
         cache_key: None,
+        selected_from: Default::default(),
     }
 }
 
@@ -439,6 +440,7 @@ pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckT
         resolved_command: command.to_string(),
         resolved_fix_command: None,
         cache_key: None,
+        selected_from: Default::default(),
     }
 }
 
