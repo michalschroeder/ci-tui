@@ -176,6 +176,8 @@ CI-TUI detects changed files by comparing the working tree against the base bran
 2. `{base_branch}` (local branch)
 3. `{fallback_branch}` (e.g., HEAD~1 for last commit)
 
+A candidate is skipped only if it does not exist. Once a ref resolves, git failures stop the run (exit 3) instead of trying the next one, including when the ref has no merge base with `HEAD`. Shallow clones therefore need enough history to reach the merge base, e.g. `fetch-depth: 0` in `actions/checkout`, or bypass git with `--files`.
+
 **Use cases:**
 - Feature branch workflow: `base_branch: main`, `fallback_branch: HEAD~1`
 - Multiple environments: `base_branch: development`, `fallback_branch: staging`

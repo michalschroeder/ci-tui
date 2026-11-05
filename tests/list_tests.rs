@@ -463,6 +463,6 @@ fn binary_staged_outside_git_repo_exits_with_error() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(ci_tui::exit::ENV_ERROR), "{stderr}");
     assert!(stderr.contains("could not read staged files"), "{stderr}");
-    assert!(stderr.contains("--staged reads the git index"), "{stderr}");
+    assert!(!stderr.contains("--staged reads the git index"), "{stderr}");
     assert!(out.stdout.is_empty(), "nothing listed on git failure");
 }

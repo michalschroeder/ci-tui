@@ -13,30 +13,31 @@ fn git_detect_changes_or_exit(
     base_override: Option<&str>,
     staged: bool,
 ) -> git::ChangedFiles {
-    let (result, hint) = match (staged, base_override) {
-        (true, _) => (
-            git::get_staged_files(project_root),
-            "--staged reads the git index; see the git error above.".to_string(),
-        ),
-        (false, Some(base_ref)) => (
-            git::get_changed_files(project_root, base_ref),
-            format!("Check that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."),
-        ),
-        (false, None) => (
-            git::detect_changes(project_root, git_config),
-            "No base ref could be resolved against the current repository. \
-            If this is intentional, bypass git with --files <paths...>."
-                .to_string(),
-        ),
+    let result = match (staged, base_override) {
+        (true, _) => git::get_staged_files(project_root),
+        (false, Some(base_ref)) => git::get_changed_files(project_root, base_ref),
+        (false, None) => git::detect_changes(project_root, git_config),
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");
-        // The message says what to do; the hint would blame the base ref
-        if !git::is_non_utf8(&e) {
-            eprintln!("\n{hint}");
+        // Any other git error says what is wrong; a hint would blame the base ref
+        if e.is::<git::BaseRefNotFound>() {
+            eprintln!("\n{}", base_ref_hint(base_override));
         }
         std::process::exit(exit::ENV_ERROR);
     })
+}
+
+/// What to do about a base ref that does not exist
+fn base_ref_hint(base_override: Option<&str>) -> String {
+    match base_override {
+        Some(base_ref) => format!(
+            "Check that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."
+        ),
+        None => "No base ref could be resolved against the current repository. \
+            If this is intentional, bypass git with --files <paths...>."
+            .to_string(),
+    }
 }
 
 /// Changed files minus `ignore_patterns`: from --files, the git index

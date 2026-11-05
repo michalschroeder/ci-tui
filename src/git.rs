@@ -1,13 +1,15 @@
 //! Git operations for detecting changed files.
 //!
 //! This module provides functionality to detect which files have changed compared
-//! to a base branch or commit reference. It supports multiple fallback strategies
-//! for determining the comparison base.
+//! to a base branch or commit reference, falling back only when a ref does not
+//! exist.
 //!
 //! # Key Types
 //!
 //! - [`ChangedFiles`]: Collection of changed file paths with filtering methods
 //! - [`GitExecutor`]: Trait abstraction for git command execution
+//! - [`GitFailed`]: Non-zero git exit, keeping the exit code
+//! - [`BaseRefNotFound`]: No candidate base ref exists
 //!
 //! # Key Functions
 //!
@@ -41,7 +43,8 @@ pub trait GitExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the command fails or git exits with non-zero status.
+    /// Returns an error if the command fails to start, or [`GitFailed`] if git
+    /// exits with non-zero status.
     fn run_command(&self, project_root: &Path, args: &[String]) -> Result<String>;
 }
 
@@ -57,15 +60,33 @@ impl GitExecutor for RealGitExecutor {
             .context("Failed to run git command")?;
 
         if !output.status.success() {
-            anyhow::bail!(
-                "git command failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim_end()
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(GitFailed {
+                code: output.status.code(),
+                stderr: stderr.trim_end().to_string(),
+            }
+            .into());
         }
 
         String::from_utf8(output.stdout).map_err(|e| NonUtf8Output::new(e.as_bytes()).into())
     }
 }
+
+/// Git ran and exited non-zero. Typed so callers can tell exit codes apart
+/// through the `anyhow::Error` of [`GitExecutor::run_command`].
+#[derive(Debug, thiserror::Error)]
+#[error("git command failed: {stderr}")]
+pub struct GitFailed {
+    /// Exit code; `None` when a signal killed git
+    pub code: Option<i32>,
+    pub stderr: String,
+}
+
+/// No candidate base ref exists (the only error that means "bad base ref":
+/// the hint in `main` keys on it).
+#[derive(Debug, thiserror::Error)]
+#[error("could not resolve git base ref (tried: {})", .0.join(", "))]
+pub struct BaseRefNotFound(Vec<String>);
 
 /// Git printed bytes that are not UTF-8, e.g. a non-UTF-8 file name. Change
 /// detection fails on it (exit 3) instead of dropping or mangling the path,
@@ -89,11 +110,6 @@ impl NonUtf8Output {
         let entry = entry.strip_suffix(b"\n").unwrap_or(entry);
         Self(String::from_utf8_lossy(entry).into_owned())
     }
-}
-
-/// True when `err` is (or wraps) [`NonUtf8Output`]
-pub fn is_non_utf8(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<NonUtf8Output>().is_some()
 }
 
 /// Sentinel `base_ref` used when files come from the `--files` CLI flag
@@ -170,12 +186,16 @@ pub fn base_ref_candidates(git_config: &GitConfig) -> [String; 3] {
 
 /// Detect changed files by trying multiple base references in order of preference.
 ///
-/// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`.
+/// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`, and
+/// diffs against the first that exists.
 ///
 /// # Errors
 ///
-/// Returns an error if none of the base references resolve, or if the
-/// uncommitted-diff / untracked-files git commands fail.
+/// Returns [`BaseRefNotFound`] if none of the base references exist. Any other
+/// git failure is returned as is, without trying the next reference: failing
+/// to resolve a candidate (e.g. not a git repository), or a diff or
+/// untracked-files command failing once one resolved (e.g. no merge base with
+/// HEAD in a shallow clone).
 pub fn detect_changes(project_root: &Path, git_config: &GitConfig) -> Result<ChangedFiles> {
     detect_changes_with_executor(project_root, git_config, &RealGitExecutor)
 }
@@ -188,44 +208,15 @@ pub fn detect_changes_with_executor(
     git_config: &GitConfig,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let base_refs = base_ref_candidates(git_config);
-
-    // Find the first base ref whose committed diff resolves.
-    let mut resolved: Option<(String, Vec<String>)> = None;
-    for base_ref in &base_refs {
-        match run_committed_diff(project_root, base_ref, executor) {
-            Ok(out) => {
-                resolved = Some((base_ref.clone(), out));
-                break;
-            }
-            // The ref resolved: falling back would diff against the wrong base
-            Err(e) if is_non_utf8(&e) => return Err(e),
-            Err(_) => {}
-        }
-    }
-
-    let (base_ref, committed) = resolved.ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not resolve any git base ref (tried: {})",
-            base_refs.join(", ")
-        )
-    })?;
-
-    // Uncommitted diff runs once; error here surfaces directly.
-    let uncommitted = run_uncommitted_diff(project_root, executor)?;
-    let untracked = run_untracked_list(project_root, executor)?;
-
-    Ok(ChangedFiles {
-        files: union_paths([committed, uncommitted, untracked]),
-        base_ref,
-    })
+    changed_files_against_first(project_root, &base_ref_candidates(git_config), executor)
 }
 
 /// Get list of files changed compared to a specific git reference.
 ///
 /// # Errors
 ///
-/// Returns an error if the git command fails or the reference doesn't exist.
+/// Returns [`BaseRefNotFound`] if the reference doesn't exist, else the error
+/// of the git command that failed.
 pub fn get_changed_files(project_root: &Path, base_ref: &str) -> Result<ChangedFiles> {
     get_changed_files_with_executor(project_root, base_ref, &RealGitExecutor)
 }
@@ -238,6 +229,17 @@ pub fn get_changed_files_with_executor(
     base_ref: &str,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
+    changed_files_against_first(project_root, &[base_ref.to_string()], executor)
+}
+
+/// Files changed against the first of `candidates` that exists. The diff gets
+/// the ref's name, not its sha: `ChangedFiles::base_ref` is shown and refreshed.
+fn changed_files_against_first(
+    project_root: &Path,
+    candidates: &[String],
+    executor: &impl GitExecutor,
+) -> Result<ChangedFiles> {
+    let base_ref = resolve_base_ref(project_root, executor, candidates)?;
     let committed = run_committed_diff(project_root, base_ref, executor)?;
     let uncommitted = run_uncommitted_diff(project_root, executor)?;
     let untracked = run_untracked_list(project_root, executor)?;
@@ -245,6 +247,43 @@ pub fn get_changed_files_with_executor(
         files: union_paths([committed, uncommitted, untracked]),
         base_ref: base_ref.to_string(),
     })
+}
+
+/// First of `candidates` that exists. `git rev-parse --verify` exits 1 for a
+/// ref that does not exist, the only failure that moves on: any other (not a
+/// repo, git missing) would fail the same on the next candidate or hide a real
+/// problem behind the wrong base.
+///
+/// No `^{commit}` peel: it would report a ref to a missing object as absent,
+/// and `:/text` would swallow the suffix.
+fn resolve_base_ref<'a>(
+    project_root: &Path,
+    executor: &impl GitExecutor,
+    candidates: &'a [String],
+) -> Result<&'a str> {
+    for candidate in candidates {
+        // As in `run_committed_diff`, a leading `-` must not parse as an option
+        let args = [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            candidate.as_str(),
+        ]
+        .map(String::from);
+        match executor.run_command(project_root, &args) {
+            Ok(_) => return Ok(candidate.as_str()),
+            Err(e) if is_missing_ref(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(BaseRefNotFound(candidates.to_vec()).into())
+}
+
+/// True for `git rev-parse --verify --quiet`'s exit 1: no such ref
+fn is_missing_ref(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<GitFailed>()
+        .is_some_and(|failed| failed.code == Some(1))
 }
 
 /// Get files staged in the git index (`git diff --cached`), for `--staged`.
@@ -282,8 +321,8 @@ pub fn get_staged_files_with_executor(
     })
 }
 
-/// Paths changed between the merge base of `base_ref` and HEAD. Errors say
-/// the ref did not resolve, except [`NonUtf8Output`] (the ref did).
+/// Paths changed between the merge base of `base_ref`, which resolved, and
+/// HEAD. Git's errors stay as they are, e.g. no merge base in a shallow clone.
 fn run_committed_diff(
     project_root: &Path,
     base_ref: &str,
@@ -300,13 +339,7 @@ fn run_committed_diff(
         "HEAD",
         "--",
     ];
-    list_paths(project_root, executor, "diff", &args).map_err(|e| {
-        if is_non_utf8(&e) {
-            e
-        } else {
-            e.context(format!("could not resolve git base ref `{base_ref}`"))
-        }
-    })
+    list_paths(project_root, executor, "diff", &args)
 }
 
 fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
@@ -610,9 +643,19 @@ mod tests {
         assert_eq!(files.base_ref, "custom-branch");
     }
 
+    /// Mock whose first candidate resolves: exactly one `git rev-parse`
+    fn mock_resolving() -> MockGitExecutor {
+        let mut mock = MockGitExecutor::new();
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args[0] == "rev-parse")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        mock
+    }
+
     #[test]
     fn get_changed_files_passes_diff_filter_excluding_deletions() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--diff-filter=d"))
             .times(2)
@@ -629,7 +672,7 @@ mod tests {
 
     #[test]
     fn get_changed_files_uses_merge_base_against_head() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 args.iter().any(|a| a == "--merge-base")
@@ -649,19 +692,19 @@ mod tests {
     }
 
     #[test]
-    fn get_changed_files_issues_three_calls_and_unions_results() {
+    fn get_changed_files_resolves_then_unions_three_listings() {
         use mockall::Sequence;
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
         let mut seq = Sequence::new();
 
-        // First call: committed (merge-base) — returns a.rs, b.rs
+        // First listing: committed (merge-base) — returns a.rs, b.rs
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
             .in_sequence(&mut seq)
             .returning(|_, _| Ok("a.rs\0b.rs\0".to_string()));
 
-        // Second call: uncommitted — returns b.rs, c.rs
+        // Second listing: uncommitted — returns b.rs, c.rs
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 !args.iter().any(|a| a == "--merge-base")
@@ -672,7 +715,7 @@ mod tests {
             .in_sequence(&mut seq)
             .returning(|_, _| Ok("b.rs\0c.rs\0".to_string()));
 
-        // Third call: untracked (ls-files --others --exclude-standard) — returns c.rs, d.rs
+        // Third listing: untracked (ls-files --others --exclude-standard) — returns c.rs, d.rs
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
                 args.iter().any(|a| a == "ls-files")
@@ -692,7 +735,7 @@ mod tests {
 
     #[test]
     fn get_changed_files_includes_untracked_when_no_diff() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == DIFF_FILTER))
@@ -712,13 +755,14 @@ mod tests {
 
     #[test]
     fn get_changed_files_committed_failure_propagates() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
         mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
-            .returning(|_, _| Err(anyhow::anyhow!("fatal: bad revision 'nope'")));
+            .returning(|_, _| Err(anyhow::anyhow!("fatal: no merge base found")));
 
-        let result = get_changed_files_with_executor(Path::new("/tmp"), "nope", &mock);
-        assert!(result.is_err());
+        let err = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap_err();
+        assert_eq!(format!("{err:#}"), "fatal: no merge base found");
     }
 
     fn default_git_config() -> crate::config::GitConfig {
@@ -730,7 +774,7 @@ mod tests {
 
     #[test]
     fn detect_changes_errors_when_uncommitted_diff_fails() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
@@ -751,7 +795,7 @@ mod tests {
 
     #[test]
     fn detect_changes_errors_when_untracked_list_fails() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
 
         mock.expect_run_command()
             .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
@@ -803,7 +847,7 @@ mod tests {
 
     #[test]
     fn path_listings_are_nul_separated() {
-        let mut mock = MockGitExecutor::new();
+        let mut mock = mock_resolving();
         // Right after the subcommand: before `--end-of-options` / `--`
         mock.expect_run_command()
             .withf(|_, args: &[String]| args[1] == "-z")
@@ -856,43 +900,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detect_changes_does_not_fall_back_past_non_utf8_output() {
-        let mut mock = MockGitExecutor::new();
-        // Only origin/main is diffed: falling back would use the wrong base
+    /// [`mock_resolving`] whose committed diff prints a non-UTF-8 path
+    fn mock_non_utf8_diff() -> MockGitExecutor {
+        let mut mock = mock_resolving();
         mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "--merge-base"))
             .times(1)
             .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
+        mock
+    }
 
+    #[test]
+    fn detect_changes_does_not_fall_back_past_non_utf8_output() {
+        // Only origin/main is diffed: falling back would use the wrong base
+        let mock = mock_non_utf8_diff();
         let err = detect_changes_with_executor(Path::new("/tmp"), &default_git_config(), &mock)
             .unwrap_err();
-        assert!(is_non_utf8(&err), "got: {err:#}");
+        assert!(err.is::<NonUtf8Output>(), "got: {err:#}");
     }
 
     #[test]
     fn get_changed_files_non_utf8_is_not_a_bad_ref() {
-        let mut mock = MockGitExecutor::new();
-        mock.expect_run_command()
-            .times(1)
-            .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
-
+        let mock = mock_non_utf8_diff();
         let err = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap_err();
-        assert!(is_non_utf8(&err));
-        assert!(
-            !format!("{err:#}").contains("could not resolve"),
-            "got: {err:#}"
-        );
+        assert!(err.is::<NonUtf8Output>(), "got: {err:#}");
     }
 
     #[test]
-    fn is_non_utf8_sees_through_context() {
+    fn non_utf8_output_is_found_through_context() {
         let mut mock = MockGitExecutor::new();
         mock.expect_run_command()
             .returning(|_, _| Err(NonUtf8Output::new(b"caf\xff.py\0").into()));
 
         let err = get_staged_files_with_executor(Path::new("/tmp"), &mock).unwrap_err();
         assert!(format!("{err:#}").starts_with("could not read staged files"));
-        assert!(is_non_utf8(&err), "got: {err:#}");
+        assert!(err.is::<NonUtf8Output>(), "got: {err:#}");
     }
 
     #[test]
@@ -907,6 +949,54 @@ mod tests {
             format!("{err:#}").contains("not a git repository"),
             "got: {err:#}"
         );
+    }
+
+    /// [`GitFailed`] of the real binary running `args` in `dir`
+    fn git_failure(dir: &Path, args: &[&str]) -> GitFailed {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        RealGitExecutor
+            .run_command(dir, &args)
+            .unwrap_err()
+            .downcast::<GitFailed>()
+            .unwrap()
+    }
+
+    #[test]
+    fn real_executor_keeps_exit_code_of_missing_ref() {
+        if crate::watch::tests::in_git_hook() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+
+        let failed = git_failure(tmp.path(), &["rev-parse", "--verify", "--quiet", "nosuch"]);
+        assert_eq!(failed.code, Some(1));
+    }
+
+    #[test]
+    fn real_executor_keeps_exit_code_outside_a_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Explicit dir: a plain tempdir could sit in a work tree, or a hook's
+        // GIT_DIR could redirect git to one
+        let args = [
+            "--git-dir=not-a-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "nosuch",
+        ];
+        let failed = git_failure(tmp.path(), &args);
+        assert_eq!(failed.code, Some(128));
+        assert_eq!(
+            failed.to_string(),
+            format!("git command failed: {}", failed.stderr)
+        );
+        assert!(failed.stderr.contains("not a git repository"), "{failed}");
     }
 
     #[test]
