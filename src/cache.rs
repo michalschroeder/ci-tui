@@ -109,7 +109,8 @@ pub(crate) fn stamp_keys(
 /// Input files `check`'s key covers, resolved: its files (changed ones
 /// under `key_root`, discovered tests under `exec_root`), then its other
 /// changed trigger files ([`trigger_sources`]) under `key_root`. Also what
-/// `--watch` snapshots at a run start ([`crate::ui::app::App::queue_watch`]).
+/// `--watch` snapshots at a run start, `changed_files` being the list `check`
+/// was selected from ([`crate::ui::app::App::queue_watch`]).
 pub(crate) fn input_paths(
     check: &CheckToRun,
     config: &CiConfig,
@@ -127,6 +128,30 @@ pub(crate) fn input_paths(
     files
         .chain(sources.iter().map(|source| key_root.join(source)))
         .collect()
+}
+
+/// The files of the list `check` was selected from (for `--watch`, a batch
+/// of saves) that are its inputs: a file it never reads must not keep a
+/// covered save from being dropped. Compared resolved ([`input_paths`]): a
+/// discovered test is relative to `exec_root`, the list to `key_root`. All
+/// of them when none is: a check without triggers has no inputs.
+pub(crate) fn saved_inputs(
+    check: &CheckToRun,
+    config: &CiConfig,
+    key_root: &Path,
+    exec_root: &Path,
+) -> Vec<String> {
+    let selected_from = check.selected_from.as_ref();
+    let inputs: HashSet<PathBuf> = input_paths(check, config, selected_from, key_root, exec_root)
+        .into_iter()
+        .collect();
+    let is_input = |file: &&String| inputs.contains(&key_root.join(file));
+    let saved = selected_from.files.iter();
+    let kept: Vec<String> = saved.filter(is_input).cloned().collect();
+    match kept.is_empty() {
+        true => selected_from.files.clone(),
+        false => kept,
+    }
 }
 
 /// Changed files behind the check's triggers that are not in its `{files}`:
@@ -358,6 +383,7 @@ mod tests {
             resolved_command: command.into(),
             resolved_fix_command: None,
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 

@@ -616,6 +616,7 @@ mod tests {
             resolved_command: command.into(),
             resolved_fix_command: None,
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 

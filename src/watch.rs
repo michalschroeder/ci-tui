@@ -6,9 +6,10 @@
 //! saves into one batch ([`next_batch`]), keeps the repo-relative paths
 //! worth checking ([`keep_paths`]: also not editor temp files, not matched
 //! by `ignore_patterns`, not gitignored) and sends the checks they select
-//! to run automatically ([`affected_checks`]) with the saved paths
-//! ([`WatchBatch`]) to the TUI, which re-runs them like `r`.
+//! to run automatically ([`affected_checks`]), each with its saved inputs
+//! ([`WatchBatch`]), to the TUI, which re-runs them like `r`.
 
+use crate::cache::saved_inputs;
 use crate::checks::{select_checks, CheckToRun, Decision};
 use crate::config::CiConfig;
 use crate::git::{ChangedFiles, CLI_FILES_BASE_REF};
@@ -44,9 +45,16 @@ pub struct Watch {
 /// Checks a batch of saves selects, for the TUI
 #[derive(Debug)]
 pub struct WatchBatch {
-    pub checks: Vec<CheckToRun>,
-    /// The batch's kept saved files, repo-relative (sorted, deduped): their
-    /// content tells a check's own writes apart
+    pub checks: Vec<SavedCheck>,
+}
+
+/// A check a batch of saves selects
+#[derive(Debug)]
+pub struct SavedCheck {
+    pub check: CheckToRun,
+    /// The batch's kept saved files, repo-relative (sorted, deduped) that are
+    /// the check's inputs ([`saved_inputs`]), all of them for a check without
+    /// any: their content tells apart what its run covered or wrote itself
     /// ([`crate::ui::app::App::queue_watch`])
     pub saved: Vec<String>,
 }
@@ -116,8 +124,8 @@ fn watch_loop(
         drop(watcher);
         batch.extend(found);
         let saved = keep_paths(root, batch, config);
-        let checks = affected_checks(config, saved.clone(), exec_root);
-        if !checks.is_empty() && tx.send(WatchBatch { checks, saved }).is_err() {
+        let batch = watch_batch(config, saved, &root.path, exec_root);
+        if !batch.checks.is_empty() && tx.send(batch).is_err() {
             return;
         }
     }
@@ -322,8 +330,31 @@ pub fn affected_checks(config: &CiConfig, files: Vec<String>, exec_root: &Path) 
     selected.checks.into_iter().filter(runs).collect()
 }
 
+/// [`affected_checks`] of the saved `files`, each with its saved inputs,
+/// told apart by resolved path. `key_root` is the watch root (canonical),
+/// where the saved paths resolve, so `exec_root` is compared canonical too:
+/// a symlinked project path must not hide a discovered test. Blocking, like
+/// [`affected_checks`].
+pub fn watch_batch(
+    config: &CiConfig,
+    files: Vec<String>,
+    key_root: &Path,
+    exec_root: &Path,
+) -> WatchBatch {
+    let canonical = exec_root.canonicalize();
+    let resolved = canonical.as_deref().unwrap_or(exec_root);
+    let with_inputs = |check: CheckToRun| SavedCheck {
+        saved: saved_inputs(&check, config, key_root, resolved),
+        check,
+    };
+    let checks = affected_checks(config, files, exec_root);
+    WatchBatch {
+        checks: checks.into_iter().map(with_inputs).collect(),
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::mpsc;
 
@@ -508,7 +539,7 @@ checks:
     const OUTER_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"];
 
     /// Running inside a git hook: tempdir repos would see the outer one
-    fn in_git_hook() -> bool {
+    pub(crate) fn in_git_hook() -> bool {
         let set = OUTER_GIT_ENV.iter().any(|v| std::env::var_os(v).is_some());
         if set {
             eprintln!("skipped: outer git env set (running inside a git hook)");
@@ -643,6 +674,59 @@ checks:
         checks.iter().map(CheckToRun::id).collect()
     }
 
+    /// Edge case: config in `sub/`, so exec-relative discovered tests and
+    /// repo-relative saved paths differ
+    fn sub_dir_config() -> CiConfig {
+        serde_yaml::from_str(
+            r#"
+version: 2
+runner: local
+local: { shell: sh }
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns:
+  source: { pattern: '^sub/src/.*\.php$' }
+checks:
+  fast:
+    checks:
+      unit:
+        name: Unit
+        command: "unit {files}"
+        triggers:
+          test_discovery:
+            source_pattern: source
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: sub/src/{path}.php
+                    tests:
+                      - tests/{path}Test.php
+"#,
+        )
+        .unwrap()
+    }
+
+    /// A saved test the check discovered is one of its inputs when the exec
+    /// root is below the watch root, also through a symlinked project path:
+    /// dropping it would leave a new test unchecked
+    #[rstest::rstest]
+    #[case::exec_root_below_watch_root(false)]
+    #[case::symlinked_exec_root(true)]
+    fn test_watch_batch_keeps_discovered_test_saved_under_exec_root(#[case] symlinked: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(sub.join("tests")).unwrap();
+        std::fs::write(sub.join("tests/aTest.php"), "test").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+        let exec_root = if symlinked { &link } else { &sub };
+        let saved = ["sub/src/a.php", "sub/tests/aTest.php"].map(String::from);
+
+        let batch = watch_batch(&sub_dir_config(), saved.to_vec(), &root, exec_root);
+
+        assert_eq!(batch.checks[0].saved, saved);
+    }
+
     #[test]
     fn test_affected_checks_only_those_the_saves_select() {
         let dir = tempfile::tempdir().unwrap();
@@ -687,8 +771,9 @@ checks:
 
     /// Files of the batch's only check
     fn batch_files(batch: &WatchBatch) -> Vec<String> {
-        assert_eq!(ids(&batch.checks), ["lint"]);
-        batch.checks[0].files.paths().to_vec()
+        let checks: Vec<CheckToRun> = batch.checks.iter().map(|c| c.check.clone()).collect();
+        assert_eq!(ids(&checks), ["lint"]);
+        batch.checks[0].check.files.paths().to_vec()
     }
 
     #[test]
@@ -702,7 +787,7 @@ checks:
 
         let batch = recv_batch(&mut rx);
         assert_eq!(batch_files(&batch), ["A.php"]);
-        assert_eq!(batch.saved, ["A.php"]);
+        assert_eq!(batch.checks[0].saved, ["A.php"]);
     }
 
     /// A dir created after start is watched, its subdirs too; files written

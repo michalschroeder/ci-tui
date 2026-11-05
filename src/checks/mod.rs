@@ -17,6 +17,7 @@ use crate::config::{CheckDefinition, CiConfig};
 use crate::git::ChangedFiles;
 use crate::runner::CheckResult;
 use std::path::Path;
+use std::sync::Arc;
 
 mod determine;
 pub(crate) use determine::{
@@ -107,6 +108,11 @@ pub struct CheckToRun {
     /// Result cache key, set by [`select_checks`] with a key root; `None`
     /// otherwise and for checks without concrete files (never cached)
     pub cache_key: Option<crate::cache::CacheKey>,
+    /// The file list this check was selected from, set by [`select_checks`]:
+    /// a later refresh of a sibling leaves it, like the check's resolved
+    /// command. For `--watch` a batch's saved files
+    /// ([`crate::cache::saved_inputs`]).
+    pub selected_from: Arc<ChangedFiles>,
 }
 
 impl CheckToRun {
@@ -123,6 +129,13 @@ impl CheckToRun {
     /// Get the execution group this check belongs to
     pub fn group(&self) -> &str {
         &self.group
+    }
+
+    /// The run gets a file list: `{files}` with concrete paths. Otherwise
+    /// (no `{files}`, or one expanding to nothing for an always-run check)
+    /// the command reads the tree as it is when it starts.
+    pub fn takes_file_list(&self) -> bool {
+        self.definition.command.contains("{files}") && !self.files.paths().is_empty()
     }
 
     /// The check's own compose `service`; `None` = `docker.service`
@@ -259,6 +272,10 @@ pub fn select_checks(
             root,
             project_root,
         );
+    }
+    let selected_from = Arc::new(changed_files.clone());
+    for check in &mut checks_to_run {
+        check.selected_from = Arc::clone(&selected_from);
     }
     let mut seen = std::collections::HashSet::new();
     warnings.retain(|w| seen.insert(w.clone()));
@@ -527,6 +544,7 @@ mod tests {
             resolved_command: command.to_string(),
             resolved_fix_command: None,
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 
