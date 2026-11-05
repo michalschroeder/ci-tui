@@ -15,9 +15,7 @@
 //! - [`CheckResult`]: Result of executing a check including output and timing
 //! - [`CheckStatus`]: Current status of a check (Pending, Running, Passed, TimedOut, etc.)
 //! - [`RunnerEvent`]: Events emitted during execution for UI updates
-//! - [`CancelRegistry`] / [`CancelSwitch`]: Per-execution cancel switches (TUI
-//!   `s` key), registered synchronously, before the execution shows as
-//!   cancellable
+//! - [`CancelRegistry`] / [`CancelSwitch`]: Per-execution cancel switches (TUI `s` key)
 //!
 //! # Process cleanup
 //!
@@ -948,10 +946,15 @@ impl CancelRegistry {
         tx.is_some_and(|tx| tx.send(()).is_ok())
     }
 
-    /// Register an execution of `check_id` now, replacing any previous one
-    /// (which then runs on, no longer cancellable). Call this before the
-    /// execution shows as cancellable, outside its deferred task: a cancel
-    /// sent from here on reaches it. Finished runs' entries are pruned here.
+    /// Register an execution of `check_id`, replacing any previous one
+    /// (which then runs on, no longer cancellable). Finished runs' entries
+    /// are pruned here.
+    ///
+    /// Register before anything can show the execution as cancellable: a
+    /// cancel reaches it only from here on. The TUI marks a check `Running`
+    /// synchronously, so it registers synchronously, before spawning; the
+    /// runner sends `CheckQueued` / `CheckStarted` from inside the run, so
+    /// it may register in its task.
     pub fn register(&self, check_id: &str) -> CancelSwitch {
         let (tx, cancelled) = oneshot::channel();
         let mut map = self.lock();
@@ -969,9 +972,9 @@ impl CancelRegistry {
     }
 }
 
-/// One execution's cancel switch, obtained synchronously from
-/// [`CancelRegistry::register`] before the execution is shown as cancellable.
-/// Each has its own channel, so a cancel never reaches a later execution.
+/// One execution's cancel switch, from [`CancelRegistry::register`]. Each
+/// has its own channel, so a cancel never reaches a later execution.
+#[must_use = "a discarded switch leaves the running execution uncancellable"]
 pub struct CancelSwitch {
     check_id: String,
     cancelled: oneshot::Receiver<()>,
@@ -986,16 +989,11 @@ impl CancelSwitch {
     /// polled, so its command never starts. `T` is `CheckResult` or
     /// `Option<CheckResult>`.
     pub async fn run<T: From<CheckResult>>(self, run: impl Future<Output = T>) -> T {
-        let Self {
-            check_id,
-            cancelled,
-        } = self;
-        // `biased`, cancel first: `select!` otherwise polls in random order,
-        // which could start `run` despite a cancel already received
+        // Cancel first: a received cancel must keep `run` from being polled
         tokio::select! {
             biased;
             // Err = replaced by a newer run of the same id: keep running
-            Ok(()) = cancelled => CheckResult::cancelled(&check_id).into(),
+            Ok(()) = self.cancelled => CheckResult::cancelled(&self.check_id).into(),
             output = run => output,
         }
     }

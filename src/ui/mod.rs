@@ -394,9 +394,8 @@ impl TaskCtx {
         outcome
     }
 
-    /// [`Self::run_after_setup`], cancellable with 's' through `switch`,
-    /// which the caller registered before spawning this (then reports
-    /// `Cancelled`); sends the result to `tx` as `done(result)`
+    /// [`Self::run_after_setup`] unless cancelled with 's' through `switch`;
+    /// sends the result (then `Cancelled`) to `tx` as `done(result)`
     async fn run_cancellable(
         &self,
         check: &CheckToRun,
@@ -528,26 +527,18 @@ impl Tasks {
     }
 
     /// Spawn a fix run of `command` for `check`. Output is not streamed
-    /// (the fix result shows once done). Cancellable like
-    /// [`Self::spawn_check`], but 's' only acts on a `Running` check, which
-    /// a fixed (failed) check is not.
+    /// (the fix result shows once done).
     fn spawn_fix(&mut self, check: CheckToRun, command: String) {
-        self.spawn(|ctx, tx| {
-            let switch = ctx.cancels.register(check.id());
-            async move {
-                let sink = OutputSink::none();
-                let run = ctx.run(&check, &command, &sink);
-                let result = switch.run(run).await;
-                let _ = tx.send(TaskEvent::FixResult(result)).await;
-            }
+        self.spawn(|ctx, tx| async move {
+            let sink = OutputSink::none();
+            let result = ctx.run(&check, &command, &sink).await;
+            let _ = tx.send(TaskEvent::FixResult(result)).await;
         });
     }
 
     /// Spawn a task running `command` as `check` (after its group's
     /// pre-commands with `setup`), streaming its output, cancellable with
-    /// 's' from now on: the switch is registered here, not in the task, which
-    /// may be first polled after the check shows as running. Reports the
-    /// result as `done(result)` (a failed setup as
+    /// 's'; reports the result as `done(result)` (a failed setup as
     /// [`TaskEvent::UnrecordedResult`]).
     fn spawn_check(
         &mut self,
@@ -556,45 +547,20 @@ impl Tasks {
         setup: bool,
         done: fn(CheckResult) -> TaskEvent,
     ) {
-        self.spawn(|ctx, tx| {
-            let switch = ctx.cancels.register(check.id());
-            async move {
-                ctx.run_cancellable(&check, &command, setup, switch, &tx, done)
-                    .await;
-            }
+        let switch = self.ctx.cancels.register(check.id());
+        self.spawn(|ctx, tx| async move {
+            ctx.run_cancellable(&check, &command, setup, switch, &tx, done)
+                .await;
         });
     }
 }
 
-/// Retry `check` after a git refresh (and its group's pre-commands with
+/// Run `check` after a git refresh (and its group's pre-commands with
 /// `setup`). `previous` is restored if the check no longer applies to the
 /// refreshed file list. With `auto_only` (`--watch`), a check the refresh
-/// leaves on-demand / skipped shows that instead of running. Cancellable
-/// with 's' as of this call (the check shows as running during the refresh
-/// too): not an `async fn`, so the switch is registered here, not when the
-/// task is first polled.
-fn retry_with_refresh(
-    ctx: TaskCtx,
-    tx: mpsc::Sender<TaskEvent>,
-    check: CheckToRun,
-    previous: CheckResult,
-    changed_files: ChangedFiles,
-    setup: bool,
-    auto_only: bool,
-) -> impl std::future::Future<Output = ()> {
-    let switch = ctx.cancels.register(check.id());
-    async move {
-        let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
-        // None: not applicable or failed setup, already reported
-        if let Some(result) = switch.run(run).await {
-            let _ = tx.send(TaskEvent::RetryResult(result)).await;
-        }
-    }
-}
-
-/// Body of [`retry_with_refresh`]; `None` when the check no longer applies
-/// (or no longer runs automatically with `auto_only`) or its setup failed
-/// (see [`TaskCtx::run_after_setup`])
+/// leaves on-demand / skipped shows that instead of running. `None` when
+/// the check no longer applies (or no longer runs automatically with
+/// `auto_only`) or its setup failed (see [`TaskCtx::run_after_setup`])
 async fn refresh_and_run(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
@@ -865,10 +831,10 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
 }
 
 /// Re-run `check` like 'r' (its group setup claimed: `setup` runs the
-/// pre-commands first). Marks it running now (also blocks a second start);
-/// git refresh runs off the event loop so large repos do not freeze the UI.
-/// A user run ('r') also clears fix results; an `auto_only` one (`--watch`)
-/// leaves them.
+/// pre-commands first). Marks it running now (also blocks a second start),
+/// cancellable with 's' (during the refresh too); git refresh runs off the
+/// event loop so large repos do not freeze the UI. A user run ('r') also
+/// clears fix results; an `auto_only` one (`--watch`) leaves them.
 fn spawn_refreshed_run(
     app: &mut App,
     tasks: &mut Tasks,
@@ -882,13 +848,18 @@ fn spawn_refreshed_run(
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
+    let switch = tasks.ctx.cancels.register(check.id());
     if auto_only {
         app.mark_running(check.id());
     } else {
         app.reset_check_for_retry(check.id());
     }
-    tasks.spawn(|ctx, tx| {
-        retry_with_refresh(ctx, tx, check, previous, changed_files, setup, auto_only)
+    tasks.spawn(|ctx, tx| async move {
+        let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
+        // None: not applicable or failed setup, already reported
+        if let Some(result) = switch.run(run).await {
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+        }
     });
 }
 
@@ -1001,11 +972,10 @@ fn fixes_to_verify(app: &App, event: &TaskEvent) -> Vec<String> {
 }
 
 /// Re-run the fixed checks `check_ids` that are not running again: marked
-/// running now (the fix result stays shown) with their cancel switches
-/// registered, run by [`run_verifications`], results recorded like 'r'. No
-/// git refresh: a fix does not change which checks apply. The first check of
-/// a group whose pre-commands are due runs them for the group; skipped while
-/// they are busy ([`claim_setup`]).
+/// running now (the fix result stays shown), run by [`run_verifications`],
+/// results recorded like 'r'. No git refresh: a fix does not change which
+/// checks apply. The first check of a group whose pre-commands are due runs
+/// them for the group; skipped while they are busy ([`claim_setup`]).
 fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
     let mut jobs = Vec::new();
     let mut setup_groups = HashSet::new();
@@ -1025,8 +995,8 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
         if setup {
             setup_groups.insert(check.group().to_string());
         }
-        app.mark_verifying(check.id());
         let switch = tasks.ctx.cancels.register(check.id());
+        app.mark_verifying(check.id());
         jobs.push((check, setup, switch));
     }
     if !jobs.is_empty() {
@@ -1036,7 +1006,7 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
 
 /// [`verify_fixes`] task: one check at a time in `jobs` order, so groups'
 /// `parallel: false` / `max_parallel` hold. All are cancellable with 's'
-/// from the start (waiting too): `jobs` carry their registered switches.
+/// from the start (waiting too).
 async fn run_verifications(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
@@ -1168,9 +1138,7 @@ fn claim_setup(app: &mut App, check: &CheckToRun) -> Option<bool> {
 }
 
 /// Handle 's' key: cancel the selected running check. Its runner or retry
-/// task then reports `Cancelled`; other checks keep running. Every execution
-/// shown as cancellable has registered, so `cancel` returning false only
-/// means it already finished and its result is on its way.
+/// task then reports `Cancelled`; other checks keep running.
 fn handle_cancel_selected(app: &mut App, tasks: &mut Tasks) -> Action {
     if !app.selected_capabilities().can_cancel {
         return Action::Continue;
@@ -4804,26 +4772,6 @@ checks:
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
     }
 
-    /// Edge case: group `serial` with checks `a` and `b`, both triggered by
-    /// PHP files; `GROUP` is replaced with the group's settings
-    fn serial_config(group: &str) -> CiConfig {
-        let yaml = r#"
-version: 2
-runner: local
-local: { shell: sh }
-git: { base_branch: main, fallback_branch: HEAD~1 }
-file_patterns:
-  php: { pattern: '\.php$' }
-checks:
-  serial:
-    GROUP
-    checks:
-      a: { name: A, command: "echo a {files}", triggers: { file_pattern: php } }
-      b: { name: B, command: "echo b {files}", triggers: { file_pattern: php } }
-"#;
-        serde_yaml::from_str(&yaml.replace("GROUP", group)).unwrap()
-    }
-
     /// `--watch` runs keep the group's concurrency: `parallel: false` (or
     /// `max_parallel: 1`) runs one at a time, the next on the first's result
     #[rstest::rstest]
@@ -4831,7 +4779,7 @@ checks:
     #[case::max_parallel("parallel: true\n    max_parallel: 1")]
     #[tokio::test]
     async fn test_watch_runs_respect_group_concurrency(#[case] group: &str) {
-        let config = serial_config(group);
+        let config = marker_config(group);
         let dir = tempfile::tempdir().unwrap();
         let files = &["src/Foo.php"];
         let (mut app, mut tasks, mut rx) =
@@ -5268,7 +5216,7 @@ checks:
             assert_eq!(*status, CheckStatus::Cancelled, "round {round}");
         }
 
-        while tasks.set.join_next().await.is_some() {}
+        settle(&mut app, &mut tasks, &mut rx).await;
         assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
     }
 
