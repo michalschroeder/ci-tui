@@ -1865,6 +1865,31 @@ mod cancel_tests {
         assert!(!CancelRegistry::default().cancel("nope"));
     }
 
+    /// A newer run of the same id replaces the older one's switch: the older
+    /// run keeps going to its own result, a cancel reaches only the newer one
+    #[tokio::test]
+    async fn replaced_cancel_switch_keeps_running_and_cancel_reaches_newer() {
+        let cancels = CancelRegistry::default();
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let older = cancels.register("lint").run(async move {
+            finished.await.unwrap();
+            CheckResult {
+                status: CheckStatus::Passed,
+                ..CheckResult::pending("lint")
+            }
+        });
+        let older = tokio::spawn(older);
+        tokio::task::yield_now().await; // the older run is under way
+
+        let newer = cancels.register("lint");
+        assert!(cancels.cancel("lint"));
+        let cancelled = newer.run(std::future::pending::<CheckResult>()).await;
+        assert_eq!(cancelled.status, CheckStatus::Cancelled);
+
+        finish.send(()).unwrap();
+        assert_eq!(older.await.unwrap().status, CheckStatus::Passed);
+    }
+
     #[tokio::test]
     async fn cancel_kills_whole_process_group() {
         let dir = tempfile::tempdir().unwrap();

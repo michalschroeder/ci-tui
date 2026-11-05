@@ -30,9 +30,8 @@ use crate::checks::{select_checks, CheckToRun, Decision, Selected, Severity};
 use crate::config::CiConfig;
 use crate::git::{current_branch, get_changed_files, get_staged_files, ChangedFiles};
 use crate::runner::{
-    run_check_cancellable, run_check_with_command_with_executor, CancelRegistry, CheckResult,
-    CheckRunner, CheckStatus, OutputSink, PreCommandOutcome, RealCommandExecutor, RunnerEvent,
-    SetupFailure,
+    run_check_with_command_with_executor, CancelRegistry, CancelSwitch, CheckResult, CheckRunner,
+    CheckStatus, OutputSink, PreCommandOutcome, RealCommandExecutor, RunnerEvent, SetupFailure,
 };
 use crate::watch::WatchBatch;
 use anyhow::Result;
@@ -395,18 +394,19 @@ impl TaskCtx {
         outcome
     }
 
-    /// [`Self::run_after_setup`], cancellable with 's' (then reports
-    /// `Cancelled`); sends the result to `tx` as `done(result)`
+    /// [`Self::run_after_setup`] unless cancelled with 's' through `switch`;
+    /// sends the result (then `Cancelled`) to `tx` as `done(result)`
     async fn run_cancellable(
         &self,
         check: &CheckToRun,
         command: &str,
         setup: bool,
+        switch: CancelSwitch,
         tx: &mpsc::Sender<TaskEvent>,
         done: fn(CheckResult) -> TaskEvent,
     ) {
         let run = self.run_after_setup(check, command, setup, tx);
-        if let Some(result) = run_check_cancellable(&self.cancels, check.id(), run).await {
+        if let Some(result) = switch.run(run).await {
             let _ = tx.send(done(result)).await;
         }
     }
@@ -527,14 +527,11 @@ impl Tasks {
     }
 
     /// Spawn a fix run of `command` for `check`. Output is not streamed
-    /// (the fix result shows once done). Cancellable like
-    /// [`Self::spawn_check`], but 's' only acts on a `Running` check, which
-    /// a fixed (failed) check is not.
+    /// (the fix result shows once done).
     fn spawn_fix(&mut self, check: CheckToRun, command: String) {
         self.spawn(|ctx, tx| async move {
             let sink = OutputSink::none();
-            let run = ctx.run(&check, &command, &sink);
-            let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
+            let result = ctx.run(&check, &command, &sink).await;
             let _ = tx.send(TaskEvent::FixResult(result)).await;
         });
     }
@@ -550,39 +547,20 @@ impl Tasks {
         setup: bool,
         done: fn(CheckResult) -> TaskEvent,
     ) {
+        let switch = self.ctx.cancels.register(check.id());
         self.spawn(|ctx, tx| async move {
-            ctx.run_cancellable(&check, &command, setup, &tx, done)
+            ctx.run_cancellable(&check, &command, setup, switch, &tx, done)
                 .await;
         });
     }
 }
 
-/// Retry `check` after a git refresh (and its group's pre-commands with
+/// Run `check` after a git refresh (and its group's pre-commands with
 /// `setup`). `previous` is restored if the check no longer applies to the
 /// refreshed file list. With `auto_only` (`--watch`), a check the refresh
-/// leaves on-demand / skipped shows that instead of running. Cancellable
-/// with 's' from the start (the check shows as running during the refresh
-/// too).
-async fn retry_with_refresh(
-    ctx: TaskCtx,
-    tx: mpsc::Sender<TaskEvent>,
-    check: CheckToRun,
-    previous: CheckResult,
-    changed_files: ChangedFiles,
-    setup: bool,
-    auto_only: bool,
-) {
-    let check_id = check.id().to_string();
-    let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
-    // None: not applicable or failed setup, already reported
-    if let Some(result) = run_check_cancellable(&ctx.cancels, &check_id, run).await {
-        let _ = tx.send(TaskEvent::RetryResult(result)).await;
-    }
-}
-
-/// Body of [`retry_with_refresh`]; `None` when the check no longer applies
-/// (or no longer runs automatically with `auto_only`) or its setup failed
-/// (see [`TaskCtx::run_after_setup`])
+/// leaves on-demand / skipped shows that instead of running. `None` when
+/// the check no longer applies (or no longer runs automatically with
+/// `auto_only`) or its setup failed (see [`TaskCtx::run_after_setup`])
 async fn refresh_and_run(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
@@ -853,10 +831,10 @@ fn handle_retry_selected(app: &mut App, tasks: &mut Tasks) -> Action {
 }
 
 /// Re-run `check` like 'r' (its group setup claimed: `setup` runs the
-/// pre-commands first). Marks it running now (also blocks a second start);
-/// git refresh runs off the event loop so large repos do not freeze the UI.
-/// A user run ('r') also clears fix results; an `auto_only` one (`--watch`)
-/// leaves them.
+/// pre-commands first). Marks it running now (also blocks a second start),
+/// cancellable with 's' (during the refresh too); git refresh runs off the
+/// event loop so large repos do not freeze the UI. A user run ('r') also
+/// clears fix results; an `auto_only` one (`--watch`) leaves them.
 fn spawn_refreshed_run(
     app: &mut App,
     tasks: &mut Tasks,
@@ -870,13 +848,18 @@ fn spawn_refreshed_run(
         .cloned()
         .unwrap_or_else(|| CheckResult::pending(check.id()));
     let changed_files = app.changed_files.clone();
+    let switch = tasks.ctx.cancels.register(check.id());
     if auto_only {
         app.mark_running(check.id());
     } else {
         app.reset_check_for_retry(check.id());
     }
-    tasks.spawn(|ctx, tx| {
-        retry_with_refresh(ctx, tx, check, previous, changed_files, setup, auto_only)
+    tasks.spawn(|ctx, tx| async move {
+        let run = refresh_and_run(&ctx, &tx, check, previous, changed_files, setup, auto_only);
+        // None: not applicable or failed setup, already reported
+        if let Some(result) = switch.run(run).await {
+            let _ = tx.send(TaskEvent::RetryResult(result)).await;
+        }
     });
 }
 
@@ -1019,8 +1002,9 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
         if setup {
             setup_groups.insert(check.group().to_string());
         }
+        let switch = tasks.ctx.cancels.register(check.id());
         app.mark_verifying(check.id());
-        jobs.push((check, setup));
+        jobs.push((check, setup, switch));
     }
     if !jobs.is_empty() {
         tasks.spawn(|ctx, tx| run_verifications(ctx, tx, jobs));
@@ -1033,13 +1017,17 @@ fn verify_fixes(app: &mut App, tasks: &mut Tasks, check_ids: Vec<String>) {
 async fn run_verifications(
     ctx: TaskCtx,
     tx: mpsc::Sender<TaskEvent>,
-    jobs: Vec<(CheckToRun, bool)>,
+    jobs: Vec<(CheckToRun, bool, CancelSwitch)>,
 ) {
     let turn = tokio::sync::Semaphore::new(1);
     let no_setup = std::sync::Mutex::new(HashMap::new());
     let mut runs: Vec<_> = jobs
-        .iter()
-        .map(|(check, setup)| Box::pin(verify_one(&ctx, &tx, check, *setup, &turn, &no_setup)))
+        .into_iter()
+        .map(|(check, setup, switch)| {
+            Box::pin(verify_one(
+                &ctx, &tx, check, setup, switch, &turn, &no_setup,
+            ))
+        })
         .collect();
     // Join all; first polled in `jobs` order, so queued in that order on the
     // fair `turn`
@@ -1060,8 +1048,9 @@ async fn run_verifications(
 async fn verify_one(
     ctx: &TaskCtx,
     tx: &mpsc::Sender<TaskEvent>,
-    check: &CheckToRun,
+    check: CheckToRun,
     setup: bool,
+    switch: CancelSwitch,
     turn: &tokio::sync::Semaphore,
     no_setup: &std::sync::Mutex<HashMap<String, String>>,
 ) {
@@ -1080,9 +1069,9 @@ async fn verify_one(
             return None;
         }
         blocked = None;
-        Some(ctx.run_streaming(check, &check.resolved_command, tx).await)
+        Some(ctx.run_streaming(&check, &check.resolved_command, tx).await)
     };
-    let result = run_check_cancellable(&ctx.cancels, check.id(), run).await;
+    let result = switch.run(run).await;
     let reason = blocked.map(|r| r.unwrap_or_else(|| SetupFailure::cancelled_reason(group)));
     if let Some(reason) = &reason {
         let mut no_setup = no_setup.lock().unwrap();
@@ -2397,7 +2386,7 @@ checks:
     fn spawn_cancellable(tasks: &mut Tasks, check_id: &'static str) {
         tasks.spawn(move |ctx, tx| async move {
             let run = std::future::pending::<CheckResult>();
-            let result = run_check_cancellable(&ctx.cancels, check_id, run).await;
+            let result = ctx.cancels.register(check_id).run(run).await;
             let _ = tx.send(TaskEvent::RetryResult(result)).await;
         });
     }
@@ -5424,26 +5413,6 @@ checks:
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
     }
 
-    /// Edge case: group `serial` with checks `a` and `b`, both triggered by
-    /// PHP files; `GROUP` is replaced with the group's settings
-    fn serial_config(group: &str) -> CiConfig {
-        let yaml = r#"
-version: 2
-runner: local
-local: { shell: sh }
-git: { base_branch: main, fallback_branch: HEAD~1 }
-file_patterns:
-  php: { pattern: '\.php$' }
-checks:
-  serial:
-    GROUP
-    checks:
-      a: { name: A, command: "echo a {files}", triggers: { file_pattern: php } }
-      b: { name: B, command: "echo b {files}", triggers: { file_pattern: php } }
-"#;
-        serde_yaml::from_str(&yaml.replace("GROUP", group)).unwrap()
-    }
-
     /// `--watch` runs keep the group's concurrency: `parallel: false` (or
     /// `max_parallel: 1`) runs one at a time, the next on the first's result
     #[rstest::rstest]
@@ -5451,7 +5420,7 @@ checks:
     #[case::max_parallel("parallel: true\n    max_parallel: 1")]
     #[tokio::test]
     async fn test_watch_runs_respect_group_concurrency(#[case] group: &str) {
-        let config = serial_config(group);
+        let config = marker_config(group);
         let dir = tempfile::tempdir().unwrap();
         let files = &["src/Foo.php"];
         let (mut app, mut tasks, mut rx) =
@@ -5665,5 +5634,363 @@ checks:
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(rx.try_recv().is_err(), "cancelled again");
         assert!(app.run.watch_queue[0].cancel_sent);
+    }
+
+    /// Edge case: local-mode group `fast` (`GROUP` replaced with `group`)
+    /// whose checks `a` and `b`, triggered by PHP files, add a line to their
+    /// `<id>.ran` file ([`command_runs`]); on-demand with no changed PHP file
+    fn marker_config(group: &str) -> CiConfig {
+        let yaml = r#"
+version: 2
+runner: local
+local: { shell: sh }
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns:
+  php: { pattern: '\.php$' }
+checks:
+  fast:
+    GROUP
+    checks:
+      a: { name: A, command: "echo ran >> a.ran", triggers: { file_pattern: php } }
+      b: { name: B, command: "echo ran >> b.ran", triggers: { file_pattern: php } }
+"#;
+        serde_yaml::from_str(&yaml.replace("GROUP", group)).unwrap()
+    }
+
+    /// [`watch_app_with`] on [`marker_config`] with `file` changed; `a` is
+    /// selected
+    fn marker_app(dir: &Path, file: &str) -> (App, Tasks, mpsc::Receiver<TaskEvent>) {
+        watch_app_with(marker_config("parallel: true"), dir, &[file], |_| true)
+    }
+
+    /// [`fixable_app`] with verification, whose failed checks `ids` add a
+    /// line to their `<id>.ran` file when re-run ([`command_runs`])
+    fn marker_fixable_app(dir: &Path, ids: &[&str]) -> (App, Tasks, mpsc::Receiver<TaskEvent>) {
+        let fixes: Vec<(&str, &str)> = ids.iter().map(|id| (*id, "true")).collect();
+        let (mut app, tasks, rx) = fixable_app(dir, &fixes, true);
+        for check in &mut app.checks {
+            check.resolved_command = format!("echo ran >> {}.ran", check.id());
+        }
+        (app, tasks, rx)
+    }
+
+    /// How many times the command of marker check `id` ran in `dir`
+    fn command_runs(dir: &Path, id: &str) -> usize {
+        let log = std::fs::read_to_string(dir.join(format!("{id}.ran")));
+        log.map_or(0, |log| log.lines().count())
+    }
+
+    /// Let every task end, then handle the events they sent
+    async fn settle(app: &mut App, tasks: &mut Tasks, rx: &mut mpsc::Receiver<TaskEvent>) {
+        while tasks.set.join_next().await.is_some() {}
+        while let Ok(event) = rx.try_recv() {
+            handle_message(app, Message::Task(event), tasks);
+        }
+    }
+
+    /// #262: `s` in the same tick as `r`, before the spawned task was polled
+    #[tokio::test]
+    async fn review_cancel_immediately_after_retry_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        assert_eq!(app.selected_check().unwrap().id(), "php-lint");
+        handle_retry_selected(&mut app, &mut tasks);
+        assert!(app.selected_capabilities().can_cancel);
+        // Both key messages can be ready before the spawned future is polled.
+        handle_cancel_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(
+            app.results["php-lint"].status,
+            CheckStatus::Cancelled,
+            "accepted cancel must prevent the retry from completing successfully"
+        );
+    }
+
+    /// #262: a cancel before the task started keeps the command from
+    /// running, it does not only change the shown result
+    #[tokio::test]
+    async fn test_cancel_before_start_prevents_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.php");
+
+        handle_retry_selected(&mut app, &mut tasks);
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+    }
+
+    /// #262: the other ways to start a task behave like 'r'
+    #[rstest::rstest]
+    #[case::on_demand('t', KeyModifiers::NONE)]
+    #[case::all_files('A', KeyModifiers::SHIFT)]
+    #[tokio::test]
+    async fn test_cancel_before_start_of_on_demand_check_prevents_command(
+        #[case] c: char,
+        #[case] modifiers: KeyModifiers,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.yaml");
+        assert_eq!(app.results["a"].status, CheckStatus::OnDemand);
+
+        handle_key_event(&mut app, press(KeyCode::Char(c), modifiers), &mut tasks);
+        assert!(app.selected_capabilities().can_cancel);
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+    }
+
+    /// #262: the cancelled result of 'A' clears its footer progress
+    #[tokio::test]
+    async fn test_cancel_before_start_of_all_files_run_clears_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.php");
+
+        handle_run_all_files(&mut app, &mut tasks);
+        assert_eq!(status_text(&app), Some("Running for all files..."));
+        handle_cancel_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::UnrecordedResult(_))
+        })
+        .await;
+
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
+        assert_eq!(status_text(&app), None, "progress cleared");
+    }
+
+    /// #262: `verify_fixes`, then 's' before its task was polled
+    #[tokio::test]
+    async fn test_cancel_before_start_of_fix_verification_prevents_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_fixable_app(dir.path(), &["php-lint"]);
+
+        verify_fixes(&mut app, &mut tasks, vec!["php-lint".to_string()]);
+        assert!(app.selected_capabilities().can_cancel);
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(command_runs(dir.path(), "php-lint"), 0, "command ran");
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Cancelled);
+        assert!(!app.fixing());
+    }
+
+    /// #262: cancelling a verification waiting for its turn, before the
+    /// task was polled, spares the one ahead of it
+    #[tokio::test]
+    async fn test_cancel_before_start_of_second_verification_leaves_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = ["php-lint", "phpstan"];
+        let (mut app, mut tasks, mut rx) = marker_fixable_app(dir.path(), &ids);
+
+        verify_fixes(&mut app, &mut tasks, ids.map(String::from).to_vec());
+        app.select_last();
+        assert_eq!(app.selected_check().unwrap().id(), "phpstan");
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(command_runs(dir.path(), "phpstan"), 0, "cancelled one ran");
+        assert_eq!(app.results["phpstan"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "php-lint"), 1);
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+        assert!(!app.fixing());
+    }
+
+    /// #262: cancelling, before the start, the verification that owns its
+    /// group's pre-commands: they never ran, so the group's next verification
+    /// fails without running; the claim is released
+    #[tokio::test]
+    async fn test_cancel_before_start_of_verification_owning_group_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = r#"pre_commands: [{ name: seed, command: "echo seeded > seeded" }]"#;
+        let config = marker_config(group);
+        let (mut app, mut tasks, mut rx) = watch_app_with(config, dir.path(), &["a.php"], |_| true);
+        for id in ["a", "b"] {
+            app.results.get_mut(id).unwrap().status = CheckStatus::Failed;
+        }
+        app.select_last();
+        app.previous_check();
+        assert_eq!(app.selected_check().unwrap().id(), "a");
+
+        let ids = vec!["a".to_string(), "b".to_string()];
+        verify_fixes(&mut app, &mut tasks, ids);
+        assert!(app.run.setup_claims.contains_key("a"));
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert!(!dir.path().join("seeded").exists(), "pre-command ran");
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "a"), 0, "cancelled one ran");
+        let blocked = &app.results["b"];
+        assert_eq!(blocked.status, CheckStatus::Failed);
+        assert!(blocked.not_run);
+        assert_eq!(blocked.output, SetupFailure::cancelled_reason("fast"));
+        assert_eq!(command_runs(dir.path(), "b"), 0, "blocked one ran");
+        assert!(!app.fixing());
+        assert!(app.run.setup_claims.is_empty(), "claim released");
+    }
+
+    /// #262: `tokio::select!` polls in random order unless biased: a cancel
+    /// received before the start must win every time, without the run being
+    /// polled at all (it would report `CheckStarted` first)
+    #[tokio::test]
+    async fn test_cancel_before_start_wins_every_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.php");
+
+        for round in 0..32 {
+            handle_run_all_files(&mut app, &mut tasks);
+            handle_cancel_selected(&mut app, &mut tasks);
+            handle_until(&mut app, &mut tasks, &mut rx, |e| {
+                let started = matches!(e, TaskEvent::Output(RunnerEvent::CheckStarted { .. }));
+                assert!(!started, "run polled despite the cancel");
+                matches!(e, TaskEvent::UnrecordedResult(_))
+            })
+            .await;
+            let status = &app.results["a"].status;
+            assert_eq!(*status, CheckStatus::Cancelled, "round {round}");
+        }
+
+        settle(&mut app, &mut tasks, &mut rx).await;
+        assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
+    }
+
+    /// #262: a cancel belongs to one execution: the next run of the check
+    /// is not cancelled by it
+    #[tokio::test]
+    async fn test_cancel_before_start_does_not_spill_into_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.php");
+
+        handle_retry_selected(&mut app, &mut tasks);
+        handle_cancel_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "a"), 0, "command ran");
+
+        handle_retry_selected(&mut app, &mut tasks);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(app.results["a"].status, CheckStatus::Passed);
+        assert_eq!(command_runs(dir.path(), "a"), 1);
+    }
+
+    /// #262: cancelling one of two checks started in the same tick leaves
+    /// the other one running
+    #[tokio::test]
+    async fn test_cancel_before_start_leaves_sibling_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = marker_app(dir.path(), "a.php");
+
+        handle_retry_selected(&mut app, &mut tasks);
+        app.next_check();
+        assert_eq!(app.selected_check().unwrap().id(), "b");
+        handle_retry_selected(&mut app, &mut tasks);
+        app.previous_check();
+        assert_eq!(app.selected_check().unwrap().id(), "a");
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert_eq!(command_runs(dir.path(), "a"), 0, "cancelled one ran");
+        assert_eq!(app.results["b"].status, CheckStatus::Passed);
+        assert_eq!(command_runs(dir.path(), "b"), 1);
+    }
+
+    /// #262: a single run owning its group's pre-commands, cancelled before
+    /// the start: they never ran, the claim is released and the next run
+    /// claims and runs them
+    #[rstest::rstest]
+    #[case::retry("a.php", 'r')]
+    #[case::on_demand("a.yaml", 't')]
+    #[tokio::test]
+    async fn test_cancel_before_start_releases_group_setup(#[case] file: &str, #[case] key: char) {
+        let dir = tempfile::tempdir().unwrap();
+        let group = r#"pre_commands: [{ name: seed, command: "echo seeded > seeded" }]"#;
+        let config = marker_config(group);
+        let (mut app, mut tasks, mut rx) =
+            watch_app_with(config, dir.path(), &[file], |c| c.id() == "a");
+        app.select_last();
+        assert_eq!(app.selected_check().unwrap().id(), "a");
+        assert_eq!(app.group_setup("fast"), GroupSetup::Run);
+        let seeded = dir.path().join("seeded");
+
+        let key = press(KeyCode::Char(key), KeyModifiers::NONE);
+        handle_key_event(&mut app, key, &mut tasks);
+        assert!(app.run.setup_claims.contains_key("a"));
+        handle_cancel_selected(&mut app, &mut tasks);
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert_eq!(app.results["a"].status, CheckStatus::Cancelled);
+        assert!(!seeded.exists(), "pre-command ran");
+        assert!(app.run.setup_claims.is_empty(), "claim released");
+
+        handle_retry_selected(&mut app, &mut tasks);
+        assert!(app.run.setup_claims.contains_key("a"), "claimed again");
+        settle(&mut app, &mut tasks, &mut rx).await;
+
+        assert!(seeded.exists(), "next run runs the pre-commands");
+        assert_eq!(app.results["a"].status, CheckStatus::Passed);
+        assert_eq!(command_runs(dir.path(), "a"), 1);
+    }
+
+    /// #262: a second save with new content before the first save's re-run
+    /// was polled: that run is cancelled without its command running, the
+    /// queued re-run then starts on its result
+    #[tokio::test]
+    async fn test_watch_second_save_cancels_rerun_not_started_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = marker_config("parallel: true");
+        let files = &["a.php"];
+        let (mut app, mut tasks, mut rx) =
+            watch_app_with(config.clone(), dir.path(), files, |c| c.id() == "a");
+
+        write(dir.path(), "a.php", "first save");
+        let batch = touched_with(&config, dir.path(), files);
+        handle_message(&mut app, batch, &mut tasks);
+        assert_eq!(app.results["a"].status, CheckStatus::Running);
+
+        write(dir.path(), "a.php", "second save");
+        let batch = touched_with(&config, dir.path(), files);
+        handle_message(&mut app, batch, &mut tasks);
+        assert_eq!(app.run.watch_queue.len(), 1, "waits for the cancel");
+
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            if let TaskEvent::RetryResult(result) = e {
+                assert_eq!(result.status, CheckStatus::Cancelled, "cancel was lost");
+            }
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(
+            command_runs(dir.path(), "a"),
+            0,
+            "first re-run's command ran"
+        );
+        assert_eq!(
+            app.results["a"].status,
+            CheckStatus::Running,
+            "queued re-run started"
+        );
+        assert!(app.run.watch_queue.is_empty());
+
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert_eq!(app.results["a"].status, CheckStatus::Passed);
+        assert_eq!(command_runs(dir.path(), "a"), 1);
+        assert!(app.run.watch_queue.is_empty());
     }
 }
