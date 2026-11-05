@@ -868,14 +868,17 @@ fn spawn_refreshed_run(
 /// cache). They run the check as the saves selected it, so a failed refresh
 /// runs that one, not the listed one (maybe on-demand / skipped). None
 /// start while a fix or its verification runs ([`App::fixing`]). A check
-/// the runner still owes (pending, queued) stays queued until the runner
-/// takes it (then dropped: that run sees the save) or the run ends with it
-/// still pending (then started). A running or finished one whose saved
-/// files all hash as when its latest run started is dropped (its own
-/// writes, a touch: [`App::own_writes`]); checked after a fix and its
-/// verification, so a fix's writes compare against the verification run.
-/// A running one is cancelled (once) and stays queued until its result
-/// arrives, so that stale result cannot land on the new run. One whose
+/// the runner still owes (pending, queued) stays queued through the
+/// runner's run, which this entry does not cancel (a later batch replaces
+/// it and takes the running path), until that run finished (then treated
+/// like a finished one: the run's command predates the save, so a newly
+/// matched file re-runs) or the run ends with it still pending (then
+/// started). A running or finished one whose saved files all hash as when
+/// its latest run started is dropped (the run saw them, or its own writes,
+/// a touch: [`App::own_writes`]); checked after a fix and its verification,
+/// so a fix's writes compare against the verification run. A running one
+/// is cancelled (once) and stays queued until its result arrives, so that
+/// stale result cannot land on the new run. One whose
 /// group has no free slot ([`App::group_slot_free`]) or whose pre-commands
 /// are busy stays queued. A check this run does not list is dropped: the
 /// list holds every check the config can select.
@@ -894,13 +897,17 @@ fn start_watch_runs(app: &mut App, tasks: &mut Tasks) {
                 app.run.watch_queue.push(queued);
                 continue;
             }
-            // A failed pre-command kept the runner from running it: the
-            // run never saw the save; start once the run ended
-            _ if queued.runner_owed && result.not_run && !app.run.all_finished => {
+            // Held until the run ended or the owed run finished: its run
+            // may not cover the save (compared then) and this entry does
+            // not cancel it; a failed pre-command kept the runner from
+            // running it, so that run never saw the save
+            _ if queued.runner_owed
+                && !app.run.all_finished
+                && (result.status == CheckStatus::Running || result.not_run) =>
+            {
                 app.run.watch_queue.push(queued);
                 continue;
             }
-            _ if queued.runner_owed && !result.not_run => continue,
             _ if !queued.cancel_sent && app.own_writes(&queued) => continue,
             CheckStatus::Running => {
                 cancel_once(&mut queued, &tasks.ctx.cancels);
@@ -2007,6 +2014,7 @@ checks:
             resolved_command: format!("{} src/Foo.php", id),
             resolved_fix_command: None,
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 
@@ -4434,12 +4442,17 @@ checks:
 
     /// `--watch` batch for saving `files` in `dir` now, each with new content
     fn saved(dir: &Path, files: &[&str]) -> Message {
+        saved_with(&watch_config(), dir, files)
+    }
+
+    /// [`saved`] with `config`
+    fn saved_with(config: &CiConfig, dir: &Path, files: &[&str]) -> Message {
         static SAVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         for file in files {
             let n = SAVES.fetch_add(1, Ordering::Relaxed);
             write(dir, file, &format!("save {n}"));
         }
-        touched(dir, files)
+        touched_with(config, dir, files)
     }
 
     /// `--watch` batch for `files` in `dir` as they are now (a touch, or
@@ -4451,8 +4464,7 @@ checks:
     /// [`touched`] with `config`
     fn touched_with(config: &CiConfig, dir: &Path, files: &[&str]) -> Message {
         let saved: Vec<String> = files.iter().map(|f| f.to_string()).collect();
-        let checks = crate::watch::affected_checks(config, saved.clone(), dir);
-        Message::Watch(WatchBatch { checks, saved })
+        Message::Watch(crate::watch::watch_batch(config, saved, dir, dir))
     }
 
     /// Saving a PHP file re-runs `php-lint` like 'r' (git refresh, then the
@@ -4529,9 +4541,9 @@ checks:
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
     }
 
-    /// A save for checks the runner still runs (pending, queued) waits;
-    /// once the runner ran them (that run saw the save) it is dropped, not
-    /// cancelling the runner's run
+    /// A save for checks the runner still runs (pending, queued) waits and
+    /// stays through their runs, which it does not cancel; once they
+    /// finished, having started with the saved files, it is dropped
     #[tokio::test]
     async fn test_watch_save_for_runner_owed_check_dropped_once_runner_runs_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -4551,17 +4563,15 @@ checks:
         spawn_cancellable(&mut tasks, "php-lint"); // the runner's run
         tokio::task::yield_now().await;
         let runner = |event| Message::RunnerEvent(event);
-        let started = RunnerEvent::CheckStarted {
-            check_id: "php-lint".to_string(),
-        };
-        handle_message(&mut app, runner(started), &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        handle_message(&mut app, started("yaml-lint"), &mut tasks);
         let group = "fast".to_string();
         handle_message(
             &mut app,
             runner(RunnerEvent::GroupFinished { group }),
             &mut tasks,
         );
-        assert_eq!(app.run.watch_queue.len(), 1, "php-lint dropped");
+        assert_eq!(app.run.watch_queue.len(), 2, "retained until finished");
         for id in ["php-lint", "yaml-lint"] {
             let result = with_status(id, CheckStatus::Passed);
             handle_message(
@@ -4576,6 +4586,635 @@ checks:
         assert!(rx.try_recv().is_err(), "runner's run not cancelled");
         assert_eq!(tasks.set.len(), 1, "no re-run spawned");
         assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+    }
+
+    /// The runner starts `id`
+    fn started(id: &str) -> Message {
+        let check_id = id.to_string();
+        Message::RunnerEvent(RunnerEvent::CheckStarted { check_id })
+    }
+
+    /// The run is on again, the runner still owing `id` (`status`: pending
+    /// or queued)
+    fn owe(app: &mut App, id: &str, status: CheckStatus) {
+        app.run.all_finished = false;
+        app.results.get_mut(id).unwrap().status = status;
+    }
+
+    /// [`watch_app_with`] in a new git repo at `dir` whose uncommitted
+    /// files are `files`, written by the caller: refreshes re-detect them
+    fn git_watch_app(
+        config: CiConfig,
+        dir: &Path,
+        files: &[&str],
+        keep: fn(&CheckToRun) -> bool,
+    ) -> (App, Tasks, mpsc::Receiver<TaskEvent>) {
+        git(dir, &["init", "-q"]);
+        let identity = ["-c", "user.email=t@example.com", "-c", "user.name=t"];
+        let commit = ["commit", "-q", "--allow-empty", "-m", "base"];
+        git(dir, &[&identity[..], &commit[..]].concat());
+        let (mut app, tasks, rx) = watch_app_with(config, dir, files, keep);
+        app.changed_files.base_ref = "HEAD".to_string();
+        (app, tasks, rx)
+    }
+
+    /// [`watch_config`] with `php-lint` and `yaml-lint` sharing one slot
+    fn one_slot_config(parallel: bool) -> CiConfig {
+        let mut config = watch_config();
+        let group = config.checks.get_mut("fast").unwrap();
+        group.parallel = parallel;
+        group.max_parallel = std::num::NonZeroUsize::new(1);
+        config
+    }
+
+    /// Edge case: `phpunit` runs after `php-lint`, on the tests of changed
+    /// `src/` files and on changed test files
+    fn discovery_config() -> CiConfig {
+        serde_yaml::from_str(
+            r#"
+version: 2
+runner: local
+local: { shell: sh }
+git: { base_branch: main, fallback_branch: HEAD~1 }
+file_patterns:
+  php: { pattern: '\.php$' }
+  source: { pattern: '^src/.*\.php$' }
+  test: { pattern: '^tests/.*\.php$' }
+checks:
+  fast:
+    checks:
+      php-lint: { name: PHP lint, command: "echo lint {files}", triggers: { file_pattern: php } }
+  tests:
+    checks:
+      phpunit:
+        name: PHPUnit
+        command: "echo phpunit {files}"
+        triggers:
+          file_pattern: test
+          test_discovery:
+            source_pattern: source
+            strategies:
+              - type: path_mapping
+                rules:
+                  - source: src/{path}.php
+                    tests:
+                      - tests/{path}Test.php
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`watch_config`] with `php-lint` running `command`, always (no
+    /// triggers) with `always_run`
+    fn lint_config(command: &str, always_run: bool) -> CiConfig {
+        let mut config = watch_config();
+        let group = config.checks.get_mut("fast").unwrap();
+        let lint = group.checks.get_mut("php-lint").unwrap();
+        lint.command = command.to_string();
+        if always_run {
+            lint.triggers = None;
+        }
+        config
+    }
+
+    /// #261: a file newly matching a check, saved while the check is pending
+    /// behind another group, is not in the run the runner owes (its command
+    /// was resolved before the save): a refreshed re-run covers it without
+    /// a second save
+    #[tokio::test]
+    async fn test_watch_new_file_saved_while_check_pending_reruns_with_it() {
+        if crate::watch::tests::in_git_hook() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.php", "a");
+        let files = &["a.php"];
+        let (mut app, mut tasks, mut rx) =
+            git_watch_app(watch_config(), dir.path(), files, |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["b.php"]), &mut tasks);
+        assert!(tasks.set.is_empty(), "waits for the runner");
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert!(app.run.watch_queue.is_empty());
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        let output = &app.results["php-lint"].output;
+        assert!(output.contains("lint a.php b.php"), "{output}");
+    }
+
+    /// #261: same for a check behind a concurrency limit. A sibling the
+    /// runner still owes takes the slot (it starts right after the check
+    /// finished): the re-run waits for it, overlapping nothing
+    #[rstest::rstest]
+    #[case::max_parallel(true, CheckStatus::Queued)]
+    #[case::not_parallel(false, CheckStatus::Pending)]
+    #[tokio::test]
+    async fn test_watch_new_file_saved_while_check_queued_reruns_once_slot_frees(
+        #[case] parallel: bool,
+        #[case] owed: CheckStatus,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, files) = (one_slot_config(parallel), &["a.php", "a.yaml"]);
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), files, |_| true);
+        owe(&mut app, "php-lint", owed.clone());
+        owe(&mut app, "yaml-lint", owed);
+
+        let batch = saved_with(&app.config, dir.path(), &["b.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.run.watch_queue.len(), 1, "sibling holds the slot");
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+        assert!(tasks.set.is_empty());
+        handle_message(&mut app, started("yaml-lint"), &mut tasks);
+        assert!(tasks.set.is_empty());
+        let done = finished("yaml-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 1);
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// A pending sibling the ended run left behind holds no slot: nothing
+    /// will start it, so the re-run must not wait for it
+    #[tokio::test]
+    async fn test_watch_rerun_not_held_by_sibling_left_pending_at_run_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, files) = (one_slot_config(false), &["a.php", "a.yaml"]);
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), files, |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+        owe(&mut app, "yaml-lint", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &["b.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+        assert!(tasks.set.is_empty());
+        handle_message(
+            &mut app,
+            Message::RunnerEvent(RunnerEvent::AllFinished),
+            &mut tasks,
+        );
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 1);
+    }
+
+    /// An owed batch does not pin a check still running once the run ended
+    /// (a stale entry): it takes the running path, here covered and dropped
+    #[tokio::test]
+    async fn test_watch_owed_batch_of_check_running_at_run_end_dropped_if_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["a.php"]), &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        handle_message(
+            &mut app,
+            Message::RunnerEvent(RunnerEvent::AllFinished),
+            &mut tasks,
+        );
+
+        assert!(app.run.watch_queue.is_empty());
+        assert!(tasks.set.is_empty());
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+    }
+
+    /// A save the owed run's selection holds, unchanged since it started,
+    /// is covered, whatever the run's outcome and with a file of the batch
+    /// that is no input of the check; nothing to re-run
+    #[rstest::rstest]
+    #[case::passed(CheckStatus::Passed, &["a.php"])]
+    #[case::failed(CheckStatus::Failed, &["a.php"])]
+    #[case::timed_out(CheckStatus::TimedOut, &["a.php"])]
+    #[case::unrelated_file_in_batch(CheckStatus::Passed, &["README.md", "a.php"])]
+    #[tokio::test]
+    async fn test_watch_save_covered_by_owed_run_dropped(
+        #[case] status: CheckStatus,
+        #[case] batch: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), batch), &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        handle_message(&mut app, finished("php-lint", status.clone()), &mut tasks);
+
+        assert!(app.run.watch_queue.is_empty());
+        assert!(tasks.set.is_empty(), "nothing spawned");
+        assert_eq!(app.results["php-lint"].status, status);
+    }
+
+    /// A check keeps the batch's files that are its inputs, unioned across
+    /// batches
+    #[tokio::test]
+    async fn test_watch_keeps_saved_inputs_per_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = &["a.php", "a.yaml"];
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), files, |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+        owe(&mut app, "yaml-lint", CheckStatus::Pending);
+
+        let first = saved(dir.path(), &["README.md", "a.php"]);
+        handle_message(&mut app, first, &mut tasks);
+        let second = saved(dir.path(), &["a.yaml", "c.php"]);
+        handle_message(&mut app, second, &mut tasks);
+
+        let queued = |id: &str| {
+            let queue = &app.run.watch_queue;
+            queue.iter().find(|q| q.check.id() == id).unwrap()
+        };
+        assert_eq!(queued("php-lint").saved, ["a.php", "c.php"]);
+        assert_eq!(queued("yaml-lint").saved, ["a.yaml"]);
+    }
+
+    /// A check without inputs (always run) keeps every saved file
+    #[tokio::test]
+    async fn test_watch_keeps_all_saved_files_of_check_without_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = lint_config("echo all", true);
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), &[], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &["README.md", "a.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+
+        assert_eq!(app.run.watch_queue[0].saved, ["README.md", "a.php"]);
+    }
+
+    /// Saving a discovery check's source in the run's selection, or a test
+    /// it discovered, is covered by a run that started after the save
+    #[rstest::rstest]
+    #[case::source("src/a.php")]
+    #[case::discovered_test("tests/aTest.php")]
+    #[tokio::test]
+    async fn test_watch_save_of_discovery_input_covered_by_owed_run(#[case] file: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tests/aTest.php", "test");
+        let (config, files) = (discovery_config(), &["src/a.php"]);
+        let only = |c: &CheckToRun| c.id() == "phpunit";
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), files, only);
+        owe(&mut app, "phpunit", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &[file]);
+        handle_message(&mut app, batch, &mut tasks);
+        assert_eq!(app.run.watch_queue.len(), 1);
+        handle_message(&mut app, started("phpunit"), &mut tasks);
+        let done = finished("phpunit", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert!(app.run.watch_queue.is_empty());
+        assert!(tasks.set.is_empty(), "nothing spawned");
+    }
+
+    /// A command that takes no file list (no `{files}`, or one that expands
+    /// to nothing for an always-run check) reads the tree: a run that
+    /// started after the save covers it. One taking a list does not
+    #[rstest::rstest]
+    #[case::triggered("echo all", false, false)]
+    #[case::always_run("echo all", true, false)]
+    #[case::always_run_empty_files("echo gen {files}", true, false)]
+    #[case::files("echo gen {files}", false, true)]
+    #[tokio::test]
+    async fn test_watch_save_before_run_start_covered_without_files_placeholder(
+        #[case] command: &str,
+        #[case] always_run: bool,
+        #[case] reruns: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = lint_config(command, always_run);
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &["b.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        let status = &app.results["php-lint"].status;
+        assert_eq!(*status == CheckStatus::Running, reruns, "{status:?}");
+        assert_eq!(tasks.set.len(), usize::from(reruns));
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// A command without `{files}` read the file too early when its content
+    /// changed after the run started
+    #[tokio::test]
+    async fn test_watch_no_files_placeholder_reruns_for_change_after_run_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = lint_config("echo all", false);
+        let (mut app, mut tasks, _rx) = watch_app_with(config, dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &["b.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        write(dir.path(), "b.php", "after the start");
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+    }
+
+    /// A no-op rewrite during the owed run does not cancel it or re-run it
+    #[tokio::test]
+    async fn test_watch_noop_rewrite_during_owed_run_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["a.php"]), &mut tasks);
+        spawn_cancellable(&mut tasks, "php-lint"); // the runner's run
+        tokio::task::yield_now().await;
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        handle_message(&mut app, touched(dir.path(), &["a.php"]), &mut tasks);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(rx.try_recv().is_err(), "runner's run not cancelled");
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+        assert!(app.run.watch_queue.is_empty());
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Passed);
+        assert_eq!(tasks.set.len(), 1, "no re-run spawned");
+    }
+
+    /// Every saved file must be covered: content that changed after the
+    /// run started, for any of them, re-runs
+    #[rstest::rstest]
+    #[case::first("a.php")]
+    #[case::last("c.php")]
+    #[tokio::test]
+    async fn test_watch_change_after_owed_run_started_reruns(#[case] file: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php", "c.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        let batch = saved(dir.path(), &["a.php", "c.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        write(dir.path(), file, "after the start");
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 1);
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// A batch held through the runner's run never cancels it; the new
+    /// file then re-runs the check
+    #[tokio::test]
+    async fn test_watch_retained_batch_does_not_cancel_owed_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["b.php"]), &mut tasks);
+        spawn_cancellable(&mut tasks, "php-lint"); // the runner's run
+        tokio::task::yield_now().await;
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        let group = "fast".to_string();
+        let msg = Message::RunnerEvent(RunnerEvent::GroupFinished { group });
+        handle_message(&mut app, msg, &mut tasks);
+
+        assert_eq!(app.run.watch_queue.len(), 1, "retained");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "runner's run not cancelled");
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 2, "re-run beside the runner's run");
+    }
+
+    /// A later batch during the owed run replaces the retained one, which
+    /// then takes the running path: cancel, wait for the result, re-run
+    #[tokio::test]
+    async fn test_watch_later_batch_during_owed_run_restarts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, mut rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["b.php"]), &mut tasks);
+        spawn_cancellable(&mut tasks, "php-lint"); // the runner's run
+        tokio::task::yield_now().await;
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        handle_message(&mut app, saved(dir.path(), &["b.php"]), &mut tasks);
+
+        assert!(app.run.watch_queue[0].cancel_sent);
+        let stale = rx.recv().await.expect("cancelled result");
+        handle_message(&mut app, Message::Task(stale), &mut tasks);
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// 's' on a run holding an owed batch: a covered save stays dropped
+    /// (the check shows cancelled); an uncovered one, or no run start to
+    /// compare with (cancelled while queued), re-runs like any save on a
+    /// cancelled check
+    #[rstest::rstest]
+    #[case::covered("a.php", true, false)]
+    #[case::uncovered("b.php", true, true)]
+    #[case::cancelled_while_queued("a.php", false, true)]
+    #[tokio::test]
+    async fn test_watch_owed_batch_of_cancelled_run(
+        #[case] file: &str,
+        #[case] ran: bool,
+        #[case] reruns: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Queued);
+
+        handle_message(&mut app, saved(dir.path(), &[file]), &mut tasks);
+        if ran {
+            handle_message(&mut app, started("php-lint"), &mut tasks);
+        }
+        let done = finished("php-lint", CheckStatus::Cancelled);
+        handle_message(&mut app, done, &mut tasks);
+
+        let status = &app.results["php-lint"].status;
+        let expected = match reruns {
+            true => CheckStatus::Running,
+            false => CheckStatus::Cancelled,
+        };
+        assert_eq!(*status, expected);
+        assert_eq!(tasks.set.len(), usize::from(reruns));
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// A file gone at the run's start and still gone (a check's transient
+    /// file), or unreadable both times, counts as unchanged; one that
+    /// appears after the start re-runs
+    #[rstest::rstest]
+    #[case::still_missing(false, false)]
+    #[case::still_unreadable(true, false)]
+    #[case::created_after_start(false, true)]
+    #[tokio::test]
+    async fn test_watch_owed_save_of_file_missing_at_run_start(
+        #[case] unreadable: bool,
+        #[case] created: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.php");
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        owe(&mut app, "php-lint", CheckStatus::Pending);
+
+        handle_message(&mut app, saved(dir.path(), &["a.php"]), &mut tasks);
+        std::fs::remove_file(&path).unwrap();
+        if unreadable {
+            std::fs::create_dir(&path).unwrap();
+        }
+        handle_message(&mut app, started("php-lint"), &mut tasks);
+        if created {
+            write(dir.path(), "a.php", "after the start");
+        }
+        let done = finished("php-lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(tasks.set.len(), usize::from(created));
+        assert!(app.run.watch_queue.is_empty());
+    }
+
+    /// #261: a sibling's refresh must not make a pending check's snapshot
+    /// claim files outside its own selection: the new source saved during
+    /// the run is not in the command of the run the runner owes, so its
+    /// tests re-run although the sibling's refreshed list holds it
+    #[tokio::test]
+    async fn test_watch_sibling_refresh_does_not_cover_saved_source() {
+        if crate::watch::tests::in_git_hook() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.php", "a");
+        write(dir.path(), "tests/aTest.php", "a test");
+        write(dir.path(), "tests/bTest.php", "b test");
+        let files = &["src/a.php"];
+        let (mut app, mut tasks, mut rx) =
+            git_watch_app(discovery_config(), dir.path(), files, |_| true);
+        owe(&mut app, "phpunit", CheckStatus::Pending);
+
+        let batch = saved_with(&app.config, dir.path(), &["src/b.php"]);
+        handle_message(&mut app, batch, &mut tasks);
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        assert!(app.changed_files.files.contains(&"src/b.php".to_string()));
+        handle_message(&mut app, started("phpunit"), &mut tasks);
+        let done = finished("phpunit", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.results["phpunit"].status, CheckStatus::Running);
+        handle_until(&mut app, &mut tasks, &mut rx, |e| {
+            matches!(e, TaskEvent::RetryResult(_))
+        })
+        .await;
+        let output = &app.results["phpunit"].output;
+        assert!(output.contains("tests/bTest.php"), "{output}");
+    }
+
+    /// A run start snapshots the file list its check was selected from,
+    /// in the order of real runs (a re-run marks running, then its refresh
+    /// replaces the check): not a sibling's refreshed list, its own from
+    /// the run after its refresh, the restart's after 'R'
+    #[tokio::test]
+    async fn test_run_snapshot_uses_the_checks_own_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tests/aTest.php", "a test");
+        write(dir.path(), "tests/bTest.php", "b test");
+        write(dir.path(), "src/b.php", "b");
+        let (config, files) = (discovery_config(), &["src/a.php"]);
+        let (mut app, ..) = watch_app_with(config.clone(), dir.path(), files, |_| true);
+        let selected = |files: &[&str]| {
+            let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+            let base_ref = crate::git::CLI_FILES_BASE_REF.to_string();
+            let changed = ChangedFiles { files, base_ref };
+            let checks = select_checks(&config, &changed, dir.path(), None).checks;
+            (changed, checks)
+        };
+        let (both, both_checks) = selected(&["src/a.php", "src/b.php"]);
+        let check_of = |id: &str| both_checks.iter().find(|c| c.id() == id).unwrap().clone();
+        let saved_b = || app::WatchRun::new(check_of("phpunit"), vec!["src/b.php".to_string()]);
+
+        app.mark_running("php-lint");
+        app.replace_check(both.clone(), check_of("php-lint"));
+        app.set_retry_result(with_status("php-lint", CheckStatus::Passed));
+        owe(&mut app, "phpunit", CheckStatus::Pending);
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "phpunit".to_string(),
+        });
+        assert!(!app.own_writes(&saved_b()), "sibling's list");
+
+        app.set_retry_result(with_status("phpunit", CheckStatus::Passed));
+        app.mark_running("phpunit");
+        assert!(!app.own_writes(&saved_b()), "before its refresh");
+        app.replace_check(both, check_of("phpunit"));
+        app.set_retry_result(with_status("phpunit", CheckStatus::Passed));
+        app.mark_running("phpunit");
+        assert!(app.own_writes(&saved_b()), "its own list");
+
+        let (one, one_checks) = selected(&["src/a.php"]);
+        app.reset_for_retry(one, one_checks);
+        app.handle_runner_event(RunnerEvent::CheckStarted {
+            check_id: "phpunit".to_string(),
+        });
+        assert!(!app.own_writes(&saved_b()), "the restart's list");
+    }
+
+    /// A cached check is never owed (the runner skips it): a save re-runs
+    /// it right away, its result stays recorded as any re-run's
+    #[tokio::test]
+    async fn test_watch_save_for_cached_check_reruns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut tasks, _rx) = watch_app(dir.path(), &["a.php"], |_| true);
+        app.run.all_finished = false;
+        app.mark_cached(["php-lint"]);
+
+        handle_message(&mut app, saved(dir.path(), &["a.php"]), &mut tasks);
+
+        assert_eq!(app.results["php-lint"].status, CheckStatus::Running);
+        assert_eq!(tasks.set.len(), 1);
+    }
+
+    /// A retained batch whose run left it uncovered waits for its group's
+    /// busy setup like any other
+    #[tokio::test]
+    async fn test_watch_retained_batch_waits_for_group_setup() {
+        let config = setup_config();
+        let checks = vec![make_test_check("unit", "db"), make_test_check("lint", "db")];
+        let mut app = make_test_app_with_checks(&config, checks);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let batch = Message::Watch(WatchBatch {
+            checks: vec![crate::watch::SavedCheck {
+                check: make_test_check("lint", "db"),
+                saved: vec!["src/Foo.php".to_string()],
+            }],
+        });
+        handle_message(&mut app, batch, &mut tasks);
+        handle_message(&mut app, started("lint"), &mut tasks);
+
+        let done = finished("lint", CheckStatus::Passed);
+        handle_message(&mut app, done, &mut tasks);
+
+        assert_eq!(app.run.watch_queue.len(), 1, "still queued");
+        assert!(tasks.set.is_empty());
+        assert_eq!(app.results["lint"].status, CheckStatus::Passed);
     }
 
     /// A save for a check the runner owes runs once the run ended with the
@@ -4644,8 +5283,10 @@ checks:
         let (mut tasks, _rx) = make_test_tasks(&config);
 
         let batch = Message::Watch(WatchBatch {
-            checks: vec![make_test_check("lint", "db")],
-            saved: vec!["src/Foo.php".to_string()],
+            checks: vec![crate::watch::SavedCheck {
+                check: make_test_check("lint", "db"),
+                saved: vec!["src/Foo.php".to_string()],
+            }],
         });
         handle_message(&mut app, batch, &mut tasks);
 

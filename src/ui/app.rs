@@ -15,7 +15,7 @@ use crate::checks::{CheckToRun, Decision, Severity};
 use crate::config::CiConfig;
 use crate::git::ChangedFiles;
 use crate::runner::{append_output, CheckResult, CheckStatus, PreCommandOutcome, RunnerEvent};
-use crate::watch::WatchBatch;
+use crate::watch::{SavedCheck, WatchBatch};
 use ratatui::layout::{Position, Rect};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -326,10 +326,14 @@ impl RunState {
 pub struct WatchRun {
     /// The check as the saves selected it
     pub check: CheckToRun,
-    /// Saved files (repo-relative) of the batches that queued it
+    /// Saved files (repo-relative) of the batches that queued it, per batch
+    /// only the check's inputs ([`App::queue_watch`])
     pub saved: Vec<String>,
     /// The runner still owed the check (pending / queued) when last seen:
-    /// once it ran it, this is dropped (that run saw the save)
+    /// this entry waits for that run's end and does not cancel it (a later
+    /// batch replaces the entry, which then takes the running path). Then
+    /// the run's start snapshot decides ([`App::own_writes`]): its command
+    /// was resolved before the save, so a newly matched file is not in it.
     pub runner_owed: bool,
     /// The check's running run was cancelled for this re-run (sent once)
     pub cancel_sent: bool,
@@ -699,22 +703,21 @@ impl App {
     }
 
     /// Queue `--watch` re-runs of `batch`'s checks (as the saves selected
-    /// them) with its saved files, replacing queued ones of the same id
-    /// (their saved files kept); the main loop starts them. Own writes are
-    /// told apart by content: each run start snapshots the check's input
-    /// files ([`input_paths`], plus the saved files of the `--watch` re-run
-    /// it is), and a re-run whose saved files all hash as in that snapshot
-    /// is dropped ([`Self::own_writes`]): a touch, or what the check (a
-    /// formatter, generated files) or its fix wrote, which its run saw.
+    /// them) with the saved files that are their inputs, replacing queued
+    /// ones of the same id (their saved files kept); the main loop starts
+    /// them. Own writes are told apart by content: each run start snapshots
+    /// the check's input files ([`Self::snapshot_run_start`], plus the saved
+    /// files of the `--watch` re-run it is), and a re-run whose saved files
+    /// all hash as in that snapshot is dropped ([`Self::own_writes`]): a
+    /// touch, or what the check (a formatter, generated files) or its fix
+    /// wrote, which its run saw.
     pub fn queue_watch(&mut self, batch: WatchBatch) {
-        let WatchBatch { checks, saved } = batch;
         let queue = &mut self.run.watch_queue;
-        for check in checks {
+        for SavedCheck { check, saved } in batch.checks {
             let same = queue.iter().position(|q| q.check.id() == check.id());
             let replaced = same.map(|idx| queue.remove(idx).saved);
             let mut paths: Vec<String> = saved
-                .iter()
-                .cloned()
+                .into_iter()
                 .chain(replaced.into_iter().flatten())
                 .collect();
             paths.sort();
@@ -724,8 +727,11 @@ impl App {
     }
 
     /// Every saved file of `queued` hashes as in its check's latest run
-    /// start snapshot (a file the snapshot lacks differs): the run saw
-    /// them, nothing to re-run for. False without saved files or snapshot.
+    /// start snapshot, which holds that run's own selection (a file the
+    /// snapshot lacks differs, so a file the run's command left out does):
+    /// the run saw them, nothing to re-run for. A file missing or unreadable
+    /// both at the start and now is unchanged (a check's transient file).
+    /// False without saved files or snapshot.
     pub fn own_writes(&self, queued: &WatchRun) -> bool {
         let (Some(roots), Some(snapshot)) = (
             &self.watch_roots,
@@ -735,13 +741,16 @@ impl App {
         };
         let unchanged = |file: &String| {
             let path = roots.key_root.join(file);
-            snapshot.get(&path) == Some(&file_hash(&path))
+            snapshot
+                .get(&path)
+                .is_some_and(|hash| *hash == file_hash(&path))
         };
         !queued.saved.is_empty() && queued.saved.iter().all(unchanged)
     }
 
     /// Add the saved files of the `--watch` re-run that just started
-    /// `check_id` to its run start snapshot
+    /// `check_id`, or the saves queued for a run that reads the tree, to its
+    /// run start snapshot; paths it already holds are not read again
     pub fn snapshot_saved(&mut self, check_id: &str, saved: &[String]) {
         let (Some(roots), Some(snapshot)) =
             (&self.watch_roots, self.run.run_snapshots.get_mut(check_id))
@@ -761,20 +770,23 @@ impl App {
 
     /// A single run of a check in `group` may start without exceeding the
     /// group's concurrency: one at a time for `parallel: false`, else its
-    /// `max_parallel`
+    /// `max_parallel`. A sibling the runner still owes takes a slot (it
+    /// starts as soon as one frees); a run that ended owes none.
     pub fn group_slot_free(&self, group: &str) -> bool {
         let limit = match self.config.get_group(group) {
             Some(config) if config.parallel => self.config.group_parallel_limit(Some(config)),
             _ => 1,
         };
-        let running = |c: &&CheckToRun| {
-            self.results
-                .get(c.id())
-                .is_some_and(|r| r.status == CheckStatus::Running)
+        let takes_slot = |c: &&CheckToRun| {
+            self.results.get(c.id()).is_some_and(|r| match r.status {
+                CheckStatus::Running => true,
+                CheckStatus::Pending | CheckStatus::Queued => !self.run.all_finished,
+                _ => false,
+            })
         };
         self.checks_in_group(group)
             .into_iter()
-            .filter(running)
+            .filter(takes_slot)
             .count()
             < limit
     }
@@ -980,7 +992,14 @@ impl App {
     }
 
     /// Snapshot `check_id`'s input files as its run starts, unless it is
-    /// already running; `--watch` only (reads files: [`Self::queue_watch`])
+    /// already running; `--watch` only (reads files: [`Self::queue_watch`]).
+    /// Inputs come from the file list the check was selected from
+    /// ([`CheckToRun::selected_from`]), not the latest refresh, so for a
+    /// runner run the snapshot holds what the run takes. A single re-run (`r`,
+    /// `--watch`) snapshots before its refresh, with the saved files it adds
+    /// ([`Self::snapshot_saved`]): the safe direction, a file the refresh
+    /// adds is not claimed. A run that takes no file list reads the tree, so
+    /// it also sees the saves queued for it by now.
     fn snapshot_run_start(&mut self, check_id: &str) {
         let status = self.results.get(check_id).map(|r| &r.status);
         let Some(roots) = self
@@ -994,17 +1013,18 @@ impl App {
             return;
         };
         let (key_root, exec_root) = (&roots.key_root, &roots.exec_root);
-        let paths = input_paths(
-            check,
-            &self.config,
-            &self.changed_files,
-            key_root,
-            exec_root,
-        );
+        let selected_from = &check.selected_from;
+        let paths = input_paths(check, &self.config, selected_from, key_root, exec_root);
         let snapshot = paths.into_iter().map(hashed).collect();
+        let reads_tree = !check.takes_file_list();
         self.run
             .run_snapshots
             .insert(check_id.to_string(), snapshot);
+        let queue = &self.run.watch_queue;
+        let queued = queue.iter().find(|q| q.check.id() == check_id);
+        if let Some(saved) = queued.filter(|_| reads_tree).map(|q| q.saved.clone()) {
+            self.snapshot_saved(check_id, &saved);
+        }
     }
 
     /// Mark a check as running (preparing to execute): on-demand 't', or
@@ -2053,6 +2073,7 @@ checks:
                 None
             },
             cache_key: None,
+            selected_from: Default::default(),
         }
     }
 
@@ -2133,8 +2154,10 @@ checks:
         let mut app = make_app();
         let check = app.checks[0].clone();
         let batch = |saved: &[&str]| WatchBatch {
-            checks: vec![check.clone()],
-            saved: saved.iter().map(|f| f.to_string()).collect(),
+            checks: vec![SavedCheck {
+                check: check.clone(),
+                saved: saved.iter().map(|f| f.to_string()).collect(),
+            }],
         };
 
         app.queue_watch(batch(&["b.php", "a.php"]));

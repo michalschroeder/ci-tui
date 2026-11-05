@@ -110,7 +110,7 @@ pub const STAGED_BASE_REF: &str = "--staged (git index)";
 const DIFF_FILTER: &str = "--diff-filter=d";
 
 /// Files that have changed compared to a base git reference
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChangedFiles {
     /// List of changed file paths relative to the repository root
     pub files: Vec<String>,
