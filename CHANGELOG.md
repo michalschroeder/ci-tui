@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/michalschroeder/ci-tui/compare/v1.0.0...v1.1.0) (2026-11-07)
+
+
+### Features
+
+* make on_demand checks manual-only whatever their triggers match ([#268](https://github.com/michalschroeder/ci-tui/issues/268)) ([84f14c0](https://github.com/michalschroeder/ci-tui/commit/84f14c06a9e83cc1a543ea114e94f91614aa3a24))
+
 ## [1.0.0](https://github.com/michalschroeder/ci-tui/compare/v0.6.0...v1.0.0) (2026-11-05)
 
 
