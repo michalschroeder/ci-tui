@@ -647,7 +647,7 @@ pub fn rust_grep_discovery_config(pattern: &str) -> CiConfig {
 /// - unit: `{files}` command
 /// - slow: `{files}` command, on_demand
 /// - suite: full command (no `{files}`)
-/// - mixed: `{files}` command, on_demand, plus `file_pattern: rust_src`
+/// - mixed: `{files}` command plus `file_pattern: rust_src`
 #[allow(dead_code)]
 pub fn rust_discovery_config() -> CiConfig {
     ConfigBuilder::new()
@@ -680,7 +680,6 @@ pub fn rust_discovery_config() -> CiConfig {
             CheckBuilder::new("Mixed", "mixed {files}")
                 .with_file_pattern_trigger("rust_src")
                 .with_test_discovery(rust_discovery())
-                .on_demand()
                 .build(),
         )
         .build()

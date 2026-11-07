@@ -1,17 +1,18 @@
 //! Tests for `--list` / `--dry-run`: per-check decision + reason, rendered
 //! report, and an end-to-end binary run proving nothing executes.
 
-use ci_tui::config::CheckTriggers;
+use ci_tui::config::{CheckTriggers, CiConfig};
 use ci_tui::git::{ChangedFiles, CLI_FILES_BASE_REF, STAGED_BASE_REF};
 use ci_tui::list::{explain_checks, mark_cached, render, CheckExplanation, Decision};
 use std::path::Path;
 
 mod common;
 use common::configs::{
-    checks_test_config, php_files_filter_config, rust_discovery_config, rust_grep_discovery_config,
-    rust_project_config, CheckBuilder, ConfigBuilder, FOO_FIXTURES, FOO_TEST,
+    checks_test_config, php_files_filter_config, rust_discovery, rust_discovery_config,
+    rust_grep_discovery_config, rust_project_config, CheckBuilder, ConfigBuilder, FOO_FIXTURES,
+    FOO_TEST,
 };
-use common::{git, run_ci_tui};
+use common::{git, run_ci_tui, write};
 
 fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
     ChangedFiles {
@@ -19,6 +20,9 @@ fn changed(files: &[&str], base_ref: &str) -> ChangedFiles {
         base_ref: base_ref.to_string(),
     }
 }
+
+/// `--list` reason of a check marked `on_demand: true`
+const ON_DEMAND_REASON: &str = "on_demand: manual trigger only ('t' in TUI)";
 
 fn find<'a>(explained: &'a [CheckExplanation], id: &str) -> &'a CheckExplanation {
     explained
@@ -179,8 +183,8 @@ fn test_discovery_no_tests_reasons() {
     assert_eq!(
         slow.reasons,
         vec![
-            "test_discovery `rust_src` (src/foo.rs): no tests found; on_demand",
-            "manual trigger only ('t' in TUI)",
+            "test_discovery `rust_src` (src/foo.rs): no tests found",
+            ON_DEMAND_REASON,
         ]
     );
 
@@ -194,7 +198,7 @@ fn test_discovery_no_tests_reasons() {
 
 #[test]
 fn test_discovery_no_tests_with_file_pattern_match_runs() {
-    // file_pattern match decides the run; no-tests fallback (on_demand) doesn't apply
+    // file_pattern match decides the run; no-tests fallback doesn't apply
     let tmp = tempfile::TempDir::new().unwrap();
     let explained = explain_checks(
         &rust_discovery_config(),
@@ -257,9 +261,90 @@ fn files_filter_dropping_every_match_is_explained() {
     assert_eq!(suite.reasons, reasons("runs full command (no {files})"));
     let slow = find(&explained, "slow");
     assert_eq!(slow.decision, Some(Decision::OnDemand));
-    let mut on_demand = reasons("on_demand");
-    on_demand.push("manual trigger only ('t' in TUI)".to_string());
-    assert_eq!(slow.reasons, on_demand);
+    assert_eq!(
+        slow.reasons,
+        vec![
+            "file_pattern `linter_tests`: every match dropped by files_filter".to_string(),
+            "test_discovery `linter_src`: no changed file matched".to_string(),
+            dropped,
+            ON_DEMAND_REASON.to_string(),
+        ]
+    );
+}
+
+/// `on_demand: true` check `od` (`slow {files}`, group `tests`) with the
+/// triggers `with` adds; file pattern `rust_src`, discovery [`rust_discovery`]
+fn on_demand_config(with: fn(CheckBuilder) -> CheckBuilder) -> CiConfig {
+    let check = with(CheckBuilder::new("Od", "slow {files}")).on_demand();
+    ConfigBuilder::new()
+        .with_file_pattern("rust_src", r"^src/.*\.rs$", None)
+        .with_check("tests", "od", check.build())
+        .build()
+}
+
+/// #267: `on_demand: true` is on-demand whatever its triggers matched; the
+/// reasons keep the match facts, no fallback, plus why it waits.
+/// `tests/foo_test.rs` exists, `src/bar.rs` has no test.
+#[rstest::rstest]
+#[case::no_triggers(|c: CheckBuilder| c, &["src/foo.rs"], &["no triggers"])]
+#[case::file_pattern_matched(
+    |c: CheckBuilder| c.with_file_pattern_trigger("rust_src"),
+    &["src/foo.rs"],
+    &["file_pattern `rust_src` matched: src/foo.rs"]
+)]
+#[case::file_pattern_unmatched(
+    |c: CheckBuilder| c.with_file_pattern_trigger("rust_src"),
+    &["README.md"],
+    &["file_pattern `rust_src`: no changed file matched"]
+)]
+#[case::files_filter_drops_every_match(
+    |c: CheckBuilder| c.with_file_pattern_trigger("rust_src").with_files_filter(r"_test\.rs$"),
+    &["src/foo.rs"],
+    &[
+        "file_pattern `rust_src`: every match dropped by files_filter",
+        "files_filter `_test\\.rs$` dropped: src/foo.rs",
+    ]
+)]
+#[case::tests_found(
+    |c: CheckBuilder| c.with_test_discovery(rust_discovery()),
+    &["src/foo.rs"],
+    &["test_discovery `rust_src` (src/foo.rs): discovered tests: tests/foo_test.rs"]
+)]
+#[case::no_tests(
+    |c: CheckBuilder| c.with_test_discovery(rust_discovery()),
+    &["src/bar.rs"],
+    &["test_discovery `rust_src` (src/bar.rs): no tests found"]
+)]
+#[case::matched_and_no_tests(
+    |c: CheckBuilder| c.with_file_pattern_trigger("rust_src").with_test_discovery(rust_discovery()),
+    &["src/bar.rs"],
+    &[
+        "file_pattern `rust_src` matched: src/bar.rs",
+        "test_discovery `rust_src` (src/bar.rs): no tests found",
+    ]
+)]
+fn on_demand_check_is_listed_on_demand_for_its_flag(
+    #[case] with: fn(CheckBuilder) -> CheckBuilder,
+    #[case] files: &[&str],
+    #[case] facts: &[&str],
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(tmp.path(), "tests/foo_test.rs", "");
+    let config = on_demand_config(with);
+    let cf = changed(files, "main");
+
+    let explained = explain_checks(&config, &cf, tmp.path());
+
+    let e = find(&explained, "od");
+    assert_eq!(e.decision, Some(Decision::OnDemand));
+    let mut expected: Vec<&str> = facts.to_vec();
+    expected.push(ON_DEMAND_REASON);
+    assert_eq!(e.reasons, expected);
+    let out = render(&config, &cf, None, &explained);
+    assert!(
+        out.contains("0 run, 0 cached, 1 on-demand, 0 skipped (nothing executed)"),
+        "{out}"
+    );
 }
 
 #[test]

@@ -71,8 +71,6 @@ pub(crate) enum DiscoveryOutcome {
     NoSources,
     /// Related test files were discovered
     TestsFound(Vec<String>),
-    /// No tests found and the check is marked on_demand — offer manual trigger
-    NoTestsOnDemand,
     /// No tests found; command has no {files} placeholder — run the full suite
     NoTestsRunAll,
     /// No tests found; command uses {files} — nothing to run
@@ -100,12 +98,10 @@ pub(super) fn run_test_discovery<'a>(
             tests.into_iter().partition(|test| keeps(filter, test));
         let outcome = if !related_tests.is_empty() {
             DiscoveryOutcome::TestsFound(related_tests)
+        } else if needs_files(check) {
+            DiscoveryOutcome::NoTestsSkip
         } else {
-            match no_files_fallback(check) {
-                CheckFiles::OnDemand => DiscoveryOutcome::NoTestsOnDemand,
-                CheckFiles::RunAll => DiscoveryOutcome::NoTestsRunAll,
-                _ => DiscoveryOutcome::NoTestsSkip,
-            }
+            DiscoveryOutcome::NoTestsRunAll
         };
         (outcome, warnings, filtered_out)
     };
@@ -123,12 +119,16 @@ pub(crate) fn keeps(filter: Option<&Regex>, path: &str) -> bool {
     filter.is_none_or(|re| re.is_match(path))
 }
 
+/// True when `check`'s command takes `{files}`: with none it has nothing to run
+fn needs_files(check: &CheckDefinition) -> bool {
+    check.command.contains("{files}")
+}
+
 /// Files state of a check whose trigger fired but left no files for
-/// `{files}`: on_demand → manual trigger; no `{files}` → full command; else skip.
+/// `{files}`: no `{files}` → full command; else skip. Not for `on_demand`
+/// checks, which wait for a manual trigger whatever matched.
 fn no_files_fallback(check: &CheckDefinition) -> CheckFiles {
-    if check.on_demand {
-        CheckFiles::OnDemand
-    } else if check.command.contains("{files}") {
+    if needs_files(check) {
         CheckFiles::SkippedNoMatch
     } else {
         CheckFiles::RunAll
@@ -139,8 +139,8 @@ fn no_files_fallback(check: &CheckDefinition) -> CheckFiles {
 /// and `--list`, so both always agree.
 #[derive(Debug)]
 pub(crate) enum Selection<'a> {
-    /// No `triggers`: runs unconditionally
-    AlwaysRun,
+    /// No `triggers`: runs unconditionally, unless `on_demand`
+    AlwaysRun { on_demand: bool },
     /// Result of evaluating the check's triggers
     Triggered(TriggerEval<'a>),
 }
@@ -153,7 +153,9 @@ impl<'a> Selection<'a> {
         check: &'a CheckDefinition,
     ) -> Self {
         match &check.triggers {
-            None => Self::AlwaysRun,
+            None => Self::AlwaysRun {
+                on_demand: check.on_demand,
+            },
             Some(triggers) => Self::Triggered(TriggerEval::evaluate(
                 config,
                 changed_files,
@@ -161,6 +163,15 @@ impl<'a> Selection<'a> {
                 triggers,
                 check,
             )),
+        }
+    }
+
+    /// The check is `on_demand: true`: once selected, it waits for a manual
+    /// trigger ([`CheckFiles::OnDemand`]) whatever its triggers matched
+    pub(crate) fn on_demand(&self) -> bool {
+        match self {
+            Self::AlwaysRun { on_demand } => *on_demand,
+            Self::Triggered(eval) => eval.on_demand(),
         }
     }
 
@@ -178,7 +189,8 @@ impl<'a> Selection<'a> {
     /// Files state for the check; `None` drops it (empty `triggers` block).
     pub(crate) fn into_check_files(self) -> Option<CheckFiles> {
         match self {
-            Self::AlwaysRun => Some(CheckFiles::Files(vec![])),
+            Self::AlwaysRun { on_demand: true } => Some(CheckFiles::OnDemand),
+            Self::AlwaysRun { on_demand: false } => Some(CheckFiles::Files(vec![])),
             Self::Triggered(eval) => eval.into_check_files(),
         }
     }
@@ -276,7 +288,8 @@ impl<'a> TriggerEval<'a> {
     /// Fallback files state when `files_filter` dropped every `file_pattern`
     /// match and `test_discovery` (if any) had no changed source: the trigger
     /// fired but left nothing for `{files}` (see [`no_files_fallback`]).
-    /// `None` otherwise. Discovery without tests applies the same fallback.
+    /// `None` otherwise and for an `on_demand` check. Discovery without
+    /// tests applies the same fallback.
     pub(crate) fn filter_fallback(&self) -> Option<CheckFiles> {
         let emptied = self
             .file_pattern
@@ -286,7 +299,12 @@ impl<'a> TriggerEval<'a> {
             .discovery
             .as_ref()
             .is_none_or(|d| d.outcome == DiscoveryOutcome::NoSources);
-        (emptied && no_sources).then(|| no_files_fallback(self.check))
+        (emptied && no_sources && !self.on_demand()).then(|| no_files_fallback(self.check))
+    }
+
+    /// The check is `on_demand: true` (see [`Selection::on_demand`])
+    pub(crate) fn on_demand(&self) -> bool {
+        self.check.on_demand
     }
 
     /// True when the `file_pattern` trigger kept at least one file.
@@ -312,10 +330,14 @@ impl<'a> TriggerEval<'a> {
     }
 
     /// Files state implied by the evaluation; `None` for an empty `triggers`
-    /// block (no `file_pattern`, no `test_discovery`).
+    /// block (no `file_pattern`, no `test_discovery`), on-demand for an
+    /// `on_demand` check whatever matched.
     fn into_check_files(self) -> Option<CheckFiles> {
         if self.file_pattern.is_none() && self.discovery.is_none() {
             return None;
+        }
+        if self.on_demand() {
+            return Some(CheckFiles::OnDemand);
         }
         if let Some(files) = self.filter_fallback() {
             return Some(files);
@@ -332,7 +354,6 @@ impl<'a> TriggerEval<'a> {
             matched_files.is_empty(),
         ) {
             (Some(DiscoveryOutcome::TestsFound(tests)), _) => matched_files.extend(tests),
-            (Some(DiscoveryOutcome::NoTestsOnDemand), true) => return Some(CheckFiles::OnDemand),
             (Some(DiscoveryOutcome::NoTestsRunAll), true) => return Some(CheckFiles::RunAll),
             _ => {}
         }
@@ -432,6 +453,19 @@ mod tests {
         }
     }
 
+    /// `rust_src` changes map to `tests/{path}_test.rs`
+    fn discovery_cfg() -> TestDiscoveryConfig {
+        TestDiscoveryConfig {
+            source_pattern: "rust_src".to_string(),
+            strategies: vec![TestDiscoveryStrategy::PathMapping {
+                rules: vec![PathMappingRule {
+                    source: "src/{path}.rs".to_string(),
+                    tests: vec!["tests/{path}_test.rs".to_string()],
+                }],
+            }],
+        }
+    }
+
     mod match_file_pattern_tests {
         use super::*;
 
@@ -471,18 +505,6 @@ mod tests {
     mod run_test_discovery_tests {
         use super::*;
 
-        fn discovery_cfg() -> TestDiscoveryConfig {
-            TestDiscoveryConfig {
-                source_pattern: "rust_src".to_string(),
-                strategies: vec![TestDiscoveryStrategy::PathMapping {
-                    rules: vec![PathMappingRule {
-                        source: "src/{path}.rs".to_string(),
-                        tests: vec!["tests/{path}_test.rs".to_string()],
-                    }],
-                }],
-            }
-        }
-
         #[test]
         fn no_source_files_match_returns_no_sources() {
             let cfg = base_config();
@@ -512,17 +534,6 @@ mod tests {
             let out =
                 run_test_discovery(&cfg, &cf, &PathBuf::from("/tmp"), &disc, &check, None).outcome;
             assert_eq!(out, DiscoveryOutcome::NoSources);
-        }
-
-        #[test]
-        fn no_tests_found_and_on_demand_returns_on_demand() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = base_config();
-            let cf = changed(&["src/foo.rs"]);
-            let check = mk_check("cmd {files}", None, None, /*on_demand=*/ true);
-            let out =
-                run_test_discovery(&cfg, &cf, tmp.path(), &discovery_cfg(), &check, None).outcome;
-            assert_eq!(out, DiscoveryOutcome::NoTestsOnDemand);
         }
 
         #[test]
@@ -689,10 +700,13 @@ mod tests {
             }
         }
 
-        #[test]
-        fn returns_none_when_no_triggers_match() {
+        /// An empty `triggers` block excludes the check, `on_demand` too
+        #[rstest::rstest]
+        #[case::auto(false)]
+        #[case::on_demand(true)]
+        fn returns_none_when_no_triggers_match(#[case] on_demand: bool) {
             let cfg = base_config();
-            let def = mk_check("cmd", None, Some(CheckTriggers::default()), false);
+            let def = mk_check("cmd", None, Some(CheckTriggers::default()), on_demand);
             let cf = changed(&["src/main.rs"]);
             let out = process(&cfg, &cf, &PathBuf::from("/tmp"), "g", "id", &def);
             assert!(out.is_none());
@@ -768,33 +782,46 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_discovery_no_tests_on_demand_builds_on_demand() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = base_config();
-            let triggers = CheckTriggers {
-                file_pattern: None,
-                test_discovery: Some(TestDiscoveryConfig {
-                    source_pattern: "rust_src".to_string(),
-                    strategies: vec![TestDiscoveryStrategy::PathMapping {
-                        rules: vec![PathMappingRule {
-                            source: "src/{path}.rs".to_string(),
-                            tests: vec!["tests/{path}_test.rs".to_string()],
-                        }],
-                    }],
-                }),
+        fn discovery() -> CheckTriggers {
+            CheckTriggers {
+                test_discovery: Some(discovery_cfg()),
                 ..Default::default()
-            };
-            let def = mk_check(
-                "slow {files}",
-                None,
-                Some(triggers),
-                /*on_demand=*/ true,
-            );
-            let cf = changed(&["src/foo.rs"]);
-            let out = process(&cfg, &cf, tmp.path(), "g", "id", &def).unwrap();
-            assert!(out.is_on_demand());
-            assert_eq!(out.files, CheckFiles::OnDemand);
+            }
+        }
+
+        fn filtered_file_pattern() -> CheckTriggers {
+            CheckTriggers {
+                files_filter: Some(Regex::new(r"_test\.rs$").unwrap()),
+                ..triggers_file_pattern("rust")
+            }
+        }
+
+        /// `on_demand: true` waits for `t` whatever its triggers matched
+        /// (#267), even nothing; `t` runs the full command (`{files}` empty).
+        /// `tests/foo_test.rs` exists, `src/bar.rs` has no test.
+        #[rstest::rstest]
+        #[case::no_triggers(None, &["src/foo.rs"])]
+        #[case::file_pattern_matched(Some(triggers_file_pattern("rust")), &["src/foo.rs"])]
+        #[case::file_pattern_unmatched(Some(triggers_file_pattern("rust")), &["README.md"])]
+        #[case::files_filter_drops_every_match(Some(filtered_file_pattern()), &["src/foo.rs"])]
+        #[case::discovery_tests_found(Some(discovery()), &["src/foo.rs"])]
+        #[case::discovery_no_tests(Some(discovery()), &["src/bar.rs"])]
+        #[case::discovery_no_sources(Some(discovery()), &["README.md"])]
+        fn on_demand_check_is_manual_whatever_its_triggers_matched(
+            #[case] triggers: Option<CheckTriggers>,
+            #[case] files: &[&str],
+        ) {
+            let tmp = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+            std::fs::write(tmp.path().join("tests/foo_test.rs"), "").unwrap();
+            let def = mk_check("slow {files}", None, triggers, /*on_demand=*/ true);
+
+            let run = process(&base_config(), &changed(files), tmp.path(), "g", "id", &def)
+                .expect("on-demand check is selected");
+
+            assert_eq!(run.files, CheckFiles::OnDemand);
+            assert_eq!(run.decision(), crate::checks::Decision::OnDemand);
+            assert_eq!(run.resolved_command, "slow");
         }
     }
 }

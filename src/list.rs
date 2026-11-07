@@ -113,16 +113,29 @@ fn explain(
     let selection = Selection::evaluate(config, changed_files, project_root, check);
     let mut reasons = selection_reasons(&selection);
     let to_run = process_check(selection, group, id, check);
-    if to_run.as_ref().map(CheckToRun::decision) == Some(Decision::OnDemand) {
-        reasons.push("manual trigger only ('t' in TUI)".to_string());
+    let waits = |c: &&CheckToRun| c.decision() == Decision::OnDemand;
+    if let Some(run) = to_run.as_ref().filter(waits) {
+        // `CheckFiles::OnDemand` only comes from `on_demand: true`
+        let cause = if run.files == CheckFiles::OnDemand {
+            "on_demand: "
+        } else {
+            ""
+        };
+        reasons.push(format!("{cause}manual trigger only ('t' in TUI)"));
     }
     (reasons, to_run)
 }
 
-/// One reason per evaluated trigger.
+/// One reason per evaluated trigger. For an `on_demand` check (it waits for
+/// `t` whatever matched) only the match facts, no run / skip fallback.
 fn selection_reasons(selection: &Selection) -> Vec<String> {
     let Selection::Triggered(eval) = selection else {
-        return vec!["no triggers: always runs".to_string()];
+        let reason = if selection.on_demand() {
+            "no triggers"
+        } else {
+            "no triggers: always runs"
+        };
+        return vec![reason.to_string()];
     };
     let mut reasons = Vec::new();
 
@@ -131,9 +144,10 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
             format!("file_pattern `{key}`: no changed file matched")
         } else if kept.is_empty() {
             let fallback = eval.filter_fallback().map(|files| match files {
-                CheckFiles::OnDemand => "; on_demand",
                 CheckFiles::RunAll => "; runs full command (no {files})",
-                _ => "; command needs {files}",
+                CheckFiles::SkippedNoMatch => "; command needs {files}",
+                // Never a no-files fallback
+                CheckFiles::Files(_) | CheckFiles::OnDemand => "",
             });
             format!(
                 "file_pattern `{key}`: every match dropped by files_filter{}",
@@ -149,7 +163,7 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
             &discovery.config.source_pattern,
             &discovery.sources,
             &discovery.outcome,
-            eval.file_pattern_matched(),
+            eval.file_pattern_matched() || eval.on_demand(),
         ));
         reasons.extend(discovery.warnings.iter().map(|w| format!("warning: {w}")));
     }
@@ -171,15 +185,15 @@ fn selection_reasons(selection: &Selection) -> Vec<String> {
     reasons
 }
 
-/// Reason for a `test_discovery` trigger. With `file_pattern_matched`, the
-/// file_pattern match decides the run, so no-tests fallbacks don't apply.
+/// Reason for a `test_discovery` trigger. With `decided` (a file_pattern
+/// match or `on_demand` decides the run) no-tests fallbacks don't apply.
 fn discovery_reason(
     key: &str,
     sources: &[&str],
     outcome: &DiscoveryOutcome,
-    file_pattern_matched: bool,
+    decided: bool,
 ) -> String {
-    let no_tests = |fallback: &str| match file_pattern_matched {
+    let no_tests = |fallback: &str| match decided {
         true => "no tests found".to_string(),
         false => format!("no tests found; {fallback}"),
     };
@@ -188,7 +202,6 @@ fn discovery_reason(
             return format!("test_discovery `{key}`: no changed file matched")
         }
         DiscoveryOutcome::TestsFound(tests) => format!("discovered tests: {}", tests.join(", ")),
-        DiscoveryOutcome::NoTestsOnDemand => no_tests("on_demand"),
         DiscoveryOutcome::NoTestsRunAll => no_tests("runs full command (no {files})"),
         DiscoveryOutcome::NoTestsSkip => no_tests("command needs {files}"),
     };
