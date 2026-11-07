@@ -347,9 +347,13 @@ checks:
 - If omitted, check always runs
 
 **`on_demand`** (default: `false`)
-- Only takes effect on a check with a `test_discovery` trigger; ignored otherwise
-- If `true`, and test discovery finds no related tests, check waits for the 't' key instead of skipping or running the full command
-- Useful for expensive checks when test discovery finds no specific tests
+- If `true`, the check never runs automatically, whatever its `triggers` match (or with none): it waits for the `t` key in the TUI and never runs in `--simple` or as a `--watch` re-run
+- `t` runs the full command, with `{files}` expanded to nothing, even when the triggers matched files or discovered tests (`--list` still shows those matches)
+- On-demand runs are never cached (no concrete files to key them on)
+- A check with an empty `triggers: {}` block still never shows up
+- `--fix` (CLI) still runs its `fix_command` on the matched files, then reports it `not verified (on-demand)`
+- In the TUI, `x` after a `t` run applies `fix_command` with `{files}` empty, like the command it fixes; its verification re-runs the full command
+- Useful for expensive checks you want one keypress away but out of your fast loop
 
 **`allow_failure`** (default: `false`)
 - If `true`, a failure or timeout of this check's command is a **warning**: it doesn't fail the run, and the exit code stays `0` if nothing else failed
@@ -428,7 +432,7 @@ triggers:
 **`files_filter`** (optional)
 - Inline regex (not a `file_patterns` key) every path in `{files}` must match
 - Applies to both `file_pattern` matches and discovered tests; non-matching paths are dropped
-- If every path is dropped, the trigger still fired: the check is skipped, `on_demand`, or runs its full command per [Handling No Tests Found](#handling-no-tests-found)
+- If every path is dropped, the trigger still fired: the check is skipped or runs its full command per [Handling No Tests Found](#handling-no-tests-found) (an `on_demand` check waits for `t` either way)
 - Also filters `{files}` of `fix_command` (TUI and `--fix`)
 - Dropped paths still count for the result cache: editing only a fixture re-runs the check
 - `--list` shows the dropped paths as a `files_filter` reason
@@ -442,7 +446,7 @@ triggers:
   files_filter: 'Test\.php$'          # phpunit gets only *Test.php
 ```
 
-Changing only a fixture then leaves nothing for `{files}`: `on_demand` checks become manual, checks without `{files}` run their full command, others are skipped. To run the test that uses the fixture, add a `grep_search` strategy whose `source_pattern` matches fixtures (e.g. pattern `{filename}`, if the test references the fixture by name).
+Changing only a fixture then leaves nothing for `{files}`: checks without `{files}` run their full command, others are skipped (`on_demand` checks wait for `t` either way). To run the test that uses the fixture, add a `grep_search` strategy whose `source_pattern` matches fixtures (e.g. pattern `{filename}`, if the test references the fixture by name).
 
 ## Test Discovery
 
@@ -564,10 +568,10 @@ This finds both:
 
 ### Handling No Tests Found
 
-When test discovery finds no related tests:
-- If check has `on_demand: false` (default): Check is skipped but visible in UI
-- If check has `on_demand: true`: Check is skipped and marked on-demand
-- User can manually trigger with 't' key to run full test suite
+When test discovery finds no related tests (and no `file_pattern` match runs the check):
+- If the command has no `{files}`: the full command runs
+- If the command uses `{files}`: the check is skipped but visible in the UI
+- An `on_demand: true` check waits for the `t` key whether or not tests were found; `t` runs the full command (`{files}` empty)
 
 ## Test Discovery Limitations
 
@@ -780,7 +784,7 @@ Restricts the run to a subset of checks for fast iteration:
 ci-tui --config ci-tui.yaml --list      # alias: --dry-run
 ```
 
-Prints the base ref used (or that `--files` bypassed git / `--staged` read the git index), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, paths dropped by `files_filter`, or no match). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files`, `--base` and `--staged`; cannot be combined with `--simple`, `--fix`, or a subcommand.
+Prints the base ref used (or that `--files` bypassed git / `--staged` read the git index), the changed files after `ignore_patterns`, and every configured check grouped in config order as `run` / `on-demand` / `skipped` with its reason (matched `file_pattern` files, discovered tests, paths dropped by `files_filter`, or no match; an `on_demand: true` check adds `on_demand: manual trigger only`). Nothing executes — no checks, pre-commands, or docker commands. Works with `--files`, `--base` and `--staged`; cannot be combined with `--simple`, `--fix`, or a subcommand.
 
 ## Best Practices
 
@@ -848,26 +852,25 @@ checks:
 
 ### Use on_demand for Expensive Checks
 
-`on_demand` only has an effect on a check with a `test_discovery` trigger — it's ignored
-on any other check (including one with no `triggers` at all, which always runs):
+`on_demand: true` keeps a check out of every automatic run (TUI, `--simple`, `--watch`),
+whatever its triggers match, even when they match nothing; it waits for the `t` key, which
+runs the full command (`{files}` stripped). Only an empty `triggers: {}` block hides it;
+`--list` lists what its triggers matched:
 
 ```yaml
 checks:
   tests:
     checks:
-      phpunit:
-        name: PHPUnit
-        command: vendor/bin/phpunit {files}
-        on_demand: true  # no related tests found -> wait for 't' instead of skipping
+      phpunit-full:
+        name: PHPUnit (full suite)
+        command: vendor/bin/phpunit
+        on_demand: true  # never automatic: press 't'
         triggers:
-          file_pattern: php_tests
-          test_discovery:
-            source_pattern: php_src
-            strategies: [...]
+          file_pattern: php
 ```
 
-When source changes but no specific tests are found, user can trigger the full command
-(with `{files}` stripped) with the 't' key.
+For related tests that run automatically, drop `on_demand`: with no tests found, a
+`test_discovery` check runs its full command if it has no `{files}`, else it is skipped.
 
 ### Leverage fix_command
 

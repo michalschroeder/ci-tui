@@ -1080,6 +1080,39 @@ mod check_runner_tests {
         assert!(events.iter().any(|e| matches!(e, RunnerEvent::AllFinished)));
     }
 
+    #[tokio::test]
+    async fn on_demand_check_matching_changed_file_runs_no_pre_commands() {
+        // #267: `on_demand: true` wins over its matching file_pattern, so
+        // the group has nothing to run: no setup, no check
+        let mock = mock_executor_success("");
+        let config = ConfigBuilder::new()
+            .with_file_pattern("txt", r"\.txt$", None)
+            .with_pre_command("lint", "warmup", "echo warmup")
+            .with_check(
+                "lint",
+                "expensive",
+                common::configs::CheckBuilder::new("Expensive", "slow-test {files}")
+                    .with_file_pattern_trigger("txt")
+                    .on_demand()
+                    .build(),
+            )
+            .build();
+        let checks = common::select_for_a_txt(&config, Path::new("/tmp"));
+        let runner = CheckRunner::with_executor(config, Path::new("/tmp"), Arc::new(mock));
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        runner.run_checks(checks, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+        let ran = |e: &&RunnerEvent| {
+            matches!(
+                e,
+                RunnerEvent::PreCommandStarted { .. } | RunnerEvent::CheckStarted { .. }
+            )
+        };
+        assert_eq!(events.iter().filter(ran).count(), 0, "{events:?}");
+    }
+
     /// Peak concurrency of 5 checks in group `g` under `config`
     async fn peak_concurrency(config: ci_tui::config::CiConfig) -> usize {
         let executor = Arc::new(common::ConcurrencyExecutor::default());

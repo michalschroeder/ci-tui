@@ -36,7 +36,8 @@ pub enum CheckFiles {
     /// file_pattern / source_pattern (or the pattern key is unknown), or
     /// test discovery found no tests for a `{files}` command
     SkippedNoMatch,
-    /// Test-discovery found no tests; check requires manual trigger ('t' key)
+    /// Check marked `on_demand: true`: waits for a manual trigger ('t' key),
+    /// whatever its triggers matched; the trigger runs the full command
     OnDemand,
     /// Source files changed but no specific tests found; command runs the full suite
     RunAll,

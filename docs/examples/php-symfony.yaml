@@ -217,6 +217,7 @@ checks:
                 pattern: '(use|class|new)\s+(\w+\\)*{basename}(;|\(|Test)'
 
       # Functional tests only (useful for API testing)
+      # On-demand: listed when test files change, 't' runs the whole suite
       phpunit-functional:
         name: Functional Tests Only
         command: vendor/bin/phpunit --colors=always --testsuite=functional {files}

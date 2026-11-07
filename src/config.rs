@@ -655,7 +655,9 @@ pub struct CheckDefinition {
     pub fix_command: Option<String>,
     #[serde(default)]
     pub triggers: Option<CheckTriggers>,
-    /// If true, check requires manual trigger when source files change but no specific tests found
+    /// If true, the check never runs automatically (nor in `--simple`):
+    /// whatever its triggers match, it waits for a manual trigger (`t` in
+    /// the TUI), which runs the full command (`{files}` empty)
     #[serde(default)]
     pub on_demand: bool,
     /// If true, a failure or timeout of this check is a warning: shown in
@@ -690,8 +692,8 @@ pub struct CheckTriggers {
     /// Inline regex every `{files}` path must match: file_pattern matches and
     /// discovered tests that don't are dropped (e.g. `Test\.php$` keeps test
     /// fixtures away from the test runner). All dropped: no-tests fallback
-    /// (on_demand / full command without `{files}` / skip). Needs
-    /// `file_pattern` or `test_discovery`.
+    /// (full command without `{files}` / skip). Needs `file_pattern` or
+    /// `test_discovery`.
     #[serde(default, deserialize_with = "deserialize_files_filter")]
     #[schemars(with = "Option<String>")]
     pub files_filter: Option<Regex>,

@@ -324,6 +324,21 @@ async fn unselected_or_on_demand_check_is_not_verified() {
 }
 
 #[tokio::test]
+async fn on_demand_check_is_fixed_but_not_verified() {
+    // #267: the selected `on_demand: true` check matched `src/main.rs`; --fix
+    // still runs its fix, verification leaves it to `t`
+    let mut config = rust_fmt_with_fix_config();
+    config.checks["lint"].checks["fmt"].on_demand = true;
+    let checks = selected(&config);
+
+    let (summary, log) = fix_run(config, Some(checks), &[]).await;
+
+    assert_eq!(log, ["fix"]);
+    assert_eq!((summary.verify_count(), summary.unverified_count), (0, 1));
+    assert!(!summary.has_failures);
+}
+
+#[tokio::test]
 async fn no_verify_runs_fixes_only() {
     let (summary, log) = fix_run(rust_fmt_with_fix_config(), None, &["check"]).await;
 

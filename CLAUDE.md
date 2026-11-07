@@ -136,7 +136,7 @@ The inline fixtures in `src/config.rs` and `src/checks.rs` mirror the structure 
 - `path_mapping`: Maps source paths to test paths (e.g., `src/{path}.php` → `tests/{path}Test.php`)
 - `grep_search`: Searches test directories for content patterns with placeholders (`{basename}`, `{filename}`, etc.)
 
-**On-Demand Checks**: Checks marked `on_demand: true` don't run automatically - user triggers with 't' key. Used for expensive tests when no specific test files are found.
+**On-Demand Checks**: Checks marked `on_demand: true` never run automatically (nor in `--simple`), whatever their triggers match (`Selection::into_check_files` makes them `CheckFiles::OnDemand`) - user triggers with 't' key, which runs the full command (`{files}` empty). Used for expensive checks kept out of the fast loop.
 
 **Event-Driven UI**: Main loop uses `tokio::select!` (biased, keyboard first) over runner/input/stats/task channels (plus a live-timer tick while a check runs, and `--watch` batches), redrawing when `needs_redraw` is set.
 

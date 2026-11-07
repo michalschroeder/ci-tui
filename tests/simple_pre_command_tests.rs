@@ -74,6 +74,33 @@ async fn group_with_only_on_demand_checks_runs_no_pre_commands() {
 }
 
 #[tokio::test]
+async fn on_demand_check_matching_changed_file_runs_neither_it_nor_its_setup() {
+    // #267: `on_demand: true` wins over the `a.txt` match: not run, not
+    // reported, and its group's pre-commands skipped
+    let check = |id: &str| CheckBuilder::new(id, &logged(id, "true", true));
+    let mut config = ConfigBuilder::new()
+        .with_file_pattern("txt", r"\.txt$", None)
+        .with_pre_command("g1", "p1", &logged("p1", "true", true))
+        .with_check(
+            "g1",
+            "od",
+            check("od")
+                .with_file_pattern_trigger("txt")
+                .on_demand()
+                .build(),
+        )
+        .with_pre_command("g2", "p2", &logged("p2", "true", true))
+        .with_check("g2", "c", check("c").build())
+        .build();
+    config.runner = local_sh();
+
+    let (results, log) = run_simple(config).await;
+
+    assert_eq!(log, ["p2", "c"]);
+    assert_eq!(outcomes(&results), [passed("c")]);
+}
+
+#[tokio::test]
 async fn skip_group_blocks_its_group_and_runs_later_groups() {
     let (results, log) = run_simple(two_groups("false", OnFailure::SkipGroup)).await;
 

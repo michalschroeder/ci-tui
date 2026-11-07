@@ -739,6 +739,17 @@ checks:
     }
 
     #[test]
+    fn test_affected_checks_skip_on_demand_check_the_save_matches() {
+        // #267: `on_demand: true` waits for `t` even when a save matches it
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.checks["fast"].checks["lint"].on_demand = true;
+        let files = vec!["src/A.php".to_string()];
+
+        assert!(affected_checks(&config, files, dir.path()).is_empty());
+    }
+
+    #[test]
     fn test_affected_checks_none_without_files() {
         let dir = tempfile::tempdir().unwrap();
         assert!(affected_checks(&config(), Vec::new(), dir.path()).is_empty());

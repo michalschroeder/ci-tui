@@ -20,7 +20,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - Jump to failure: when the run ends the first failed check is selected and opened at its first error line; error lines are highlighted (per-check `error_pattern` regex overrides the default)
 - Sequential check groups, parallel checks within a group, group `pre_commands` (e.g. DB init) with per-command `on_failure: abort | skip_group | continue`, group `stop_on_failure: true` (a failed check stops later groups); checks kept from running fail, showing why
 - Test discovery via `path_mapping` and `grep_search` strategies
-- On-demand checks (`t` key): unmatched triggers, or `test_discovery` checks marked `on_demand: true` that found no related tests
+- On-demand checks (`t` key): `on_demand: true` keeps a check out of automatic runs (and `--simple`) whatever its triggers match, `t` runs its full command; also checks without `{files}` whose triggers matched nothing
 - `allow_failure: true` per check: its failure or timeout is a yellow warning (`1/2 passed, 1 warning`) that doesn't fail the run or the exit code
 - `--fix` mode runs each check's `fix_command` (formatters, etc.), then re-runs each check whose fix passed to confirm it passes now (`--no-verify` skips this; also for `x` / `X` in the TUI)
 - `--simple` console mode for CI pipelines — auto-selected when stdout is not a TTY
@@ -200,8 +200,9 @@ Simple mode is auto-enabled when stdout is not a terminal, so `ci-tui` works as 
 
 1. `git diff` against the base ref lists changed files, plus uncommitted and untracked files (minus `ignore_patterns`).
 2. A check with no `triggers` key always runs. A check with a `triggers` block but neither `file_pattern` nor `test_discovery` set never runs.
-3. `triggers.file_pattern` is matched against the list; if it's set and nothing matches, the check becomes `t`-triggerable instead.
-4. `triggers.test_discovery` maps changed sources to test files; if none are found: `on_demand: true` makes it wait for you to press `t` (never runs in `--simple`), otherwise it runs the full command if the command has no `{files}`, else it's skipped. `on_demand` only has an effect here — it's ignored on checks without `test_discovery`.
+3. `triggers.file_pattern` is matched against the list; if it's set and nothing matches, the check is skipped if the command uses `{files}`, else it becomes `t`-triggerable.
+4. `triggers.test_discovery` maps changed sources to test files; if none are found, it runs the full command if the command has no `{files}`, else it's skipped.
+5. `on_demand: true` overrides 2–4 (except the never-running empty `triggers` block): the check never runs automatically, nor in `--simple`, whatever its triggers match; press `t` to run its full command (`{files}` empty).
 
 Test discovery is heuristic (path conventions + grep) — it does not do dependency analysis, so a passing run is a fast pre-push signal, not a replacement for full CI. See [limitations](docs/configuration.md#test-discovery-limitations).
 

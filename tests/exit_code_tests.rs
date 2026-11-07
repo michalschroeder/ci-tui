@@ -294,6 +294,15 @@ fn only_on_demand_checks_do_not_probe_docker() {
 }
 
 #[test]
+fn simple_never_runs_an_on_demand_check() {
+    // #267: `on_demand: true` without triggers would always run; its
+    // failing command must not decide the exit code
+    let config = format!("{}        on_demand: true\n", local_yaml("'false'"));
+    let (_tmp, out) = run_config(&config, &["--simple", "--files", "a.rs"]);
+    assert_code(&out, exit::SUCCESS);
+}
+
+#[test]
 fn fix_without_fix_commands_does_not_probe_docker() {
     let (_tmp, out) = run_config(&docker_yaml(""), &["--fix", "--files", "a.rs"]);
     assert_code(&out, exit::SUCCESS);

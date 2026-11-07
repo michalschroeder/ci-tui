@@ -148,17 +148,17 @@ fn test_empty_config_returns_empty_list() {
 }
 
 #[test]
-fn test_on_demand_config_field_ignored_when_files_match() {
-    // This test documents CURRENT behavior: the on_demand config field
-    // is ignored when files match - check becomes triggered automatically.
+fn test_on_demand_check_waits_for_t_when_files_match() {
+    // #267: `on_demand: true` wins over a matching trigger; `t` runs the
+    // full command (`{files}` empty)
     let config = ConfigBuilder::new()
         .with_file_pattern("php", r"\.php$", None)
         .with_check(
             "expensive",
             "expensive-check",
-            CheckBuilder::new("Expensive Check", "expensive-analysis")
+            CheckBuilder::new("Expensive Check", "expensive-analysis {files}")
                 .with_file_pattern_trigger("php")
-                .on_demand() // Explicitly marked as on-demand in config
+                .on_demand()
                 .build(),
         )
         .build();
@@ -167,13 +167,10 @@ fn test_on_demand_config_field_ignored_when_files_match() {
 
     let checks = determine_checks(&config, &changed_files, &project_root);
 
-    // CURRENT BEHAVIOR: Even though config has on_demand=true,
-    // when files match the pattern, the check is triggered (not on-demand)
+    assert_check_on_demand(&checks, "expensive-check");
     let check = assert_check_exists(&checks, "expensive-check");
-    assert!(
-        !check.is_on_demand(),
-        "Check marked on_demand in config becomes triggered when files match (current behavior)"
-    );
+    assert_eq!(check.files, CheckFiles::OnDemand);
+    assert_eq!(check.resolved_command, "expensive-analysis");
 }
 
 // ============================================================================
@@ -473,7 +470,8 @@ fn test_files_filter_drops_fixtures_from_files() {
 #[test]
 fn test_files_filter_dropping_every_file_pattern_match_applies_no_files_fallback() {
     // Only fixtures changed: `file_pattern` matched them, filter drops all,
-    // so the trigger fired with nothing for `{files}` (skip / on_demand / run all)
+    // so the trigger fired with nothing for `{files}` (skip / run all; the
+    // on_demand check waits for `t` anyway)
     let root = linter_root(&FOO_FIXTURES);
     let checks = determine_checks(
         &php_files_filter_config(),
@@ -496,7 +494,8 @@ fn test_files_filter_dropping_every_file_pattern_match_applies_no_files_fallback
 #[test]
 fn test_files_filter_dropping_all_discovered_tests_is_no_tests_found() {
     // Source changed, grep discovers only fixtures: filter drops them, so
-    // the no-tests fallbacks apply (skip / on_demand / run full command)
+    // the no-tests fallbacks apply (skip / run full command; the on_demand
+    // check waits for `t` anyway)
     let root = linter_root(&FOO_FIXTURES);
     let checks = determine_checks(
         &php_files_filter_config(),
