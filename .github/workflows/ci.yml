@@ -41,7 +41,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@d042af60014eb018fcd01f57f4f62118b69e3ea6 # nextest
+        uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Run unit tests
         run: cargo nextest run --lib --profile ci
@@ -70,7 +70,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@d042af60014eb018fcd01f57f4f62118b69e3ea6 # nextest
+        uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Run integration tests
         run: cargo nextest run --features test --test '*' --profile ci
@@ -126,10 +126,10 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@2409e52fd2fc8a8601d0d900fab9d85ae1fe714a # cargo-llvm-cov
+        uses: taiki-e/install-action@c2e5d2ce8920c881761c4cabb41434daa1f95687 # cargo-llvm-cov
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@d042af60014eb018fcd01f57f4f62118b69e3ea6 # nextest
+        uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Generate coverage report
         run: cargo llvm-cov nextest --features test --lcov --output-path lcov.info
