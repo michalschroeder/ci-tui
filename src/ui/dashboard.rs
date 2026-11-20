@@ -35,6 +35,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
 const BUILD_DATE: &str = env!("CI_TUI_BUILD_DATE");
 /// Minimum height (rows, incl. borders) of the checks panel
@@ -1933,7 +1934,7 @@ fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
     }
 
     spans.push(Span::styled(
-        format!("  {} (built {})", GIT_HASH, BUILD_DATE),
+        format!("  v{VERSION} ({GIT_HASH}, built {BUILD_DATE})"),
         Style::default().fg(Color::DarkGray),
     ));
 

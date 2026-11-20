@@ -16,6 +16,8 @@ fn main() {
     let git_hash = env::var("CI_TUI_GIT_HASH")
         .ok()
         .filter(|s| !s.is_empty() && s != "unknown")
+        // CI passes the full SHA; keep the footer to the short form
+        .map(|s| s.chars().take(7).collect())
         .or_else(|| {
             Command::new("git")
                 .args(["rev-parse", "--short", "HEAD"])
