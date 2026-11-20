@@ -44,8 +44,10 @@ ignore_patterns:
   - '^target/'
 
 checks:
-  quality:
-    name: Code Quality
+  # One parallel group: separate groups run in sequence, so clippy would hold
+  # back every test. Measured ~19s vs ~24.5s for a one-file change.
+  all:
+    name: Checks
     parallel: true
     checks:
       fmt:
@@ -55,16 +57,14 @@ checks:
         triggers:
           file_pattern: rust
 
+      # Own target dir: otherwise it holds cargo's build-dir lock and the
+      # tests wait for it anyway (+~1.2 GB on disk)
       clippy:
         name: Clippy Lints
-        command: cargo clippy --all-targets --all-features -- -D warnings
+        command: CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets --all-features -- -D warnings
         triggers:
           file_pattern: crate
 
-  tests:
-    name: Tests
-    parallel: true
-    checks:
       unit:
         name: Unit Tests
         command: script -q -e -c "cargo nextest run --lib --no-fail-fast --status-level all --color always" /dev/null
