@@ -10,5 +10,12 @@
   "schedule": [
     "after 8am and before 9am"
   ],
-  "minimumReleaseAge": "3 days"
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "rust crates (non-major)"
+    }
+  ]
 }
