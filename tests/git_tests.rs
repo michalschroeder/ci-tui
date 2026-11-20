@@ -3,6 +3,9 @@
 //! Most use MockGitExecutor to verify git command parsing logic without a
 //! Git repository; `real_repo` runs the binary against one.
 
+// Test code: nesting limit targets production code (see src/lib.rs)
+#![allow(clippy::excessive_nesting)]
+
 mod common;
 
 use ci_tui::config::GitConfig;

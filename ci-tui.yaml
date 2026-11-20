@@ -13,9 +13,13 @@ docker:
   volume_mount: "${HOST_PWD}:/build"
   work_dir: /build
   shell: bash
+  # Host uid:gid (the published image runs ci-tui as the project owner), so
+  # target/ is not root-owned. No passwd entry in the image: HOME=/ otherwise.
+  user: host
   env:
+    HOME: /tmp
     # Keep the crate registry across `docker run --rm` containers (no
-    # re-download per check). Must match the Makefile, else deps rebuild.
+    # re-download per check). Must match the Makefile (DEV_RUN), else deps rebuild.
     CARGO_HOME: /build/target/cargo-home
 
 git:
@@ -26,15 +30,13 @@ file_patterns:
   rust:
     pattern: '\.rs$'
     color: yellow
-  # Everything the crate build reads: Rust sources, manifests, lint config,
-  # committed schema (drift test) and test fixtures. Also feeds the result
-  # cache key, so a Cargo.lock / clippy.toml edit re-runs clippy and tests.
+  # Everything the crate build and tests read: Rust sources, manifests, lint
+  # and nextest config, committed schema (drift test) and test fixtures. Also
+  # feeds the result cache key, so a Cargo.lock / clippy.toml / nextest.toml
+  # edit re-runs clippy and tests.
   crate:
-    pattern: '\.rs$|^(Cargo\.(toml|lock)|clippy\.toml)$|^(schema|tests)/'
+    pattern: '\.rs$|^(Cargo\.(toml|lock)|clippy\.toml)$|^(schema|tests|\.config)/'
     color: blue
-  yaml:
-    pattern: '\.ya?ml$'
-    color: green
 
 ignore_patterns:
   - '\.md$'
@@ -55,7 +57,7 @@ checks:
 
       clippy:
         name: Clippy Lints
-        command: cargo clippy -- -D warnings
+        command: cargo clippy --all-targets --all-features -- -D warnings
         triggers:
           file_pattern: crate
 
@@ -65,13 +67,13 @@ checks:
     checks:
       unit:
         name: Unit Tests
-        command: script -q -e -c "cargo nextest run --lib --status-level all --color always" /dev/null
+        command: script -q -e -c "cargo nextest run --lib --no-fail-fast --status-level all --color always" /dev/null
         triggers:
           file_pattern: crate
 
       integration:
         name: Integration Tests
-        command: script -q -e -c "cargo nextest run --features test --test '*' --status-level all --color always" /dev/null
+        command: script -q -e -c "cargo nextest run --features test --test '*' --no-fail-fast --status-level all --color always" /dev/null
         triggers:
           file_pattern: crate
 

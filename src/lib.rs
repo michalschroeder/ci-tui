@@ -25,6 +25,11 @@
 //! - `ui`: Terminal UI using ratatui
 //! - `watch`: `--watch` file watcher re-running checks affected by saves
 
+// Nesting / length limits target production code (still linted by the plain
+// lib target): `mod tests` + fn + closure alone uses up the nesting budget,
+// and fixtures are long by design.
+#![cfg_attr(test, allow(clippy::excessive_nesting, clippy::too_many_lines))]
+
 pub mod cache;
 pub mod checks;
 pub mod cli;

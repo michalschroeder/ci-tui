@@ -41,8 +41,8 @@ make ci
 
 This runs all CI checks in Docker (using the dev image), regardless of what changed:
 - `cargo fmt --check` - Code formatting check
-- `cargo clippy -- -D warnings` - Linter checks
-- `cargo nextest run` - Test suite
+- `cargo clippy --all-targets --all-features -- -D warnings` - Linter checks (tests too)
+- `cargo nextest run` + `cargo test --doc` - Test suite (unit, integration, doc)
 
 **Workflow:** `make fmt`, iterate with `ci-tui --simple`, then `make ci`. `make fmt` and `make ci` must pass before any commit or push (ci-tui runs nothing for docs-only changes, so it never replaces `make ci`).
 

@@ -7,33 +7,39 @@ DEV_IMAGE := $(IMAGE_NAME)-dev:latest
 REGISTRY ?= docker.io
 FULL_IMAGE := $(REGISTRY)/$(IMAGE_NAME):$(VERSION)
 
+# Dev-image run as the host user so target/ stays yours (no passwd entry in the
+# image: HOME=/tmp). CARGO_HOME must match ci-tui.yaml, else deps rebuild.
+DEV_RUN := docker run --rm --user $(shell id -u):$(shell id -g) -v $(PWD):/build -w /build \
+	-e CARGO_HOME=/build/target/cargo-home -e HOME=/tmp $(DEV_IMAGE)
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 # === Development (runs in Docker using dev image) ===
 
-test: ## Run tests with nextest
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo nextest run --lib --status-level all
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo nextest run --features test --test '*' --status-level all
+test: ## Run unit, integration and doc tests
+	$(DEV_RUN) cargo nextest run --lib --status-level all
+	$(DEV_RUN) cargo nextest run --features test --test '*' --status-level all
+	$(DEV_RUN) cargo test --doc
 
 fmt: ## Format code
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo fmt
+	$(DEV_RUN) cargo fmt
 
 fmt-check: ## Check formatting without fixing
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo fmt -- --check
+	$(DEV_RUN) cargo fmt -- --check
 
 clippy: ## Run clippy lints
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo clippy -- -D warnings
+	$(DEV_RUN) cargo clippy --all-targets --all-features -- -D warnings
 
 schema: ## Regenerate schema/ci-tui.schema.json from the config structs
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo run -q -- schema > schema/ci-tui.schema.json.tmp
+	$(DEV_RUN) cargo run -q -- schema > schema/ci-tui.schema.json.tmp
 	mv schema/ci-tui.schema.json.tmp schema/ci-tui.schema.json
 
 coverage: ## Generate LCOV coverage report
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
+	$(DEV_RUN) sh -c "rustup component add llvm-tools-preview && cargo install cargo-llvm-cov --locked && cargo llvm-cov nextest --lcov --output-path lcov.info"
 
 update-lock: ## Update Cargo.lock with latest compatible versions
-	docker run --rm -v $(PWD):/build -w /build -e CARGO_HOME=/build/target/cargo-home $(DEV_IMAGE) cargo update
+	$(DEV_RUN) cargo update
 
 # === CI (mirrors GitHub Actions) ===
 
