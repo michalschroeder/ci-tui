@@ -352,7 +352,11 @@ fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Resul
     // from `git diff`, and lists files outside a subdirectory project root —
     // plain `ls-files` from a subdir only sees its own tree.
     let args = ["--others", "--exclude-standard", "--full-name", "--", ":/"];
-    list_paths(project_root, executor, "ls-files", &args)
+    let mut paths = list_paths(project_root, executor, "ls-files", &args)?;
+    // An untracked nested repo is listed as one `dir/` entry, not its files:
+    // no file to check or hash for the cache key.
+    paths.retain(|path| !path.ends_with('/'));
+    Ok(paths)
 }
 
 /// Paths `git <subcommand> -z <args>` lists. `-z` prints names verbatim,
@@ -778,6 +782,25 @@ mod tests {
 
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
         assert_eq!(result.files, vec!["other/t.txt", "sub/new.rs"]);
+    }
+
+    #[test]
+    fn get_changed_files_drops_untracked_nested_repo_dirs() {
+        let mut mock = mock_resolving();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == DIFF_FILTER))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        // `ls-files --others` lists an untracked nested repo as `dir/`
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == "ls-files"))
+            .times(1)
+            .returning(|_, _| Ok("sub/a.rs\0vendor/lib/\0".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+        assert_eq!(result.files, vec!["sub/a.rs"]);
     }
 
     #[test]
