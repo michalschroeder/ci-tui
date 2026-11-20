@@ -17,6 +17,17 @@ pub use ci_tui::runner::{CommandOutput, MockCommandExecutor};
 #[allow(dead_code)]
 pub const OUTER_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX"];
 
+/// Running inside a git hook ([`OUTER_GIT_ENV`] set): in-process git would
+/// see the outer repo instead of the test's tempdir repo, so such tests skip
+#[allow(dead_code)]
+pub fn in_git_hook() -> bool {
+    let set = OUTER_GIT_ENV.iter().any(|v| std::env::var_os(v).is_some());
+    if set {
+        eprintln!("skipped: outer git env set (running inside a git hook)");
+    }
+    set
+}
+
 /// `Command` for `program` with [`OUTER_GIT_ENV`] cleared.
 #[allow(dead_code)]
 pub fn isolated_git_command(program: &str) -> std::process::Command {
@@ -180,6 +191,20 @@ pub fn run_ci_tui_env(
         .args(args)
         .output()
         .unwrap()
+}
+
+/// [`run_ci_tui_env`] in `<tmp>/repo/<dir>` with git discovery capped at
+/// `<tmp>` (so a repo at `<tmp>/repo` is found from its subdirs)
+#[allow(dead_code)]
+pub fn run_in(
+    tmp: &tempfile::TempDir,
+    dir: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let ceiling = [("GIT_CEILING_DIRECTORIES", tmp.path().to_str().unwrap())];
+    let cwd = tmp.path().join("repo").join(dir);
+    run_ci_tui_env(&cwd, args, &[&ceiling[..], env].concat())
 }
 
 /// Tempdir with `ci-tui.yaml` = `config` and `a.rs`; a git repo if `git_init`

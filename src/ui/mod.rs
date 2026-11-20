@@ -286,17 +286,17 @@ struct ViewerRequest {
 /// Shared handles for spawned async tasks (Arcs for cheap cloning)
 #[derive(Clone)]
 struct TaskCtx {
-    /// Git change detection root (cwd)
+    /// Project root (the config's dir): `.ci-tui/` logs
     project_root: Arc<PathBuf>,
-    /// Command execution + test discovery root (repo root in local mode, cwd in docker mode)
+    /// Command execution, git change detection and test discovery root (repo
+    /// root in local mode, project root in docker mode)
     exec_root: Arc<PathBuf>,
     /// Config; `config.runner` is where commands execute (docker or local host)
     config: Arc<CiConfig>,
     /// Cancel switches shared with the runner ('s' key)
     cancels: CancelRegistry,
-    /// Result cache key root ([`ResultCache::key_root`]); refreshed checks
-    /// get keys only with it
-    key_root: Option<Arc<Path>>,
+    /// Refreshed checks get result cache keys ([`ResultCache::keys_checks`])
+    keyed: bool,
 }
 
 impl TaskCtx {
@@ -306,14 +306,14 @@ impl TaskCtx {
         exec_root: &Path,
         config: Arc<CiConfig>,
         cancels: &CancelRegistry,
-        key_root: Option<Arc<Path>>,
+        keyed: bool,
     ) -> Self {
         Self {
             project_root: Arc::new(project_root),
             exec_root: Arc::new(exec_root.to_path_buf()),
             config,
             cancels: cancels.clone(),
-            key_root,
+            keyed,
         }
     }
 
@@ -414,13 +414,13 @@ impl TaskCtx {
     /// Checks `changed_files` selects (with `only`, just that one), with
     /// fresh result cache keys. Blocking: keys read the files.
     fn select(&self, changed_files: &ChangedFiles, only: Option<&str>) -> Selected {
-        let mut selected = select_checks(&self.config, changed_files, &self.exec_root, None);
+        let mut selected = select_checks(&self.config, changed_files, &self.exec_root, false);
         selected
             .checks
             .retain(|c| only.is_none_or(|id| c.id() == id));
-        if let Some(root) = &self.key_root {
+        if self.keyed {
             let checks = &mut selected.checks;
-            stamp_keys(checks, &self.config, changed_files, root, &self.exec_root);
+            stamp_keys(checks, &self.config, changed_files, &self.exec_root);
         }
         selected
     }
@@ -446,12 +446,13 @@ impl TaskCtx {
     }
 
     /// Git re-detection for [`Self::refresh`], minus `ignore_patterns`: the
-    /// index for `--staged`, else a diff against the previous base ref.
+    /// index for `--staged`, else a diff against the previous base ref. In
+    /// the exec root, like main's initial detection (paths relative to it).
     fn redetect(&self, previous: &ChangedFiles) -> Result<ChangedFiles> {
         let mut changed = if previous.is_staged() {
-            get_staged_files(&self.project_root)
+            get_staged_files(&self.exec_root)
         } else {
-            get_changed_files(&self.project_root, &previous.base_ref)
+            get_changed_files(&self.exec_root, &previous.base_ref)
         }?;
         changed.apply_ignore_patterns(self.config.compiled_ignore_patterns());
         Ok(changed)
@@ -635,11 +636,10 @@ fn setup_terminal() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::
 }
 
 /// `--watch` batches receiver ([`crate::watch`]) and, if `watch`, the
-/// watcher feeding it (dropping it stops watching); errors when the
-/// watcher cannot start
+/// watcher on `exec_root` feeding it (dropping it stops watching); errors
+/// when the watcher cannot start
 fn start_watch(
     watch: bool,
-    cwd: &Path,
     config: &Arc<CiConfig>,
     exec_root: &Path,
 ) -> Result<(
@@ -647,7 +647,7 @@ fn start_watch(
     mpsc::UnboundedReceiver<WatchBatch>,
 )> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let start = || crate::watch::start(cwd, Arc::clone(config), exec_root.to_path_buf(), tx);
+    let start = || crate::watch::start(Arc::clone(config), exec_root.to_path_buf(), tx);
     Ok((watch.then(start).transpose()?, rx))
 }
 
@@ -741,12 +741,12 @@ fn install_panic_hook() {
 /// Start a new check runner and return its handle and event receiver
 fn start_runner(
     config: &CiConfig,
-    project_root: &Path,
+    exec_root: &Path,
     checks: Vec<CheckToRun>,
     cancels: &CancelRegistry,
 ) -> (JoinHandle<Result<()>>, mpsc::Receiver<RunnerEvent>) {
     let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>(RUNNER_CHANNEL_CAPACITY);
-    let runner = CheckRunner::new(config.clone(), project_root).with_cancels(cancels.clone());
+    let runner = CheckRunner::new(config.clone(), exec_root).with_cancels(cancels.clone());
 
     let handle = tokio::spawn(async move { runner.run_checks(checks, event_tx).await });
 
@@ -1643,11 +1643,8 @@ fn new_app(
     app.view.stats_visible = options.show_stats;
     app.fix.verify = options.verify;
     app.watching = options.watch;
-    app.watch_roots = options.watch.then(|| app::WatchRoots {
-        // Outside a repo (cache off) saves are relative to the cwd
-        key_root: options.cache.key_root().unwrap_or(exec_root).to_path_buf(),
-        exec_root: exec_root.to_path_buf(),
-    });
+    // Saved, changed and discovered paths all resolve under the exec root
+    app.watch_root = options.watch.then(|| exec_root.to_path_buf());
     app
 }
 
@@ -1701,8 +1698,7 @@ pub async fn run(
 ) -> Result<i32> {
     // `--watch` fails here, before the terminal is touched (exit 3)
     let config_arc = Arc::new(config.clone());
-    let (_watch, mut watch_rx) =
-        start_watch(options.watch, &project_root, &config_arc, &exec_root)?;
+    let (_watch, mut watch_rx) = start_watch(options.watch, &config_arc, &exec_root)?;
 
     // Install panic hook to restore terminal on panic
     install_panic_hook();
@@ -1726,8 +1722,8 @@ pub async fn run(
     let (mut runner_handle, mut event_rx) = start_runner(&config, &exec_root, checks, &cancels);
 
     // Spawner for fix/retry/refresh tasks and the receiver for their events
-    let key_root = options.cache.key_root().map(Arc::from);
-    let ctx = TaskCtx::new(project_root, &exec_root, config_arc, &cancels, key_root);
+    let keyed = options.cache.keys_checks();
+    let ctx = TaskCtx::new(project_root, &exec_root, config_arc, &cancels, keyed);
     let (mut tasks, mut task_rx) = Tasks::new(ctx);
     let recorder = Recorder::start(options.cache);
 
@@ -1950,7 +1946,7 @@ checks:
         .expect("Failed to parse test config")
     }
 
-    /// Build a task spawner for handle_message tests. project_root points
+    /// Build a task spawner for handle_message tests. Both roots point
     /// at a nonexistent path so git operations fail deterministically.
     fn make_test_tasks(config: &CiConfig) -> (Tasks, mpsc::Receiver<TaskEvent>) {
         Tasks::new(TaskCtx {
@@ -1958,7 +1954,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/nonexistent-ci-tui-test-path")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         })
     }
 
@@ -1969,7 +1965,7 @@ checks:
             exec_root: Arc::new(root.to_path_buf()),
             config: Arc::new(config),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         })
     }
 
@@ -2023,7 +2019,7 @@ checks:
         let config = test_config();
         let mut app = make_test_app_with_checks(&config, vec![make_test_check("php-lint", "fast")]);
         app.results.get_mut("php-lint").unwrap().status = crate::runner::CheckStatus::Passed;
-        let (mut tasks, mut rx) = make_test_tasks(&config); // project_root does not exist -> git fails
+        let (mut tasks, mut rx) = make_test_tasks(&config); // exec_root does not exist -> git fails
 
         let action = handle_retry_selected(&mut app, &mut tasks);
 
@@ -2064,7 +2060,7 @@ checks:
             files: vec!["src/Foo.php".to_string()],
             base_ref: "main".to_string(),
         };
-        let (mut tasks, mut rx) = make_test_tasks(&config); // project_root does not exist -> git fails
+        let (mut tasks, mut rx) = make_test_tasks(&config); // exec_root does not exist -> git fails
 
         handle_retry_all(&mut app, &mut tasks);
 
@@ -2154,7 +2150,7 @@ checks:
         std::fs::write(repo.path().join("Unstaged.php"), "<?php").unwrap();
         git(repo.path(), &["add", "Staged.php"]);
         let (mut tasks, _rx) = make_test_tasks(&test_config());
-        tasks.ctx.project_root = Arc::new(repo.path().to_path_buf());
+        tasks.ctx.exec_root = Arc::new(repo.path().to_path_buf());
         let previous = ChangedFiles {
             files: vec!["src/Foo.php".to_string()],
             base_ref: crate::git::STAGED_BASE_REF.to_string(),
@@ -2164,6 +2160,52 @@ checks:
 
         assert_eq!(changed_files.files, vec!["Staged.php".to_string()]);
         assert!(changed_files.is_staged());
+    }
+
+    /// Refresh lists from the exec root like main's detection: a config in
+    /// `svc/` sees only `svc/` project-relative in docker mode (exec root
+    /// `svc`), the whole repo repo-relative in local mode (exec root: repo)
+    #[rstest::rstest]
+    #[case::docker("svc", &["src/a.php"], &["src/b.php"])]
+    #[case::local("", &["other/c.php", "svc/src/a.php"], &["other/c.php", "svc/src/b.php"])]
+    fn test_refresh_lists_paths_relative_to_exec_root(
+        #[case] exec_dir: &str,
+        #[case] changed: &[&str],
+        #[case] staged: &[&str],
+    ) {
+        if OUTER_GIT_ENV.iter().any(|v| std::env::var_os(v).is_some()) {
+            eprintln!("skipped: outer git env set (running inside a git hook)");
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join("svc/src")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::write(dir.join("svc/src/b.php"), "<?php").unwrap();
+        git(dir, &["add", "."]);
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        git(
+            dir,
+            &[&identity[..], &["commit", "-q", "-m", "base"]].concat(),
+        );
+        std::fs::write(dir.join("svc/src/a.php"), "<?php").unwrap();
+        std::fs::write(dir.join("other/c.php"), "<?php").unwrap();
+        let (mut tasks, _rx) = make_test_tasks(&test_config());
+        tasks.ctx.exec_root = Arc::new(dir.join(exec_dir));
+        let refresh = |base_ref: &str| {
+            let previous = ChangedFiles {
+                files: vec![],
+                base_ref: base_ref.to_string(),
+            };
+            let (changed_files, _) = tasks.ctx.refresh(previous, None).ok().unwrap();
+            changed_files.files
+        };
+
+        assert_eq!(refresh("main"), changed);
+        std::fs::write(dir.join("svc/src/b.php"), "<?php // staged").unwrap();
+        git(dir, &["add", "svc/src/b.php", "other/c.php"]);
+        assert_eq!(refresh(crate::git::STAGED_BASE_REF), staged);
     }
 
     #[tokio::test]
@@ -2727,8 +2769,7 @@ checks:
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/Foo.php"), "<?php").unwrap();
-        let root = dir.path().to_path_buf();
-        let cache = ResultCache::at(dir.path().join(cache_file), root, true);
+        let cache = ResultCache::at(dir.path().join(cache_file), true);
         (dir, cache)
     }
 
@@ -2737,7 +2778,7 @@ checks:
         let mut check = make_test_check(id, "fast");
         let changed = make_test_app(config).changed_files;
         let checks = std::slice::from_mut(&mut check);
-        crate::cache::stamp_keys(checks, config, &changed, root, root);
+        crate::cache::stamp_keys(checks, config, &changed, root);
         assert!(check.cache_key.is_some());
         check
     }
@@ -2795,8 +2836,7 @@ checks:
         );
         drop(recorder);
 
-        let root = dir.path().to_path_buf();
-        let reopened = ResultCache::at(dir.path().join("results.json"), root, true);
+        let reopened = ResultCache::at(dir.path().join("results.json"), true);
         assert!(reopened.is_fresh(&lint), "runner pass recorded");
         assert!(
             !reopened.is_fresh(&unit),
@@ -2825,8 +2865,7 @@ checks:
         recorder.record(&mut app, &msg);
         drop(recorder);
 
-        let root = dir.path().to_path_buf();
-        let reopened = ResultCache::at(dir.path().join("results.json"), root, true);
+        let reopened = ResultCache::at(dir.path().join("results.json"), true);
         assert!(reopened.is_fresh(&lint), "blocked result dropped the pass");
     }
 
@@ -2961,7 +3000,7 @@ checks:
             exec_root: Arc::new(dir.path().to_path_buf()),
             config: Arc::new(config),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         });
 
         handle_retry_selected(&mut app, &mut tasks);
@@ -3278,7 +3317,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         });
 
         handle_trigger_on_demand(&mut app, &mut tasks);
@@ -3322,7 +3361,7 @@ checks:
             exec_root: Arc::new(PathBuf::from("/tmp")),
             config: Arc::new(config.clone()),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         });
 
         handle_fix_selected(&mut app, &mut tasks);
@@ -3402,7 +3441,7 @@ checks:
             exec_root: Arc::new(dir.to_path_buf()),
             config: Arc::new(config),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         });
         (app, tasks, rx)
     }
@@ -3524,7 +3563,7 @@ checks:
             exec_root: Arc::new(dir.path().to_path_buf()),
             config: Arc::new(config),
             cancels: CancelRegistry::default(),
-            key_root: None,
+            keyed: false,
         });
 
         handle_fix_all(&mut app, &mut tasks);
@@ -4416,19 +4455,16 @@ checks:
             files: files.iter().map(|f| f.to_string()).collect(),
             base_ref: crate::git::CLI_FILES_BASE_REF.to_string(),
         };
-        let mut checks = select_checks(&config, &changed_files, dir, None).checks;
+        let mut checks = select_checks(&config, &changed_files, dir, false).checks;
         checks.retain(keep);
         let mut app = App::new(config.clone(), changed_files, checks, "main".to_string());
-        app.watch_roots = Some(app::WatchRoots {
-            key_root: dir.to_path_buf(),
-            exec_root: dir.to_path_buf(),
-        });
+        app.watch_root = Some(dir.to_path_buf());
         finish_run(&mut app, &config, None);
         let ran = app.results.values_mut();
         ran.filter(|r| r.status == CheckStatus::Pending)
             .for_each(|r| r.status = CheckStatus::Passed);
         let cancels = CancelRegistry::default();
-        let ctx = TaskCtx::new(dir.to_path_buf(), dir, Arc::new(config), &cancels, None);
+        let ctx = TaskCtx::new(dir.to_path_buf(), dir, Arc::new(config), &cancels, false);
         let (tasks, rx) = Tasks::new(ctx);
         (app, tasks, rx)
     }
@@ -4464,7 +4500,7 @@ checks:
     /// [`touched`] with `config`
     fn touched_with(config: &CiConfig, dir: &Path, files: &[&str]) -> Message {
         let saved: Vec<String> = files.iter().map(|f| f.to_string()).collect();
-        Message::Watch(crate::watch::watch_batch(config, saved, dir, dir))
+        Message::Watch(crate::watch::watch_batch(config, saved, dir))
     }
 
     /// Saving a PHP file re-runs `php-lint` like 'r' (git refresh, then the
@@ -5145,7 +5181,7 @@ checks:
             let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
             let base_ref = crate::git::CLI_FILES_BASE_REF.to_string();
             let changed = ChangedFiles { files, base_ref };
-            let checks = select_checks(&config, &changed, dir.path(), None).checks;
+            let checks = select_checks(&config, &changed, dir.path(), false).checks;
             (changed, checks)
         };
         let (both, both_checks) = selected(&["src/a.php", "src/b.php"]);

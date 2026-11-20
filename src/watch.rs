@@ -1,13 +1,14 @@
 //! `--watch` (TUI): saving files re-runs the checks they affect.
 //!
-//! A `notify` watcher on each dir of the repo worth watching ([`walk`]: not
-//! gitignored, not `.git/` / `.ci-tui/`, not a nested repo; dirs created
-//! later are added as they appear) feeds a thread that debounces bursts of
-//! saves into one batch ([`next_batch`]), keeps the repo-relative paths
-//! worth checking ([`keep_paths`]: also not editor temp files, not matched
-//! by `ignore_patterns`, not gitignored) and sends the checks they select
-//! to run automatically ([`affected_checks`]), each with its saved inputs
-//! ([`WatchBatch`]), to the TUI, which re-runs them like `r`.
+//! A `notify` watcher on each dir of the execution root worth watching
+//! ([`walk`]: not gitignored, not `.git/` / `.ci-tui/`, not a nested repo;
+//! dirs created later are added as they appear) feeds a thread that
+//! debounces bursts of saves into one batch ([`next_batch`]), keeps the
+//! exec-root-relative paths worth checking ([`keep_paths`]: also not editor
+//! temp files, not matched by `ignore_patterns`, not gitignored) and sends
+//! the checks they select to run automatically ([`affected_checks`]), each
+//! with its saved inputs ([`WatchBatch`]), to the TUI, which re-runs them
+//! like `r`.
 
 use crate::cache::saved_inputs;
 use crate::checks::{select_checks, CheckToRun, Decision};
@@ -31,7 +32,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 /// Longest a batch waits for quiet, so constant writes elsewhere cannot
 /// hold back saves
 const MAX_BATCH_WAIT: Duration = Duration::from_secs(2);
-/// Repo-relative dirs never watched for saves: git's own writes and
+/// Root-relative dirs never watched for saves: git's own writes and
 /// ci-tui's (result cache under `.git/`, logs) would re-trigger checks
 const ALWAYS_IGNORED: [&str; 2] = [".git/", ".ci-tui/"];
 /// Longest `git check-ignore` may take; the batch is dropped after it
@@ -52,37 +53,33 @@ pub struct WatchBatch {
 #[derive(Debug)]
 pub struct SavedCheck {
     pub check: CheckToRun,
-    /// The batch's kept saved files, repo-relative (sorted, deduped) that are
-    /// the check's inputs ([`saved_inputs`]), all of them for a check without
-    /// any: their content tells apart what its run covered or wrote itself
-    /// ([`crate::ui::app::App::queue_watch`])
+    /// The batch's kept saved files, exec-root-relative (sorted, deduped)
+    /// that are the check's inputs ([`saved_inputs`]), all of them for a
+    /// check without any: their content tells apart what its run covered or
+    /// wrote itself ([`crate::ui::app::App::queue_watch`])
     pub saved: Vec<String>,
 }
 
-/// Watched tree: the repo root, else the cwd
+/// Watched tree: the exec root, where changed-file paths resolve (local
+/// mode: the repo root; docker mode: the project dir, saves outside it
+/// cannot resolve in the container)
 struct Root {
     /// Canonical path
     path: PathBuf,
-    /// `path` is a git repo: gitignored paths are neither watched nor checked
+    /// `path` is in a git repo (at its top or below): gitignored paths
+    /// (parent dirs' `.gitignore`s included) are neither watched nor checked
     git: bool,
 }
 
-/// Watch the repo containing `cwd` (else `cwd`), sending each batch's
-/// [`affected_checks`] to `tx`. Errors when the watcher cannot start (e.g.
+/// Watch `exec_root`, sending each batch's [`affected_checks`] to `tx`,
+/// with paths relative to it. Errors when the watcher cannot start (e.g.
 /// inotify watch limit reached).
 pub fn start(
-    cwd: &Path,
     config: Arc<CiConfig>,
     exec_root: PathBuf,
     tx: UnboundedSender<WatchBatch>,
 ) -> Result<Watch> {
-    let (path, git) = match crate::git::repo_root(cwd) {
-        Ok(root) => (root, true),
-        Err(_) => (cwd.to_path_buf(), false),
-    };
-    // Real path: watchers may report events under it (macOS FSEvents)
-    let path = path.canonicalize().unwrap_or(path);
-    let root = Root { path, git };
+    let root = watch_root(&exec_root);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         // Watch errors (e.g. a vanished dir) only lose those events
@@ -101,9 +98,21 @@ pub fn start(
     let weak = Arc::downgrade(&watcher);
     std::thread::Builder::new()
         .name("watch".to_string())
-        .spawn(move || watch_loop(&event_rx, &root, &weak, &config, &exec_root, &tx))
+        .spawn(move || watch_loop(&event_rx, &root, &weak, &config, &tx))
         .context("--watch: failed to start watch thread")?;
     Ok(Watch { _watcher: watcher })
+}
+
+/// [`Root`] of `exec_root`: its real path (watchers may report events
+/// under it, e.g. macOS FSEvents; saved paths and discovered tests resolve
+/// under it alike)
+fn watch_root(exec_root: &Path) -> Root {
+    Root {
+        path: exec_root
+            .canonicalize()
+            .unwrap_or_else(|_| exec_root.to_path_buf()),
+        git: crate::git::repo_root(exec_root).is_ok(),
+    }
 }
 
 /// Batch thread: until the watcher or the TUI is gone, watch new dirs and
@@ -113,7 +122,6 @@ fn watch_loop(
     root: &Root,
     watcher: &Weak<Mutex<RecommendedWatcher>>,
     config: &CiConfig,
-    exec_root: &Path,
     tx: &UnboundedSender<WatchBatch>,
 ) {
     while let Some(mut batch) = next_batch(events, DEBOUNCE, MAX_BATCH_WAIT) {
@@ -124,7 +132,7 @@ fn watch_loop(
         drop(watcher);
         batch.extend(found);
         let saved = keep_paths(root, batch, config);
-        let batch = watch_batch(config, saved, &root.path, exec_root);
+        let batch = watch_batch(config, saved, &root.path);
         if !batch.checks.is_empty() && tx.send(batch).is_err() {
             return;
         }
@@ -247,7 +255,7 @@ fn next_batch<T>(rx: &Receiver<T>, quiet: Duration, max_wait: Duration) -> Optio
     Some(batch)
 }
 
-/// Saved `paths` as sorted, deduped repo-relative files worth checking:
+/// Saved `paths` as sorted, deduped root-relative files worth checking:
 /// under `root`, not in `.git/` / `.ci-tui/`, not editor temp files, not
 /// matched by `ignore_patterns`, not directories, and not gitignored (none
 /// when git fails in a repo: better a lost batch than re-running on
@@ -294,9 +302,10 @@ fn is_editor_temp(file: &str) -> bool {
         || autosave
 }
 
-/// `files` (repo-relative; `dir/` for a dir) that git ignores in the repo
-/// at `root`; tracked files never are. None outside a repo. `None` when git
-/// fails (exit other than 0 / 1) or times out.
+/// `files` (root-relative; `dir/` for a dir) that git ignores, run in
+/// `root` (in a subdir git takes and prints paths relative to it); tracked
+/// files never are. None outside a repo. `None` when git fails (exit other
+/// than 0 / 1) or times out.
 fn gitignored(root: &Root, files: &[String]) -> Option<HashSet<String>> {
     if !root.git {
         return Some(HashSet::new());
@@ -325,29 +334,21 @@ pub fn affected_checks(config: &CiConfig, files: Vec<String>, exec_root: &Path) 
         files,
         base_ref: CLI_FILES_BASE_REF.to_string(),
     };
-    let selected = select_checks(config, &saved, exec_root, None);
+    let selected = select_checks(config, &saved, exec_root, false);
     let runs = |check: &CheckToRun| check.decision() == Decision::Run;
     selected.checks.into_iter().filter(runs).collect()
 }
 
 /// [`affected_checks`] of the saved `files`, each with its saved inputs,
-/// told apart by resolved path. `key_root` is the watch root (canonical),
-/// where the saved paths resolve, so `exec_root` is compared canonical too:
-/// a symlinked project path must not hide a discovered test. Blocking, like
+/// told apart by path under `root`, the watch root (canonical), where the
+/// saved paths and discovered tests both resolve. Blocking, like
 /// [`affected_checks`].
-pub fn watch_batch(
-    config: &CiConfig,
-    files: Vec<String>,
-    key_root: &Path,
-    exec_root: &Path,
-) -> WatchBatch {
-    let canonical = exec_root.canonicalize();
-    let resolved = canonical.as_deref().unwrap_or(exec_root);
+pub fn watch_batch(config: &CiConfig, files: Vec<String>, root: &Path) -> WatchBatch {
     let with_inputs = |check: CheckToRun| SavedCheck {
-        saved: saved_inputs(&check, config, key_root, resolved),
+        saved: saved_inputs(&check, config, root),
         check,
     };
-    let checks = affected_checks(config, files, exec_root);
+    let checks = affected_checks(config, files, root);
     WatchBatch {
         checks: checks.into_iter().map(with_inputs).collect(),
     }
@@ -659,6 +660,47 @@ checks:
         assert_eq!(walked(&root(repo.path(), true)), ["", "src", "src/lib"]);
     }
 
+    /// Repo whose root `.gitignore` ignores `svc/target/` and `*.log`, with
+    /// [`make_tree`] in `svc/`; returns the repo and its `svc` dir
+    fn svc_repo() -> (tempfile::TempDir, PathBuf) {
+        let repo = repo("svc/target/\n*.log\n");
+        let svc = repo.path().join("svc");
+        make_tree(&svc);
+        (repo, svc)
+    }
+
+    /// Watch root below the repo root (docker-mode config in a subdir):
+    /// parent `.gitignore`s still apply, paths are relative to it
+    #[test]
+    fn test_walk_subdir_root_applies_parent_gitignore() {
+        if in_git_hook() {
+            return;
+        }
+        let (_repo, svc) = svc_repo();
+
+        assert_eq!(walked(&root(&svc, true)), ["", "src", "src/lib"]);
+    }
+
+    #[test]
+    fn test_keep_paths_subdir_root_relative_to_it() {
+        if in_git_hook() {
+            return;
+        }
+        let (repo, svc) = svc_repo();
+        let root = root(&svc, true);
+        let saved = [
+            "target/T.php",
+            "a.log",
+            "src/A.php",
+            ".ci-tui/x.php",
+            "src/.A.php.swp",
+        ];
+        let mut paths: Vec<PathBuf> = saved.iter().map(|f| svc.join(f)).collect();
+        paths.push(repo.path().join("other/O.php"));
+
+        assert_eq!(keep_paths(&root, paths, &config()), ["src/A.php"]);
+    }
+
     /// Outside a repo `.gitignore` does not apply
     #[test]
     fn test_walk_outside_repo_skips_only_ci_tui_and_nested_repos() {
@@ -674,9 +716,9 @@ checks:
         checks.iter().map(CheckToRun::id).collect()
     }
 
-    /// Edge case: config in `sub/`, so exec-relative discovered tests and
-    /// repo-relative saved paths differ
-    fn sub_dir_config() -> CiConfig {
+    /// Edge case: test discovery maps `src/{path}.php` to
+    /// `tests/{path}Test.php`
+    fn discovery_config() -> CiConfig {
         serde_yaml::from_str(
             r#"
 version: 2
@@ -684,7 +726,7 @@ runner: local
 local: { shell: sh }
 git: { base_branch: main, fallback_branch: HEAD~1 }
 file_patterns:
-  source: { pattern: '^sub/src/.*\.php$' }
+  source: { pattern: '^src/.*\.php$' }
 checks:
   fast:
     checks:
@@ -697,7 +739,7 @@ checks:
             strategies:
               - type: path_mapping
                 rules:
-                  - source: sub/src/{path}.php
+                  - source: src/{path}.php
                     tests:
                       - tests/{path}Test.php
 "#,
@@ -706,24 +748,22 @@ checks:
     }
 
     /// A saved test the check discovered is one of its inputs when the exec
-    /// root is below the watch root, also through a symlinked project path:
+    /// root is a symlinked project path (the watch root is its real path):
     /// dropping it would leave a new test unchecked
-    #[rstest::rstest]
-    #[case::exec_root_below_watch_root(false)]
-    #[case::symlinked_exec_root(true)]
-    fn test_watch_batch_keeps_discovered_test_saved_under_exec_root(#[case] symlinked: bool) {
+    #[test]
+    fn test_watch_batch_keeps_discovered_test_saved_under_symlinked_exec_root() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let sub = root.join("sub");
+        let sub = dir.path().canonicalize().unwrap().join("sub");
         std::fs::create_dir_all(sub.join("tests")).unwrap();
         std::fs::write(sub.join("tests/aTest.php"), "test").unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&sub, &link).unwrap();
-        let exec_root = if symlinked { &link } else { &sub };
-        let saved = ["sub/src/a.php", "sub/tests/aTest.php"].map(String::from);
+        let saved = ["src/a.php", "tests/aTest.php"].map(String::from);
 
-        let batch = watch_batch(&sub_dir_config(), saved.to_vec(), &root, exec_root);
+        let root = watch_root(&link);
+        let batch = watch_batch(&discovery_config(), saved.to_vec(), &root.path);
 
+        assert_eq!(root.path, sub);
         assert_eq!(batch.checks[0].saved, saved);
     }
 
@@ -760,7 +800,7 @@ checks:
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let missing = Path::new("/nonexistent-ci-tui-watch");
 
-        let err = start(missing, Arc::new(config()), missing.to_path_buf(), tx)
+        let err = start(Arc::new(config()), missing.to_path_buf(), tx)
             .err()
             .expect("watching a missing dir fails");
 
@@ -792,7 +832,7 @@ checks:
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let root = dir.path().to_path_buf();
-        let _watch = start(&root, Arc::new(config()), root.clone(), tx).unwrap();
+        let _watch = start(Arc::new(config()), root.clone(), tx).unwrap();
 
         std::fs::write(dir.path().join("A.php"), "<?php").unwrap();
 
@@ -808,7 +848,7 @@ checks:
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let root = dir.path().to_path_buf();
-        let _watch = start(&root, Arc::new(config()), root.clone(), tx).unwrap();
+        let _watch = start(Arc::new(config()), root.clone(), tx).unwrap();
 
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         std::fs::write(root.join("a/b/A.php"), "<?php").unwrap();
@@ -828,12 +868,32 @@ checks:
         std::fs::create_dir_all(repo.path().join("target")).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let root = repo.path().to_path_buf();
-        let _watch = start(&root, Arc::new(config()), root.clone(), tx).unwrap();
+        let _watch = start(Arc::new(config()), root.clone(), tx).unwrap();
 
         std::fs::write(root.join("target/A.php"), "<?php").unwrap();
         std::thread::sleep(DEBOUNCE * 3);
         std::fs::write(root.join("B.php"), "<?php").unwrap();
 
         assert_eq!(batch_files(&recv_batch(&mut rx)), ["B.php"]);
+    }
+
+    /// Exec root below the repo root (docker-mode config in a subdir): saves
+    /// outside it send nothing, saves under it are relative to it
+    #[test]
+    fn test_start_in_subdir_sends_paths_relative_to_it() {
+        if in_git_hook() {
+            return;
+        }
+        let (repo, svc) = svc_repo();
+        std::fs::create_dir_all(repo.path().join("other")).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _watch = start(Arc::new(config()), svc.clone(), tx).unwrap();
+
+        std::fs::write(repo.path().join("other/A.php"), "<?php").unwrap();
+        std::fs::write(repo.path().join("A.php"), "<?php").unwrap();
+        std::fs::write(svc.join("target/T.php"), "<?php").unwrap();
+        std::fs::write(svc.join("src/B.php"), "<?php").unwrap();
+
+        assert_eq!(batch_files(&recv_batch(&mut rx)), ["src/B.php"]);
     }
 }

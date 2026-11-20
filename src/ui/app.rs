@@ -326,7 +326,7 @@ impl RunState {
 pub struct WatchRun {
     /// The check as the saves selected it
     pub check: CheckToRun,
-    /// Saved files (repo-relative) of the batches that queued it, per batch
+    /// Saved files (exec-root-relative) of the batches that queued it, per batch
     /// only the check's inputs ([`App::queue_watch`])
     pub saved: Vec<String>,
     /// The runner still owed the check (pending / queued) when last seen:
@@ -358,15 +358,6 @@ pub type Snapshot = HashMap<PathBuf, Option<u64>>;
 fn hashed(path: PathBuf) -> (PathBuf, Option<u64>) {
     let hash = file_hash(&path);
     (path, hash)
-}
-
-/// Where `--watch` snapshot paths resolve ([`App::queue_watch`])
-#[derive(Debug, Clone)]
-pub struct WatchRoots {
-    /// Changed and saved files (repo-relative): the result cache's key root
-    pub key_root: PathBuf,
-    /// Discovered tests: the execution root
-    pub exec_root: PathBuf,
 }
 
 /// Represents an item that can be selected in the checks list
@@ -478,8 +469,9 @@ pub struct App {
     pub color: bool,
     /// `--watch` is on: saves re-run affected checks (shown in the header)
     pub watching: bool,
-    /// `--watch` snapshot roots; `None` = no snapshots (no `--watch`)
-    pub watch_roots: Option<WatchRoots>,
+    /// Where `--watch` snapshot paths resolve (changed, saved and discovered
+    /// files alike: the execution root); `None` = no snapshots (no `--watch`)
+    pub watch_root: Option<PathBuf>,
 
     /// Width of the output panel area (updated during render, used for
     /// command-line truncation when counting rendered lines)
@@ -578,7 +570,7 @@ impl App {
             filter_notice: None,
             color: true,
             watching: false,
-            watch_roots: None,
+            watch_root: None,
             output_area_width: 80,
             output_cache: None,
             view: ViewState::default(),
@@ -733,14 +725,14 @@ impl App {
     /// both at the start and now is unchanged (a check's transient file).
     /// False without saved files or snapshot.
     pub fn own_writes(&self, queued: &WatchRun) -> bool {
-        let (Some(roots), Some(snapshot)) = (
-            &self.watch_roots,
+        let (Some(root), Some(snapshot)) = (
+            &self.watch_root,
             self.run.run_snapshots.get(queued.check.id()),
         ) else {
             return false;
         };
         let unchanged = |file: &String| {
-            let path = roots.key_root.join(file);
+            let path = root.join(file);
             snapshot
                 .get(&path)
                 .is_some_and(|hash| *hash == file_hash(&path))
@@ -752,12 +744,12 @@ impl App {
     /// `check_id`, or the saves queued for a run that reads the tree, to its
     /// run start snapshot; paths it already holds are not read again
     pub fn snapshot_saved(&mut self, check_id: &str, saved: &[String]) {
-        let (Some(roots), Some(snapshot)) =
-            (&self.watch_roots, self.run.run_snapshots.get_mut(check_id))
+        let (Some(root), Some(snapshot)) =
+            (&self.watch_root, self.run.run_snapshots.get_mut(check_id))
         else {
             return;
         };
-        let paths = saved.iter().map(|file| roots.key_root.join(file));
+        let paths = saved.iter().map(|file| root.join(file));
         let new: Vec<PathBuf> = paths.filter(|p| !snapshot.contains_key(p)).collect();
         snapshot.extend(new.into_iter().map(hashed));
     }
@@ -1002,8 +994,8 @@ impl App {
     /// it also sees the saves queued for it by now.
     fn snapshot_run_start(&mut self, check_id: &str) {
         let status = self.results.get(check_id).map(|r| &r.status);
-        let Some(roots) = self
-            .watch_roots
+        let Some(root) = self
+            .watch_root
             .as_ref()
             .filter(|_| status.is_some_and(|s| *s != CheckStatus::Running))
         else {
@@ -1012,9 +1004,8 @@ impl App {
         let Some(check) = self.checks.iter().find(|c| c.id() == check_id) else {
             return;
         };
-        let (key_root, exec_root) = (&roots.key_root, &roots.exec_root);
         let selected_from = &check.selected_from;
-        let paths = input_paths(check, &self.config, selected_from, key_root, exec_root);
+        let paths = input_paths(check, &self.config, selected_from, root);
         let snapshot = paths.into_iter().map(hashed).collect();
         let reads_tree = !check.takes_file_list();
         self.run
@@ -2091,13 +2082,10 @@ checks:
         App::new(config, changed_files, checks, "main".to_string())
     }
 
-    /// [`make_app`] with `--watch` roots at `dir`
+    /// [`make_app`] with the `--watch` root at `dir`
     fn watch_app(dir: &std::path::Path) -> App {
         let mut app = make_app();
-        app.watch_roots = Some(WatchRoots {
-            key_root: dir.to_path_buf(),
-            exec_root: dir.to_path_buf(),
-        });
+        app.watch_root = Some(dir.to_path_buf());
         app
     }
 
@@ -2128,7 +2116,7 @@ checks:
     }
 
     /// Saved files of a `--watch` re-run join its start snapshot; without
-    /// `--watch` roots nothing is snapshotted
+    /// a `--watch` root nothing is snapshotted
     #[test]
     fn test_snapshot_saved_adds_watch_run_files() {
         let dir = tempfile::tempdir().unwrap();

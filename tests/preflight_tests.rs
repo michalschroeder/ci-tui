@@ -1,7 +1,8 @@
 //! Tests for the docker startup probe (`preflight::docker_warnings`): warn when
-//! changed files won't resolve inside the containers the selected checks use
-//! (repo not at a running service container's WORKDIR, or a plain-image
-//! `docker run` without a matching repo mount).
+//! changed files (relative to the project dir) won't resolve inside the
+//! containers the selected checks use (project dir not at a running service
+//! container's WORKDIR, or a plain-image `docker run` without a matching
+//! project dir mount).
 
 use ci_tui::checks::CheckToRun;
 use ci_tui::exit;
@@ -129,6 +130,10 @@ async fn exec_probe_missing_warns_with_file_and_service() {
     assert!(warning.contains("service `app`"), "{warning}");
     assert!(warning.contains(RUNNING_ID), "{warning}");
     assert!(warning.contains("working directory"), "{warning}");
+    assert!(
+        warning.contains("mount the project dir at the container's WORKDIR"),
+        "{warning}"
+    );
     // docker.work_dir does not apply to `docker exec`: must not be suggested
     assert!(!warning.contains("docker.work_dir"), "{warning}");
 }
@@ -250,6 +255,7 @@ async fn image_without_volume_mount_warns() {
     assert!(warning.contains("docker.work_dir"), "{warning}");
     assert!(warning.contains("docker run"), "{warning}");
     assert!(warning.contains("`img`"), "{warning}");
+    assert!(warning.contains("has no project dir mount"), "{warning}");
 }
 
 #[tokio::test]
@@ -266,7 +272,10 @@ async fn image_mount_target_mismatch_warns() {
     let warnings = warnings_for(&image(Some(".:/build")), &image_mock()).await;
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("/build"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("mounts the project dir at `/build`"),
+        "{warnings:?}"
+    );
     assert!(warnings[0].contains("/app"), "{warnings:?}");
 }
 

@@ -78,7 +78,7 @@ local:
     APP_ENV: testing
 ```
 
-With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so `{files}` paths resolve from any subdirectory); the `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` is rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
+With `runner: local`, checks and pre-commands run directly on the host from the git repository root (so `{files}` paths resolve from any subdirectory); changed files are detected across the whole repo, repo-relative, even with the config in a subdirectory. The `docker` section becomes optional and is ignored, but if present it must still be a valid `docker` section. Per-check / pre-command `service` is rejected at load time in local mode. `local.env` applies to every mode (TUI, `--simple`, `--fix`). Use this when your toolchain runs natively. It gives up CI environment parity — prefer docker mode when your CI runs in containers.
 
 ## Docker Configuration
 
@@ -391,6 +391,13 @@ Commands can use `{files}` placeholder, which expands to space-separated list of
 command: php-cs-fixer fix --dry-run {files}
 # Expands to: php-cs-fixer fix --dry-run src/Foo.php src/Bar.php
 ```
+
+Paths (and the `file_patterns` / test discovery rules matching them) are relative to the directory checks run from:
+
+- Docker mode: the project dir (the config's directory, or the cwd with `--config`). Only changed files under it are detected: with `svc/ci-tui.yaml`, a change to `svc/src/Foo.php` is `src/Foo.php`, and a change outside `svc/` is not listed (it could not resolve in a container whose WORKDIR is the project dir).
+- `runner: local`: the git repository root. Changed files of the whole repo, repo-relative (`svc/src/Foo.php`), wherever the config sits.
+
+`--files` paths are given relative to the cwd and rewritten relative to that directory.
 
 **Auto-skip behavior:** If a command contains `{files}` but no files match the trigger pattern, CI-TUI automatically skips the check to prevent accidentally running against entire codebase.
 

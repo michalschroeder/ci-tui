@@ -4,6 +4,12 @@
 //! to a base branch or commit reference, falling back only when a ref does not
 //! exist.
 //!
+//! Every path listing runs in the directory it is given (the execution root)
+//! and lists only its subtree, relative to it: `git diff --relative`, plain
+//! `git ls-files`. Local mode passes the repo root (whole repo, repo-relative
+//! paths); docker mode the project dir, so a config in a repo subdirectory
+//! gets paths that resolve under the container WORKDIR mapped to it.
+//!
 //! # Key Types
 //!
 //! - [`ChangedFiles`]: Collection of changed file paths with filtering methods
@@ -125,10 +131,14 @@ pub const STAGED_BASE_REF: &str = "--staged (git index)";
 /// (`U`) still reach their checks; an allow-list would drop new classes silently.
 const DIFF_FILTER: &str = "--diff-filter=d";
 
+/// Every `git diff` lists only the run dir's subtree, relative to it (see the
+/// module doc). Explicit, so a user's `diff.relative` changes nothing.
+const RELATIVE: &str = "--relative";
+
 /// Files that have changed compared to a base git reference
 #[derive(Debug, Clone, Default)]
 pub struct ChangedFiles {
-    /// List of changed file paths relative to the repository root
+    /// Changed file paths, relative to the execution root (see the module doc)
     pub files: Vec<String>,
     /// The git reference used as the comparison base (e.g., "origin/development")
     pub base_ref: String,
@@ -187,7 +197,8 @@ pub fn base_ref_candidates(git_config: &GitConfig) -> [String; 3] {
 /// Detect changed files by trying multiple base references in order of preference.
 ///
 /// Tries: `origin/{base_branch}`, `{base_branch}`, `{fallback_branch}`, and
-/// diffs against the first that exists.
+/// diffs against the first that exists. Lists committed, uncommitted and
+/// untracked files under `project_root` (the execution root), relative to it.
 ///
 /// # Errors
 ///
@@ -289,6 +300,7 @@ fn is_missing_ref(err: &anyhow::Error) -> bool {
 /// Get files staged in the git index (`git diff --cached`), for `--staged`.
 ///
 /// Only the index is read: no base ref, unstaged changes or untracked files.
+/// Paths as for [`detect_changes`]: under `project_root`, relative to it.
 ///
 /// # Errors
 ///
@@ -304,12 +316,12 @@ pub fn get_staged_files_with_executor(
     project_root: &Path,
     executor: &impl GitExecutor,
 ) -> Result<ChangedFiles> {
-    let args = ["--cached", "--name-only", DIFF_FILTER];
+    let args = ["--cached", "--name-only", DIFF_FILTER, RELATIVE];
     let mut files = list_paths(project_root, executor, "diff", &args)
         .context("could not read staged files from the git index")?;
-    // Checks read the working tree: drop staged paths since deleted on disk.
-    // `--full-name -- :/` keeps paths repo-relative like `git diff` from subdirs.
-    let args = ["--deleted", "--full-name", "--", ":/"];
+    // Checks read the working tree: drop staged paths since deleted on disk
+    // (plain `ls-files`: relative to the run dir like `diff --relative`)
+    let args = ["--deleted"];
     let deleted: HashSet<String> = list_paths(project_root, executor, "ls-files", &args)
         .context("could not list staged files deleted from the working tree")?
         .into_iter()
@@ -331,6 +343,7 @@ fn run_committed_diff(
     let args = [
         "--name-only",
         DIFF_FILTER,
+        RELATIVE,
         "--merge-base",
         // Refs come from config / `--base`: a leading `-` must not parse as an
         // option, and `--` keeps a ref that is also a path unambiguous.
@@ -343,15 +356,14 @@ fn run_committed_diff(
 }
 
 fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
-    let args = ["--name-only", DIFF_FILTER, "HEAD"];
+    let args = ["--name-only", DIFF_FILTER, RELATIVE, "HEAD"];
     list_paths(project_root, executor, "diff", &args)
 }
 
 fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
-    // `--full-name -- :/` keeps new paths repo-relative like the tracked ones
-    // from `git diff`, and lists files outside a subdirectory project root —
-    // plain `ls-files` from a subdir only sees its own tree.
-    let args = ["--others", "--exclude-standard", "--full-name", "--", ":/"];
+    // Plain `ls-files`: the run dir's subtree, relative to it, like the
+    // tracked paths from `diff --relative`
+    let args = ["--others", "--exclude-standard"];
     let mut paths = list_paths(project_root, executor, "ls-files", &args)?;
     // An untracked nested repo is listed as one `dir/` entry, not its files:
     // no file to check or hash for the cache key.
@@ -760,28 +772,48 @@ mod tests {
         assert_eq!(result.files, vec!["new_file.rs", "src/new_mod.rs"]);
     }
 
+    /// Every listing runs where it is called (the exec root) and prints
+    /// paths relative to it, limited to its subtree: `--relative` for the
+    /// diffs (whatever the user's `diff.relative`), plain `ls-files`
     #[test]
-    fn get_changed_files_lists_untracked_repo_relative() {
+    fn get_changed_files_lists_paths_relative_to_the_run_dir() {
         let mut mock = mock_resolving();
+        let expected: [&[&str]; 3] = [
+            &[
+                "diff",
+                "-z",
+                "--name-only",
+                DIFF_FILTER,
+                "--relative",
+                "--merge-base",
+                "--end-of-options",
+                "main",
+                "HEAD",
+                "--",
+            ],
+            &[
+                "diff",
+                "-z",
+                "--name-only",
+                DIFF_FILTER,
+                "--relative",
+                "HEAD",
+            ],
+            &["ls-files", "-z", "--others", "--exclude-standard"],
+        ];
+        for (i, args) in expected.into_iter().enumerate() {
+            let output = format!("src/{i}.rs\0");
+            mock.expect_run_command()
+                .withf(move |dir, actual: &[String]| {
+                    dir == Path::new("/repo/svc") && actual == args
+                })
+                .times(1)
+                .return_once(move |_, _| Ok(output));
+        }
 
-        mock.expect_run_command()
-            .withf(|_, args: &[String]| args.iter().any(|a| a == DIFF_FILTER))
-            .times(2)
-            .returning(|_, _| Ok(String::new()));
-
-        // Untracked paths must come repo-relative (and repo-wide) like the
-        // `git diff` ones, whatever directory the config was found in.
-        mock.expect_run_command()
-            .withf(|_, args: &[String]| {
-                args.iter().any(|a| a == "ls-files")
-                    && args.iter().any(|a| a == "--full-name")
-                    && args.iter().any(|a| a == ":/")
-            })
-            .times(1)
-            .returning(|_, _| Ok("other/t.txt\0sub/new.rs\0".to_string()));
-
-        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
-        assert_eq!(result.files, vec!["other/t.txt", "sub/new.rs"]);
+        let result =
+            get_changed_files_with_executor(Path::new("/repo/svc"), "main", &mock).unwrap();
+        assert_eq!(result.files, vec!["src/0.rs", "src/1.rs", "src/2.rs"]);
     }
 
     #[test]
@@ -875,14 +907,19 @@ mod tests {
         // Index diff + deleted-on-disk list only: no base ref, unstaged diff or untracked
         mock.expect_run_command()
             .withf(|_, args: &[String]| {
-                args == ["diff", "-z", "--cached", "--name-only", DIFF_FILTER]
+                args == [
+                    "diff",
+                    "-z",
+                    "--cached",
+                    "--name-only",
+                    DIFF_FILTER,
+                    "--relative",
+                ]
             })
             .times(1)
             .returning(|_, _| Ok("a.rs\0src/b.rs\0gone.rs\0".to_string()));
         mock.expect_run_command()
-            .withf(|_, args: &[String]| {
-                args == ["ls-files", "-z", "--deleted", "--full-name", "--", ":/"]
-            })
+            .withf(|_, args: &[String]| args == ["ls-files", "-z", "--deleted"])
             .times(1)
             .returning(|_, _| Ok("gone.rs\0".to_string()));
 
