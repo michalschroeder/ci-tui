@@ -348,7 +348,10 @@ fn run_uncommitted_diff(project_root: &Path, executor: &impl GitExecutor) -> Res
 }
 
 fn run_untracked_list(project_root: &Path, executor: &impl GitExecutor) -> Result<Vec<String>> {
-    let args = ["--others", "--exclude-standard"];
+    // `--full-name -- :/` keeps new paths repo-relative like the tracked ones
+    // from `git diff`, and lists files outside a subdirectory project root —
+    // plain `ls-files` from a subdir only sees its own tree.
+    let args = ["--others", "--exclude-standard", "--full-name", "--", ":/"];
     list_paths(project_root, executor, "ls-files", &args)
 }
 
@@ -751,6 +754,30 @@ mod tests {
 
         let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
         assert_eq!(result.files, vec!["new_file.rs", "src/new_mod.rs"]);
+    }
+
+    #[test]
+    fn get_changed_files_lists_untracked_repo_relative() {
+        let mut mock = mock_resolving();
+
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| args.iter().any(|a| a == DIFF_FILTER))
+            .times(2)
+            .returning(|_, _| Ok(String::new()));
+
+        // Untracked paths must come repo-relative (and repo-wide) like the
+        // `git diff` ones, whatever directory the config was found in.
+        mock.expect_run_command()
+            .withf(|_, args: &[String]| {
+                args.iter().any(|a| a == "ls-files")
+                    && args.iter().any(|a| a == "--full-name")
+                    && args.iter().any(|a| a == ":/")
+            })
+            .times(1)
+            .returning(|_, _| Ok("other/t.txt\0sub/new.rs\0".to_string()));
+
+        let result = get_changed_files_with_executor(Path::new("/tmp"), "main", &mock).unwrap();
+        assert_eq!(result.files, vec!["other/t.txt", "sub/new.rs"]);
     }
 
     #[test]
