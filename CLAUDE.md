@@ -31,7 +31,7 @@ Runs this repo's own `ci-tui.yaml` (fmt, clippy, unit, integration, doc tests in
 - `--list` shows what would run and why; `--no-cache` forces every selected check
 - `--fix` runs `cargo fmt` on changed files and re-runs fmt to verify
 - `--format json` for a machine-readable report (failed check output in `checks[].output`)
-- Needs `ci-tui` >= 0.6.0 on PATH (installed binary, not the code under change): `cargo install --path . --locked --target-dir /tmp/ci-tui-install` (repo `target/release` is root-owned). Not installed → skip to step 3
+- `ci-tui` on PATH runs the published image `ghcr.io/michalschroeder/ci-tui:latest` (a wrapper, not a host binary): the latest release, not the code under change, so a fix shows there only after its release. Update with `docker pull ghcr.io/michalschroeder/ci-tui:latest`. Not on PATH → skip to step 3
 
 ### Step 3: Final gate
 
