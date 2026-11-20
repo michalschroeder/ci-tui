@@ -27,7 +27,7 @@ HOST_PWD=$PWD ci-tui --simple --no-color
 ```
 
 Runs this repo's own `ci-tui.yaml` in the dev image: fmt, clippy (`--all-targets --all-features`), unit, integration and doc tests, the same commands as `make ci`. Only files changed vs `master` (incl. untracked) select checks (any crate file selects all 5; docs-only changes run nothing, nothing to check), and checks unchanged since their last pass are skipped (`✓ cached`). Must pass before every commit. Exit 0 pass, 1 checks failed, 2 config, 3 docker/git.
-- Narrow: `--group quality|tests`, `--only fmt,clippy,unit,integration,doctests`
+- Narrow: `--only fmt,clippy,unit,integration,doctests` (one parallel group `all`)
 - `--list` shows what would run and why
 - `--fix` runs `cargo fmt` on changed files and re-runs fmt to verify
 - `--format json` for a machine-readable report (failed check output in `checks[].output`)
