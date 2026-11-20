@@ -3,6 +3,9 @@
 //! These tests verify dashboard rendering by checking terminal buffer contents
 //! at 80x24 by default (`create_terminal`); some tests use a wider backend.
 
+// Test code: nesting limit targets production code (see src/lib.rs)
+#![allow(clippy::excessive_nesting)]
+
 use ci_tui::ui::app::StatusKind;
 use ci_tui::ui::dashboard;
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};

@@ -1,5 +1,8 @@
 //! Shared test utilities and mock helpers
 
+// Test code: nesting limit targets production code (see src/lib.rs)
+#![allow(clippy::excessive_nesting)]
+
 pub mod configs;
 
 use ci_tui::checks::{CheckFiles, CheckToRun};

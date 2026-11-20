@@ -3728,10 +3728,12 @@ checks:
             app.view.output_scroll, MOUSE_SCROLL_LINES,
             "one wheel tick scrolls by the small increment"
         );
-        assert!(
-            MOUSE_SCROLL_LINES < PAGE_SCROLL_LINES,
-            "wheel scroll must be smaller than a page scroll"
-        );
+        const {
+            assert!(
+                MOUSE_SCROLL_LINES < PAGE_SCROLL_LINES,
+                "wheel scroll must be smaller than a page scroll"
+            );
+        }
 
         handle_message(
             &mut app,

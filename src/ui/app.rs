@@ -3774,7 +3774,8 @@ checks:
 
         #[test]
         fn test_needs_redraw_set_after_mutations() {
-            let cases: Vec<(&str, fn(&mut App))> = vec![
+            type Case = (&'static str, fn(&mut App));
+            let cases: Vec<Case> = vec![
                 ("next_check", |a| a.next_check()),
                 ("previous_check", |a| a.previous_check()),
                 ("scroll_up", |a| a.scroll_up(1)),

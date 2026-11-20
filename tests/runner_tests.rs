@@ -6,6 +6,9 @@
 //! - CheckResult factory methods
 //! - CheckRunner orchestration
 
+// Test code: nesting limit targets production code (see src/lib.rs)
+#![allow(clippy::excessive_nesting)]
+
 use ci_tui::config::DEFAULT_MAX_OUTPUT_LINES;
 use ci_tui::runner::{
     build_docker_exec_command, build_docker_run_command, execute_command_with_executor,
@@ -1318,7 +1321,7 @@ mod check_runner_tests {
         runner.run_checks(checks, tx).await.unwrap();
         let events = collect_events(rx).await;
 
-        let pos = |pred: &dyn Fn(&RunnerEvent) -> bool| events.iter().position(|e| pred(e));
+        let pos = |pred: &dyn Fn(&RunnerEvent) -> bool| events.iter().position(pred);
         let queued =
             pos(&|e| matches!(e, RunnerEvent::CheckQueued { check_id } if check_id == "p0"));
         let started =

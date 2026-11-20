@@ -4,6 +4,9 @@
 //! (real local-mode commands logging their names), `--simple` and `--fix`
 //! through the binary. TUI state is unit-tested in `ui`.
 
+// Test code: nesting limit targets production code (see src/lib.rs)
+#![allow(clippy::excessive_nesting)]
+
 use ci_tui::config::{CiConfig, OnFailure};
 use ci_tui::exit;
 use ci_tui::runner::{CancelRegistry, CheckRunner, CheckStatus, RealCommandExecutor, RunnerEvent};
