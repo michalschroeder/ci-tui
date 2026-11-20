@@ -20,31 +20,30 @@ make fmt
 
 This runs `cargo fmt` to fix formatting issues automatically.
 
-### Step 2: Fast loop while iterating (dogfood)
+### Step 2: Iterate and gate commits (dogfood)
 
 ```bash
 HOST_PWD=$PWD ci-tui --simple --no-color
 ```
 
-Runs this repo's own `ci-tui.yaml` (fmt, clippy, unit, integration, doc tests in the dev image) only for files changed vs `master` (incl. untracked), skipping checks unchanged since their last pass (`✓ cached`). Exit 0 pass, 1 checks failed, 2 config, 3 docker/git.
+Runs this repo's own `ci-tui.yaml` in the dev image: fmt, clippy (`--all-targets --all-features`), unit, integration and doc tests, the same commands as `make ci`. Only files changed vs `master` (incl. untracked) select checks (any crate file selects all 5; docs-only changes run nothing, nothing to check), and checks unchanged since their last pass are skipped (`✓ cached`). Must pass before every commit. Exit 0 pass, 1 checks failed, 2 config, 3 docker/git.
 - Narrow: `--group quality|tests`, `--only fmt,clippy,unit,integration,doctests`
-- `--list` shows what would run and why; `--no-cache` forces every selected check
+- `--list` shows what would run and why
 - `--fix` runs `cargo fmt` on changed files and re-runs fmt to verify
 - `--format json` for a machine-readable report (failed check output in `checks[].output`)
-- `ci-tui` on PATH runs the published image `ghcr.io/michalschroeder/ci-tui:latest` (a wrapper, not a host binary): the latest release, not the code under change, so a fix shows there only after its release. Update with `docker pull ghcr.io/michalschroeder/ci-tui:latest`. Not on PATH → skip to step 3
+- `ci-tui` on PATH runs the published image `ghcr.io/michalschroeder/ci-tui:latest` (a wrapper, not a host binary): the latest release, not the code under change. The checks are plain cargo commands, so they test the current code; only a runner fix shows there after its release. Update with `docker pull ghcr.io/michalschroeder/ci-tui:latest`
 
-### Step 3: Final gate
+### Step 3: Before push
 
 ```bash
-make ci
+HOST_PWD=$PWD ci-tui --simple --no-color --no-cache
 ```
 
-This runs all CI checks in Docker (using the dev image), regardless of what changed:
-- `cargo fmt --check` - Code formatting check
-- `cargo clippy --all-targets --all-features -- -D warnings` - Linter checks (tests too)
-- `cargo nextest run` + `cargo test --doc` - Test suite (unit, integration, doc)
+A cached pass is keyed on the changed files' contents only, but clippy and the tests build the whole crate: after a rebase / merge of `master`, `make build-dev` (new toolchain, new lints) or edits to unchanged files, a `✓ cached` can hide a real failure. `--no-cache` runs every selected check. Required before every push and after any of those events.
 
-**Workflow:** `make fmt`, iterate with `ci-tui --simple`, then `make ci`. `make fmt` and `make ci` must pass before any commit or push (ci-tui runs nothing for docs-only changes, so it never replaces `make ci`).
+**Fallback:** `ci-tui` not on PATH → `make ci` instead of steps 2 and 3 (same checks, every time, regardless of what changed).
+
+**Workflow:** `make fmt`, `ci-tui --simple` while iterating and before each commit, `ci-tui --simple --no-cache` before push. GitHub CI is the final gate.
 
 These are the ONLY commands Claude should use to validate code changes. Do not use `cargo test`, `cargo clippy`, or other commands directly.
 
