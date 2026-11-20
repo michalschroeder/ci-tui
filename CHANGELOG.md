@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.1.0](https://github.com/michalschroeder/ci-tui/compare/v1.0.0...v1.1.0) (2026-11-20)
+
+
+### Features
+
+* make on_demand checks manual-only whatever their triggers match ([#268](https://github.com/michalschroeder/ci-tui/issues/268)) ([84f14c0](https://github.com/michalschroeder/ci-tui/commit/84f14c06a9e83cc1a543ea114e94f91614aa3a24))
+
+
+### Bug Fixes
+
+* drop untracked nested git repos from changed files ([#342](https://github.com/michalschroeder/ci-tui/issues/342)) ([7418478](https://github.com/michalschroeder/ci-tui/commit/741847839a190f6bded86f8b83c32b42244b1d32))
+* list changed files relative to the exec root so docker subdirectory configs resolve ([#343](https://github.com/michalschroeder/ci-tui/issues/343)) ([c14974b](https://github.com/michalschroeder/ci-tui/commit/c14974b98d163c96fcf0aa66e846a48be89bb52b))
+* list untracked files repo-relative when the config sits in a subdirectory ([#280](https://github.com/michalschroeder/ci-tui/issues/280)) ([06e2538](https://github.com/michalschroeder/ci-tui/commit/06e25385adfa1d048d551bf4220a8a864179ff2a))
+* show release version and short hash in the TUI footer ([#344](https://github.com/michalschroeder/ci-tui/issues/344)) ([04a2c89](https://github.com/michalschroeder/ci-tui/commit/04a2c898b9693b491b6eb1fe5f613958c32a0ba3))
+
+
+### Documentation
+
+* dogfood with the published ci-tui image instead of a host binary ([300fd03](https://github.com/michalschroeder/ci-tui/commit/300fd0307c85927956e7f3ae26ba10cdcb3792c1))
+* gate commits with ci-tui instead of make ci ([39d6ea8](https://github.com/michalschroeder/ci-tui/commit/39d6ea8123b6b0149d5acb230509771332f21102))
+
 ## [1.0.0](https://github.com/michalschroeder/ci-tui/compare/v0.6.0...v1.0.0) (2026-11-05)
 
 
