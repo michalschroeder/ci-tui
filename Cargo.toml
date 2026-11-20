@@ -1,6 +1,6 @@
 [package]
 name = "ci-tui"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "TUI for running and monitoring CI checks"
 license = "MIT OR Apache-2.0"
