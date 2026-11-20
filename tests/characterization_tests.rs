@@ -395,7 +395,7 @@ fn test_grep_failure_is_warning_and_other_strategies_still_find_tests() {
         &config,
         &make_changed_files(vec!["src/foo.rs"]),
         root.path(),
-        None,
+        false,
     );
 
     let a = assert_check_exists(&selected.checks, "a");
@@ -423,7 +423,7 @@ fn test_no_discovery_warnings_when_grep_succeeds() {
         &config,
         &make_changed_files(vec!["src/foo.rs"]),
         root.path(),
-        None,
+        false,
     );
     let a = assert_check_exists(&selected.checks, "a");
     assert_eq!(

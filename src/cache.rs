@@ -6,14 +6,13 @@
 //! files behind its test discovery, so editing only the source re-runs its
 //! tests, and the `file_pattern` matches `files_filter` dropped, so editing
 //! only a fixture re-runs its tests) + hash of the config content (minus the
-//! UI-only `notify` key). Changed files are read under the
-//! key root, where their paths resolve (repo root for git paths, execution
-//! root for `--files`); discovered tests under the execution root, where
-//! test discovery found them. Checks without concrete files (always-run,
-//! run-all, on-demand, skipped) or with a missing / unreadable file (e.g. a
-//! container path given to `--files`) get no key and are never cached. A
-//! pass is stored only if its key still matches when it finishes (files
-//! edited during the run are not cached).
+//! UI-only `notify` key). Every file is read under the execution root, where
+//! all paths resolve: git lists changed files relative to it, `--files` are
+//! rewritten relative to it, test discovery finds tests there. Checks without
+//! concrete files (always-run, run-all, on-demand, skipped) or with a
+//! missing / unreadable file (e.g. a container path given to `--files`) get
+//! no key and are never cached. A pass is stored only if its key still
+//! matches when it finishes (files edited during the run are not cached).
 //!
 //! Only these inputs count: edits elsewhere (`Cargo.toml`, unchanged files
 //! the changed ones use, a new base ref, the docker image, env) do not
@@ -78,14 +77,12 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 /// Set every check's [`CheckToRun::cache_key`] from the current contents of
-/// its files (each file read once): changed files under `key_root`,
-/// discovered tests under `exec_root` (see the module doc). Reads files:
-/// blocking.
+/// its files under `exec_root` (each file read once; see the module doc).
+/// Reads files: blocking.
 pub(crate) fn stamp_keys(
     checks: &mut [CheckToRun],
     config: &CiConfig,
     changed_files: &ChangedFiles,
-    key_root: &Path,
     exec_root: &Path,
 ) {
     let mut hashes: HashMap<PathBuf, Option<u64>> = HashMap::new();
@@ -95,7 +92,7 @@ pub(crate) fn stamp_keys(
             .or_insert_with(|| file_hash(path))
     };
     for check in checks {
-        let inputs = input_paths(check, config, changed_files, key_root, exec_root);
+        let inputs = input_paths(check, config, changed_files, exec_root);
         let config_hash = config.source_hash;
         check.cache_key =
             key_value(check, &inputs, config_hash, &mut hashed).map(|value| CacheKey {
@@ -106,46 +103,36 @@ pub(crate) fn stamp_keys(
     }
 }
 
-/// Input files `check`'s key covers, resolved: its files (changed ones
-/// under `key_root`, discovered tests under `exec_root`), then its other
-/// changed trigger files ([`trigger_sources`]) under `key_root`. Also what
-/// `--watch` snapshots at a run start, `changed_files` being the list `check`
-/// was selected from ([`crate::ui::app::App::queue_watch`]).
+/// Input files `check`'s key covers, under `exec_root`: its files (changed
+/// ones and discovered tests), then its other changed trigger files
+/// ([`trigger_sources`]). Also what `--watch` snapshots at a run start,
+/// `changed_files` being the list `check` was selected from
+/// ([`crate::ui::app::App::queue_watch`]).
 pub(crate) fn input_paths(
     check: &CheckToRun,
     config: &CiConfig,
     changed_files: &ChangedFiles,
-    key_root: &Path,
     exec_root: &Path,
 ) -> Vec<PathBuf> {
-    let changed: HashSet<&str> = changed_files.files.iter().map(String::as_str).collect();
-    let resolve = |path: &str| match changed.contains(path) {
-        true => key_root.join(path),
-        false => exec_root.join(path),
-    };
     let sources = trigger_sources(config, changed_files, check);
-    let files = check.files.paths().iter().map(|path| resolve(path));
+    let files = check.files.paths().iter().map(String::as_str);
     files
-        .chain(sources.iter().map(|source| key_root.join(source)))
+        .chain(sources)
+        .map(|path| exec_root.join(path))
         .collect()
 }
 
 /// The files of the list `check` was selected from (for `--watch`, a batch
 /// of saves) that are its inputs: a file it never reads must not keep a
-/// covered save from being dropped. Compared resolved ([`input_paths`]): a
-/// discovered test is relative to `exec_root`, the list to `key_root`. All
-/// of them when none is: a check without triggers has no inputs.
-pub(crate) fn saved_inputs(
-    check: &CheckToRun,
-    config: &CiConfig,
-    key_root: &Path,
-    exec_root: &Path,
-) -> Vec<String> {
+/// covered save from being dropped. Compared resolved under `exec_root`
+/// ([`input_paths`]). All of them when none is: a check without triggers
+/// has no inputs.
+pub(crate) fn saved_inputs(check: &CheckToRun, config: &CiConfig, exec_root: &Path) -> Vec<String> {
     let selected_from = check.selected_from.as_ref();
-    let inputs: HashSet<PathBuf> = input_paths(check, config, selected_from, key_root, exec_root)
+    let inputs: HashSet<PathBuf> = input_paths(check, config, selected_from, exec_root)
         .into_iter()
         .collect();
-    let is_input = |file: &&String| inputs.contains(&key_root.join(file));
+    let is_input = |file: &&String| inputs.contains(&exec_root.join(file));
     let saved = selected_from.files.iter();
     let kept: Vec<String> = saved.filter(is_input).cloned().collect();
     match kept.is_empty() {
@@ -214,8 +201,8 @@ fn key_value(
 pub struct ResultCache {
     /// Cache file; `None` = off (not a git repo, or a write failed)
     path: Option<PathBuf>,
-    /// Where key files are read (see [`Self::key_root`]); `None` = off
-    root: Option<PathBuf>,
+    /// Checks get keys (see [`Self::keys_checks`]); `false` = disabled
+    keys: bool,
     /// Serve unchanged checks from the cache (`false` with `--no-cache`)
     read: bool,
     /// Check id -> key of its latest pass
@@ -229,30 +216,29 @@ impl ResultCache {
     }
 
     /// Cache in the git dir of the repo containing `cwd` (a linked worktree
-    /// has its own), changed-file paths resolving under `root`; disabled
-    /// outside a repo. `read = false` still records.
-    pub fn open(cwd: &Path, root: PathBuf, read: bool) -> Self {
+    /// has its own); disabled outside a repo. `read = false` still records.
+    pub fn open(cwd: &Path, read: bool) -> Self {
         match crate::git::git_dir(cwd) {
-            Ok(dir) => Self::at(dir.join(CACHE_DIR).join(CACHE_FILE), root, read),
+            Ok(dir) => Self::at(dir.join(CACHE_DIR).join(CACHE_FILE), read),
             Err(_) => Self::disabled(),
         }
     }
 
     /// Cache stored at `path`. A missing, unreadable or corrupt file starts
     /// empty (overwritten on the next change).
-    pub fn at(path: PathBuf, root: PathBuf, read: bool) -> Self {
+    pub fn at(path: PathBuf, read: bool) -> Self {
         Self {
             entries: read_entries(&path),
             path: Some(path),
-            root: Some(root),
+            keys: true,
             read,
         }
     }
 
-    /// Root the changed-file paths resolve against, for `select_checks` to
-    /// key checks; `None` when disabled (no keys, nothing cached)
-    pub fn key_root(&self) -> Option<&Path> {
-        self.root.as_deref()
+    /// True unless disabled: `select_checks` keys checks (files read under
+    /// the execution root); disabled, nothing is keyed or cached
+    pub fn keys_checks(&self) -> bool {
+        self.keys
     }
 
     /// True unless `--no-cache`: fresh checks are served from the cache
@@ -422,8 +408,8 @@ mod tests {
         c
     }
 
-    fn cache_at(path: PathBuf, root: &Path) -> ResultCache {
-        ResultCache::at(path, root.to_path_buf(), true)
+    fn cache_at(path: PathBuf) -> ResultCache {
+        ResultCache::at(path, true)
     }
 
     fn result(id: &str, status: CheckStatus) -> CheckResult {
@@ -525,35 +511,19 @@ checks:
         (config, changed, dir)
     }
 
-    #[test]
-    fn stamp_keys_covers_discovery_sources() {
+    /// The key covers the discovered test and the changed source behind it
+    #[rstest::rstest]
+    #[case::discovery_source("src/a.rs")]
+    #[case::discovered_test("tests/a_test.rs")]
+    fn stamp_keys_covers_discovery_sources(#[case] edited: &str) {
         let (config, changed, dir) = discovery_setup();
         let stamped = || {
-            let root = Some(dir.path());
-            let checks = crate::checks::select_checks(&config, &changed, dir.path(), root).checks;
+            let checks = crate::checks::select_checks(&config, &changed, dir.path(), true).checks;
             assert_eq!(checks[0].files, files(&["tests/a_test.rs"]));
             checks[0].cache_key.clone().expect("keyed").value
         };
         let before = stamped();
-        std::fs::write(dir.path().join("src/a.rs"), "a changed").unwrap();
-        assert_ne!(stamped(), before);
-    }
-
-    #[test]
-    fn discovered_tests_are_read_under_the_exec_root() {
-        // Edge case: docker mode from a subdirectory: changed files are
-        // repo-relative, discovered tests relative to the exec root (cwd)
-        let (config, changed, dir) = discovery_setup();
-        let exec_root = dir.path().join("sub");
-        std::fs::create_dir_all(exec_root.join("tests")).unwrap();
-        std::fs::write(exec_root.join("tests/a_test.rs"), "t").unwrap();
-        let stamped = || {
-            let root = Some(dir.path());
-            let checks = crate::checks::select_checks(&config, &changed, &exec_root, root).checks;
-            checks[0].cache_key.clone().expect("keyed").value
-        };
-        let before = stamped();
-        std::fs::write(exec_root.join("tests/a_test.rs"), "t changed").unwrap();
+        std::fs::write(dir.path().join(edited), "changed").unwrap();
         assert_ne!(stamped(), before);
     }
 
@@ -588,8 +558,7 @@ checks:
             base_ref: "main".into(),
         };
         let stamped = || {
-            let root = Some(dir.path());
-            let checks = crate::checks::select_checks(&config, &changed, dir.path(), root).checks;
+            let checks = crate::checks::select_checks(&config, &changed, dir.path(), true).checks;
             assert_eq!(checks[0].files, files(&["tests/a_test.rs"]));
             checks[0].cache_key.clone().expect("keyed")
         };
@@ -603,9 +572,9 @@ checks:
     }
 
     #[test]
-    fn select_checks_without_key_root_stamps_nothing() {
+    fn select_checks_unkeyed_stamps_nothing() {
         let (config, changed, dir) = discovery_setup();
-        let checks = crate::checks::select_checks(&config, &changed, dir.path(), None).checks;
+        let checks = crate::checks::select_checks(&config, &changed, dir.path(), false).checks;
         assert_eq!(checks[0].cache_key, None);
     }
 
@@ -614,15 +583,15 @@ checks:
         let dir = root();
         let path = dir.path().join("git/ci-tui/results.json");
         let lint = keyed("lint", "lint a.rs", dir.path());
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         assert!(!cache.is_fresh(&lint));
 
         cache
             .record(&lint, &result("lint", CheckStatus::Passed))
             .unwrap();
         assert!(cache.is_fresh(&lint));
-        assert!(cache_at(path.clone(), dir.path()).is_fresh(&lint));
-        let no_cache = ResultCache::at(path, dir.path().to_path_buf(), false);
+        assert!(cache_at(path.clone()).is_fresh(&lint));
+        let no_cache = ResultCache::at(path, false);
         assert!(!no_cache.is_fresh(&lint), "--no-cache");
     }
 
@@ -632,7 +601,7 @@ checks:
     fn not_run_failure_keeps_the_pass() {
         let dir = root();
         let lint = keyed("lint", "lint a.rs", dir.path());
-        let mut cache = cache_at(dir.path().join("results.json"), dir.path());
+        let mut cache = cache_at(dir.path().join("results.json"));
         cache
             .record(&lint, &result("lint", CheckStatus::Passed))
             .unwrap();
@@ -644,7 +613,7 @@ checks:
         cache.record(&lint, &panicked).unwrap();
 
         assert!(cache.is_fresh(&lint));
-        let reopened = cache_at(dir.path().join("results.json"), dir.path());
+        let reopened = cache_at(dir.path().join("results.json"));
         assert!(reopened.is_fresh(&lint), "not saved as dropped either");
     }
 
@@ -655,7 +624,7 @@ checks:
         let lint = keyed("lint", "lint a.rs", dir.path());
         // Edited while the check ran: the pass may be for other content
         std::fs::write(dir.path().join("a.rs"), "fn a() { edited() }").unwrap();
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         cache
             .record(&lint, &result("lint", CheckStatus::Passed))
             .unwrap();
@@ -669,7 +638,7 @@ checks:
     fn new_pass_overwrites_the_single_entry_per_check() {
         let dir = root();
         let path = dir.path().join("results.json");
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         let old = keyed("lint", "lint a.rs", dir.path());
         let new = keyed("lint", "lint --strict a.rs", dir.path());
         cache
@@ -679,7 +648,7 @@ checks:
             .record(&new, &result("lint", CheckStatus::Passed))
             .unwrap();
 
-        let reloaded = cache_at(path, dir.path());
+        let reloaded = cache_at(path);
         assert_eq!(reloaded.entries.len(), 1);
         assert!(reloaded.is_fresh(&new) && !reloaded.is_fresh(&old));
     }
@@ -691,7 +660,7 @@ checks:
         let dir = root();
         let path = dir.path().join("results.json");
         let lint = keyed("lint", "lint a.rs", dir.path());
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         cache
             .record(&lint, &result("lint", status.clone()))
             .unwrap();
@@ -702,14 +671,14 @@ checks:
             .unwrap();
         cache.record(&lint, &result("lint", status)).unwrap();
         assert!(!cache.is_fresh(&lint));
-        assert!(!cache_at(path, dir.path()).is_fresh(&lint));
+        assert!(!cache_at(path).is_fresh(&lint));
     }
 
     #[test]
     fn unkeyed_cancelled_and_cached_results_are_not_stored() {
         let dir = root();
         let path = dir.path().join("results.json");
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         let unkeyed = check("always", "always", files(&[]));
         let lint = keyed("lint", "lint a.rs", dir.path());
         cache
@@ -726,7 +695,7 @@ checks:
     #[test]
     fn split_fresh_separates_cached_from_runnable() {
         let dir = root();
-        let mut cache = cache_at(dir.path().join("results.json"), dir.path());
+        let mut cache = cache_at(dir.path().join("results.json"));
         let (lint, other) = (
             keyed("lint", "lint a.rs", dir.path()),
             keyed("other", "other a.rs", dir.path()),
@@ -746,18 +715,16 @@ checks:
         let lint = keyed("lint", "lint a.rs", dir.path());
         let other = keyed("other", "other a.rs", dir.path());
         let pass = |id| result(id, CheckStatus::Passed);
-        cache_at(path.clone(), dir.path())
-            .record(&lint, &pass("lint"))
-            .unwrap();
+        cache_at(path.clone()).record(&lint, &pass("lint")).unwrap();
         // Both runs load {lint}; one drops it, then the other stores `other`
-        let mut first = cache_at(path.clone(), dir.path());
-        let mut second = cache_at(path.clone(), dir.path());
+        let mut first = cache_at(path.clone());
+        let mut second = cache_at(path.clone());
         second
             .record(&lint, &result("lint", CheckStatus::Failed))
             .unwrap();
         first.record(&other, &pass("other")).unwrap();
 
-        let reloaded = cache_at(path, dir.path());
+        let reloaded = cache_at(path);
         assert!(!reloaded.is_fresh(&lint), "the failure's removal survives");
         assert!(reloaded.is_fresh(&other));
     }
@@ -768,12 +735,12 @@ checks:
         let path = dir.path().join("results.json");
         std::fs::write(&path, "{not json").unwrap();
         let lint = keyed("lint", "lint a.rs", dir.path());
-        let mut cache = cache_at(path.clone(), dir.path());
+        let mut cache = cache_at(path.clone());
         assert!(!cache.is_fresh(&lint));
         cache
             .record(&lint, &result("lint", CheckStatus::Passed))
             .unwrap();
-        assert!(cache_at(path, dir.path()).is_fresh(&lint));
+        assert!(cache_at(path).is_fresh(&lint));
     }
 
     #[test]
@@ -781,7 +748,7 @@ checks:
         let dir = root();
         // A file where the cache dir should be
         std::fs::write(dir.path().join("ci-tui"), "").unwrap();
-        let mut cache = cache_at(dir.path().join("ci-tui/results.json"), dir.path());
+        let mut cache = cache_at(dir.path().join("ci-tui/results.json"));
         let lint = keyed("lint", "lint a.rs", dir.path());
         let other = keyed("other", "other a.rs", dir.path());
         assert!(cache
@@ -797,7 +764,7 @@ checks:
         let dir = root();
         let lint = keyed("lint", "lint a.rs", dir.path());
         let mut cache = ResultCache::disabled();
-        assert_eq!(cache.key_root(), None);
+        assert!(!cache.keys_checks());
         cache
             .record(&lint, &result("lint", CheckStatus::Passed))
             .unwrap();

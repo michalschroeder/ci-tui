@@ -1,11 +1,12 @@
 //! Startup sanity probe for docker mode.
 //!
-//! Checks get repo-relative paths via `{files}`, which only resolve if the
-//! repo is visible where the command runs in the container (the running
-//! container's WORKDIR for `docker exec`, `docker.work_dir` for plain-image
-//! `docker run`; `docker compose run` takes volumes / working_dir from the
-//! compose file, not checked). A mismatch would otherwise surface only as
-//! "file not found" inside checks, so warn up front.
+//! Checks get paths relative to the project dir (the execution root) via
+//! `{files}`, which only resolve if the project is visible where the command
+//! runs in the container (the running container's WORKDIR for `docker exec`,
+//! `docker.work_dir` for plain-image `docker run`; `docker compose run` takes
+//! volumes / working_dir from the compose file, not checked). A mismatch
+//! would otherwise surface only as "file not found" inside checks, so warn up
+//! front.
 //!
 //! Warnings are advisory: callers print/show them and run normally. An
 //! unreachable Docker daemon is not: [`docker_reachable`] fails the run
@@ -149,7 +150,7 @@ async fn exec_probe(
     }
     let mut warning = format!(
         "`{file}` not found in service `{service}` working directory (container `{id}`): \
-         mount the repo at the container's WORKDIR"
+         mount the project dir at the container's WORKDIR"
     );
     // Surface the real cause when exec itself failed (missing shell, container gone)
     if let Some(cause) = output
@@ -172,14 +173,14 @@ fn image_mount_warning(config: &ImageConfig) -> Option<String> {
     let image = &config.image;
     let Some(mount) = &config.volume_mount else {
         return Some(format!(
-            "`docker run` of `{image}` has no repo mount: set `docker.volume_mount` \
+            "`docker run` of `{image}` has no project dir mount: set `docker.volume_mount` \
              (e.g. `.:{work_dir}`, matching `docker.work_dir`)"
         ));
     };
     let dst = mount.split(':').nth(1)?.trim_end_matches('/');
     (dst != work_dir).then(|| {
         format!(
-            "`docker run` of `{image}` mounts the repo at `{dst}` but runs in \
+            "`docker run` of `{image}` mounts the project dir at `{dst}` but runs in \
              `docker.work_dir` `{work_dir}`: make them match"
         )
     })

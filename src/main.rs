@@ -8,15 +8,15 @@ use ci_tui::{
 use std::io::IsTerminal;
 
 fn git_detect_changes_or_exit(
-    project_root: &std::path::Path,
+    exec_root: &std::path::Path,
     git_config: &ci_tui::config::GitConfig,
     base_override: Option<&str>,
     staged: bool,
 ) -> git::ChangedFiles {
     let result = match (staged, base_override) {
-        (true, _) => git::get_staged_files(project_root),
-        (false, Some(base_ref)) => git::get_changed_files(project_root, base_ref),
-        (false, None) => git::detect_changes(project_root, git_config),
+        (true, _) => git::get_staged_files(exec_root),
+        (false, Some(base_ref)) => git::get_changed_files(exec_root, base_ref),
+        (false, None) => git::detect_changes(exec_root, git_config),
     };
     result.unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");
@@ -40,19 +40,19 @@ fn base_ref_hint(base_override: Option<&str>) -> String {
     }
 }
 
-/// Changed files minus `ignore_patterns`: from --files, the git index
-/// (--staged) or git detection in `project_root`. `--files` (cwd-relative) are
-/// rewritten relative to `exec_root` (local mode: the repo root, matching git
-/// paths); paths outside it are kept as given.
+/// Changed files minus `ignore_patterns`, relative to `exec_root` (where
+/// checks run): from --files, the git index (--staged) or git detection.
+/// Git lists only files under `exec_root` (docker mode: the project dir;
+/// local mode: the repo root, so the whole repo). `--files` (cwd-relative)
+/// are rewritten relative to it; paths outside it are kept as given.
 fn changed_files(
     cli: &Cli,
     config: &config::CiConfig,
     cwd: &std::path::Path,
-    project_root: &std::path::Path,
     exec_root: &std::path::Path,
 ) -> git::ChangedFiles {
     let mut changed_files = if cli.files.is_empty() {
-        git_detect_changes_or_exit(project_root, &config.git, cli.base.as_deref(), cli.staged)
+        git_detect_changes_or_exit(exec_root, &config.git, cli.base.as_deref(), cli.staged)
     } else {
         git::ChangedFiles {
             files: cli
@@ -74,25 +74,6 @@ fn local_exec_root(cwd: &std::path::Path) -> std::path::PathBuf {
         eprintln!("Warning: {e:#}; running checks from the current directory");
         cwd.to_path_buf()
     })
-}
-
-/// Result cache for a run (not fix mode). Keys read the changed files where
-/// their paths resolve: the repo root for git paths, `exec_root` for
-/// `--files`. Disabled outside a git repo.
-fn open_cache(
-    cwd: &std::path::Path,
-    exec_root: &std::path::Path,
-    changed_files: &git::ChangedFiles,
-    read: bool,
-) -> cache::ResultCache {
-    let root = match changed_files.is_cli_files() {
-        true => Ok(exec_root.to_path_buf()),
-        false => git::repo_root(cwd),
-    };
-    root.map_or_else(
-        |_| cache::ResultCache::disabled(),
-        |root| cache::ResultCache::open(cwd, root, read),
-    )
 }
 
 /// Print the config JSON Schema; a closed pipe (`ci-tui schema | head`) is not an error.
@@ -220,18 +201,20 @@ async fn run() -> Result<i32> {
 
     // Local mode runs commands from the repo root so repo-relative {files}
     // resolve from any subdirectory. Docker mode keeps the project root
-    // (compose project dir).
+    // (compose project dir): git lists only files under it, relative to it,
+    // so they resolve under the container WORKDIR mapped to it.
     let exec_root = match config.runner {
         ExecTarget::Local(_) => local_exec_root(&project_root),
         ExecTarget::Docker(_) => project_root.clone(),
     };
-    let changed_files = changed_files(&cli, &config, &cwd, &project_root, &exec_root);
+    let changed_files = changed_files(&cli, &config, &cwd, &exec_root);
 
-    // Result cache: skips checks unchanged since their last pass. Fix mode
-    // only runs fix commands.
+    // Result cache: skips checks unchanged since their last pass (keys read
+    // the files under `exec_root`, where all their paths resolve; disabled
+    // outside a git repo). Fix mode only runs fix commands.
     let cache = match cli.fix {
         true => cache::ResultCache::disabled(),
-        false => open_cache(&project_root, &exec_root, &changed_files, !cli.no_cache),
+        false => cache::ResultCache::open(&project_root, !cli.no_cache),
     };
 
     // Dry run: explain check selection, execute nothing
@@ -249,7 +232,7 @@ async fn run() -> Result<i32> {
     let checks::Selected {
         checks: checks_to_run,
         mut warnings,
-    } = checks::select_checks(&config, &changed_files, &exec_root, cache.key_root());
+    } = checks::select_checks(&config, &changed_files, &exec_root, cache.keys_checks());
 
     // Docker preflight, fatal if commands would run in docker mode but it is
     // down: on-demand checks only run on request, fix mode runs its own
