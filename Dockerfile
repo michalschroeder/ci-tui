@@ -18,7 +18,7 @@ RUN apk add --no-cache musl-dev git
 
 # Copy manifest, lockfile, and build script
 COPY Cargo.toml ./
-COPY Cargo.lock* ./
+COPY Cargo.lock ./
 COPY build.rs ./
 
 # Create dummy src to build dependencies (will be replaced)
@@ -41,7 +41,7 @@ RUN touch src/main.rs src/lib.rs 2>/dev/null || touch src/main.rs
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     CI_TUI_GIT_HASH=${CI_TUI_GIT_HASH} CI_TUI_BUILD_DATE=${CI_TUI_BUILD_DATE} \
-    cargo build --release && \
+    cargo build --release --locked && \
     cp /build/target/release/ci-tui /tmp/ci-tui
 
 # Dev stage - full Rust toolchain for running checks
