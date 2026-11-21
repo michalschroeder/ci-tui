@@ -11,7 +11,10 @@ use ci_tui::ui::dashboard;
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
 mod common;
-use common::{make_test_app, make_test_app_all_passed, make_test_app_running, make_widget_check};
+use common::{
+    make_test_app, make_test_app_all_passed, make_test_app_on_branch, make_test_app_running,
+    make_test_app_with_statuses, make_widget_check,
+};
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
@@ -726,10 +729,10 @@ fn test_footer_does_not_show_version_info() {
 }
 
 /// #300 criterion 6: the help overlay shows the version, also at the
-/// minimum size (60x15: the overlay stays 15 rows)
+/// minimum size (60x13: the overlay stays 13 rows)
 #[test]
 fn test_help_overlay_shows_version_info() {
-    for (w, h) in [(60, 15), (80, 24)] {
+    for (w, h) in [(60, 13), (80, 24)] {
         let mut app = make_test_app();
         app.toggle_help();
         app.toggle_stats();
@@ -743,7 +746,7 @@ fn test_help_overlay_shows_version_info() {
             text.contains(&version),
             "{w}x{h} missing {version}:\n{text}"
         );
-        assert!(text.contains("Press ? or Esc to close"), "{w}x{h}:\n{text}");
+        assert!(text.contains("Esc to close"), "{w}x{h}:\n{text}");
         assert!(text.contains(" Help "), "{w}x{h}:\n{text}");
     }
 }
@@ -779,9 +782,9 @@ fn row_text(buffer: &Buffer, y: u16, x0: u16, x1: u16) -> String {
         .collect()
 }
 
-/// Stats panels: top border at row 3, four inner rows 4..=7 (header is 3 rows)
-const STATS_INNER_TOP: u16 = 4;
-const STATS_INNER_BOTTOM: u16 = 7;
+/// Stats panels: top border at row 1, four inner rows 2..=5 (header is 1 row)
+const STATS_INNER_TOP: u16 = 2;
+const STATS_INNER_BOTTOM: u16 = 5;
 
 /// #192: CPU graph spans the whole panel on a wide terminal once enough
 /// samples arrived (history no longer capped below panel width)
@@ -1082,20 +1085,20 @@ fn test_no_color_renders_no_fg_bg_colors() {
 
 #[rstest::rstest]
 #[case::narrow(59, 24)]
-#[case::short(80, 20)]
+#[case::short(80, 18)]
 fn test_too_small_terminal_shows_message_only(#[case] width: u16, #[case] height: u16) {
     let mut app = make_test_app();
     let buffer = render_at(&mut app, width, height);
     assert!(buffer_contains(&buffer, "Terminal too small"));
     assert!(buffer_contains(&buffer, &format!("{width}x{height}")));
-    assert!(buffer_contains(&buffer, "need 60x21"));
+    assert!(buffer_contains(&buffer, "need 60x19"));
     assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "Checks"));
 }
 
 #[test]
 fn test_min_size_terminal_renders_layout() {
     let mut app = make_test_app();
-    let buffer = render_at(&mut app, 60, 21);
+    let buffer = render_at(&mut app, 60, 19);
     assert!(!buffer_contains(&buffer, "too small"));
     assert!(buffer_contains(&buffer, "CPU") && buffer_contains(&buffer, "Checks"));
 }
@@ -1108,40 +1111,23 @@ fn test_stats_hidden_renders_no_cpu_mem_panel() {
     assert!(!app.stats_visible());
     let buffer = render_at(&mut app, WIDTH, HEIGHT);
     assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "MEM"));
-    // Main content moves up into the stats panel's rows (header is 3 rows)
-    assert!(row_text(&buffer, 3, 0, WIDTH).contains("Checks"));
+    // Main content moves up into the stats panel's rows (header is 1 row)
+    assert!(row_text(&buffer, 1, 0, WIDTH).contains("Checks"));
 }
 
 #[test]
 fn test_stats_hidden_lowers_min_height_by_stats_rows() {
     let mut app = make_test_app();
     app.toggle_stats();
-    assert!(!buffer_contains(&render_at(&mut app, 60, 15), "too small"));
-    let buffer = render_at(&mut app, 60, 14);
+    assert!(!buffer_contains(&render_at(&mut app, 60, 13), "too small"));
+    let buffer = render_at(&mut app, 60, 12);
     assert!(buffer_contains(&buffer, "Terminal too small"));
-    assert!(buffer_contains(&buffer, "need 60x15"));
-}
-
-/// Color off: gauge fill has no bg color left, so filled cells must show as
-/// `█` or reversed (under the label) and unfilled cells as neither
-#[test]
-fn test_no_color_header_gauge_fill_visible() {
-    let mut app = make_test_app(); // 2 of 3 auto-run checks done
-    app.color = false;
-    let buffer = render_at(&mut app, WIDTH, HEIGHT);
-    let filled = |x: u16| {
-        let cell = &buffer[(x, 1)];
-        cell.symbol() == "█" || cell.modifier.contains(ratatui::style::Modifier::REVERSED)
-    };
-    // Inner gauge row 1, cols 1..79; fill ends at 1 + round(78 * 2/3)
-    let end = 1 + (78.0_f64 * 2.0 / 3.0).round() as u16;
-    assert!((1..end).all(filled), "filled part distinguishable");
-    assert!(!(end..WIDTH - 1).any(filled), "unfilled part plain");
+    assert!(buffer_contains(&buffer, "need 60x13"));
 }
 
 #[rstest::rstest]
-#[case::with_stats(21, true)]
-#[case::without_stats(15, false)]
+#[case::with_stats(19, true)]
+#[case::without_stats(13, false)]
 fn test_help_overlay_fits_min_size(#[case] height: u16, #[case] stats: bool) {
     let mut app = make_test_app();
     if !stats {
@@ -1150,8 +1136,11 @@ fn test_help_overlay_fits_min_size(#[case] height: u16, #[case] stats: bool) {
     app.toggle_help();
     let buffer = render_at(&mut app, 60, height);
     assert!(!buffer_contains(&buffer, "too small"));
-    assert!(buffer_contains(&buffer, "Press ? or Esc to close"));
+    assert!(buffer_contains(&buffer, "Esc to close"));
     assert!(buffer_contains(&buffer, "CPU/MEM stats"));
+    assert!(buffer_contains(&buffer, "quit"), "last table row not cut");
+    let version = format!("v{}", ci_tui::cli::VERSION_INFO);
+    assert!(buffer_contains(&buffer, &version), "version title");
 }
 
 // ============================================================================
@@ -1231,6 +1220,259 @@ fn test_header_allowed_failure_only_is_yellow_warning() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    assert!(buffer_contains(buffer, "2/3 passed, 1 warning in "));
-    assert_eq!(buffer[(1, 1)].fg, Color::Yellow, "gauge fill");
+    assert!(buffer_contains(buffer, "2/3 passed, 1 warning"));
+    assert!(
+        !buffer_contains(buffer, "1 warning in "),
+        "elapsed shown once"
+    );
+    assert_eq!(status_cell(buffer, "2/3 passed").bg, Color::Yellow);
+}
+
+// ============================================================================
+// #292: one-row header
+// ============================================================================
+
+/// Finished app with one failed check: status `✗ 2/3 passed, 1 failed`
+fn failed_finished_app() -> ci_tui::ui::app::App {
+    failed_finished_app_on("feature/test")
+}
+
+fn failed_finished_app_on(branch: &str) -> ci_tui::ui::app::App {
+    let mut app = make_test_app_on_branch(branch);
+    app.run.all_finished = true;
+    app.results.values_mut().for_each(|r| {
+        r.status = ci_tui::runner::CheckStatus::Passed;
+    });
+    app.results.get_mut("unit").unwrap().status = ci_tui::runner::CheckStatus::Failed;
+    app
+}
+
+/// Column (in cells) where `needle` starts in `row` (every char before it is
+/// one cell wide in these tests)
+fn col_of(row: &str, needle: &str) -> u16 {
+    let at = row
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+    row[..at].chars().count() as u16
+}
+
+/// First cell of `needle` in header row 0
+fn status_cell<'a>(buffer: &'a Buffer, needle: &str) -> &'a ratatui::buffer::Cell {
+    let row = full_row(buffer, 0);
+    &buffer[(col_of(&row, needle), 0)]
+}
+
+#[test]
+fn test_header_is_one_row_with_stats_panel_below() {
+    let mut app = make_test_app();
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    let header = full_row(&buffer, 0);
+    assert!(header.contains("feature/test"), "{header}");
+    assert!(header.contains("2 files vs main"), "{header}");
+    assert!(header.contains("Running..."), "{header}");
+    assert_eq!(
+        buffer[(0, 1)].symbol(),
+        "┌",
+        "row 1: {}",
+        full_row(&buffer, 1)
+    );
+    assert!(full_row(&buffer, 1).contains("CPU"));
+}
+
+#[test]
+fn test_header_row_layout_shows_elapsed_once_after_status() {
+    let mut app = failed_finished_app();
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    assert_eq!(
+        full_row(&buffer, 0).trim_end(),
+        " feature/test · 2 files vs main · ✗ 2/3 passed, 1 failed · 0s"
+    );
+}
+
+#[rstest::rstest]
+#[case::all_passed(make_test_app_all_passed(), "✓ All 3 checks passed", Color::Green)]
+#[case::failed(failed_finished_app(), "✗ 2/3 passed, 1 failed", Color::Red)]
+#[case::running(make_test_app_running(), "Running...", Color::Yellow)]
+fn test_header_status_segment_keeps_color(
+    #[case] mut app: ci_tui::ui::app::App,
+    #[case] status: &str,
+    #[case] bg: Color,
+) {
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    let row = full_row(&buffer, 0);
+    let first = col_of(&row, status);
+    for x in first..first + status.chars().count() as u16 {
+        assert_eq!(buffer[(x, 0)].bg, bg, "col {x}: {row}");
+    }
+    // Branch part carries no status background
+    assert_ne!(buffer[(1, 0)].bg, bg);
+}
+
+#[test]
+fn test_header_status_distinguishable_without_color() {
+    let mut app = failed_finished_app();
+    app.color = false;
+    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    let reversed = |x: u16| {
+        buffer[(x, 0)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    };
+    let row = full_row(&buffer, 0);
+    let first = col_of(&row, "✗ 2/3");
+    let end = first + "✗ 2/3 passed, 1 failed".chars().count() as u16;
+    assert!((first..end).all(reversed), "status reversed: {row}");
+    assert!(!(0..first).any(reversed), "branch part plain: {row}");
+    assert!(!(end..WIDTH).any(reversed), "elapsed part plain: {row}");
+}
+
+/// Parts vanish in order elapsed, files, branch as the branch grows; the
+/// status counts stay whole
+#[test]
+fn test_header_truncation_order_elapsed_then_files_then_branch() {
+    // (branch length, elapsed shown, files shown, branch shown)
+    let mut seen = Vec::new();
+    for len in 1..45 {
+        let mut app = failed_finished_app_on(&"b".repeat(len));
+        let row = full_row(&render_at(&mut app, 60, 19), 0);
+        assert!(row.contains("✗ 2/3 passed, 1 failed"), "status cut: {row}");
+        seen.push((
+            row.contains(" · 0s"),
+            row.contains("files vs"),
+            row.contains(&"b".repeat(len)),
+        ));
+    }
+    let n = |f: fn(&(bool, bool, bool)) -> bool| seen.iter().filter(|r| f(r)).count();
+    let (elapsed, files, branch) = (n(|r| r.0), n(|r| r.1), n(|r| r.2));
+    assert!(elapsed < files && files < branch, "{seen:?}");
+    for (len, (e, f, b)) in seen.iter().enumerate() {
+        assert!(!e || *f, "elapsed without files at {}", len + 1);
+        assert!(!f || *b, "files without branch at {}", len + 1);
+    }
+}
+
+#[test]
+fn test_header_markers_and_status_survive_at_min_width() {
+    let mut app = failed_finished_app_on("feature/a-rather-long-branch-name");
+    app.watching = true;
+    app.filter_notice = Some("Filtered: --only php-lint".to_string());
+    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    // Compact status (counts kept) makes room for the whole filter marker
+    assert!(row.contains("✗ 2/3, 1 fail"), "{row}");
+    assert!(row.contains("watching"), "{row}");
+    assert!(row.contains("Filtered: --only"), "{row}");
+    assert!(!row.contains(" 0s"), "elapsed dropped first: {row}");
+}
+
+/// Min-width (60) row of `app` with `watching` and a `--only` filter
+fn min_width_row(mut app: ci_tui::ui::app::App) -> String {
+    app.watching = true;
+    app.filter_notice = Some("Filtered: --only php-lint".to_string());
+    full_row(&render_at(&mut app, 60, 19), 0)
+}
+
+fn statuses(
+    n: usize,
+    status: ci_tui::runner::CheckStatus,
+    allow: bool,
+) -> Vec<(ci_tui::runner::CheckStatus, bool)> {
+    vec![(status, allow); n]
+}
+
+/// Review of #359: every count survives at the minimum width, however long
+#[test]
+fn test_header_mixed_counts_all_survive_at_min_width() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(100, Passed, false);
+    all.extend(statuses(100, Failed, false));
+    all.extend(statuses(100, Failed, true));
+    all.extend(statuses(100, Cancelled, false));
+    all.extend(statuses(100, Pending, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["100/500", "100 fail", "100 warn", "100 canc", "100 pend"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+    assert!(!row.contains('…'), "status clipped: {row}");
+}
+
+#[test]
+fn test_header_retry_pending_after_finish_keeps_filter_and_counts() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(3, Passed, false);
+    all.extend(statuses(1, Failed, false));
+    all.extend(statuses(2, Pending, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["3/6", "1 fail", "2 pend", "watching", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+#[test]
+fn test_header_on_demand_count_survives_at_min_width() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(2, Passed, false);
+    all.extend(statuses(2, OnDemand, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["All 2", "+2", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+/// Review of #359: the reported two-check running state kept no filter
+#[test]
+fn test_header_running_state_keeps_filter_at_min_width() {
+    let mut app = make_test_app();
+    app.results.get_mut("fmt").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    app.results.get_mut("unit").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::Running;
+    let row = min_width_row(app);
+    for token in ["0/1", "+2", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+/// Review of #359: a joined emoji is cut as one unit, by the same width
+/// the row is measured with
+#[test]
+fn test_header_filter_cut_keeps_zwj_emoji_whole() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(10, Passed, false);
+    all.extend(statuses(10, Failed, false));
+    let mut app = make_test_app_with_statuses(&all);
+    app.watching = true;
+    app.filter_notice = Some("Filtered: --only abcdefghi👩‍💻-long-check-name".to_string());
+    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    assert!(row.contains("✗ 10/20, 10 fail"), "{row}");
+    assert!(row.contains("watching"), "{row}");
+    // (the cell after a wide char reads as a space in the buffer)
+    assert!(row.contains("Filtered: --only abcdefghi👩‍💻"), "{row}");
+    assert!(
+        row.trim_end().ends_with('…') && !row.contains("-long"),
+        "{row}"
+    );
+}
+
+#[test]
+fn test_header_wide_branch_name_keeps_status_and_watching() {
+    let mut app = failed_finished_app_on(&"ブランチ".repeat(12));
+    app.watching = true;
+    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    assert!(row.contains("✗ 2/3 passed, 1 failed"), "{row}");
+    assert!(row.contains("watching"), "{row}");
+}
+
+/// The panels start right under the 1-row header: with stats the main
+/// area begins at row 7, without at row 1
+#[test]
+fn test_hit_test_areas_start_two_rows_higher() {
+    let mut app = make_test_app();
+    render_at(&mut app, WIDTH, HEIGHT);
+    assert!(
+        app.is_over_output(70, 8) && !app.is_over_output(70, 6),
+        "{:?}",
+        output_rows(&app)
+    );
+    app.toggle_stats();
+    render_at(&mut app, WIDTH, HEIGHT);
+    assert!(app.is_over_output(70, 2) && !app.is_over_output(70, 0));
 }
