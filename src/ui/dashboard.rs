@@ -149,7 +149,8 @@ fn get_status_display(status: Option<&CheckStatus>, severity: Severity) -> (&'st
     }
 }
 
-/// " +N on-demand" header suffix (empty without on-demand checks)
+/// " +N on-demand" suffix of the running / preparing header (empty without
+/// on-demand checks); the finished text uses [`crate::report::not_run_suffix`]
 fn on_demand_suffix(counts: &super::app::StatusCounts) -> String {
     if counts.on_demand > 0 {
         format!(" +{} on-demand", counts.on_demand)
@@ -172,7 +173,10 @@ pub(crate) fn finished_status_text(counts: &super::app::StatusCounts, elapsed: &
         counts.pending,
     );
     let total = counts.auto_run();
-    let on_demand = on_demand_suffix(counts);
+    if counts.nothing_ran() {
+        return crate::report::nothing_ran_text(counts.skipped, counts.on_demand);
+    }
+    let on_demand = crate::report::not_run_suffix(counts.skipped, counts.on_demand);
     if failed == 0 && warnings == 0 && cancelled == 0 && pending == 0 {
         return format!("✓ All {total} checks passed in {elapsed}{on_demand}");
     }
@@ -460,6 +464,43 @@ fn header_title(app: &App, elapsed: &str) -> String {
     )
 }
 
+/// Header label and gauge color: running / preparing progress, or the
+/// finished text ([`finished_status_text`]) in green (all passed), gray
+/// (nothing ran), yellow
+/// (warnings, cancelled, pending), red (failures)
+fn header_status(
+    counts: &super::app::StatusCounts,
+    all_finished: bool,
+    elapsed: &str,
+) -> (String, Color) {
+    let (completed, auto_run_total) = (counts.completed(), counts.auto_run());
+    let on_demand_text = on_demand_suffix(counts);
+    if all_finished {
+        let color = if counts.failed > 0 {
+            Color::Red
+        } else if counts.nothing_ran() {
+            Color::Gray
+        } else if counts.warnings > 0 || counts.cancelled > 0 || counts.pending > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        return (finished_status_text(counts, elapsed), color);
+    }
+    let text = if counts.pending > 0 {
+        format!(
+            "Running... {}/{} ({} in progress){}",
+            completed, auto_run_total, counts.pending, on_demand_text
+        )
+    } else {
+        format!(
+            "Preparing... {}/{}{}",
+            completed, auto_run_total, on_demand_text
+        )
+    };
+    (text, Color::Yellow)
+}
+
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let counts = app.count_by_status();
     let auto_run_total = counts.auto_run();
@@ -476,32 +517,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 
     let branch_info = header_title(app, &elapsed_str);
 
-    let on_demand_text = on_demand_suffix(&counts);
-    let status_text = if app.run.all_finished {
-        finished_status_text(&counts, &elapsed_str)
-    } else if counts.pending > 0 {
-        format!(
-            "Running... {}/{} ({} in progress){}",
-            completed, auto_run_total, counts.pending, on_demand_text
-        )
-    } else {
-        format!(
-            "Preparing... {}/{}{}",
-            completed, auto_run_total, on_demand_text
-        )
-    };
-
-    let color = if app.run.all_finished {
-        if counts.failed > 0 {
-            Color::Red
-        } else if counts.warnings > 0 || counts.cancelled > 0 || counts.pending > 0 {
-            Color::Yellow
-        } else {
-            Color::Green
-        }
-    } else {
-        Color::Yellow
-    };
+    let (status_text, color) = header_status(&counts, app.run.all_finished, &elapsed_str);
 
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(branch_info))
@@ -2082,6 +2098,96 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::ui::app::StatusCounts;
+
+    #[test]
+    fn test_finished_text_nothing_ran() {
+        let counts = StatusCounts {
+            skipped: 5,
+            on_demand: 2,
+            ..StatusCounts::default()
+        };
+        assert_eq!(
+            finished_status_text(&counts, "1s"),
+            "0 of 7 checks ran (5 skipped, 2 on-demand) — see --list"
+        );
+        let only = StatusCounts {
+            on_demand: 1,
+            ..StatusCounts::default()
+        };
+        assert_eq!(
+            finished_status_text(&only, "1s"),
+            "0 of 1 checks ran (1 on-demand) — see --list"
+        );
+    }
+
+    #[test]
+    fn test_finished_text_with_runs_replaces_plus_suffix() {
+        let counts = StatusCounts {
+            passed: 3,
+            skipped: 4,
+            on_demand: 1,
+            ..StatusCounts::default()
+        };
+        assert_eq!(
+            finished_status_text(&counts, "4s"),
+            "✓ All 3 checks passed in 4s (4 skipped, 1 on-demand)"
+        );
+        let failed = StatusCounts {
+            passed: 1,
+            failed: 1,
+            on_demand: 1,
+            ..StatusCounts::default()
+        };
+        assert_eq!(
+            finished_status_text(&failed, "4s"),
+            "✗ 1/2 passed, 1 failed in 4s (1 on-demand)"
+        );
+        let plain = StatusCounts {
+            passed: 2,
+            ..StatusCounts::default()
+        };
+        assert_eq!(
+            finished_status_text(&plain, "4s"),
+            "✓ All 2 checks passed in 4s"
+        );
+    }
+
+    #[test]
+    fn test_header_nothing_ran_is_neutral() {
+        let counts = StatusCounts {
+            skipped: 1,
+            on_demand: 1,
+            ..StatusCounts::default()
+        };
+        let (text, color) = header_status(&counts, true, "1s");
+        assert!(text.starts_with("0 of 2 checks ran"), "{text}");
+        assert_eq!(color, Color::Gray);
+    }
+
+    #[test]
+    fn test_header_while_running_keeps_plus_on_demand() {
+        let counts = StatusCounts {
+            passed: 1,
+            pending: 1,
+            skipped: 2,
+            on_demand: 1,
+            ..StatusCounts::default()
+        };
+        let (text, color) = header_status(&counts, false, "1s");
+        assert_eq!(text, "Running... 1/2 (1 in progress) +1 on-demand");
+        assert_eq!(color, Color::Yellow);
+        let (text, _) = header_status(
+            &StatusCounts {
+                on_demand: 1,
+                ..StatusCounts::default()
+            },
+            false,
+            "1s",
+        );
+        assert_eq!(text, "Preparing... 0/0 +1 on-demand");
+    }
 
     #[test]
     fn test_prepare_sparkline_data_trims_to_width_keeping_newest() {
