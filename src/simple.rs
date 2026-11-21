@@ -189,19 +189,39 @@ impl SimpleRun {
         let mut all_results = Vec::new();
         let mut stopped = None;
         for (group_name, group_checks) in group_checks(checks) {
-            self.print_group_start(group_name);
-            // Unchanged since their last pass: listed first as cached, not run
-            let (cached, group_checks) = cache.split_fresh(group_checks);
-            let mut results: Vec<CheckResult> =
-                cached.iter().map(|c| CheckResult::cached(c.id())).collect();
-            let ran = self.run_group(group_name, group_checks, &mut stopped).await;
-            record(cache, checks, &ran);
-            results.extend(ran);
-            self.print_results(checks, &results);
+            let results = self
+                .print_group(group_name, group_checks, checks, cache, &mut stopped)
+                .await;
             all_results.extend(results);
-            self.print_group_end();
         }
         all_results
+    }
+
+    /// Print and run one group (results in order: cached, then run); nothing
+    /// (no header, no blank line) for a group without a cached or runnable
+    /// check, i.e. only on-demand / skipped ones
+    async fn print_group(
+        &self,
+        group_name: &str,
+        group_checks: Vec<&CheckToRun>,
+        checks: &[CheckToRun],
+        cache: &mut ResultCache,
+        stopped: &mut Option<RunStop>,
+    ) -> Vec<CheckResult> {
+        // Unchanged since their last pass: listed first as cached, not run
+        let (cached, group_checks) = cache.split_fresh(group_checks);
+        if cached.is_empty() && group_checks.iter().all(|c| c.is_on_demand()) {
+            return Vec::new();
+        }
+        self.print_group_start(group_name);
+        let mut results: Vec<CheckResult> =
+            cached.iter().map(|c| CheckResult::cached(c.id())).collect();
+        let ran = self.run_group(group_name, group_checks, stopped).await;
+        record(cache, checks, &ran);
+        results.extend(ran);
+        self.print_results(checks, &results);
+        self.print_group_end();
+        results
     }
 
     /// Run `group`'s `checks` (on-demand ones skipped): its pre-commands
@@ -347,13 +367,20 @@ fn print_summary(run: &Report, elapsed: std::time::Duration, annotate: bool) {
 /// Text summary after all groups: pass count, or failure / warning counts
 /// plus each failed check's output and fix command (and its `::error` /
 /// `::warning` annotation with `annotate`), allowed failures in their own
-/// block. Without checks, says there was nothing to run.
+/// block. Counts checks skipped / on-demand after the outcome; says so
+/// instead when nothing ran, and without selected checks that there was
+/// nothing to run.
 fn format_summary(run: &Report, elapsed: &str, annotate: bool) -> String {
     let summary = &run.summary;
     if run.checks.is_empty() {
         return "\x1b[33mNo checks to run for changed files.\x1b[0m\n".to_string();
     }
     let mut buf = String::from("\x1b[1m── Summary ──\x1b[0m\n");
+    if run.results.is_empty() {
+        let line = report::nothing_ran_text(run.checks.len(), summary.skipped, summary.on_demand);
+        let _ = writeln!(buf, "\x1b[37m{line}\x1b[0m");
+        return buf;
+    }
     let (passed, total) = (summary.passed, summary.total);
     let (failed, warnings) = (summary.failed, summary.warnings);
     let (color, mark, counts) = match (failed, warnings) {
@@ -366,7 +393,11 @@ fn format_summary(run: &Report, elapsed: &str, annotate: bool) -> String {
     } else {
         String::new()
     };
-    let _ = writeln!(buf, "\x1b[{color}m{mark}{counts}{tail} in {elapsed}\x1b[0m");
+    let not_run = report::not_run_suffix(summary.skipped, summary.on_demand);
+    let _ = writeln!(
+        buf,
+        "\x1b[{color}m{mark}{counts}{tail} in {elapsed}{not_run}\x1b[0m"
+    );
 
     push_failures(&mut buf, run, Severity::Error, annotate);
     push_failures(&mut buf, run, Severity::Warning, annotate);
@@ -764,6 +795,105 @@ mod tests {
         let results = [finished("ok", CheckStatus::Passed)];
         let text = summary_of(&[("ok", true)], &results, false);
         assert!(text.contains("✓ All 1 checks passed in 12s"), "{text:?}");
+    }
+
+    /// Check `id` with `files` (`{files}` command, so no match = skipped)
+    fn selected(id: &str, files: CheckFiles) -> CheckToRun {
+        let mut c = check("true {files}");
+        c.id = id.into();
+        c.files = files;
+        c
+    }
+
+    fn report_text(checks: &[CheckToRun], results: &[CheckResult]) -> String {
+        let run = Report {
+            base_ref: "main",
+            changed_files: 1,
+            duration_ms: 0,
+            checks,
+            results,
+            summary: Summary::of(checks, results),
+        };
+        format_summary(&run, "4s", false)
+    }
+
+    fn mixed_checks() -> Vec<CheckToRun> {
+        let mut checks = vec![selected("ran", CheckFiles::Files(vec!["a".into()]))];
+        checks.push(selected("s1", CheckFiles::SkippedNoMatch));
+        checks.push(selected("s2", CheckFiles::SkippedNoMatch));
+        checks.push(selected("od", CheckFiles::OnDemand));
+        checks
+    }
+
+    #[test]
+    fn test_summary_nothing_ran_is_neutral_and_honest() {
+        let all = mixed_checks();
+        let checks = &all[1..];
+        let text = report_text(checks, &[]);
+        let plain = crate::color::paint(&text, false);
+        assert!(
+            plain.contains("0 of 3 checks ran (2 skipped, 1 on-demand) — see --list\n"),
+            "{plain:?}"
+        );
+        assert!(!plain.contains("All 0"), "{plain:?}");
+        assert!(
+            !text.contains("\x1b[32m") && !text.contains("\x1b[31m"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn test_summary_nothing_ran_omits_zero_counts() {
+        let checks = [selected("od", CheckFiles::OnDemand)];
+        let text = report_text(&checks, &[]);
+        let plain = crate::color::paint(&text, false);
+        assert!(
+            plain.contains("0 of 1 checks ran (1 on-demand) — see --list\n"),
+            "{plain:?}"
+        );
+    }
+
+    #[test]
+    fn test_summary_empty_selection_keeps_no_checks_message() {
+        // guard
+        let text = report_text(&[], &[]);
+        assert!(
+            text.contains("No checks to run for changed files."),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn test_summary_with_runs_appends_counts() {
+        let results = [finished("ran", CheckStatus::Passed)];
+        let text = report_text(&mixed_checks(), &results);
+        assert!(
+            text.contains("✓ All 1 checks passed in 4s (2 skipped, 1 on-demand)\x1b[0m\n"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn test_summary_failure_and_warning_lines_get_suffix() {
+        let mut checks = mixed_checks();
+        checks[0].definition.allow_failure = true;
+        let warn = report_text(&checks, &[finished("ran", CheckStatus::Failed)]);
+        assert!(
+            warn.contains("0/1 checks passed, 1 warning in 4s (2 skipped, 1 on-demand)\x1b[0m"),
+            "{warn:?}"
+        );
+        checks[0].definition.allow_failure = false;
+        let bad = report_text(&checks, &[finished("ran", CheckStatus::Failed)]);
+        assert!(
+            bad.contains("✗ 0/1 checks passed, 1 failed in 4s (2 skipped, 1 on-demand)\x1b[0m"),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn test_summary_counts_by_decision() {
+        let s = Summary::of(&mixed_checks(), &[finished("ran", CheckStatus::Passed)]);
+        assert_eq!((s.total, s.skipped, s.on_demand), (1, 2, 1));
     }
 
     #[tokio::test]
