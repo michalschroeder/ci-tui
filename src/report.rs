@@ -8,7 +8,7 @@
 //! ones never run there). Output text is ANSI-stripped; JUnit is hand-rolled
 //! XML (escaped, XML-invalid control chars dropped) to avoid a dependency.
 
-use crate::checks::{severity_in, CheckToRun, Severity};
+use crate::checks::{severity_in, CheckToRun, Decision, Severity};
 use crate::runner::{CheckResult, CheckStatus, PreCommandOutcome, RunnerEvent};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -148,6 +148,10 @@ pub struct Summary {
     /// Failures of `allow_failure` checks (not in `failed`)
     pub warnings: usize,
     pub cached: usize,
+    /// Selected checks with nothing to run (`{files}` command, no match)
+    pub skipped: usize,
+    /// Selected checks waiting for a manual trigger
+    pub on_demand: usize,
     /// JUnit `skipped`, not in the JSON summary
     #[serde(skip)]
     pub cancelled: usize,
@@ -161,6 +165,14 @@ impl Summary {
             total: results.len(),
             ..Self::default()
         };
+        for check in checks {
+            let bucket = match check.decision() {
+                Decision::OnDemand => &mut summary.on_demand,
+                Decision::Skipped => &mut summary.skipped,
+                Decision::Run => continue,
+            };
+            *bucket += 1;
+        }
         for result in results {
             summary.cached += usize::from(result.cached);
             let bucket = match (severity_in(checks, result), &result.status) {
@@ -183,6 +195,29 @@ pub fn warning_count(n: usize) -> String {
     } else {
         format!("{n} warnings")
     }
+}
+
+/// ` (4 skipped, 1 on-demand)` summary suffix: checks that did not run
+/// (zero counts left out, empty when both are zero)
+pub fn not_run_suffix(skipped: usize, on_demand: usize) -> String {
+    let parts: Vec<String> = [(skipped, "skipped"), (on_demand, "on-demand")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
+/// Summary line of a run that executed nothing: `0 of 7 checks ran (5
+/// skipped, 2 on-demand) — see --list` (without results every selected
+/// check is skipped or on-demand)
+pub fn nothing_ran_text(skipped: usize, on_demand: usize) -> String {
+    let (total, counts) = (skipped + on_demand, not_run_suffix(skipped, on_demand));
+    format!("0 of {total} checks ran{counts} — see --list")
 }
 
 /// Run outcome tail: `, N failed` (left out when there are only warnings)
@@ -556,7 +591,7 @@ mod tests {
         assert_eq!(doc["duration_ms"], 5000);
         assert_eq!(
             doc["summary"],
-            serde_json::json!({"total": 3, "passed": 1, "failed": 2, "warnings": 0, "cached": 1})
+            serde_json::json!({"total": 3, "passed": 1, "failed": 2, "warnings": 0, "cached": 1, "skipped": 0, "on_demand": 0})
         );
         let lint = &doc["checks"][0];
         assert_eq!(lint["id"], "lint");
@@ -600,7 +635,7 @@ mod tests {
         assert_eq!(doc["version"], 1);
         assert_eq!(
             doc["summary"],
-            serde_json::json!({"total": 3, "passed": 0, "failed": 1, "warnings": 2, "cached": 0})
+            serde_json::json!({"total": 3, "passed": 0, "failed": 1, "warnings": 2, "cached": 0, "skipped": 0, "on_demand": 0})
         );
         assert_eq!(doc["checks"][0]["allow_failure"], true);
         assert_eq!(doc["checks"][0]["status"], "failed");
