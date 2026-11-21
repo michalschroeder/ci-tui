@@ -267,7 +267,7 @@ fn render_zoomed(app: &mut App, frame: &mut Frame) {
     render_output(app, frame, chunks[0]);
     render_footer(app, frame, chunks[1]);
     if app.view.help_visible {
-        render_help_overlay(frame);
+        render_help_overlay(app, frame);
     }
 }
 
@@ -292,7 +292,7 @@ fn render_dashboard(app: &mut App, frame: &mut Frame) {
     render_footer(app, frame, chunks[3]);
 
     if app.view.help_visible {
-        render_help_overlay(frame);
+        render_help_overlay(app, frame);
     }
 }
 
@@ -359,39 +359,84 @@ fn help_cell((key, action): (&str, &str)) -> String {
     )
 }
 
-/// Centered popup listing all key bindings (`?` to toggle, `Esc` to close).
-/// Sized to its content so it fits the minimum terminal size (60x15).
-fn render_help_overlay(frame: &mut Frame) {
+/// Help body lines: two columns side by side when `two_cols`, else one
+/// column (left bindings, then right ones), cells cut to `width`
+fn help_lines(two_cols: bool, width: usize) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{:<HELP_COL_WIDTH$}", " Navigation / Output"), bold),
-        Span::styled(" Actions", bold),
-    ])];
+    let cut = |text: String| -> String { text.chars().take(width).collect() };
+    if two_cols {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(format!("{:<HELP_COL_WIDTH$}", " Navigation / Output"), bold),
+            Span::styled(" Actions", bold),
+        ])];
+        lines.extend(
+            HELP_LEFT
+                .into_iter()
+                .zip(HELP_RIGHT)
+                .map(|(l, r)| Line::from(help_cell(l) + &help_cell(r))),
+        );
+        return lines;
+    }
+    let mut lines = vec![Line::from(Span::styled(" Navigation / Output", bold))];
+    lines.extend(HELP_LEFT.into_iter().map(|b| Line::from(cut(help_cell(b)))));
+    lines.push(Line::from(Span::styled(" Actions", bold)));
     lines.extend(
-        HELP_LEFT
+        HELP_RIGHT
             .into_iter()
-            .zip(HELP_RIGHT)
-            .map(|(l, r)| Line::from(help_cell(l) + &help_cell(r))),
+            .map(|b| Line::from(cut(help_cell(b)))),
     );
-    lines.push(Line::from(Span::styled(
-        " Press ? or Esc to close",
-        Style::default().fg(Color::DarkGray),
-    )));
+    lines
+}
 
-    let width = (2 * HELP_COL_WIDTH as u16) + PANEL_BORDER_COLS;
+/// Centered popup listing all key bindings (`?` to toggle, `Esc` to close).
+/// At 60x15 and up it shows both columns with a close line; on a smaller
+/// frame (zoomed output) it stacks one column when narrower than two, drops
+/// the close line for a title hint, and scrolls (`App::view.help_scroll`,
+/// clamped here).
+fn render_help_overlay(app: &mut App, frame: &mut Frame) {
+    let area = frame.area();
+    let two_col_width = (2 * HELP_COL_WIDTH as u16) + PANEL_BORDER_COLS;
+    let two_cols = area.width >= two_col_width;
+    let mut lines = help_lines(
+        two_cols,
+        usize::from(area.width.saturating_sub(PANEL_BORDER_COLS)),
+    );
+    let full = two_cols && area.height >= lines.len() as u16 + 1 + PANEL_BORDER_ROWS as u16;
+    if full {
+        lines.push(Line::from(Span::styled(
+            " Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let width = if two_cols {
+        two_col_width
+    } else {
+        HELP_COL_WIDTH as u16 + PANEL_BORDER_COLS
+    };
     let height = lines.len() as u16 + PANEL_BORDER_ROWS as u16;
-    let area = frame
-        .area()
-        .centered(Constraint::Max(width), Constraint::Max(height));
-    frame.render_widget(Clear, area);
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
+    let popup = area.centered(Constraint::Max(width), Constraint::Max(height));
+    frame.render_widget(Clear, popup);
+
+    let inner_rows = usize::from(popup.height).saturating_sub(PANEL_BORDER_ROWS);
+    app.view.help_scroll = app
+        .view
+        .help_scroll
+        .min(lines.len().saturating_sub(inner_rows));
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default());
+    block = if full {
+        block
             .title(" Help ")
             .title_bottom(Line::from(format!(" v{VERSION_INFO} ")).right_aligned())
-            .style(Style::default()),
-    );
-    frame.render_widget(paragraph, area);
+    } else {
+        block.title(" ? / Esc close ")
+    };
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((app.view.help_scroll as u16, 0));
+    frame.render_widget(paragraph, popup);
 }
 
 /// Header title: branch, changed files vs base, elapsed, `--watch` and the
@@ -2445,18 +2490,59 @@ mod tests {
         assert!(screen.contains("zoom output"), "{screen}");
     }
 
+    /// Cached (width, wrapped rows) of the output after a draw
+    fn cache_shape(app: &App) -> (u16, usize) {
+        let cache = app.output_cache.as_ref().expect("output cache");
+        (cache.width, cache.line_count)
+    }
+
     #[test]
-    fn test_zoom_wraps_at_zoomed_width_and_toggles_state() {
+    fn test_zoom_rewraps_output_per_width_and_bounds_scroll() {
+        reset_parse_calls();
+        let mut app = make_test_app();
+        app.results.get_mut("php-lint").unwrap().output = (0..40)
+            .map(|i| format!("{i:02} {}", "word ".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        let (narrow_w, narrow_rows) = cache_shape(&app);
+        let narrow_visible = app.view.output_visible_lines;
+        assert_eq!(narrow_w, app.output_area_width);
+        assert_eq!(parse_calls(), 1);
+
+        app.toggle_zoom();
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        let (wide_w, wide_rows) = cache_shape(&app);
+        assert_eq!(wide_w, 80, "wrapped at the zoomed width");
+        assert!(wide_rows < narrow_rows, "{wide_rows} < {narrow_rows}");
+        assert!(app.view.output_visible_lines > narrow_visible);
+        assert_eq!(parse_calls(), 2, "cache not reused across widths");
+        app.scroll_to_bottom();
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        let max = wide_rows - app.view.output_visible_lines;
+        assert_eq!(app.view.output_scroll, max, "bottom bound uses zoomed size");
+
+        app.toggle_zoom();
+        terminal.draw(|f| render(&mut app, f)).expect("draw");
+        assert_eq!(cache_shape(&app), (narrow_w, narrow_rows));
+        assert_eq!(app.view.output_visible_lines, narrow_visible);
+        assert_eq!(parse_calls(), 3, "re-wrapped after unzoom");
+        assert!(app.view.output_scroll <= narrow_rows - narrow_visible);
+    }
+
+    /// `R` rebuilds the view state: zoom must survive it
+    #[test]
+    fn test_zoom_survives_retry_all_reset() {
         let mut app = make_test_app();
         app.toggle_zoom();
+        let checks = app.checks.clone();
+        let changed = app.changed_files.clone();
+        app.reset_for_retry(changed, checks);
         assert!(app.view.output_zoomed);
-        app.toggle_zoom();
-        assert!(!app.view.output_zoomed);
-        app.toggle_zoom();
-        app.leave_zoom();
-        assert!(!app.view.output_zoomed);
-        app.leave_zoom();
-        assert!(!app.view.output_zoomed, "leave is idempotent");
+        let screen = draw_screen(&mut app, 40, 8);
+        assert!(!screen.contains("too small"), "{screen}");
+        assert!(app.view.output_area.width > 0);
     }
 
     /// Help overlay lists every binding, even at the minimum terminal size

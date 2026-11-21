@@ -1237,12 +1237,19 @@ fn handle_fix_all(app: &mut App, tasks: &mut Tasks) -> Action {
     Action::Continue
 }
 
-/// Handle a key press while the `?` help overlay is shown: only `?`/`Esc`
-/// close it, everything else is swallowed (no normal action dispatches).
+/// Handle a key press while the `?` help overlay is shown: `?`/`Esc` close
+/// it, j/k/arrows/PgUp/PgDn/Home/End scroll it, everything else is swallowed
+/// (no normal action dispatches).
 fn handle_help_key_event(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('?') => app.toggle_help(),
         KeyCode::Esc => app.close_help(),
+        KeyCode::Down | KeyCode::Char('j') => app.scroll_help(1),
+        KeyCode::Up | KeyCode::Char('k') => app.scroll_help(-1),
+        KeyCode::PageDown => app.scroll_help(PAGE_SCROLL_LINES as isize),
+        KeyCode::PageUp => app.scroll_help(-(PAGE_SCROLL_LINES as isize)),
+        KeyCode::Home => app.scroll_help(isize::MIN),
+        KeyCode::End => app.scroll_help(isize::MAX),
         _ => {}
     }
     Action::Continue
@@ -2605,17 +2612,6 @@ checks:
 
     /// Guard: Enter still folds a group header while zoomed
     #[test]
-    fn test_enter_still_folds_group_header_zoomed() {
-        let config = test_config();
-        let mut app = zoom_app(&config);
-        let (mut tasks, _rx) = make_test_tasks(&config);
-        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
-        app.select_first();
-        press_key(&mut app, &mut tasks, KeyCode::Enter);
-        assert!(app.view.output_zoomed, "Enter does not unzoom");
-    }
-
-    #[test]
     fn test_scroll_keys_use_zoomed_height() {
         let config = test_config();
         let mut app = zoom_app(&config);
@@ -2646,6 +2642,92 @@ checks:
             &mut tasks,
         );
         assert_eq!(app.view.output_scroll, MOUSE_SCROLL_LINES);
+    }
+
+    /// Draw `app` at `width` x `height`, return the screen text
+    fn help_screen(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| dashboard::render(app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_help_overlay_scrolls_and_keeps_close_hint_at_zoom_sizes() {
+        // (width, height, needle for the zoom row inside the popup)
+        for (w, h, zoom) in [(40, 8, "zoom output"), (20, 5, "zoom")] {
+            let config = test_config();
+            let mut app = zoom_app(&config);
+            let (mut tasks, _rx) = make_test_tasks(&config);
+            app.view.output_zoomed = true;
+            app.toggle_help();
+            let top = help_screen(&mut app, w, h);
+            assert!(top.contains("Esc close"), "{w}x{h} close hint:\n{top}");
+            assert!(top.contains("Navigation"), "{w}x{h} starts at top:\n{top}");
+            assert!(!top.contains("quit"), "{w}x{h}: quit scrolled out:\n{top}");
+
+            // line-by-line scrolling reaches the zoom row
+            let mut seen = false;
+            for _ in 0..30 {
+                press_key(&mut app, &mut tasks, KeyCode::Char('j'));
+                seen |= help_screen(&mut app, w, h).contains(zoom);
+            }
+            assert!(seen, "{w}x{h}: zoom row never shown");
+
+            press_key(&mut app, &mut tasks, KeyCode::End);
+            let end = help_screen(&mut app, w, h);
+            assert!(end.contains("quit"), "{w}x{h} End shows quit:\n{end}");
+            assert!(end.contains("Esc close"), "{end}");
+            for _ in 0..5 {
+                press_key(&mut app, &mut tasks, KeyCode::Down);
+            }
+            assert!(
+                help_screen(&mut app, w, h).contains("quit"),
+                "clamped at end"
+            );
+
+            press_key(&mut app, &mut tasks, KeyCode::PageUp);
+            press_key(&mut app, &mut tasks, KeyCode::Home);
+            assert!(help_screen(&mut app, w, h).contains("Navigation"));
+            press_key(&mut app, &mut tasks, KeyCode::Up);
+            assert!(
+                help_screen(&mut app, w, h).contains("Navigation"),
+                "no underflow"
+            );
+        }
+    }
+
+    #[test]
+    fn test_help_scroll_resets_on_reopen_and_other_keys_swallowed() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.view.output_zoomed = true;
+        app.toggle_help();
+        help_screen(&mut app, 20, 5);
+        press_key(&mut app, &mut tasks, KeyCode::End);
+        help_screen(&mut app, 20, 5);
+        assert!(app.view.help_scroll > 0);
+
+        for code in [KeyCode::Char('q'), KeyCode::Char('z'), KeyCode::Char('f')] {
+            let action = handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+            assert!(matches!(action, Action::Continue), "{code:?} swallowed");
+        }
+        assert!(app.view.help_visible && app.view.output_zoomed);
+
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(!app.view.help_visible);
+        app.toggle_help();
+        assert_eq!(app.view.help_scroll, 0, "reopened at the top");
+        assert!(help_screen(&mut app, 20, 5).contains("Navigation"));
     }
 
     #[test]
@@ -4318,19 +4400,30 @@ checks:
 
     #[test]
     fn test_space_and_enter_toggle_fold_on_header() {
-        let config = test_config();
-        let mut app = make_fold_app(&config);
-        let (mut tasks, _rx) = make_test_tasks(&config);
-        app.select_first(); // fast header
+        for zoomed in [false, true] {
+            let config = test_config();
+            let mut app = make_fold_app(&config);
+            let (mut tasks, _rx) = make_test_tasks(&config);
+            app.view.output_zoomed = zoomed;
+            app.select_first(); // fast header
+            assert!(matches!(
+                app.selected_item(),
+                Some(app::SelectableItem::Group(_))
+            ));
 
-        for code in [KeyCode::Char(' '), KeyCode::Enter] {
-            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
-            assert!(app.is_group_collapsed("fast"), "{:?} folds", code);
-            assert_eq!(app.selectable_items().count(), 1, "only the header");
+            for code in [KeyCode::Char(' '), KeyCode::Enter] {
+                handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+                assert!(
+                    app.is_group_collapsed("fast"),
+                    "{code:?} folds (zoom {zoomed})"
+                );
+                assert_eq!(app.selectable_items().count(), 1, "only the header");
 
-            handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
-            assert!(!app.is_group_collapsed("fast"), "{:?} unfolds", code);
-            assert_eq!(app.selectable_items().count(), 3);
+                handle_key_event(&mut app, press(code, KeyModifiers::NONE), &mut tasks);
+                assert!(!app.is_group_collapsed("fast"), "{code:?} unfolds");
+                assert_eq!(app.selectable_items().count(), 3);
+                assert_eq!(app.view.output_zoomed, zoomed, "zoom unchanged");
+            }
         }
     }
 

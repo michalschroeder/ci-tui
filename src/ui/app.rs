@@ -240,6 +240,8 @@ pub struct ViewState {
     /// Output panel zoomed to the full area minus footer (`z` toggles, `Esc`
     /// leaves); pure view state
     pub output_zoomed: bool,
+    /// First visible line of the `?` help overlay (clamped when drawn)
+    pub help_scroll: usize,
     /// Output search state (`/` key); `None` when not searching
     pub search: Option<SearchState>,
     /// Keep the output panel pinned to the bottom while the selected check
@@ -269,6 +271,7 @@ impl Default for ViewState {
             help_visible: false,
             stats_visible: true,
             output_zoomed: false,
+            help_scroll: 0,
             search: None,
             follow_output: true,
             pending_error_jump: false,
@@ -629,6 +632,7 @@ impl App {
             output_visible_lines: self.view.output_visible_lines,
             collapsed_groups,
             manual_folds,
+            output_zoomed: self.view.output_zoomed,
             ..ViewState::default()
         };
         self.select_initial_item();
@@ -1694,6 +1698,14 @@ impl App {
     /// by the key handler rather than dispatched.
     pub fn toggle_help(&mut self) {
         self.view.help_visible = !self.view.help_visible;
+        self.view.help_scroll = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Scroll the help overlay by `lines` (negative = up); the renderer
+    /// clamps the end. `isize::MAX` / `MIN` jump to bottom / top.
+    pub fn scroll_help(&mut self, lines: isize) {
+        self.view.help_scroll = self.view.help_scroll.saturating_add_signed(lines);
         self.needs_redraw = true;
     }
 
