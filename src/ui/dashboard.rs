@@ -172,11 +172,7 @@ pub(crate) fn finished_status_text(counts: &super::app::StatusCounts, elapsed: &
     );
     let total = counts.auto_run();
     if counts.nothing_ran() {
-        return crate::report::nothing_ran_text(
-            counts.skipped + counts.on_demand,
-            counts.skipped,
-            counts.on_demand,
-        );
+        return crate::report::nothing_ran_text(counts.skipped, counts.on_demand);
     }
     let on_demand = crate::report::not_run_suffix(counts.skipped, counts.on_demand);
     if failed == 0 && warnings == 0 && cancelled == 0 && pending == 0 {

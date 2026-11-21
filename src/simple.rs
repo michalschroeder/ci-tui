@@ -190,7 +190,7 @@ impl SimpleRun {
         let mut stopped = None;
         for (group_name, group_checks) in group_checks(checks) {
             let results = self
-                .print_group(group_name, group_checks, checks, cache, &mut stopped)
+                .run_and_print_group(group_name, group_checks, checks, cache, &mut stopped)
                 .await;
             all_results.extend(results);
         }
@@ -200,7 +200,7 @@ impl SimpleRun {
     /// Print and run one group (results in order: cached, then run); nothing
     /// (no header, no blank line) for a group without a cached or runnable
     /// check, i.e. only on-demand / skipped ones
-    async fn print_group(
+    async fn run_and_print_group(
         &self,
         group_name: &str,
         group_checks: Vec<&CheckToRun>,
@@ -377,7 +377,7 @@ fn format_summary(run: &Report, elapsed: &str, annotate: bool) -> String {
     }
     let mut buf = String::from("\x1b[1m── Summary ──\x1b[0m\n");
     if run.results.is_empty() {
-        let line = report::nothing_ran_text(run.checks.len(), summary.skipped, summary.on_demand);
+        let line = report::nothing_ran_text(summary.skipped, summary.on_demand);
         let _ = writeln!(buf, "\x1b[37m{line}\x1b[0m");
         return buf;
     }

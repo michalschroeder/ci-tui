@@ -165,9 +165,14 @@ impl Summary {
             total: results.len(),
             ..Self::default()
         };
-        let decisions = || checks.iter().map(CheckToRun::decision);
-        summary.on_demand = decisions().filter(|d| *d == Decision::OnDemand).count();
-        summary.skipped = decisions().filter(|d| *d == Decision::Skipped).count();
+        for check in checks {
+            let bucket = match check.decision() {
+                Decision::OnDemand => &mut summary.on_demand,
+                Decision::Skipped => &mut summary.skipped,
+                Decision::Run => continue,
+            };
+            *bucket += 1;
+        }
         for result in results {
             summary.cached += usize::from(result.cached);
             let bucket = match (severity_in(checks, result), &result.status) {
@@ -208,9 +213,10 @@ pub fn not_run_suffix(skipped: usize, on_demand: usize) -> String {
 }
 
 /// Summary line of a run that executed nothing: `0 of 7 checks ran (5
-/// skipped, 2 on-demand) — see --list` (`total` = selected checks)
-pub fn nothing_ran_text(total: usize, skipped: usize, on_demand: usize) -> String {
-    let counts = not_run_suffix(skipped, on_demand);
+/// skipped, 2 on-demand) — see --list` (without results every selected
+/// check is skipped or on-demand)
+pub fn nothing_ran_text(skipped: usize, on_demand: usize) -> String {
+    let (total, counts) = (skipped + on_demand, not_run_suffix(skipped, on_demand));
     format!("0 of {total} checks ran{counts} — see --list")
 }
 
