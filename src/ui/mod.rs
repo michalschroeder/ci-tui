@@ -1894,7 +1894,7 @@ fn print_summary(app: &App) {
 }
 
 /// Final summary: same wording as the dashboard header, colored green (all
-/// passed), yellow (some warnings / cancelled / pending) or red (exit code
+/// passed), gray (nothing ran), yellow (some warnings / cancelled / pending) or red (exit code
 /// 1: a check or group pre-command failed), then the failed checks' ids in
 /// list order (`(allowed)` for [`Severity::Warning`] ones)
 fn quit_summary(app: &App) -> String {
@@ -1902,6 +1902,8 @@ fn quit_summary(app: &App) -> String {
     let text = finished_text(app, &counts);
     let color = if app.exit_code() != crate::exit::SUCCESS {
         31
+    } else if counts.nothing_ran() {
+        37
     } else if counts.warnings > 0 || counts.cancelled > 0 || counts.pending > 0 {
         33
     } else {
@@ -2750,6 +2752,20 @@ checks:
     }
 
     #[test]
+    fn test_quit_summary_nothing_ran_is_neutral() {
+        let config = test_config();
+        let mut check = make_test_check("od", "fast");
+        check.files = crate::checks::CheckFiles::OnDemand;
+        let mut app = make_test_app_with_checks(&config, vec![check]);
+        finish_run(&mut app, &config, None);
+        let summary = quit_summary(&app);
+        assert!(
+            summary.starts_with("\n\x1b[37m0 of 1 checks ran (1 on-demand) — see --list"),
+            "{summary:?}"
+        );
+    }
+
+    #[test]
     fn test_finished_text_mixed_failures_and_warnings() {
         let config = test_config();
         let checks = vec![
@@ -2883,7 +2899,7 @@ checks:
         finish_run(&mut app, &config, Some(("php-lint", CheckStatus::Passed)));
         let text = finished_text(&app, &app.count_by_status());
         assert!(text.starts_with("✓ All 1 checks passed in "), "{text}");
-        assert!(text.ends_with(" +1 on-demand"), "{text}");
+        assert!(text.ends_with(" (1 skipped, 1 on-demand)"), "{text}");
     }
 
     #[test]

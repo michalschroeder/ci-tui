@@ -519,6 +519,8 @@ pub struct StatusCounts {
     /// Pending or running
     pub pending: usize,
     pub on_demand: usize,
+    /// Nothing to run (`{files}` command with no matching file)
+    pub skipped: usize,
     /// Cancelled by the user (neither passed nor failed)
     pub cancelled: usize,
 }
@@ -527,6 +529,12 @@ impl StatusCounts {
     /// Checks that ran to an outcome (passed, failed, warning or cancelled)
     pub fn completed(&self) -> usize {
         self.passed + self.failed + self.warnings + self.cancelled
+    }
+
+    /// Nothing ran and something was left out: all checks skipped or
+    /// on-demand
+    pub fn nothing_ran(&self) -> bool {
+        self.auto_run() == 0 && self.skipped + self.on_demand > 0
     }
 
     /// Checks the run covers: all but skipped and untriggered on-demand ones
@@ -1761,8 +1769,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Count check results per status bucket (skipped checks are not
-    /// counted; [`Severity::Warning`] failures are warnings)
+    /// Count check results per status bucket ([`Severity::Warning`] failures are warnings)
     pub fn count_by_status(&self) -> StatusCounts {
         use CheckStatus as S;
         let mut counts = StatusCounts::default();
@@ -1777,8 +1784,9 @@ impl App {
                 (_, S::Passed) => &mut counts.passed,
                 (_, S::Pending | S::Queued | S::Running) => &mut counts.pending,
                 (_, S::OnDemand) => &mut counts.on_demand,
+                (_, S::Skipped) => &mut counts.skipped,
                 (_, S::Cancelled) => &mut counts.cancelled,
-                (_, S::Skipped | S::Failed | S::TimedOut) => continue,
+                (_, S::Failed | S::TimedOut) => continue,
             };
             *bucket += 1;
         }
@@ -2395,6 +2403,7 @@ checks:
                 warnings: 0,
                 pending: 2,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
         );
@@ -2411,6 +2420,7 @@ checks:
                 warnings: 0,
                 pending: 1,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
         );
@@ -2427,8 +2437,20 @@ checks:
                 warnings: 0,
                 pending: 0,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
+        );
+    }
+
+    #[test]
+    fn test_count_by_status_counts_skipped() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Skipped;
+        let counts = app.count_by_status();
+        assert_eq!(
+            (counts.skipped, counts.pending, counts.on_demand),
+            (1, 1, 1)
         );
     }
 
