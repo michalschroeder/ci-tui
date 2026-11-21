@@ -35,7 +35,8 @@ fn base_ref_hint(base_override: Option<&str>) -> String {
             "Check that `{base_ref}` exists locally (tags / remote branches may need `git fetch`)."
         ),
         None => "No base ref could be resolved against the current repository. \
-            If this is intentional, bypass git with --files <paths...>."
+            Set `git.base_branch` in the config to your default branch, or pass \
+            `--base <ref>`; `--files <paths...>` bypasses git."
             .to_string(),
     }
 }
@@ -90,12 +91,16 @@ fn print_schema() -> Result<()> {
 
 /// Run `init` / `validate` / `schema` and print the outcome.
 fn run_subcommand(command: Command, config: Option<std::path::PathBuf>) -> Result<()> {
-    let Some(path) = command.config_path(config, &std::env::current_dir()?) else {
+    let cwd = std::env::current_dir()?;
+    let Some(path) = command.config_path(config, &cwd) else {
         return print_schema();
     };
     if let Command::Init { .. } = command {
-        commands::init(&path)?;
-        println!("Wrote {}", path.display());
+        // The repo the config lands in, not the one `init` runs from
+        let config_dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let base_branch = commands::detect_base_branch(config_dir.unwrap_or(&cwd));
+        commands::init(&path, &base_branch)?;
+        println!("Wrote {} (git.base_branch: {base_branch})", path.display());
         println!(
             "Edit the checks section, then run: ci-tui --config {}",
             path.display()

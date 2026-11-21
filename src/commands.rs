@@ -91,11 +91,53 @@ checks:
 
 /// Write the starter config to `path`. Refuses to overwrite an existing file.
 /// Errors are [`ConfigError`]s (exit 2).
-pub fn init(path: &Path) -> Result<()> {
-    write_template(path).map_err(|e| ConfigError(e).into())
+pub fn init(path: &Path, base_branch: &str) -> Result<()> {
+    write_template(path, base_branch).map_err(|e| ConfigError(e).into())
 }
 
-fn write_template(path: &Path) -> Result<()> {
+/// Starter config with `git.base_branch` set to `base_branch`.
+fn template_for(base_branch: &str) -> String {
+    TEMPLATE.replacen(
+        "  base_branch: main\n",
+        &format!("  base_branch: {base_branch}\n"),
+        1,
+    )
+}
+
+/// Default branch of the repository in `dir`, for `git.base_branch`:
+/// `origin/HEAD`, else an existing local `main` / `master`, else the current
+/// branch, else `main` (also outside a git repo).
+pub fn detect_base_branch(dir: &Path) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !text.is_empty()).then_some(text)
+    };
+    git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .and_then(|r| r.strip_prefix("origin/").map(str::to_string))
+        .or_else(|| {
+            ["main", "master"]
+                .into_iter()
+                .find(|b| {
+                    git(&[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{b}"),
+                    ])
+                    .is_some()
+                })
+                .map(str::to_string)
+        })
+        .or_else(|| git(&["symbolic-ref", "--short", "HEAD"]))
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn write_template(path: &Path, base_branch: &str) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -106,7 +148,7 @@ fn write_template(path: &Path) -> Result<()> {
             }
             _ => anyhow::Error::new(e).context(format!("failed to write {}", path.display())),
         })?;
-    if let Err(e) = file.write_all(TEMPLATE.as_bytes()) {
+    if let Err(e) = file.write_all(template_for(base_branch).as_bytes()) {
         // Remove the partial file so a retry is not refused as "already exists".
         let _ = std::fs::remove_file(path);
         return Err(e).with_context(|| format!("failed to write {}", path.display()));
@@ -148,8 +190,81 @@ mod tests {
     fn test_init_writes_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
-        init(&path).unwrap();
+        init(&path, "main").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn repo(branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", branch]);
+        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "one"]);
+        dir
+    }
+
+    #[test]
+    fn test_init_writes_given_base_branch_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ci-tui.yaml");
+        init(&path, "develop").unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("  base_branch: develop\n"));
+        validate(&path).unwrap();
+    }
+
+    #[test]
+    fn test_detect_base_branch_master_without_remote() {
+        let dir = repo("master");
+        assert_eq!(detect_base_branch(dir.path()), "master");
+    }
+
+    #[test]
+    fn test_detect_base_branch_prefers_origin_head() {
+        let dir = repo("master");
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(
+            dir.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+            ],
+        );
+        assert_eq!(detect_base_branch(dir.path()), "develop");
+    }
+
+    #[test]
+    fn test_detect_base_branch_prefers_local_default_over_feature() {
+        let dir = repo("master");
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        assert_eq!(detect_base_branch(dir.path()), "master");
+    }
+
+    #[test]
+    fn test_detect_base_branch_current_branch_fallback() {
+        let dir = repo("trunk");
+        assert_eq!(detect_base_branch(dir.path()), "trunk");
+    }
+
+    #[test]
+    fn test_detect_base_branch_outside_repo_is_main() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_base_branch(dir.path()), "main");
     }
 
     #[test]
@@ -157,7 +272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
         std::fs::write(&path, "existing").unwrap();
-        let err = init(&path).unwrap_err().to_string();
+        let err = init(&path, "main").unwrap_err().to_string();
         assert!(err.contains("exists"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
     }

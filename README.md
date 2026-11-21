@@ -38,7 +38,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
 - `--watch` (TUI only) keeps the TUI running and re-runs the checks a file save affects, like `r` (git refresh first; a running one restarts, one the current run still runs finishes that run first, then re-runs unless the run took the saved files, so a newly matched file missing from its `{files}` is still checked). Re-runs wait while a fix or its verification runs and keep a group's concurrency (`parallel: false` one at a time, else `max_parallel`); a check is not re-run when the saved files' content is what its latest run started with (a touch, or files it or its fix wrote itself once that run saw them). Watches the dirs checks run from (local mode: the repo; docker mode: the project dir) except gitignored ones, `.git/`, `.ci-tui/` and nested repos / submodules (new dirs are picked up); saves are debounced (300 ms quiet, 2 s cap), and files matching `ignore_patterns`, gitignored files and editor temp files (vim swap / `4913`, `*~`, emacs `.#*` / `#*#`) are skipped. A save selects checks like a run on just the saved files, so always-run checks (no `triggers`) re-run on every save
 - `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x21 (60x15 without stats) show a "terminal too small" notice instead of a clipped layout
-- `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
+- `ci-tui init` scaffolds a commented starter config (`git.base_branch` detected from the repo); `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
 
 ## Install
@@ -77,7 +77,7 @@ Add `-e COMPOSE_PROJECT_NAME=<name>` when your project name is not the directory
 1. Scaffold a config in your project root and edit its `checks` section (full reference: [docs/configuration.md](docs/configuration.md)):
 
 ```bash
-ci-tui init          # writes a commented ci-tui.yaml (never overwrites)
+ci-tui init          # writes a commented ci-tui.yaml (never overwrites); git.base_branch from origin/HEAD, else local main / master, else the current branch
 ci-tui validate      # checks it without running anything
 ```
 
