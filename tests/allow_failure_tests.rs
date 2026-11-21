@@ -82,7 +82,7 @@ fn json_summary_counts_allowed_failure_as_warning() {
     let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(
         doc["summary"],
-        serde_json::json!({"total": 3, "passed": 1, "failed": 1, "warnings": 1, "cached": 0})
+        serde_json::json!({"total": 3, "passed": 1, "failed": 1, "warnings": 1, "cached": 0, "skipped": 0, "on_demand": 0})
     );
 }
 
