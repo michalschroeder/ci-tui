@@ -44,10 +44,10 @@ jobs:
         uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Run unit tests
-        run: cargo nextest run --lib --profile ci
+        run: cargo nextest run --locked --lib --profile ci
 
       - name: Run doctests
-        run: cargo test --doc
+        run: cargo test --locked --doc
 
   integration-tests:
     name: Integration Tests
@@ -73,7 +73,7 @@ jobs:
         uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Run integration tests
-        run: cargo nextest run --features test --test '*' --profile ci
+        run: cargo nextest run --locked --features test --test '*' --profile ci
 
   lint:
     name: Lint
@@ -101,7 +101,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   coverage:
     name: Coverage
@@ -132,7 +132,7 @@ jobs:
         uses: taiki-e/install-action@e800962fea8b802cd1bd32c4e6f08fbda4bb0048 # nextest
 
       - name: Generate coverage report
-        run: cargo llvm-cov nextest --features test --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --locked --features test --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
