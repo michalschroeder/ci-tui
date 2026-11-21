@@ -335,3 +335,18 @@ fn init_over_existing_config_exits_2() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("already exists"), "{stderr}");
 }
+
+/// #300: `-V` / `--version` print version, short hash and build date
+#[test]
+fn version_flags_print_version_hash_and_build_date() {
+    let tmp = tempfile::tempdir().unwrap();
+    for flag in ["-V", "--version"] {
+        let out = run_ci_tui(tmp.path(), &[flag]);
+        assert_code(&out, exit::SUCCESS);
+        assert_eq!(
+            stdout(&out).trim_end(),
+            format!("ci-tui {}", ci_tui::cli::VERSION_INFO),
+            "{flag}"
+        );
+    }
+}
