@@ -8,11 +8,22 @@ use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+/// `<version> (<short hash>, built <date>)`: shown by `--version` and in the
+/// TUI help overlay
+pub const VERSION_INFO: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CI_TUI_GIT_HASH"),
+    ", built ",
+    env!("CI_TUI_BUILD_DATE"),
+    ")"
+);
+
 /// CI TUI - Run CI checks for changed files
 #[derive(Parser)]
 #[command(
     name = "ci-tui",
-    version,
+    version = VERSION_INFO,
     about,
     long_about = None
 )]

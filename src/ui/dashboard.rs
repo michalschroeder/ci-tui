@@ -18,6 +18,7 @@
 
 use super::app::{App, PreCommandState, PreCommandStatus, SelectableItem, StatusKind};
 use crate::checks::{CheckFiles, Severity};
+use crate::cli::VERSION_INFO;
 use crate::runner::{CheckResult, CheckStatus};
 use crate::utils::time;
 use ansi_to_tui::IntoText;
@@ -35,9 +36,6 @@ use std::collections::VecDeque;
 use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const GIT_HASH: &str = env!("CI_TUI_GIT_HASH");
-const BUILD_DATE: &str = env!("CI_TUI_BUILD_DATE");
 /// Minimum height (rows, incl. borders) of the checks panel
 const CHECKS_PANEL_MIN_HEIGHT: u16 = 8;
 /// Checks panel takes at most this fraction of the main-area height
@@ -257,7 +255,7 @@ fn render_dashboard(app: &mut App, frame: &mut Frame) {
             Constraint::Length(HEADER_ROWS),
             Constraint::Length(stats_rows),
             Constraint::Min(MAIN_MIN_ROWS),
-            Constraint::Length(FOOTER_ROWS),
+            Constraint::Length(footer_rows(app, frame.area().width)),
         ])
         .split(frame.area());
 
@@ -364,6 +362,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Help ")
+            .title_bottom(Line::from(format!(" v{VERSION_INFO} ")).right_aligned())
             .style(Style::default()),
     );
     frame.render_widget(paragraph, area);
@@ -1845,116 +1844,102 @@ fn render_output(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Build keyboard shortcut spans for the footer
-fn build_footer_shortcuts(app: &App) -> Vec<Span<'static>> {
+/// One footer hint (key + label): its spans always stay on a single row
+type Hint = Vec<Span<'static>>;
+
+fn hint(key: &'static str, key_style: Style, label: String, label_style: Style) -> Hint {
+    vec![
+        Span::styled(key, key_style),
+        Span::styled(format!(" {label}"), label_style),
+    ]
+}
+
+/// Keyboard hints for the footer: state-specific first, generic last, so
+/// anything clipped at the end is a generic hint
+fn footer_hints(app: &App) -> Vec<Hint> {
     let caps = app.selected_capabilities();
-    let expand_label = if app.view.show_full_command {
+    let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    let key = |c: Color| Style::default().fg(c);
+    let plain = Style::default();
+    let mut hints = Vec::new();
+
+    if caps.can_trigger {
+        let label = key(Color::Cyan);
+        hints.push(hint("t", bold(Color::Cyan), "run test".into(), label));
+    }
+    if caps.can_cancel {
+        hints.push(hint("s", key(Color::Red), "cancel".into(), plain));
+    }
+    if caps.can_retry {
+        hints.push(hint("r", key(Color::Cyan), "retry".into(), plain));
+    }
+    if caps.can_run_all_files {
+        hints.push(hint("A", bold(Color::Cyan), "all files".into(), plain));
+    }
+    if app.can_retry_all() {
+        hints.push(hint("R", bold(Color::Cyan), "RETRY ALL".into(), plain));
+    }
+    if caps.can_fix {
+        let label = key(Color::Green);
+        hints.push(hint("x", bold(Color::Green), "fix".into(), label));
+    }
+    let fixable_count = app.get_fixable_checks().len();
+    if fixable_count > 0 && !app.fix.running && !app.fix.all_running {
+        let label = key(Color::Magenta);
+        let text = format!("FIX ALL({fixable_count})");
+        hints.push(hint("X", bold(Color::Magenta), text, label));
+    }
+
+    let yellow = key(Color::Yellow);
+    hints.push(hint("q", yellow, "quit".into(), plain));
+    hints.push(hint("?", yellow, "help".into(), plain));
+    hints.push(hint("↑↓", yellow, "select".into(), plain));
+    if app.view.status_filter == crate::ui::app::StatusFilter::Failed {
+        hints.push(hint("a", yellow, "all".into(), plain));
+    } else {
+        hints.push(hint("f", yellow, "failed".into(), plain));
+    }
+    hints.push(hint("c", yellow, "copy".into(), plain));
+    let expand = if app.view.show_full_command {
         "collapse"
     } else {
         "expand"
     };
+    hints.push(hint("e", yellow, expand.into(), plain));
+    hints
+}
 
-    let filter_spans = if app.view.status_filter == crate::ui::app::StatusFilter::Failed {
-        vec![
-            Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(" all  "),
-        ]
-    } else {
-        vec![
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(" failed  "),
-        ]
-    };
-
-    let mut spans = vec![
-        Span::styled(" q", Style::default().fg(Color::Yellow)),
-        Span::raw(" quit  "),
-        Span::styled("?", Style::default().fg(Color::Yellow)),
-        Span::raw(" help  "),
-        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
-        Span::raw(" select  "),
-    ];
-    spans.extend(filter_spans);
-    spans.extend(vec![
-        Span::styled("c", Style::default().fg(Color::Yellow)),
-        Span::raw(" copy  "),
-        Span::styled("e", Style::default().fg(Color::Yellow)),
-        Span::raw(format!(" {}  ", expand_label)),
-    ]);
-
-    if caps.can_trigger {
-        spans.push(Span::styled(
-            "t",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(" run test", Style::default().fg(Color::Cyan)));
-        spans.push(Span::raw("  "));
+/// Pack `hints` into rows of at most `width` columns, breaking only between
+/// hints (one wider than a row is clipped when drawn). Rows start with one
+/// space, hints are separated by two.
+fn pack_hints(hints: Vec<Hint>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for hint in hints {
+        let hint_width: usize = hint.iter().map(|s| s.content.width()).sum();
+        if used > 0 && used + 2 + hint_width > width {
+            rows.push(Line::from(std::mem::take(&mut row)));
+            used = 0;
+        }
+        let sep = if used == 0 { 1 } else { 2 };
+        row.push(Span::raw(" ".repeat(sep)));
+        row.extend(hint);
+        used += sep + hint_width;
     }
-
-    if caps.can_cancel {
-        spans.push(Span::styled("s", Style::default().fg(Color::Red)));
-        spans.push(Span::raw(" cancel  "));
+    if !row.is_empty() {
+        rows.push(Line::from(row));
     }
+    rows
+}
 
-    if caps.can_retry {
-        spans.push(Span::styled("r", Style::default().fg(Color::Cyan)));
-        spans.push(Span::raw(" retry  "));
-    }
-
-    if caps.can_run_all_files {
-        spans.push(Span::styled(
-            "A",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" all files  "));
-    }
-
-    if app.can_retry_all() {
-        spans.push(Span::styled(
-            "R",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" RETRY ALL  "));
-    }
-
-    if caps.can_fix {
-        spans.push(Span::styled(
-            "x",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(" fix", Style::default().fg(Color::Green)));
-        spans.push(Span::raw("  "));
-    }
-
-    let fixable_count = app.get_fixable_checks().len();
-    if fixable_count > 0 && !app.fix.running && !app.fix.all_running {
-        spans.push(Span::styled(
-            "X",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" FIX ALL({})", fixable_count),
-            Style::default().fg(Color::Magenta),
-        ));
-        spans.push(Span::raw("  "));
-    }
-
-    spans.push(Span::styled(
-        format!("  v{VERSION} ({GIT_HASH}, built {BUILD_DATE})"),
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    spans
+/// Footer height at `width`: one row when the hints fit, else two (overflow
+/// past that is clipped). Independent of status / search lines, so the layout
+/// doesn't jump when one appears.
+fn footer_rows(app: &App, width: u16) -> u16 {
+    let rows = pack_hints(footer_hints(app), width).len() as u16;
+    rows.clamp(1, FOOTER_ROWS)
 }
 
 /// "no matches" / "1 match" / "N matches" summary for the search footer
@@ -2018,10 +2003,8 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         let paragraph = Paragraph::new(status_line);
         frame.render_widget(paragraph, area);
     } else {
-        let spans = build_footer_shortcuts(app);
-        let help = Line::from(spans);
-        let paragraph = Paragraph::new(help);
-        frame.render_widget(paragraph, area);
+        let rows = pack_hints(footer_hints(app), area.width);
+        frame.render_widget(Paragraph::new(rows), area);
     }
 }
 
@@ -2781,5 +2764,49 @@ mod tests {
         let text = pre_command_output_text(&pre_command(PreCommandStatus::Skipped, reason));
         assert!(text.ends_with(reason), "{text:?}");
         assert!(!text.contains("no check of this group runs"), "{text:?}");
+    }
+
+    fn row_texts(rows: &[Line<'static>]) -> Vec<String> {
+        rows.iter().map(|l| l.to_string()).collect()
+    }
+
+    fn test_hints(labels: &[&'static str]) -> Vec<Hint> {
+        labels
+            .iter()
+            .map(|l| {
+                hint(
+                    &l[..1],
+                    Style::default(),
+                    l[2..].to_string(),
+                    Style::default(),
+                )
+            })
+            .collect()
+    }
+
+    /// #300: hints wrap only between hints, each row within the width, order kept
+    #[test]
+    fn test_pack_hints_wraps_at_hint_boundaries() {
+        let hints = test_hints(&["x fix", "X FIX ALL(1)", "q quit", "e expand"]);
+        // " x fix  X FIX ALL(1)" = 20 cols; " q quit  e expand" = 17
+        let rows = row_texts(&pack_hints(hints, 22));
+        assert_eq!(rows, [" x fix  X FIX ALL(1)", " q quit  e expand"]);
+        // Everything fits: one row
+        let all = row_texts(&pack_hints(test_hints(&["x fix", "q quit"]), 80));
+        assert_eq!(all, [" x fix  q quit"]);
+    }
+
+    /// #300: past two rows the overflow is the end of the list (generic hints),
+    /// clipped by the footer's two-row area
+    #[test]
+    fn test_pack_hints_overflow_is_the_tail() {
+        let hints = test_hints(&["x fix", "X FIX ALL(1)", "q quit", "e expand"]);
+        let rows = pack_hints(hints, 14);
+        assert_eq!(rows.len(), 4);
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 14, FOOTER_ROWS));
+        ratatui::widgets::Widget::render(Paragraph::new(rows), buf.area, &mut buf);
+        let shown: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(shown.contains("x fix") && shown.contains("X FIX ALL(1)"));
+        assert!(!shown.contains("quit") && !shown.contains("expand"));
     }
 }

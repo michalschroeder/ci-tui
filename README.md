@@ -48,7 +48,7 @@ From source:
 
 ```bash
 git clone https://github.com/michalschroeder/ci-tui && cd ci-tui
-cargo install --path .
+cargo install --path . --locked
 ```
 
 `runner: local` needs ci-tui installed on the host (from source / cargo), not the Docker image, since checks use the host toolchain.
