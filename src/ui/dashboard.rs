@@ -374,6 +374,8 @@ fn render_help_overlay(frame: &mut Frame) {
 struct HeaderSeg {
     part: HeaderPart,
     text: String,
+    /// Compact wording used when the row is too wide (all counts kept)
+    short: Option<String>,
 }
 
 /// Header parts in display order
@@ -410,52 +412,116 @@ fn header_overflow(segs: &[HeaderSeg], width: usize) -> usize {
 }
 
 /// Fit `segs` into `width` columns, least important first: elapsed, files,
-/// branch; then the filter marker is shortened (or dropped), the `watching`
-/// marker dropped and only last the status cut.
+/// branch; then the status gets its compact wording (all counts kept), the
+/// `watching` marker goes (when the filter marker would be cut to a stub),
+/// the filter marker is shortened (or dropped) and only last the status is
+/// clipped (`…`).
 fn fit_header(mut segs: Vec<HeaderSeg>, width: usize) -> Vec<HeaderSeg> {
     for part in HEADER_DROP_ORDER {
         if header_overflow(&segs, width) > 0 {
             segs.retain(|s| s.part != part);
         }
     }
-    shrink_filter(&mut segs, width);
     if header_overflow(&segs, width) > 0 {
-        segs.retain(|s| s.part != HeaderPart::Watch);
+        segs.iter_mut().for_each(use_short);
     }
+    shrink_markers(&mut segs, width);
     let over = header_overflow(&segs, width);
     if let Some(status) = segs.iter_mut().find(|s| s.part == HeaderPart::Status) {
         if over > 0 {
             status.text =
-                prefix_width(&status.text, status.text.width().saturating_sub(over)).to_string();
+                clip_with_ellipsis(&status.text, status.text.width().saturating_sub(over));
         }
     }
     segs
 }
 
-/// Cut the filter marker to the room left (`…` at the end); drop it when
-/// less than [`HEADER_FILTER_MIN_COLS`] remain
-fn shrink_filter(segs: &mut Vec<HeaderSeg>, width: usize) {
-    let over = header_overflow(segs, width);
-    let Some(at) = segs.iter().position(|s| s.part == HeaderPart::Filter) else {
-        return;
-    };
-    let room = segs[at].text.width().saturating_sub(over);
-    if over == 0 {
-        return;
+/// Swap a part's text for its compact wording, if it has one
+fn use_short(seg: &mut HeaderSeg) {
+    if let Some(short) = seg.short.take() {
+        seg.text = short;
     }
+}
+
+/// Make room by the markers: the filter is cut to what is left (`…` at the
+/// end); with less than [`HEADER_FILTER_MIN_COLS`] left `watching` is dropped
+/// first, then the filter itself
+fn shrink_markers(segs: &mut Vec<HeaderSeg>, width: usize) {
+    if !fit_filter(segs, width) {
+        segs.retain(|s| s.part != HeaderPart::Watch);
+        if !fit_filter(segs, width) {
+            segs.retain(|s| s.part != HeaderPart::Filter);
+        }
+    }
+}
+
+/// True when the row fits, shortening the filter marker if that is enough
+/// (at least [`HEADER_FILTER_MIN_COLS`] columns of it left)
+fn fit_filter(segs: &mut [HeaderSeg], width: usize) -> bool {
+    let over = header_overflow(segs, width);
+    if over == 0 {
+        return true;
+    }
+    let Some(filter) = segs.iter_mut().find(|s| s.part == HeaderPart::Filter) else {
+        return false;
+    };
+    let room = filter.text.width().saturating_sub(over);
     if room < HEADER_FILTER_MIN_COLS {
-        segs.remove(at);
+        return false;
+    }
+    filter.text = clip_with_ellipsis(&filter.text, room);
+    true
+}
+
+/// `s` cut to at most `max` columns, the last one the `…`
+fn clip_with_ellipsis(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let cut = grapheme_prefix(s, max.saturating_sub(1));
+    if max == 0 {
+        return String::new();
+    }
+    format!("{cut}…")
+}
+
+/// Longest prefix of `s` whose `str` width (the one [`header_width`] sums)
+/// is at most `max`, cut only before a char that starts a new cluster: never
+/// between a ZWJ and what it joins, before a combining / variation mark or an
+/// emoji skin-tone modifier
+fn grapheme_prefix(s: &str, max: usize) -> &str {
+    const ZWJ: char = '\u{200D}';
+    let mut end = 0;
+    let mut prev = None;
+    for (i, c) in s.char_indices() {
+        let joins = c == ZWJ
+            || c.width().unwrap_or(0) == 0
+            || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+            || prev == Some(ZWJ);
+        if !joins && s[..i].width() > max {
+            break;
+        }
+        if !joins {
+            end = i;
+        }
+        prev = Some(c);
+    }
+    if s.width() <= max {
+        s
     } else {
-        let cut = prefix_width(&segs[at].text, room - 1).to_string();
-        segs[at].text = cut + "…";
+        &s[..end]
     }
 }
 
 /// Header parts for `app`: branch, changed files vs base, `status`, elapsed,
 /// `--watch` and the active `--only` / `--group` filter (persistent, unlike
 /// the dismissable footer)
-fn header_segments(app: &App, status: String, elapsed: String) -> Vec<HeaderSeg> {
-    let seg = |part, text: String| HeaderSeg { part, text };
+fn header_segments(app: &App, status: HeaderStatus, elapsed: String) -> Vec<HeaderSeg> {
+    let seg = |part, text: String| HeaderSeg {
+        part,
+        text,
+        short: None,
+    };
     let mut segs = vec![
         seg(HeaderPart::Branch, app.current_branch.clone()),
         seg(
@@ -466,7 +532,11 @@ fn header_segments(app: &App, status: String, elapsed: String) -> Vec<HeaderSeg>
                 app.changed_files.base_ref
             ),
         ),
-        seg(HeaderPart::Status, status),
+        HeaderSeg {
+            part: HeaderPart::Status,
+            text: status.full,
+            short: Some(status.short),
+        },
         seg(HeaderPart::Elapsed, elapsed),
     ];
     if app.watching {
@@ -478,11 +548,51 @@ fn header_segments(app: &App, status: String, elapsed: String) -> Vec<HeaderSeg>
     segs
 }
 
-/// Header status text (no elapsed time) and the color of its segment: red
-/// with failures, yellow for warnings / cancelled / pending / running, green
-/// when all passed
-fn header_status(app: &App, counts: &super::app::StatusCounts) -> (String, Color) {
-    let on_demand = on_demand_suffix(counts);
+/// Header status: full and compact wording (no elapsed time, same counts)
+/// and the color of its segment
+struct HeaderStatus {
+    full: String,
+    short: String,
+    color: Color,
+}
+
+/// Compact finished-run counts: `✗ 100/500, 100 fail, 100 warn, 100 canc,
+/// 100 pend +2 od` (the `failed` count shows like in the full text)
+fn compact_finished_text(counts: &super::app::StatusCounts) -> String {
+    let total = counts.auto_run();
+    let od = compact_on_demand(counts);
+    if counts.failed == 0 && counts.warnings == 0 && counts.cancelled == 0 && counts.pending == 0 {
+        return format!("✓ All {total} passed{od}");
+    }
+    let mark = if counts.failed > 0 { "✗ " } else { "" };
+    let mut text = format!("{mark}{}/{total}", counts.passed);
+    if counts.failed > 0 || counts.warnings == 0 {
+        text += &format!(", {} fail", counts.failed);
+    }
+    for (n, label) in [
+        (counts.warnings, "warn"),
+        (counts.cancelled, "canc"),
+        (counts.pending, "pend"),
+    ] {
+        if n > 0 {
+            text += &format!(", {n} {label}");
+        }
+    }
+    text + &od
+}
+
+/// " +N od" (empty without on-demand checks)
+fn compact_on_demand(counts: &super::app::StatusCounts) -> String {
+    if counts.on_demand > 0 {
+        format!(" +{} od", counts.on_demand)
+    } else {
+        String::new()
+    }
+}
+
+/// Header status: red with failures, yellow for warnings / cancelled /
+/// pending / running, green when all passed
+fn header_status(app: &App, counts: &super::app::StatusCounts) -> HeaderStatus {
     let (completed, total) = (counts.completed(), counts.auto_run());
     if app.run.all_finished {
         let (head, on_demand) = finished_status_parts(counts);
@@ -493,18 +603,38 @@ fn header_status(app: &App, counts: &super::app::StatusCounts) -> (String, Color
         } else {
             Color::Green
         };
-        (head + &on_demand, color)
-    } else if counts.pending > 0 {
-        let text = format!(
-            "Running... {completed}/{total} ({} in progress){on_demand}",
-            counts.pending
-        );
-        (text, Color::Yellow)
+        return HeaderStatus {
+            full: head + &on_demand,
+            short: compact_finished_text(counts),
+            color,
+        };
+    }
+    let (full, short) = if counts.pending > 0 {
+        (
+            format!(
+                "Running... {completed}/{total} ({} in progress){}",
+                counts.pending,
+                on_demand_suffix(counts)
+            ),
+            format!(
+                "Running {completed}/{total} ({} active){}",
+                counts.pending,
+                compact_on_demand(counts)
+            ),
+        )
     } else {
         (
-            format!("Preparing... {completed}/{total}{on_demand}"),
-            Color::Yellow,
+            format!(
+                "Preparing... {completed}/{total}{}",
+                on_demand_suffix(counts)
+            ),
+            format!("Preparing {completed}/{total}{}", compact_on_demand(counts)),
         )
+    };
+    HeaderStatus {
+        full,
+        short,
+        color: Color::Yellow,
     }
 }
 
@@ -512,7 +642,8 @@ fn header_status(app: &App, counts: &super::app::StatusCounts) -> (String, Color
 /// The status segment keeps its pass / fail / running background; with color
 /// off it is reversed instead.
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
-    let (status, color) = header_status(app, &app.count_by_status());
+    let status = header_status(app, &app.count_by_status());
+    let color = status.color;
     let segs = header_segments(app, status, format_elapsed(app.elapsed_time()));
     let segs = fit_header(segs, area.width as usize);
     let status_style = if app.color {
@@ -2408,6 +2539,7 @@ mod tests {
             .map(|(part, text)| HeaderSeg {
                 part: *part,
                 text: (*text).to_string(),
+                short: None,
             })
             .collect()
     }
@@ -2432,7 +2564,7 @@ mod tests {
     #[case::elapsed_first(52, " main · 2 files vs main · ✗ 2/6 passed, 3 failed")]
     #[case::then_files(47, " main · ✗ 2/6 passed, 3 failed")]
     #[case::then_branch(29, " ✗ 2/6 passed, 3 failed")]
-    #[case::status_cut_last(10, " ✗ 2/6 pas")]
+    #[case::status_cut_last(10, " ✗ 2/6 pa…")]
     fn test_fit_header_drops_elapsed_then_files_then_branch(
         #[case] width: usize,
         #[case] expected: &str,
@@ -2453,8 +2585,11 @@ mod tests {
             " ✗ 2/6 passed, 3 failed · watching · Filtered: --only php-l…"
         );
         assert_eq!(row.width(), 60);
-        // No room for even a stub: filter dropped before watching
-        assert_eq!(fitted(&parts, 40), " ✗ 2/6 passed, 3 failed · watching");
+        // Too little room for the filter beside `watching`: that goes
+        assert_eq!(
+            fitted(&parts, 40),
+            " ✗ 2/6 passed, 3 failed · Filtered: --o…"
+        );
         // Nothing but the status left to give: watching goes, then status cut
         assert_eq!(fitted(&parts, 24), " ✗ 2/6 passed, 3 failed");
     }
@@ -2469,7 +2604,49 @@ mod tests {
         let row = fitted(&parts, 23);
         assert_eq!(row, " ✓ ok");
         let status_only = [(HeaderPart::Status, "状態状態状態")];
-        assert_eq!(fitted(&status_only, 6), " 状態");
+        assert_eq!(fitted(&status_only, 6), " 状態…");
+    }
+
+    #[test]
+    fn test_compact_finished_text_keeps_every_count() {
+        let counts = super::super::app::StatusCounts {
+            passed: 100,
+            failed: 100,
+            warnings: 100,
+            pending: 100,
+            on_demand: 2,
+            cancelled: 100,
+        };
+        assert_eq!(
+            compact_finished_text(&counts),
+            "✗ 100/500, 100 fail, 100 warn, 100 canc, 100 pend +2 od"
+        );
+        let warn_only = super::super::app::StatusCounts {
+            passed: 2,
+            warnings: 1,
+            ..Default::default()
+        };
+        assert_eq!(compact_finished_text(&warn_only), "2/3, 1 warn");
+        let ok = super::super::app::StatusCounts {
+            passed: 3,
+            ..Default::default()
+        };
+        assert_eq!(compact_finished_text(&ok), "✓ All 3 passed");
+    }
+
+    #[rstest::rstest]
+    #[case::ascii("abcdef", 3, "abc")]
+    #[case::fits("abc", 3, "abc")]
+    #[case::wide("状態状態", 5, "状態")]
+    #[case::zwj_whole("a👩‍💻b", 3, "a👩‍💻")]
+    #[case::zwj_not_split("a👩‍💻b", 2, "a")]
+    #[case::combining("ae\u{301}x", 2, "ae\u{301}")]
+    fn test_grapheme_prefix_uses_str_width_without_splitting(
+        #[case] text: &str,
+        #[case] max: usize,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(grapheme_prefix(text, max), expected);
     }
 
     /// guard: notification / quit summary keep the elapsed time in the text

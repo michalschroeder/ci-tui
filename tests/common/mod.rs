@@ -628,3 +628,30 @@ impl ci_tui::runner::CommandExecutor for ConcurrencyExecutor {
 
     fn kill_container(&self, _: &str) {}
 }
+
+/// Finished-run App whose checks carry the given `(status, allow_failure)`
+/// pairs (ids `c0`, `c1`, ..; a failed `allow_failure` check is a warning)
+#[allow(dead_code)]
+pub fn make_test_app_with_statuses(statuses: &[(CheckStatus, bool)]) -> App {
+    let config = parse_widget_config();
+    let changed_files = ChangedFiles {
+        files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
+        base_ref: "main".to_string(),
+    };
+    let checks = statuses
+        .iter()
+        .enumerate()
+        .map(|(i, (_, allow))| {
+            let mut check =
+                make_widget_check(&format!("c{i}"), "lint", &format!("Check {i}"), false);
+            check.definition.allow_failure = *allow;
+            check
+        })
+        .collect();
+    let mut app = App::new(config, changed_files, checks, "feature/test".to_string());
+    for (i, (status, _)) in statuses.iter().enumerate() {
+        app.results.get_mut(&format!("c{i}")).unwrap().status = status.clone();
+    }
+    app.run.all_finished = true;
+    app
+}

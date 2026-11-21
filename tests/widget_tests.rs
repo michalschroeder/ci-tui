@@ -13,7 +13,7 @@ use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 mod common;
 use common::{
     make_test_app, make_test_app_all_passed, make_test_app_on_branch, make_test_app_running,
-    make_widget_check,
+    make_test_app_with_statuses, make_widget_check,
 };
 
 const WIDTH: u16 = 80;
@@ -1357,10 +1357,99 @@ fn test_header_markers_and_status_survive_at_min_width() {
     app.watching = true;
     app.filter_notice = Some("Filtered: --only php-lint".to_string());
     let row = full_row(&render_at(&mut app, 60, 19), 0);
-    assert!(row.contains("✗ 2/3 passed, 1 failed"), "{row}");
+    // Compact status (counts kept) makes room for the whole filter marker
+    assert!(row.contains("✗ 2/3, 1 fail"), "{row}");
     assert!(row.contains("watching"), "{row}");
     assert!(row.contains("Filtered: --only"), "{row}");
     assert!(!row.contains(" 0s"), "elapsed dropped first: {row}");
+}
+
+/// Min-width (60) row of `app` with `watching` and a `--only` filter
+fn min_width_row(mut app: ci_tui::ui::app::App) -> String {
+    app.watching = true;
+    app.filter_notice = Some("Filtered: --only php-lint".to_string());
+    full_row(&render_at(&mut app, 60, 19), 0)
+}
+
+fn statuses(
+    n: usize,
+    status: ci_tui::runner::CheckStatus,
+    allow: bool,
+) -> Vec<(ci_tui::runner::CheckStatus, bool)> {
+    vec![(status, allow); n]
+}
+
+/// Review of #359: every count survives at the minimum width, however long
+#[test]
+fn test_header_mixed_counts_all_survive_at_min_width() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(100, Passed, false);
+    all.extend(statuses(100, Failed, false));
+    all.extend(statuses(100, Failed, true));
+    all.extend(statuses(100, Cancelled, false));
+    all.extend(statuses(100, Pending, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["100/500", "100 fail", "100 warn", "100 canc", "100 pend"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+    assert!(!row.contains('…'), "status clipped: {row}");
+}
+
+#[test]
+fn test_header_retry_pending_after_finish_keeps_filter_and_counts() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(3, Passed, false);
+    all.extend(statuses(1, Failed, false));
+    all.extend(statuses(2, Pending, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["3/6", "1 fail", "2 pend", "watching", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+#[test]
+fn test_header_on_demand_count_survives_at_min_width() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(2, Passed, false);
+    all.extend(statuses(2, OnDemand, false));
+    let row = min_width_row(make_test_app_with_statuses(&all));
+    for token in ["All 2", "+2", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+/// Review of #359: the reported two-check running state kept no filter
+#[test]
+fn test_header_running_state_keeps_filter_at_min_width() {
+    let mut app = make_test_app();
+    app.results.get_mut("fmt").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    app.results.get_mut("unit").unwrap().status = ci_tui::runner::CheckStatus::OnDemand;
+    app.results.get_mut("clippy").unwrap().status = ci_tui::runner::CheckStatus::Running;
+    let row = min_width_row(app);
+    for token in ["0/1", "+2", "Filtered: --only"] {
+        assert!(row.contains(token), "{token:?} missing: {row}");
+    }
+}
+
+/// Review of #359: a joined emoji is cut as one unit, by the same width
+/// the row is measured with
+#[test]
+fn test_header_filter_cut_keeps_zwj_emoji_whole() {
+    use ci_tui::runner::CheckStatus::*;
+    let mut all = statuses(10, Passed, false);
+    all.extend(statuses(10, Failed, false));
+    let mut app = make_test_app_with_statuses(&all);
+    app.watching = true;
+    app.filter_notice = Some("Filtered: --only abcdefghi👩‍💻-long-check-name".to_string());
+    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    assert!(row.contains("✗ 10/20, 10 fail"), "{row}");
+    assert!(row.contains("watching"), "{row}");
+    // (the cell after a wide char reads as a space in the buffer)
+    assert!(row.contains("Filtered: --only abcdefghi👩‍💻"), "{row}");
+    assert!(
+        row.trim_end().ends_with('…') && !row.contains("-long"),
+        "{row}"
+    );
 }
 
 #[test]
