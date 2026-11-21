@@ -513,6 +513,12 @@ pub fn make_exec_check(id: &str, command: &str, service: Option<&str>) -> CheckT
 /// - Some CPU/memory history
 #[allow(dead_code)]
 pub fn make_test_app() -> App {
+    make_test_app_on_branch("feature/test")
+}
+
+/// [`make_test_app`] on another branch name
+#[allow(dead_code)]
+pub fn make_test_app_on_branch(branch: &str) -> App {
     let config = parse_widget_config();
     let changed_files = ChangedFiles {
         files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
@@ -524,7 +530,7 @@ pub fn make_test_app() -> App {
         make_widget_check("unit", "test", "Unit Tests", false),
     ];
 
-    let mut app = App::new(config, changed_files, checks, "feature/test".to_string());
+    let mut app = App::new(config, changed_files, checks, branch.to_string());
 
     // Set known states for tests
     app.results.get_mut("clippy").unwrap().status = CheckStatus::Pending;
