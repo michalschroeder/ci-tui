@@ -539,18 +539,213 @@ fn test_footer_shows_expand_shortcut() {
     );
 }
 
-#[test]
-fn test_footer_shows_version_info() {
-    let mut app = make_test_app();
-    // Version info is the footer's last span; it is truncated first on 80 cols
-    let mut terminal = Terminal::new(TestBackend::new(120, HEIGHT)).unwrap();
-    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
-    let buffer = terminal.backend().buffer();
+/// Text of buffer row `y`
+fn full_row(buffer: &Buffer, y: u16) -> String {
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol().to_string())
+        .collect()
+}
 
+/// Rows (at column 10) the output panel covers, for layout comparisons
+fn output_rows(app: &ci_tui::ui::app::App) -> Vec<bool> {
+    (0..24).map(|y| app.is_over_output(70, y)).collect()
+}
+
+/// App with the failed, fixable `fmt` check selected (`x fix` and
+/// `X FIX ALL(1)` both apply)
+fn fixable_failed_app() -> ci_tui::ui::app::App {
+    let mut app = make_test_app();
+    app.results.get_mut("fmt").unwrap().status = ci_tui::runner::CheckStatus::Failed;
+    for _ in 0..10 {
+        if app.selected_check().map(|c| c.id()) == Some("fmt") {
+            break;
+        }
+        app.next_check();
+    }
+    assert_eq!(app.selected_check().map(|c| c.id()), Some("fmt"));
+    app
+}
+
+/// Footer text: the bottom two rows of a 24-row render
+fn footer_text(buffer: &Buffer) -> String {
+    format!("{}\n{}", full_row(buffer, 22), full_row(buffer, 23))
+}
+
+/// #300 criterion 1: both fix hints fit at 80 columns
+#[test]
+fn test_footer_shows_fix_hints_at_80_columns() {
+    let mut app = fixable_failed_app();
+    let footer = footer_text(&render_at(&mut app, 80, 24));
+    assert!(footer.contains("x fix"), "footer: {footer}");
+    assert!(footer.contains("X FIX ALL(1)"), "footer: {footer}");
+}
+
+/// #300 criterion 2: state-specific hints first, generic last
+#[test]
+fn test_footer_orders_state_hints_before_generic() {
+    let mut app = fixable_failed_app();
+    let footer = footer_text(&render_at(&mut app, 80, 24));
+    let hints = [
+        "r retry",
+        "A all files",
+        "R RETRY ALL",
+        "x fix",
+        "X FIX ALL(1)",
+        "q quit",
+        "? help",
+        "↑↓ select",
+        "f failed",
+        "c copy",
+        "e expand",
+    ];
+    let order: Vec<usize> = hints
+        .iter()
+        .map(|h| footer.find(h).unwrap_or_else(|| panic!("{h} in {footer}")))
+        .collect();
     assert!(
-        buffer_contains(buffer, "built"),
-        "Footer should show build info"
+        order.windows(2).all(|w| w[0] < w[1]),
+        "order {order:?}: {footer}"
     );
+}
+
+/// #300 criteria 2 and 3: every hint stays whole (never split across rows)
+/// at every width from the minimum up
+#[test]
+fn test_footer_keeps_every_hint_whole_at_all_widths() {
+    for width in 60..=140 {
+        let mut app = fixable_failed_app();
+        let footer = footer_text(&render_at(&mut app, width, 24));
+        for hint in ["x fix", "X FIX ALL(1)", "q quit", "c copy", "e expand"] {
+            assert!(footer.contains(hint), "width {width} lost {hint}: {footer}");
+        }
+    }
+}
+
+/// #300 criterion 4: when everything fits the footer is one row and the
+/// main area gets the other; with two rows of hints it keeps both
+#[test]
+fn test_footer_rows_follow_hints_and_resize_main_area() {
+    let mut one = make_test_app();
+    let buf = render_at(&mut one, 80, 24);
+    assert!(
+        full_row(&buf, 23).contains(" quit "),
+        "one-row footer on the last row"
+    );
+    assert!(!full_row(&buf, 22).contains(" quit "));
+    // Output panel's last inner row is 21 (border at 22): hit-testing follows
+    assert!(
+        one.is_over_output(70, 21) && !one.is_over_output(70, 22),
+        "{:?}",
+        output_rows(&one)
+    );
+
+    let mut two = fixable_failed_app();
+    let buf = render_at(&mut two, 80, 24);
+    assert!(
+        full_row(&buf, 22).contains("retry"),
+        "row 22: {}",
+        full_row(&buf, 22)
+    );
+    assert!(full_row(&buf, 23).contains("expand"));
+    assert!(two.is_over_output(70, 20) && !two.is_over_output(70, 21));
+}
+
+/// #300 criterion 4: a status message shows on the footer's first row and
+/// does not change the layout
+#[test]
+fn test_status_message_does_not_move_layout() {
+    for mut app in [make_test_app(), fixable_failed_app()] {
+        let before = render_at(&mut app, 80, 24);
+        let area = output_rows(&app);
+        let first_footer_row = if full_row(&before, 22).contains("quit") {
+            22
+        } else {
+            23
+        };
+        app.set_status_message(StatusKind::info(), "hello status");
+        let after = render_at(&mut app, 80, 24);
+        assert_eq!(output_rows(&app), area, "layout jumped");
+        assert!(
+            full_row(&after, first_footer_row).contains("hello status"),
+            "row {first_footer_row}: {}",
+            full_row(&after, first_footer_row)
+        );
+    }
+}
+
+/// #300 guard: with a two-row footer the search line stays on its first row
+#[test]
+fn test_search_footer_on_first_footer_row() {
+    let mut app = fixable_failed_app();
+    app.open_search();
+    let buf = render_at(&mut app, 80, 24);
+    assert!(
+        full_row(&buf, 22).contains("Search:"),
+        "{}",
+        full_row(&buf, 22)
+    );
+    assert!(!full_row(&buf, 23).contains("quit"));
+}
+
+/// #300: fix running hides the fix hints; the footer shrinks to one row
+#[test]
+fn test_footer_one_row_while_fix_running() {
+    let mut app = fixable_failed_app();
+    app.start_fix();
+    let buf = render_at(&mut app, 80, 24);
+    let footer = footer_text(&buf);
+    assert!(!footer.contains("fix"), "footer: {footer}");
+    assert!(full_row(&buf, 23).contains("quit") && !full_row(&buf, 22).contains("quit"));
+}
+
+/// #300: nothing selectable (no checks) is a one-row footer
+#[test]
+fn test_footer_one_row_without_checks() {
+    let mut app = make_test_app();
+    app.checks.clear();
+    app.results.clear();
+    let buf = render_at(&mut app, 80, 24);
+    assert!(
+        full_row(&buf, 23).contains("quit"),
+        "{}",
+        full_row(&buf, 23)
+    );
+    assert!(!full_row(&buf, 22).contains("quit"));
+}
+
+/// #300 criterion 5: the footer no longer carries the version
+#[test]
+fn test_footer_does_not_show_version_info() {
+    let mut app = make_test_app();
+    let footer = footer_text(&render_at(&mut app, 140, 24));
+    assert!(!footer.contains("built"), "footer: {footer}");
+    assert!(
+        !footer.contains(ci_tui::cli::VERSION_INFO),
+        "footer: {footer}"
+    );
+}
+
+/// #300 criterion 6: the help overlay shows the version, also at the
+/// minimum size (60x15: the overlay stays 15 rows)
+#[test]
+fn test_help_overlay_shows_version_info() {
+    for (w, h) in [(60, 15), (80, 24)] {
+        let mut app = make_test_app();
+        app.toggle_help();
+        app.toggle_stats();
+        let buf = render_at(&mut app, w, h);
+        let text = (0..h)
+            .map(|y| full_row(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let version = format!("v{}", ci_tui::cli::VERSION_INFO);
+        assert!(
+            text.contains(&version),
+            "{w}x{h} missing {version}:\n{text}"
+        );
+        assert!(text.contains("Press ? or Esc to close"), "{w}x{h}:\n{text}");
+        assert!(text.contains(" Help "), "{w}x{h}:\n{text}");
+    }
 }
 
 // ============================================================================
