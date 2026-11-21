@@ -69,6 +69,10 @@ const FOOTER_ROWS: u16 = 2;
 /// Narrowest terminal the layout renders in; below it only a "terminal too
 /// small" message shows
 const MIN_WIDTH: u16 = 60;
+/// Smallest zoomed terminal: border + one output row above a full footer,
+/// 20 columns
+const ZOOM_MIN_WIDTH: u16 = 20;
+const ZOOM_MIN_HEIGHT: u16 = PANEL_BORDER_ROWS as u16 + 1 + FOOTER_ROWS;
 
 /// Prepare sparkline data from history, filling width with oldest data on left
 fn prepare_sparkline_data(history: &VecDeque<f32>, width: usize) -> Vec<u64> {
@@ -224,12 +228,19 @@ fn min_height(stats_visible: bool) -> u16 {
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
-    let min_height = min_height(app.view.stats_visible);
-    if area.width < MIN_WIDTH || area.height < min_height {
+    let zoomed = app.view.output_zoomed;
+    let (min_width, min_height) = if zoomed {
+        (ZOOM_MIN_WIDTH, ZOOM_MIN_HEIGHT)
+    } else {
+        (MIN_WIDTH, min_height(app.view.stats_visible))
+    };
+    if area.width < min_width || area.height < min_height {
         // Hidden layout: drop its areas so clicks / scroll can't hit it
         app.set_checks_list_layout(Rect::default());
         app.set_output_layout(Rect::default(), Rect::default());
-        render_too_small(frame, min_height);
+        render_too_small(frame, min_width, min_height);
+    } else if zoomed {
+        render_zoomed(app, frame);
     } else {
         render_dashboard(app, frame);
     }
@@ -239,6 +250,24 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         frame
             .buffer_mut()
             .set_style(area, Style::new().fg(Color::Reset).bg(Color::Reset));
+    }
+}
+
+/// Zoomed output: the panel takes every row above the footer, full width.
+/// Hidden panels drop their areas so clicks / scroll can't hit them.
+fn render_zoomed(app: &mut App, frame: &mut Frame) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(footer_rows(app, frame.area().width)),
+        ])
+        .split(frame.area());
+    app.set_checks_list_layout(Rect::default());
+    render_output(app, frame, chunks[0]);
+    render_footer(app, frame, chunks[1]);
+    if app.view.help_visible {
+        render_help_overlay(frame);
     }
 }
 
@@ -269,7 +298,7 @@ fn render_dashboard(app: &mut App, frame: &mut Frame) {
 
 /// Centered "terminal too small" notice with current and required size, in
 /// place of a clipped layout
-fn render_too_small(frame: &mut Frame, min_height: u16) {
+fn render_too_small(frame: &mut Frame, min_width: u16, min_height: u16) {
     let area = frame.area();
     let lines = vec![
         Line::from(Span::styled(
@@ -278,7 +307,7 @@ fn render_too_small(frame: &mut Frame, min_height: u16) {
         )),
         Line::from(format!(
             "{}x{}, need {}x{}",
-            area.width, area.height, MIN_WIDTH, min_height
+            area.width, area.height, min_width, min_height
         )),
     ];
     let height = (lines.len() as u16).min(area.height);
@@ -292,7 +321,7 @@ fn render_too_small(frame: &mut Frame, min_height: u16) {
 }
 
 /// Help overlay key bindings: (key, action), shown in two columns
-const HELP_LEFT: [(&str, &str); 10] = [
+const HELP_LEFT: [(&str, &str); 11] = [
     ("↑/k ↓/j", "prev/next row"),
     ("g / G", "first/last row"),
     ("n / N", "next/prev failed"),
@@ -303,8 +332,9 @@ const HELP_LEFT: [(&str, &str); 10] = [
     ("Ctrl-d/u", "half page"),
     ("/", "search output"),
     ("o / O", "$PAGER/$EDITOR"),
+    ("z", "zoom output"),
 ];
-const HELP_RIGHT: [(&str, &str); 10] = [
+const HELP_RIGHT: [(&str, &str); 11] = [
     ("f / a", "failed/all"),
     ("r / R", "retry/retry all"),
     ("t", "run on-demand"),
@@ -315,6 +345,7 @@ const HELP_RIGHT: [(&str, &str); 10] = [
     ("m", "CPU/MEM stats"),
     ("w", "save log file"),
     ("q / Ctrl-c", "quit"),
+    ("Esc", "unzoom/clear"),
 ];
 /// Columns of one help column: space, 11-col key, space, 16-col action
 const HELP_COL_WIDTH: usize = 29;
@@ -342,7 +373,6 @@ fn render_help_overlay(frame: &mut Frame) {
             .zip(HELP_RIGHT)
             .map(|(l, r)| Line::from(help_cell(l) + &help_cell(r))),
     );
-    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Press ? or Esc to close",
         Style::default().fg(Color::DarkGray),
@@ -1847,6 +1877,15 @@ fn footer_hints(app: &App) -> Vec<Hint> {
     let plain = Style::default();
     let mut hints = Vec::new();
 
+    // Zoomed: the way out comes first so a crowded footer never clips it
+    if app.view.output_zoomed {
+        hints.push(hint(
+            "z",
+            Style::default().fg(Color::Yellow),
+            "unzoom".into(),
+            plain,
+        ));
+    }
     if caps.can_trigger {
         let label = key(Color::Cyan);
         hints.push(hint("t", bold(Color::Cyan), "run test".into(), label));
@@ -1890,6 +1929,9 @@ fn footer_hints(app: &App) -> Vec<Hint> {
         "expand"
     };
     hints.push(hint("e", yellow, expand.into(), plain));
+    if !app.view.output_zoomed {
+        hints.push(hint("z", yellow, "zoom".into(), plain));
+    }
     hints
 }
 
@@ -2281,6 +2323,140 @@ mod tests {
         assert_eq!(app.output_area_width, 0);
         app.scroll_down(5);
         app.scroll_to_bottom();
+    }
+
+    /// Draw `app` at `width` x `height`, return the screen as text rows
+    fn draw_screen(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal.draw(|f| render(app, f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_zoom_output_fills_area_above_footer() {
+        let mut app = make_test_app();
+        app.toggle_zoom();
+        let screen = draw_screen(&mut app, 80, 24);
+        let footer = footer_rows(&app, 80);
+        assert_eq!(
+            app.view.output_area,
+            Rect::new(1, 1, 78, 24 - footer - 2),
+            "inner rect of full width x (height - footer)"
+        );
+        assert_eq!(app.view.output_visible_lines, usize::from(24 - footer - 2));
+        assert_eq!(app.output_area_width, 80);
+        for hidden in [" Checks", " Files (", "files vs", " CPU"] {
+            assert!(!screen.contains(hidden), "{hidden:?} visible:\n{screen}");
+        }
+        assert!(screen.contains("PHP Lint"), "panel title kept:\n{screen}");
+        assert!(screen.contains("unzoom"), "footer hint:\n{screen}");
+    }
+
+    /// Guard: unzoomed layout keeps the panels
+    #[test]
+    fn test_unzoomed_layout_shows_panels() {
+        let mut app = make_test_app();
+        let screen = draw_screen(&mut app, 80, 24);
+        assert!(screen.contains(" Checks") && screen.contains(" Files ("));
+        assert!(screen.contains(" zoom"), "footer hint:\n{screen}");
+    }
+
+    /// The unzoom cue survives a crowded, narrow footer
+    #[test]
+    fn test_zoomed_footer_keeps_unzoom_hint_when_crowded() {
+        let mut app = make_test_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Failed;
+        app.toggle_zoom();
+        let screen = draw_screen(&mut app, 20, 8);
+        assert!(screen.contains("unzoom"), "{screen}");
+    }
+
+    #[test]
+    fn test_zoom_clears_checks_list_layout() {
+        let mut app = make_test_app();
+        draw_screen(&mut app, 80, 24);
+        let old = app.view.checks_list_area;
+        assert!(old.height > 0);
+        let selected = app.view.selected_check;
+        app.toggle_zoom();
+        draw_screen(&mut app, 80, 24);
+        for row in old.y..old.bottom() {
+            app.select_check_at_position(old.x + 1, row);
+        }
+        assert_eq!(app.view.selected_check, selected);
+        assert_eq!(app.view.checks_list_area, Rect::default());
+    }
+
+    #[test]
+    fn test_zoom_renders_below_two_column_minimum() {
+        let mut app = make_test_app();
+        app.toggle_zoom();
+        let screen = draw_screen(&mut app, 40, 8);
+        assert!(!screen.contains("too small"), "{screen}");
+        assert!(app.view.output_area.width > 0 && app.view.output_area.height > 0);
+        assert_eq!(app.output_area_width, 40);
+        // Guard: unzoomed at the same size is still too small
+        app.toggle_zoom();
+        assert!(draw_screen(&mut app, 40, 8).contains("too small"));
+    }
+
+    #[test]
+    fn test_zoom_too_small_reports_zoom_minimum() {
+        let mut app = make_test_app();
+        app.toggle_zoom();
+        let need = format!("need {}x{}", ZOOM_MIN_WIDTH, ZOOM_MIN_HEIGHT);
+        for (w, h) in [(ZOOM_MIN_WIDTH - 1, 20), (60, ZOOM_MIN_HEIGHT - 1)] {
+            let screen = draw_screen(&mut app, w, h);
+            assert!(screen.contains(&need), "{w}x{h}: {screen}");
+            assert_eq!(app.view.output_area, Rect::default());
+        }
+        let screen = draw_screen(&mut app, ZOOM_MIN_WIDTH, ZOOM_MIN_HEIGHT);
+        assert!(!screen.contains("too small"), "{screen}");
+    }
+
+    #[test]
+    fn test_zoom_with_no_checks_does_not_panic() {
+        let config = serde_yaml::from_str(minimal_config_yaml()).expect("config");
+        let changed = ChangedFiles {
+            files: vec![],
+            base_ref: "development".to_string(),
+        };
+        let mut app = App::new(config, changed, vec![], "main".to_string());
+        app.toggle_zoom();
+        let screen = draw_screen(&mut app, 80, 24);
+        assert!(!screen.contains("too small"), "{screen}");
+    }
+
+    #[test]
+    fn test_zoom_help_overlay_on_top_and_lists_zoom() {
+        let mut app = make_test_app();
+        app.toggle_zoom();
+        app.toggle_help();
+        let screen = draw_screen(&mut app, MIN_WIDTH, 15);
+        assert!(screen.contains("Esc to close"), "{screen}");
+        assert!(screen.contains("zoom output"), "{screen}");
+    }
+
+    #[test]
+    fn test_zoom_wraps_at_zoomed_width_and_toggles_state() {
+        let mut app = make_test_app();
+        app.toggle_zoom();
+        assert!(app.view.output_zoomed);
+        app.toggle_zoom();
+        assert!(!app.view.output_zoomed);
+        app.toggle_zoom();
+        app.leave_zoom();
+        assert!(!app.view.output_zoomed);
+        app.leave_zoom();
+        assert!(!app.view.output_zoomed, "leave is idempotent");
     }
 
     /// Help overlay lists every binding, even at the minimum terminal size

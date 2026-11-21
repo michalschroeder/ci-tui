@@ -1329,6 +1329,15 @@ fn handle_key_event(app: &mut App, key: KeyEvent, tasks: &mut Tasks) -> Action {
             app.toggle_stats();
             Action::Continue
         }
+        (KeyCode::Char('z'), KeyModifiers::NONE) => {
+            app.toggle_zoom();
+            Action::Continue
+        }
+        // Search `Esc` is handled earlier; this one leaves zoom
+        (KeyCode::Esc, _) => {
+            app.leave_zoom();
+            Action::Continue
+        }
         (KeyCode::Char('f'), _) => {
             app.toggle_failed_filter();
             Action::Continue
@@ -2501,6 +2510,144 @@ checks:
         assert_eq!(app.view.status_filter, crate::ui::app::StatusFilter::Failed);
     }
 
+    /// Press `code` through the real key handler
+    fn press_key(app: &mut App, tasks: &mut Tasks, code: KeyCode) {
+        let action = handle_key_event(app, press(code, KeyModifiers::NONE), tasks);
+        assert!(matches!(action, Action::Continue));
+    }
+
+    /// Two checks, the first with 20 output lines
+    fn zoom_app(config: &CiConfig) -> App {
+        let checks = vec![
+            make_test_check("php-lint", "fast"),
+            make_test_check("other", "fast"),
+        ];
+        let mut app = make_test_app_with_checks(config, checks);
+        app.results.get_mut("php-lint").unwrap().output = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app
+    }
+
+    #[test]
+    fn test_z_toggles_zoom() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        assert!(app.view.output_zoomed, "z zooms");
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        assert!(!app.view.output_zoomed, "z again unzooms");
+    }
+
+    #[test]
+    fn test_esc_leaves_zoom_and_is_noop_unzoomed() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(!app.view.output_zoomed, "Esc unzoomed stays a no-op");
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(!app.view.output_zoomed, "Esc leaves zoom");
+    }
+
+    #[test]
+    fn test_esc_order_help_then_search_then_zoom() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        press_key(&mut app, &mut tasks, KeyCode::Char('/'));
+        press_key(&mut app, &mut tasks, KeyCode::Char('1'));
+        press_key(&mut app, &mut tasks, KeyCode::Enter);
+        assert!(app.view.search.is_some());
+        app.toggle_help();
+
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(!app.view.help_visible, "Esc closes help first");
+        assert!(app.view.search.is_some() && app.view.output_zoomed);
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(app.view.search.is_none(), "then clears the search");
+        assert!(app.view.output_zoomed, "and stays zoomed");
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+        assert!(!app.view.output_zoomed, "then leaves zoom");
+    }
+
+    #[test]
+    fn test_z_is_typed_in_search_and_swallowed_by_help() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Char('/'));
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        assert_eq!(app.view.search.as_ref().unwrap().query, "z");
+        assert!(!app.view.output_zoomed, "typed char, not a toggle");
+        press_key(&mut app, &mut tasks, KeyCode::Esc);
+
+        app.toggle_help();
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        assert!(!app.view.output_zoomed, "help swallows z");
+    }
+
+    #[test]
+    fn test_selection_keys_work_zoomed() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        let before = app.view.selected_check;
+        press_key(&mut app, &mut tasks, KeyCode::Char('j'));
+        assert_ne!(app.view.selected_check, before);
+        assert!(app.view.output_zoomed, "zoom persists across selection");
+    }
+
+    /// Guard: Enter still folds a group header while zoomed
+    #[test]
+    fn test_enter_still_folds_group_header_zoomed() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        press_key(&mut app, &mut tasks, KeyCode::Char('z'));
+        app.select_first();
+        press_key(&mut app, &mut tasks, KeyCode::Enter);
+        assert!(app.view.output_zoomed, "Enter does not unzoom");
+    }
+
+    #[test]
+    fn test_scroll_keys_use_zoomed_height() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.view.output_zoomed = true;
+        app.set_output_visible_lines(10);
+        let action = handle_key_event(
+            &mut app,
+            press(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut tasks,
+        );
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(app.view.output_scroll, 5, "half of the zoomed height");
+    }
+
+    #[tokio::test]
+    async fn test_mouse_wheel_scrolls_zoomed_output() {
+        let config = test_config();
+        let mut app = zoom_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        app.view.output_zoomed = true;
+        app.set_output_visible_lines(5);
+        app.output_area_width = 80;
+        app.view.output_area = ratatui::layout::Rect::new(1, 1, 78, 5);
+        handle_message(
+            &mut app,
+            Message::Mouse(mouse(MouseEventKind::ScrollDown, 3, 3)),
+            &mut tasks,
+        );
+        assert_eq!(app.view.output_scroll, MOUSE_SCROLL_LINES);
+    }
+
     #[test]
     fn test_handle_key_event_unknown_key_continues() {
         let config = test_config();
@@ -2508,7 +2655,7 @@ checks:
         let (mut tasks, _rx) = make_test_tasks(&config);
         let action = handle_key_event(
             &mut app,
-            press(KeyCode::Char('z'), KeyModifiers::NONE),
+            press(KeyCode::Char('y'), KeyModifiers::NONE),
             &mut tasks,
         );
         assert!(matches!(action, Action::Continue));
@@ -5633,7 +5780,7 @@ checks:
             Message::SystemStats(stats),
             Message::StatusExpired,
             Message::Resize,
-            Message::KeyPress(press(KeyCode::Char('z'), KeyModifiers::NONE)),
+            Message::KeyPress(press(KeyCode::Char('y'), KeyModifiers::NONE)),
             Message::RunnerEvent(output.clone()),
             Message::Task(TaskEvent::Output(output)),
         ];
