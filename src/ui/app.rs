@@ -237,6 +237,11 @@ pub struct ViewState {
     pub help_visible: bool,
     /// CPU/MEM stats panel shown (`--no-stats` starts hidden, `m` toggles)
     pub stats_visible: bool,
+    /// Output panel zoomed to the full area minus footer (`z` toggles, `Esc`
+    /// leaves); pure view state
+    pub output_zoomed: bool,
+    /// First visible line of the `?` help overlay (clamped when drawn)
+    pub help_scroll: usize,
     /// Output search state (`/` key); `None` when not searching
     pub search: Option<SearchState>,
     /// Keep the output panel pinned to the bottom while the selected check
@@ -265,6 +270,8 @@ impl Default for ViewState {
             output_area: Rect::default(),
             help_visible: false,
             stats_visible: true,
+            output_zoomed: false,
+            help_scroll: 0,
             search: None,
             follow_output: true,
             pending_error_jump: false,
@@ -515,6 +522,8 @@ pub struct StatusCounts {
     /// Pending or running
     pub pending: usize,
     pub on_demand: usize,
+    /// Nothing to run (`{files}` command with no matching file)
+    pub skipped: usize,
     /// Cancelled by the user (neither passed nor failed)
     pub cancelled: usize,
 }
@@ -523,6 +532,12 @@ impl StatusCounts {
     /// Checks that ran to an outcome (passed, failed, warning or cancelled)
     pub fn completed(&self) -> usize {
         self.passed + self.failed + self.warnings + self.cancelled
+    }
+
+    /// Nothing ran and something was left out: all checks skipped or
+    /// on-demand
+    pub fn nothing_ran(&self) -> bool {
+        self.auto_run() == 0 && self.skipped + self.on_demand > 0
     }
 
     /// Checks the run covers: all but skipped and untriggered on-demand ones
@@ -625,6 +640,7 @@ impl App {
             output_visible_lines: self.view.output_visible_lines,
             collapsed_groups,
             manual_folds,
+            output_zoomed: self.view.output_zoomed,
             ..ViewState::default()
         };
         self.select_initial_item();
@@ -1690,6 +1706,14 @@ impl App {
     /// by the key handler rather than dispatched.
     pub fn toggle_help(&mut self) {
         self.view.help_visible = !self.view.help_visible;
+        self.view.help_scroll = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Scroll the help overlay by `lines` (negative = up); the renderer
+    /// clamps the end. `isize::MAX` / `MIN` jump to bottom / top.
+    pub fn scroll_help(&mut self, lines: isize) {
+        self.view.help_scroll = self.view.help_scroll.saturating_add_signed(lines);
         self.needs_redraw = true;
     }
 
@@ -1702,6 +1726,20 @@ impl App {
     pub fn toggle_stats(&mut self) {
         self.view.stats_visible = !self.view.stats_visible;
         self.needs_redraw = true;
+    }
+
+    /// Zoom / unzoom the output panel (`z` key)
+    pub fn toggle_zoom(&mut self) {
+        self.view.output_zoomed = !self.view.output_zoomed;
+        self.needs_redraw = true;
+    }
+
+    /// Leave zoom (`Esc` while zoomed); no-op otherwise
+    pub fn leave_zoom(&mut self) {
+        if self.view.output_zoomed {
+            self.view.output_zoomed = false;
+            self.needs_redraw = true;
+        }
     }
 
     /// Close the help overlay (`Esc` while it is shown)
@@ -1743,8 +1781,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Count check results per status bucket (skipped checks are not
-    /// counted; [`Severity::Warning`] failures are warnings)
+    /// Count check results per status bucket ([`Severity::Warning`] failures are warnings)
     pub fn count_by_status(&self) -> StatusCounts {
         use CheckStatus as S;
         let mut counts = StatusCounts::default();
@@ -1759,8 +1796,9 @@ impl App {
                 (_, S::Passed) => &mut counts.passed,
                 (_, S::Pending | S::Queued | S::Running) => &mut counts.pending,
                 (_, S::OnDemand) => &mut counts.on_demand,
+                (_, S::Skipped) => &mut counts.skipped,
                 (_, S::Cancelled) => &mut counts.cancelled,
-                (_, S::Skipped | S::Failed | S::TimedOut) => continue,
+                (_, S::Failed | S::TimedOut) => continue,
             };
             *bucket += 1;
         }
@@ -2377,6 +2415,7 @@ checks:
                 warnings: 0,
                 pending: 2,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
         );
@@ -2393,6 +2432,7 @@ checks:
                 warnings: 0,
                 pending: 1,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
         );
@@ -2409,8 +2449,20 @@ checks:
                 warnings: 0,
                 pending: 0,
                 on_demand: 1,
+                skipped: 0,
                 cancelled: 0
             }
+        );
+    }
+
+    #[test]
+    fn test_count_by_status_counts_skipped() {
+        let mut app = make_app();
+        app.results.get_mut("php-lint").unwrap().status = CheckStatus::Skipped;
+        let counts = app.count_by_status();
+        assert_eq!(
+            (counts.skipped, counts.pending, counts.on_demand),
+            (1, 1, 1)
         );
     }
 

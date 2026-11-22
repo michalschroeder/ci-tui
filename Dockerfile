@@ -27,7 +27,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs
 # Build dependencies only (cached unless Cargo.toml changes)
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo build --release 2>/dev/null || true
+    cargo build --release --locked 2>/dev/null || true
 
 # Now copy actual source (this invalidates cache when src changes)
 COPY src ./src
