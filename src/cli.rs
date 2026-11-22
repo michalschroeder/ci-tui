@@ -94,10 +94,11 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with = "color")]
     pub no_color: bool,
 
-    /// TUI only: start with the CPU/MEM stats panel hidden (`m` toggles it);
-    /// no effect with --simple, --fix or --list
+    /// TUI only: start with the CPU/MEM graph panel open (`m` toggles it;
+    /// the header always shows the figures); no effect with --simple, --fix
+    /// or --list
     #[arg(long)]
-    pub no_stats: bool,
+    pub stats: bool,
 
     /// Run every check, even ones unchanged since their last passing run
     /// (passes are still recorded in `.git/ci-tui/`)
@@ -413,7 +414,7 @@ mod tests {
     #[case::only_before_validate(&["ci-tui", "--only", "a", "validate"])]
     #[case::group_before_init(&["ci-tui", "--group", "g", "init"])]
     #[case::jobs_before_validate(&["ci-tui", "-j", "2", "validate"])]
-    #[case::no_stats_before_validate(&["ci-tui", "--no-stats", "validate"])]
+    #[case::stats_before_validate(&["ci-tui", "--stats", "validate"])]
     #[case::no_cache_before_validate(&["ci-tui", "--no-cache", "validate"])]
     #[case::notify_before_validate(&["ci-tui", "--notify", "validate"])]
     #[case::exit_on_finish_before_init(&["ci-tui", "--exit-on-finish", "init"])]
@@ -576,11 +577,24 @@ mod tests {
         assert_eq!(err.exit_code(), crate::exit::CONFIG_ERROR);
     }
 
+    /// #291: `--stats` (TUI only) is accepted, and ignored, by console modes
     #[rstest::rstest]
     #[case::unset(&["ci-tui"], false)]
-    #[case::set(&["ci-tui", "--no-stats"], true)]
-    fn test_no_stats_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
-        assert_eq!(Cli::try_parse_checked(args).unwrap().no_stats, expected);
+    #[case::set(&["ci-tui", "--stats"], true)]
+    #[case::simple(&["ci-tui", "--stats", "-s"], true)]
+    #[case::fix(&["ci-tui", "--fix", "--stats"], true)]
+    #[case::list(&["ci-tui", "--stats", "--list"], true)]
+    fn test_stats_flag_parsed(#[case] args: &[&str], #[case] expected: bool) {
+        assert_eq!(Cli::try_parse_checked(args).unwrap().stats, expected);
+    }
+
+    /// #291: `--stats` replaced `--no-stats` (panel now closed by default)
+    #[test]
+    fn test_no_stats_flag_removed() {
+        let err = Cli::try_parse_checked(["ci-tui", "--no-stats"])
+            .err()
+            .expect("--no-stats is gone");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[rstest::rstest]

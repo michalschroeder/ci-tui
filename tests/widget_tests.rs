@@ -735,7 +735,6 @@ fn test_help_overlay_shows_version_info() {
     for (w, h) in [(60, 13), (80, 24)] {
         let mut app = make_test_app();
         app.toggle_help();
-        app.toggle_stats();
         let buf = render_at(&mut app, w, h);
         let text = (0..h)
             .map(|y| full_row(&buf, y))
@@ -758,16 +757,21 @@ fn test_help_overlay_shows_version_info() {
 #[test]
 fn test_system_stats_cpu_appears() {
     let mut app = make_test_app();
+    app.toggle_stats();
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    assert!(buffer_contains(buffer, "CPU"), "CPU stats should appear");
+    assert!(
+        row_text(buffer, 1, 0, WIDTH).contains("┌ CPU 78% "),
+        "CPU panel should appear"
+    );
 }
 
 #[test]
 fn test_system_stats_memory_appears() {
     let mut app = make_test_app();
+    app.toggle_stats();
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -791,6 +795,7 @@ const STATS_INNER_BOTTOM: u16 = 5;
 #[test]
 fn test_cpu_graph_fills_full_width_on_wide_terminal() {
     let mut app = make_test_app();
+    app.toggle_stats();
     for _ in 0..600 {
         app.update_stats(100.0, 8_000_000_000, 16_000_000_000);
     }
@@ -807,6 +812,7 @@ fn test_cpu_graph_fills_full_width_on_wide_terminal() {
 #[test]
 fn test_cpu_panel_shows_scale_labels() {
     let mut app = make_test_app();
+    app.toggle_stats();
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -821,6 +827,7 @@ fn test_cpu_panel_shows_scale_labels() {
 #[test]
 fn test_mem_panel_gauge_label() {
     let mut app = make_test_app();
+    app.toggle_stats();
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -836,6 +843,7 @@ fn test_mem_panel_gauge_label() {
 #[test]
 fn test_mem_panel_zero_total_renders() {
     let mut app = make_test_app();
+    app.toggle_stats();
     app.update_stats(10.0, 0, 0);
     let mut terminal = create_terminal();
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
@@ -1078,51 +1086,67 @@ fn test_no_color_renders_no_fg_bg_colors() {
     assert!(has_color(&render_at(&mut app, WIDTH, HEIGHT)), "color on");
 
     app.color = false;
-    let buffer = render_at(&mut app, WIDTH, HEIGHT);
+    // Wide enough for the figures beside the running status
+    let buffer = render_at(&mut app, 120, HEIGHT);
     assert!(!has_color(&buffer), "every cell fg/bg must be Reset");
-    assert!(buffer_contains(&buffer, "CPU"), "layout still rendered");
+    let header = full_row(&buffer, 0);
+    assert!(header.contains("CPU 90% · MEM 50%"), "figures: {header}");
 }
 
+/// #291: fresh start (graph panel closed) needs 60x13, with the panel 60x19
 #[rstest::rstest]
-#[case::narrow(59, 24)]
-#[case::short(80, 18)]
-fn test_too_small_terminal_shows_message_only(#[case] width: u16, #[case] height: u16) {
+#[case::narrow(59, 24, false, "need 60x13")]
+#[case::short(80, 12, false, "need 60x13")]
+#[case::panel_narrow(59, 24, true, "need 60x19")]
+#[case::panel_short(60, 18, true, "need 60x19")]
+fn test_too_small_terminal_shows_message_only(
+    #[case] width: u16,
+    #[case] height: u16,
+    #[case] panel: bool,
+    #[case] need: &str,
+) {
     let mut app = make_test_app();
+    if panel {
+        app.toggle_stats();
+    }
     let buffer = render_at(&mut app, width, height);
     assert!(buffer_contains(&buffer, "Terminal too small"));
     assert!(buffer_contains(&buffer, &format!("{width}x{height}")));
-    assert!(buffer_contains(&buffer, "need 60x19"));
+    assert!(buffer_contains(&buffer, need));
     assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "Checks"));
 }
 
+/// #291: a fresh start renders the dashboard at 60x13
 #[test]
 fn test_min_size_terminal_renders_layout() {
     let mut app = make_test_app();
-    let buffer = render_at(&mut app, 60, 19);
+    let buffer = render_at(&mut app, 60, 13);
     assert!(!buffer_contains(&buffer, "too small"));
-    assert!(buffer_contains(&buffer, "CPU") && buffer_contains(&buffer, "Checks"));
+    assert!(buffer_contains(&buffer, "Checks"));
 }
 
+/// #291: with the panel open, 60x19 renders it (CPU block + MEM gauge)
+#[test]
+fn test_min_size_with_stats_panel_renders_panel() {
+    let mut app = make_test_app();
+    app.toggle_stats();
+    let buffer = render_at(&mut app, 60, 19);
+    assert!(!buffer_contains(&buffer, "too small"));
+    assert!(row_text(&buffer, 1, 0, 60).contains("┌ CPU 78% "));
+    assert!(buffer_contains(&buffer, "MEM") && buffer_contains(&buffer, "GiB"));
+    assert!(buffer_contains(&buffer, "Checks"));
+}
+
+/// #291: by default no graph panel; main content right under the header,
+/// figures only in the header
 #[test]
 fn test_stats_hidden_renders_no_cpu_mem_panel() {
     let mut app = make_test_app();
-    assert!(app.stats_visible());
-    app.toggle_stats();
     assert!(!app.stats_visible());
     let buffer = render_at(&mut app, WIDTH, HEIGHT);
-    assert!(!buffer_contains(&buffer, "CPU") && !buffer_contains(&buffer, "MEM"));
-    // Main content moves up into the stats panel's rows (header is 1 row)
+    assert!(!buffer_contains(&buffer, "GiB"), "no MEM gauge");
+    assert!((1..HEIGHT).all(|y| !row_text(&buffer, y, 0, WIDTH).contains("CPU")));
     assert!(row_text(&buffer, 1, 0, WIDTH).contains("Checks"));
-}
-
-#[test]
-fn test_stats_hidden_lowers_min_height_by_stats_rows() {
-    let mut app = make_test_app();
-    app.toggle_stats();
-    assert!(!buffer_contains(&render_at(&mut app, 60, 13), "too small"));
-    let buffer = render_at(&mut app, 60, 12);
-    assert!(buffer_contains(&buffer, "Terminal too small"));
-    assert!(buffer_contains(&buffer, "need 60x13"));
 }
 
 #[rstest::rstest]
@@ -1130,14 +1154,14 @@ fn test_stats_hidden_lowers_min_height_by_stats_rows() {
 #[case::without_stats(13, false)]
 fn test_help_overlay_fits_min_size(#[case] height: u16, #[case] stats: bool) {
     let mut app = make_test_app();
-    if !stats {
+    if stats {
         app.toggle_stats();
     }
     app.toggle_help();
     let buffer = render_at(&mut app, 60, height);
     assert!(!buffer_contains(&buffer, "too small"));
     assert!(buffer_contains(&buffer, "Esc to close"));
-    assert!(buffer_contains(&buffer, "CPU/MEM stats"));
+    assert!(buffer_contains(&buffer, "CPU/MEM graph"));
     assert!(buffer_contains(&buffer, "quit"), "last table row not cut");
     let version = format!("v{}", ci_tui::cli::VERSION_INFO);
     assert!(buffer_contains(&buffer, &version), "version title");
@@ -1265,6 +1289,7 @@ fn status_cell<'a>(buffer: &'a Buffer, needle: &str) -> &'a ratatui::buffer::Cel
 #[test]
 fn test_header_is_one_row_with_stats_panel_below() {
     let mut app = make_test_app();
+    app.toggle_stats();
     let buffer = render_at(&mut app, WIDTH, HEIGHT);
     let header = full_row(&buffer, 0);
     assert!(header.contains("feature/test"), "{header}");
@@ -1284,8 +1309,40 @@ fn test_header_row_layout_shows_elapsed_once_after_status() {
     let mut app = failed_finished_app();
     let buffer = render_at(&mut app, WIDTH, HEIGHT);
     assert_eq!(
-        full_row(&buffer, 0).trim_end(),
-        " feature/test · 2 files vs main · ✗ 2/3 passed, 1 failed · 0s"
+        full_row(&buffer, 0),
+        " feature/test · 2 files vs main · ✗ 2/3 passed, 1 failed · 0s  CPU 78% · MEM 50%"
+    );
+}
+
+/// #291: figures right-aligned in the header, panel open or closed
+#[rstest::rstest]
+#[case::closed(false)]
+#[case::open(true)]
+fn test_header_shows_cpu_mem_figures_right_aligned(#[case] panel: bool) {
+    let mut app = make_test_app();
+    if panel {
+        app.toggle_stats();
+    }
+    let header = full_row(&render_at(&mut app, 120, HEIGHT), 0);
+    assert!(header.ends_with(" CPU 78% · MEM 50%"), "{header:?}");
+    assert!(header.contains("Running..."), "{header:?}");
+}
+
+/// #291: before the first sample (or without sysinfo) no figures, rather
+/// than a misleading `CPU 0% · MEM 0%`
+#[rstest::rstest]
+#[case::no_sample(None)]
+#[case::zero_total(Some((10.0, 0, 0)))]
+fn test_header_shows_no_figures_without_stats_sample(#[case] sample: Option<(f32, u64, u64)>) {
+    let passed = statuses(1, ci_tui::runner::CheckStatus::Passed, false);
+    let mut app = make_test_app_with_statuses(&passed);
+    if let Some((cpu, used, total)) = sample {
+        app.update_stats(cpu, used, total);
+    }
+    let header = full_row(&render_at(&mut app, 120, HEIGHT), 0);
+    assert!(
+        !header.contains("CPU") && !header.contains("MEM"),
+        "{header:?}"
     );
 }
 
@@ -1326,28 +1383,36 @@ fn test_header_status_distinguishable_without_color() {
     assert!(!(end..WIDTH).any(reversed), "elapsed part plain: {row}");
 }
 
-/// Parts vanish in order elapsed, files, branch as the branch grows; the
-/// status counts stay whole
+/// Parts vanish in order elapsed, CPU/MEM figures (#291), files, branch as
+/// the branch grows; the status counts stay whole
 #[test]
-fn test_header_truncation_order_elapsed_then_files_then_branch() {
-    // (branch length, elapsed shown, files shown, branch shown)
+fn test_header_truncation_order_elapsed_figures_files_branch() {
+    // Per branch length: [elapsed, figures, files, branch] shown
     let mut seen = Vec::new();
-    for len in 1..45 {
+    for len in 1..70 {
         let mut app = failed_finished_app_on(&"b".repeat(len));
-        let row = full_row(&render_at(&mut app, 60, 19), 0);
+        let row = full_row(&render_at(&mut app, 90, 13), 0);
         assert!(row.contains("✗ 2/3 passed, 1 failed"), "status cut: {row}");
-        seen.push((
+        seen.push([
             row.contains(" · 0s"),
+            row.contains("CPU 78% · MEM 50%"),
             row.contains("files vs"),
             row.contains(&"b".repeat(len)),
-        ));
+        ]);
     }
-    let n = |f: fn(&(bool, bool, bool)) -> bool| seen.iter().filter(|r| f(r)).count();
-    let (elapsed, files, branch) = (n(|r| r.0), n(|r| r.1), n(|r| r.2));
-    assert!(elapsed < files && files < branch, "{seen:?}");
-    for (len, (e, f, b)) in seen.iter().enumerate() {
-        assert!(!e || *f, "elapsed without files at {}", len + 1);
-        assert!(!f || *b, "files without branch at {}", len + 1);
+    let shown: Vec<usize> = (0..4)
+        .map(|i| seen.iter().filter(|r| r[i]).count())
+        .collect();
+    assert!(shown.windows(2).all(|w| w[0] < w[1]), "{shown:?} {seen:?}");
+    for (len, row) in seen.iter().enumerate() {
+        for i in 0..3 {
+            assert!(
+                !row[i] || row[i + 1],
+                "part {i} outlived {} at {}",
+                i + 1,
+                len + 1
+            );
+        }
     }
 }
 
@@ -1356,7 +1421,7 @@ fn test_header_markers_and_status_survive_at_min_width() {
     let mut app = failed_finished_app_on("feature/a-rather-long-branch-name");
     app.watching = true;
     app.filter_notice = Some("Filtered: --only php-lint".to_string());
-    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    let row = full_row(&render_at(&mut app, 60, 13), 0);
     // Compact status (counts kept) makes room for the whole filter marker
     assert!(row.contains("✗ 2/3, 1 fail"), "{row}");
     assert!(row.contains("watching"), "{row}");
@@ -1368,7 +1433,7 @@ fn test_header_markers_and_status_survive_at_min_width() {
 fn min_width_row(mut app: ci_tui::ui::app::App) -> String {
     app.watching = true;
     app.filter_notice = Some("Filtered: --only php-lint".to_string());
-    full_row(&render_at(&mut app, 60, 19), 0)
+    full_row(&render_at(&mut app, 60, 13), 0)
 }
 
 fn statuses(
@@ -1441,7 +1506,7 @@ fn test_header_filter_cut_keeps_zwj_emoji_whole() {
     let mut app = make_test_app_with_statuses(&all);
     app.watching = true;
     app.filter_notice = Some("Filtered: --only abcdefghi👩‍💻-long-check-name".to_string());
-    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    let row = full_row(&render_at(&mut app, 60, 13), 0);
     assert!(row.contains("✗ 10/20, 10 fail"), "{row}");
     assert!(row.contains("watching"), "{row}");
     // (the cell after a wide char reads as a space in the buffer)
@@ -1456,23 +1521,23 @@ fn test_header_filter_cut_keeps_zwj_emoji_whole() {
 fn test_header_wide_branch_name_keeps_status_and_watching() {
     let mut app = failed_finished_app_on(&"ブランチ".repeat(12));
     app.watching = true;
-    let row = full_row(&render_at(&mut app, 60, 19), 0);
+    let row = full_row(&render_at(&mut app, 60, 13), 0);
     assert!(row.contains("✗ 2/3 passed, 1 failed"), "{row}");
     assert!(row.contains("watching"), "{row}");
 }
 
 /// The panels start right under the 1-row header: with stats the main
-/// area begins at row 7, without at row 1
+/// area begins at row 7, without (default) at row 1
 #[test]
 fn test_hit_test_areas_start_two_rows_higher() {
     let mut app = make_test_app();
+    render_at(&mut app, WIDTH, HEIGHT);
+    assert!(app.is_over_output(70, 2) && !app.is_over_output(70, 0));
+    app.toggle_stats();
     render_at(&mut app, WIDTH, HEIGHT);
     assert!(
         app.is_over_output(70, 8) && !app.is_over_output(70, 6),
         "{:?}",
         output_rows(&app)
     );
-    app.toggle_stats();
-    render_at(&mut app, WIDTH, HEIGHT);
-    assert!(app.is_over_output(70, 2) && !app.is_over_output(70, 0));
 }

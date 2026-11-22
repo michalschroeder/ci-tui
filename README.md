@@ -38,7 +38,7 @@ The usual loop is: push → wait for CI → red → fix → push again. Pre-comm
 - `--color auto|always|never` (TUI, `--simple`, `--fix`): `auto` (default) colors only when stdout is a terminal and `NO_COLOR` is unset or empty ([no-color.org](https://no-color.org)), so piped / redirected output carries no ANSI escapes; `always` colors even then (also with `NO_COLOR` set); `--no-color` is the same as `--color never`
 - `--notify` (or top-level `notify: true`) rings the bell and sends a desktop notification (OSC 9; tmux needs `allow-passthrough on`; GNU screen works as is) when a TUI run finishes; `--exit-on-finish` quits the TUI then, exiting `0` / `1` like `--simple`
 - `--watch` (TUI only) keeps the TUI running and re-runs the checks a file save affects, like `r` (git refresh first; a running one restarts, one the current run still runs finishes that run first, then re-runs unless the run took the saved files, so a newly matched file missing from its `{files}` is still checked). Re-runs wait while a fix or its verification runs and keep a group's concurrency (`parallel: false` one at a time, else `max_parallel`); a check is not re-run when the saved files' content is what its latest run started with (a touch, or files it or its fix wrote itself once that run saw them). Watches the dirs checks run from (local mode: the repo; docker mode: the project dir) except gitignored ones, `.git/`, `.ci-tui/` and nested repos / submodules (new dirs are picked up); saves are debounced (300 ms quiet, 2 s cap), and files matching `ignore_patterns`, gitignored files and editor temp files (vim swap / `4913`, `*~`, emacs `.#*` / `#*#`) are skipped. A save selects checks like a run on just the saved files, so always-run checks (no `triggers`) re-run on every save
-- `--no-stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM panel hidden (`m` toggles it); terminals smaller than 60x19 (60x13 without stats) show a "terminal too small" notice instead of a clipped layout (a zoomed output panel, `z`, works down to 20x5)
+- The header always shows `CPU x% · MEM y%` at its right edge; `--stats` (TUI only; ignored by `--simple` / `--fix` / `--list`) starts the TUI with the CPU/MEM graph panel open (`m` toggles it). Terminals smaller than 60x13 (60x19 with the graph panel) show a "terminal too small" notice instead of a clipped layout (a zoomed output panel, `z`, works down to 20x5)
 - `ci-tui init` scaffolds a commented starter config; `ci-tui validate` checks one (unknown fields, bad regexes, triggers naming undefined patterns)
 - JSON Schema for editor autocomplete / validation: `ci-tui schema`, [`schema/ci-tui.schema.json`](schema/ci-tui.schema.json), and a `ci-tui.schema.json` asset on each release
 
@@ -157,7 +157,7 @@ Changed files are detected against `origin/{base_branch}`, then `{base_branch}`,
 | `O` | Open selected check's output in `$EDITOR` (default `vi`) |
 | `w` | Save selected check's output to `.ci-tui/logs/<check>.log` (plain text, overwritten) |
 | `z` | Zoom the output panel to the full terminal (above the footer); `Esc` or `z` leaves. Output keys and check selection keep working |
-| `m` | Show / hide CPU/MEM stats panel |
+| `m` | Show / hide CPU/MEM graph panel |
 
 Cancel, timeout, quit and rerun kill the check's whole process tree, and `docker kill` the container of a `docker compose run` / `docker run`. Limitation: for `docker exec` into a running container only the local client is killed; the command keeps running inside the container until it exits.
 
