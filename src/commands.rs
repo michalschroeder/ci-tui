@@ -95,18 +95,22 @@ pub fn init(path: &Path, base_branch: &str) -> Result<()> {
     write_template(path, base_branch).map_err(|e| ConfigError(e).into())
 }
 
-/// Starter config with `git.base_branch` set to `base_branch`.
+/// Starter config with `git.base_branch` set to `base_branch`, serialized as
+/// a YAML scalar (quoted when needed: `@trunk`, `#trunk`, `123`, `yes`).
 fn template_for(base_branch: &str) -> String {
+    let scalar = serde_yaml::to_string(base_branch).expect("a string serializes");
     TEMPLATE.replacen(
         "  base_branch: main\n",
-        &format!("  base_branch: {base_branch}\n"),
+        &format!("  base_branch: {}\n", scalar.trim_end()),
         1,
     )
 }
 
 /// Default branch of the repository in `dir`, for `git.base_branch`:
-/// `origin/HEAD`, else an existing local `main` / `master`, else the current
-/// branch, else `main` (also outside a git repo).
+/// `origin/HEAD` when it resolves (not dangling), else an existing local
+/// `main` / `master`, else the current branch, else `main` (also outside a
+/// git repo). Refs are read in full and their namespace stripped: `--short`
+/// keeps `remotes/` when a local branch `origin/<name>` exists.
 pub fn detect_base_branch(dir: &Path) -> String {
     let git = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
@@ -117,23 +121,21 @@ pub fn detect_base_branch(dir: &Path) -> String {
         let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
         (out.status.success() && !text.is_empty()).then_some(text)
     };
-    git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .and_then(|r| r.strip_prefix("origin/").map(str::to_string))
+    let resolves = |r: &str| git(&["rev-parse", "--verify", "--quiet", r]).is_some();
+    let target = |symref: &str, prefix: &str| {
+        git(&["symbolic-ref", symref]).and_then(|r| r.strip_prefix(prefix).map(str::to_string))
+    };
+    let origin_head = "refs/remotes/origin/HEAD";
+    resolves(origin_head)
+        .then(|| target(origin_head, "refs/remotes/origin/"))
+        .flatten()
         .or_else(|| {
             ["main", "master"]
                 .into_iter()
-                .find(|b| {
-                    git(&[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/heads/{b}"),
-                    ])
-                    .is_some()
-                })
+                .find(|b| resolves(&format!("refs/heads/{b}")))
                 .map(str::to_string)
         })
-        .or_else(|| git(&["symbolic-ref", "--short", "HEAD"]))
+        .or_else(|| target("HEAD", "refs/heads/"))
         .unwrap_or_else(|| "main".to_string())
 }
 
@@ -194,6 +196,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
     }
 
+    use crate::watch::tests::in_git_hook;
+
+    /// Real git in `dir`. Callers skip under [`in_git_hook`]: an inherited
+    /// `GIT_DIR` / `GIT_WORK_TREE` would point these mutations (and
+    /// `detect_base_branch`) at the outer repository.
     fn git(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
@@ -205,6 +212,7 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
+    /// Repo on `branch` with one empty commit
     fn repo(branch: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q", "-b", branch]);
@@ -212,44 +220,84 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn test_init_writes_given_base_branch_and_validates() {
+    /// Points `origin/HEAD` at `refs/remotes/origin/<target>`
+    fn set_origin_head(dir: &Path, target: &str) {
+        let target = format!("refs/remotes/origin/{target}");
+        git(dir, &["symbolic-ref", "refs/remotes/origin/HEAD", &target]);
+    }
+
+    #[rstest::rstest]
+    #[case::plain("develop")]
+    #[case::at("@trunk")]
+    #[case::hash("#trunk")]
+    #[case::anchor("&trunk")]
+    #[case::quote("'trunk")]
+    #[case::number("123")]
+    #[case::bool_like("yes")]
+    fn test_init_base_branch_round_trips(#[case] branch: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ci-tui.yaml");
-        init(&path, "develop").unwrap();
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("  base_branch: develop\n"));
-        validate(&path).unwrap();
+        init(&path, branch).unwrap();
+        let config = crate::config::load_config(&path).expect("written config must load");
+        assert_eq!(config.git.base_branch, branch);
     }
 
     #[test]
     fn test_detect_base_branch_master_without_remote() {
+        if in_git_hook() {
+            return;
+        }
         let dir = repo("master");
         assert_eq!(detect_base_branch(dir.path()), "master");
     }
 
     #[test]
     fn test_detect_base_branch_prefers_origin_head() {
+        if in_git_hook() {
+            return;
+        }
         let dir = repo("master");
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
         git(
             dir.path(),
             &["update-ref", "refs/remotes/origin/develop", "HEAD"],
         );
+        set_origin_head(dir.path(), "develop");
+        assert_eq!(detect_base_branch(dir.path()), "develop");
+    }
+
+    #[test]
+    fn test_detect_base_branch_skips_dangling_origin_head() {
+        if in_git_hook() {
+            return;
+        }
+        let dir = repo("master");
+        set_origin_head(dir.path(), "deleted");
+        assert_eq!(detect_base_branch(dir.path()), "master");
+    }
+
+    #[test]
+    fn test_detect_base_branch_origin_head_beside_local_origin_branch() {
+        if in_git_hook() {
+            return;
+        }
+        // Local branch `origin/develop` makes `symbolic-ref --short` print
+        // `remotes/origin/develop`
+        let dir = repo("master");
         git(
             dir.path(),
-            &[
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/develop",
-            ],
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
         );
+        git(dir.path(), &["branch", "origin/develop"]);
+        set_origin_head(dir.path(), "develop");
         assert_eq!(detect_base_branch(dir.path()), "develop");
     }
 
     #[test]
     fn test_detect_base_branch_prefers_local_default_over_feature() {
+        if in_git_hook() {
+            return;
+        }
         let dir = repo("master");
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
         assert_eq!(detect_base_branch(dir.path()), "master");
@@ -257,12 +305,18 @@ mod tests {
 
     #[test]
     fn test_detect_base_branch_current_branch_fallback() {
-        let dir = repo("trunk");
-        assert_eq!(detect_base_branch(dir.path()), "trunk");
+        if in_git_hook() {
+            return;
+        }
+        let dir = repo("origin/trunk");
+        assert_eq!(detect_base_branch(dir.path()), "origin/trunk");
     }
 
     #[test]
     fn test_detect_base_branch_outside_repo_is_main() {
+        if in_git_hook() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(detect_base_branch(dir.path()), "main");
     }

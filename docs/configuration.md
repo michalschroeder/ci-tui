@@ -13,7 +13,7 @@ A configuration file defines:
 - Check definitions with commands and execution rules
 - Test discovery strategies for intelligent test selection
 
-Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it. `init` sets `git.base_branch` to the repo's default branch: `origin/HEAD`, else an existing local `main` / `master`, else the current branch (`main` outside a repository), and prints it.
+Run `ci-tui init` to generate a commented starter file. Run `ci-tui validate [path]` to check a config without running it. `init` sets `git.base_branch` to the default branch of the repo the file is written into: `origin/HEAD` (when it resolves), else an existing local `main` / `master`, else the current branch (`main` outside a repository), and prints it.
 
 ### Config Discovery
 
