@@ -187,6 +187,8 @@ fn no_existing_base_ref_exits_3_with_hint() {
         "{stderr}"
     );
     assert!(stderr.contains("No base ref could be resolved"), "{stderr}");
+    assert!(stderr.contains("git.base_branch"), "{stderr}");
+    assert!(stderr.contains("--base"), "{stderr}");
 }
 
 #[test]
