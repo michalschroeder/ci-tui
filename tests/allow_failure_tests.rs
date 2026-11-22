@@ -1,6 +1,7 @@
 //! End-to-end per-check `allow_failure` (#151) through the binary: config
-//! parsing, simple-mode and `--fix` exit codes, the JSON summary. Output
-//! formatting is unit-tested in `simple` / `report`.
+//! parsing, simple-mode and `--fix` exit codes, the JSON summary, the
+//! `--simple --no-color` glyphs (#297). Output formatting is unit-tested in
+//! `simple` / `report`.
 
 use ci_tui::exit;
 
@@ -73,6 +74,32 @@ fn allowed_timeout_exits_0() {
     let config = config("sleep 5", "        timeout: 1s\n", "");
     let (_tmp, out) = run_config(&config, &["-s", "-f", "a.rs"]);
     assert_code(&out, exit::SUCCESS);
+}
+
+/// #297: `--simple --no-color` keeps a real failure, an allowed failure and
+/// a check a failed pre-command blocked apart by glyph alone
+#[test]
+fn simple_no_color_outcomes_have_distinct_glyphs() {
+    let blocked = "  blocked:
+    pre_commands:
+      - { name: setup, command: 'false', on_failure: skip_group }
+    checks:
+      unit: { name: Unit, command: 'true' }
+";
+    let config = format!("{}{blocked}", warn_and_bad());
+    let (_tmp, out) = run_config(&config, &["--simple", "--no-color", "-f", "a.rs"]);
+
+    assert_code(&out, exit::CHECKS_FAILED);
+    let text = stdout(&out);
+    let line = |head: &str| {
+        text.lines()
+            .find(|l| l.starts_with(head))
+            .unwrap_or_else(|| panic!("no `{head}` line: {text}"))
+    };
+    line("  ✗ bad ");
+    assert!(line("  ⚠ warn ").ends_with(" allowed failure"), "{text}");
+    assert_eq!(line("  ⊘ unit"), "  ⊘ unit not run");
+    assert!(!text.contains('\x1b'), "no colour: {text:?}");
 }
 
 #[test]

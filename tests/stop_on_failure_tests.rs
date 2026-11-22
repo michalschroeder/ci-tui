@@ -299,7 +299,7 @@ fn simple_binary_prints_later_groups_not_run_and_exits_1() {
 
     assert_code(&out, exit::CHECKS_FAILED);
     let text = stdout(&out);
-    assert!(text.contains("✗ b not run"), "{text}");
+    assert!(text.contains("⊘ b not run"), "{text}");
     assert!(
         text.contains(&format!("⊘ pre-command prep skipped ({GA_STOPPED})")),
         "{text}"
