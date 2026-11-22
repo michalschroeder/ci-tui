@@ -235,7 +235,8 @@ pub struct ViewState {
     pub output_area: Rect,
     /// True while the `?` help overlay is shown; swallows all other keys
     pub help_visible: bool,
-    /// CPU/MEM stats panel shown (`--no-stats` starts hidden, `m` toggles)
+    /// CPU/MEM graph panel shown (closed by default, `--stats` starts it
+    /// open, `m` toggles; kept by `R`). The header shows the figures either way
     pub stats_visible: bool,
     /// Output panel zoomed to the full area minus footer (`z` toggles, `Esc`
     /// leaves); pure view state
@@ -269,7 +270,7 @@ impl Default for ViewState {
             manual_folds: HashSet::new(),
             output_area: Rect::default(),
             help_visible: false,
-            stats_visible: true,
+            stats_visible: false,
             output_zoomed: false,
             help_scroll: 0,
             search: None,
@@ -626,7 +627,8 @@ impl App {
         self.pre_commands = build_pre_commands(&self.config, &active_groups);
         self.checks = checks;
 
-        // Reset state; manual folds survive, auto-collapsed groups reopen
+        // Reset state; manual folds and the graph panel survive,
+        // auto-collapsed groups reopen
         let manual_folds = std::mem::take(&mut self.view.manual_folds);
         let collapsed_groups = self
             .view
@@ -641,6 +643,7 @@ impl App {
             collapsed_groups,
             manual_folds,
             output_zoomed: self.view.output_zoomed,
+            stats_visible: self.view.stats_visible,
             ..ViewState::default()
         };
         self.select_initial_item();
@@ -1174,6 +1177,12 @@ impl App {
     /// Latest CPU usage (percent)
     pub fn cpu_usage(&self) -> f32 {
         self.sys.cpu_history.back().copied().unwrap_or(0.0)
+    }
+
+    /// A stats sample with memory figures arrived (none before the first
+    /// one, or when sysinfo fails)
+    pub fn stats_sampled(&self) -> bool {
+        !self.sys.cpu_history.is_empty() && self.sys.mem_total_bytes > 0
     }
 
     /// Latest memory usage (percent)
@@ -1717,12 +1726,12 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Whether the CPU/MEM stats panel is shown
+    /// Whether the CPU/MEM graph panel is shown
     pub fn stats_visible(&self) -> bool {
         self.view.stats_visible
     }
 
-    /// Show / hide the CPU/MEM stats panel (`m` key)
+    /// Show / hide the CPU/MEM graph panel (`m` key)
     pub fn toggle_stats(&mut self) {
         self.view.stats_visible = !self.view.stats_visible;
         self.needs_redraw = true;
@@ -3330,6 +3339,27 @@ checks:
 
         assert_eq!(app.view.status_filter, StatusFilter::Failed);
         assert_eq!(app.view.selected_check, 0);
+    }
+
+    /// #291 / #282: `R` keeps the CPU/MEM graph panel as the user left it
+    #[rstest::rstest]
+    #[case::open(true)]
+    #[case::closed(false)]
+    fn test_reset_for_retry_keeps_stats_panel(#[case] visible: bool) {
+        let mut app = make_app();
+        app.view.stats_visible = visible;
+        let (changed_files, checks) = (app.changed_files.clone(), app.checks.clone());
+
+        app.reset_for_retry(changed_files, checks);
+
+        assert_eq!(app.stats_visible(), visible);
+    }
+
+    /// #291: the graph panel is opt-in
+    #[test]
+    fn test_stats_panel_closed_by_default() {
+        assert!(!ViewState::default().stats_visible);
+        assert!(!make_app().stats_visible());
     }
 
     #[test]

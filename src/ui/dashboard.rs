@@ -8,9 +8,10 @@
 //!
 //! The UI is divided into four horizontal sections:
 //! 1. **Header**: One row: branch, changed files, colored status segment,
-//!    elapsed time, `watching` / `Filtered` markers
+//!    elapsed time, `watching` / `Filtered` markers; `CPU x% · MEM y%`
+//!    right-aligned once a stats sample arrived
 //! 2. **System stats**: CPU sparkline with 0/50/100 scale, memory gauge
-//!    (hidden with `--no-stats` / `m`; its rows go to the main content)
+//!    (opt-in: `--stats` / `m`; closed, its rows go to the main content)
 //! 3. **Main content**: Split into checks list, files list, and output panel
 //! 4. **Footer**: Keyboard shortcuts and version info
 //!
@@ -355,7 +356,7 @@ const HELP_RIGHT: [(&str, &str); 11] = [
     ("x / X", "fix/fix all"),
     ("A", "run on all files"),
     ("c / e", "copy/expand cmd"),
-    ("m", "CPU/MEM stats"),
+    ("m", "CPU/MEM graph"),
     ("w", "save log file"),
     ("q / Ctrl-c", "quit"),
     ("Esc", "unzoom/clear"),
@@ -472,6 +473,8 @@ enum HeaderPart {
     Watch,
     /// `Filtered: --only ...` marker
     Filter,
+    /// `CPU x% · MEM y%`, right-aligned at the end of the row
+    Stats,
 }
 
 /// Separator between header parts
@@ -479,13 +482,26 @@ const HEADER_SEP: &str = " · ";
 /// Shortest `Filtered: ...` stub worth keeping; less is dropped instead
 const HEADER_FILTER_MIN_COLS: usize = 12;
 /// Parts dropped, in this order, while the row is too wide
-const HEADER_DROP_ORDER: [HeaderPart; 3] =
-    [HeaderPart::Elapsed, HeaderPart::Files, HeaderPart::Branch];
+const HEADER_DROP_ORDER: [HeaderPart; 4] = [
+    HeaderPart::Elapsed,
+    HeaderPart::Stats,
+    HeaderPart::Files,
+    HeaderPart::Branch,
+];
 
-/// Terminal columns of the row for `segs` (leading space, separators)
+/// Terminal columns of the row for `segs`: leading space, separators
+/// between the left parts, and the figures with at least one space before
 fn header_width(segs: &[HeaderSeg]) -> usize {
-    let text: usize = segs.iter().map(|s| s.text.width()).sum();
-    1 + text + HEADER_SEP.width() * segs.len().saturating_sub(1)
+    let (mut left_cols, mut left_parts, mut stats_cols) = (0, 0usize, 0);
+    for seg in segs {
+        if seg.part == HeaderPart::Stats {
+            stats_cols += 1 + seg.text.width();
+        } else {
+            left_cols += seg.text.width();
+            left_parts += 1;
+        }
+    }
+    1 + left_cols + HEADER_SEP.width() * left_parts.saturating_sub(1) + stats_cols
 }
 
 /// Columns of `segs` beyond `width`
@@ -493,11 +509,11 @@ fn header_overflow(segs: &[HeaderSeg], width: usize) -> usize {
     header_width(segs).saturating_sub(width)
 }
 
-/// Fit `segs` into `width` columns, least important first: elapsed, files,
-/// branch; then the status gets its compact wording (all counts kept), the
-/// `watching` marker goes (when the filter marker would be cut to a stub),
-/// the filter marker is shortened (or dropped) and only last the status is
-/// clipped (`…`).
+/// Fit `segs` into `width` columns, least important first: elapsed, CPU/MEM
+/// figures, files, branch; then the status gets its compact wording (all
+/// counts kept), the `watching` marker goes (when the filter marker would be
+/// cut to a stub), the filter marker is shortened (or dropped) and only last
+/// the status is clipped (`…`).
 fn fit_header(mut segs: Vec<HeaderSeg>, width: usize) -> Vec<HeaderSeg> {
     for part in HEADER_DROP_ORDER {
         if header_overflow(&segs, width) > 0 {
@@ -597,7 +613,8 @@ fn grapheme_prefix(s: &str, max: usize) -> &str {
 
 /// Header parts for `app`: branch, changed files vs base, `status`, elapsed,
 /// `--watch` and the active `--only` / `--group` filter (persistent, unlike
-/// the dismissable footer)
+/// the dismissable footer), then the CPU/MEM figures (none before the first
+/// stats sample: no misleading `0%`)
 fn header_segments(app: &App, status: HeaderStatus, elapsed: String) -> Vec<HeaderSeg> {
     let seg = |part, text: String| HeaderSeg {
         part,
@@ -626,6 +643,10 @@ fn header_segments(app: &App, status: HeaderStatus, elapsed: String) -> Vec<Head
     }
     if let Some(notice) = &app.filter_notice {
         segs.push(seg(HeaderPart::Filter, notice.clone()));
+    }
+    if app.stats_sampled() {
+        let figures = format!("CPU {:.0}% · MEM {:.0}%", app.cpu_usage(), app.mem_usage());
+        segs.push(seg(HeaderPart::Stats, figures));
     }
     segs
 }
@@ -738,9 +759,9 @@ fn header_status(app: &App, counts: &super::app::StatusCounts) -> HeaderStatus {
     }
 }
 
-/// One-row header: ` branch · N files vs base · status · elapsed · markers`.
-/// The status segment keeps its pass / fail / running background; with color
-/// off it is reversed instead.
+/// One-row header: ` branch · N files vs base · status · elapsed · markers`,
+/// `CPU x% · MEM y%` at the right edge. The status segment keeps its pass /
+/// fail / running background; with color off it is reversed instead.
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let status = header_status(app, &app.count_by_status());
     let color = status.color;
@@ -751,9 +772,23 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
+    let spans = header_spans(segs, area.width as usize, status_style);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Spans of the fitted row `segs` in `width` columns: leading space,
+/// ` · `-joined left parts, then the figures flush right (padding fills the
+/// gap, at least one space)
+fn header_spans(segs: Vec<HeaderSeg>, width: usize, status_style: Style) -> Vec<Span<'static>> {
+    let pad = 1 + width.saturating_sub(header_width(&segs));
     let mut spans = vec![Span::raw(" ")];
-    for (i, seg) in segs.into_iter().enumerate() {
-        if i > 0 {
+    let mut figures = None;
+    for seg in segs {
+        if seg.part == HeaderPart::Stats {
+            figures = Some(seg.text);
+            continue;
+        }
+        if spans.len() > 1 {
             spans.push(Span::raw(HEADER_SEP));
         }
         let style = if seg.part == HeaderPart::Status {
@@ -763,7 +798,11 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         };
         spans.push(Span::styled(seg.text, style));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if let Some(figures) = figures {
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::raw(figures));
+    }
+    spans
 }
 
 /// Color off: a Gauge draws its fill as `█` except under the label, where
@@ -2929,11 +2968,14 @@ mod tests {
             .collect()
     }
 
-    /// Row text of `fit_header` (leading space, ` · ` joined)
+    /// Row text of `fit_header` as rendered (leading space, ` · ` joined,
+    /// figures right-aligned)
     fn fitted(parts: &[(HeaderPart, &str)], width: usize) -> String {
         let fit = fit_header(segs(parts), width);
-        let texts: Vec<&str> = fit.iter().map(|s| s.text.as_str()).collect();
-        format!(" {}", texts.join(HEADER_SEP))
+        header_spans(fit, width, Style::default())
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     const FULL: [(HeaderPart, &str); 4] = [
@@ -2956,6 +2998,51 @@ mod tests {
     ) {
         assert_eq!(fitted(&FULL, width), expected);
         assert!(expected.width() <= width.max(1 + 9));
+    }
+
+    const FIGURES: &str = "CPU 12% · MEM 64%";
+
+    /// #291: figures right-aligned, at least one space from the left parts;
+    /// they go after elapsed, before files and branch
+    #[rstest::rstest]
+    #[case::wide(80, " main · 2 files vs main · ✗ 2/6 passed, 3 failed · 1s", true)]
+    #[case::exact(71, " main · 2 files vs main · ✗ 2/6 passed, 3 failed · 1s", true)]
+    #[case::elapsed_first(70, " main · 2 files vs main · ✗ 2/6 passed, 3 failed", true)]
+    #[case::exact_without_elapsed(66, " main · 2 files vs main · ✗ 2/6 passed, 3 failed", true)]
+    #[case::then_figures(65, " main · 2 files vs main · ✗ 2/6 passed, 3 failed", false)]
+    #[case::then_files(47, " main · ✗ 2/6 passed, 3 failed", false)]
+    #[case::then_branch(29, " ✗ 2/6 passed, 3 failed", false)]
+    fn test_fit_header_drops_figures_after_elapsed_before_files(
+        #[case] width: usize,
+        #[case] left: &str,
+        #[case] figures: bool,
+    ) {
+        let mut parts = FULL.to_vec();
+        parts.push((HeaderPart::Stats, FIGURES));
+        let expected = if figures {
+            let gap = width - left.width() - FIGURES.width();
+            format!("{left}{}{FIGURES}", " ".repeat(gap))
+        } else {
+            left.to_string()
+        };
+        let row = fitted(&parts, width);
+        assert_eq!(row, expected);
+        if figures {
+            assert_eq!(row.width(), width, "flush right: {row:?}");
+        }
+    }
+
+    /// #291: markers shrink as before once the figures are gone
+    #[test]
+    fn test_fit_header_figures_go_before_markers_shrink() {
+        let mut parts = FULL.to_vec();
+        parts.push((HeaderPart::Watch, "watching"));
+        parts.push((HeaderPart::Filter, "Filtered: --only php-lint"));
+        parts.push((HeaderPart::Stats, FIGURES));
+        assert_eq!(
+            fitted(&parts, 60),
+            " ✗ 2/6 passed, 3 failed · watching · Filtered: --only php-l…"
+        );
     }
 
     #[test]

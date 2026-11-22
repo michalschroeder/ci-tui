@@ -1608,7 +1608,7 @@ fn handle_message(app: &mut App, msg: Message, tasks: &mut Tasks) -> Action {
 pub struct TuiOptions {
     /// Active `--only` / `--group` filter, shown in the header
     pub filter_notice: Option<String>,
-    /// Start with the CPU/MEM stats panel shown (off with `--no-stats`)
+    /// Start with the CPU/MEM graph panel open (`--stats`; closed by default)
     pub show_stats: bool,
     /// Result cache: skips unchanged checks at start, records finished runs
     pub cache: ResultCache,
@@ -1633,7 +1633,7 @@ impl TuiOptions {
     ) -> Self {
         Self {
             filter_notice,
-            show_stats: !cli.no_stats,
+            show_stats: cli.stats,
             cache,
             notify: config.notify,
             exit_on_finish: cli.exit_on_finish,
@@ -4066,10 +4066,51 @@ checks:
         let (mut tasks, _rx) = make_test_tasks(&config);
         let m = || press(KeyCode::Char('m'), KeyModifiers::NONE);
 
-        handle_key_event(&mut app, m(), &mut tasks);
-        assert!(!app.stats_visible());
+        assert!(!app.stats_visible(), "closed by default");
         handle_key_event(&mut app, m(), &mut tasks);
         assert!(app.stats_visible());
+        handle_key_event(&mut app, m(), &mut tasks);
+        assert!(!app.stats_visible());
+    }
+
+    /// #291: `m` works while the terminal is too small for the panel; a
+    /// second `m` brings the dashboard back
+    #[test]
+    fn test_m_key_at_default_min_size_toggles_too_small_notice() {
+        let config = test_config();
+        let mut app = make_test_app(&config);
+        let (mut tasks, _rx) = make_test_tasks(&config);
+        let m = || press(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(!help_screen(&mut app, 60, 13).contains("too small"));
+
+        handle_key_event(&mut app, m(), &mut tasks);
+        let screen = help_screen(&mut app, 60, 13);
+        assert!(screen.contains("need 60x19"), "{screen}");
+
+        handle_key_event(&mut app, m(), &mut tasks);
+        let screen = help_screen(&mut app, 60, 13);
+        assert!(!screen.contains("too small"), "{screen}");
+    }
+
+    /// App built the way `run` builds it, from the parsed `args`
+    fn app_from_cli(args: &[&str]) -> App {
+        let cli = crate::cli::Cli::try_parse_checked(args).unwrap();
+        let config = test_config();
+        let options = TuiOptions::new(&cli, &config, None, ResultCache::disabled());
+        let root = tempfile::tempdir().unwrap();
+        let changed = ChangedFiles {
+            files: vec![],
+            base_ref: "development".to_string(),
+        };
+        new_app(&config, changed, &[], (root.path(), root.path()), &options)
+    }
+
+    /// #291: graph panel opt-in with `--stats`, closed without
+    #[rstest::rstest]
+    #[case::default(&["ci-tui"], false)]
+    #[case::stats(&["ci-tui", "--stats"], true)]
+    fn test_stats_flag_opens_panel_at_start(#[case] args: &[&str], #[case] open: bool) {
+        assert_eq!(app_from_cli(args).stats_visible(), open);
     }
 
     #[test]
