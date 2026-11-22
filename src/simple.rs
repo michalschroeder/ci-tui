@@ -705,23 +705,6 @@ mod tests {
         assert!(line.contains("\x1b[31mnot run"), "{line:?}");
     }
 
-    /// `--no-color`: a real failure, an allowed failure / timeout and a
-    /// check that never ran each keep their own glyph
-    #[test]
-    fn test_outcomes_distinguishable_without_color() {
-        let glyph = |r: &CheckResult, severity| {
-            let plain = crate::color::paint(&format_result(r, severity), false).into_owned();
-            plain.trim_start().chars().next()
-        };
-        let glyphs = [
-            glyph(&timed_result(CheckStatus::Failed), Severity::Error),
-            glyph(&timed_result(CheckStatus::Failed), Severity::Warning),
-            glyph(&timed_result(CheckStatus::TimedOut), Severity::Warning),
-            glyph(&CheckResult::blocked("c", "Not run: x"), Severity::Error),
-        ];
-        assert_eq!(glyphs, [Some('✗'), Some('⚠'), Some('⚠'), Some('⊘')]);
-    }
-
     /// Guard: real failures / timeouts keep their glyph and colour
     #[rstest::rstest]
     #[case::failed(CheckStatus::Failed, "  ✗ c 1.2s", "  \x1b[31m✗")]

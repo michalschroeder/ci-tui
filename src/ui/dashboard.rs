@@ -3179,22 +3179,27 @@ mod tests {
         app
     }
 
-    /// Icon cell (glyph, foreground) of the `PHP Lint` row in the checks list
-    fn list_icon(app: &mut App) -> (String, Color) {
-        let (width, height) = (40, 8);
+    /// Icon cell of the `PHP Lint` row of the checks list (at x 0) that
+    /// `draw` puts on a `width` x `height` terminal: "│ <icon> PHP Lint"
+    fn list_icon_cell(
+        app: &mut App,
+        (width, height): (u16, u16),
+        draw: impl FnOnce(&mut App, &mut Frame),
+    ) -> ratatui::buffer::Cell {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal
-            .draw(|f| render_checks_list(app, f, Rect::new(0, 0, width, height)))
-            .expect("draw");
+        terminal.draw(|f| draw(app, f)).expect("draw");
         let buffer = terminal.backend().buffer();
         let y = (0..height)
-            .find(|&y| {
-                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
-                row.contains("PHP Lint")
-            })
+            .find(|&y| (4..12).map(|x| buffer[(x, y)].symbol()).collect::<String>() == "PHP Lint")
             .expect("check row");
-        // "│ <icon> PHP Lint": border, space, icon
-        let cell = &buffer[(2, y)];
+        buffer[(2, y)].clone()
+    }
+
+    /// Icon (glyph, foreground) of the `PHP Lint` row in the checks list
+    fn list_icon(app: &mut App) -> (String, Color) {
+        let cell = list_icon_cell(app, (40, 8), |app, f| {
+            render_checks_list(app, f, Rect::new(0, 0, 40, 8))
+        });
         (cell.symbol().to_string(), cell.fg)
     }
 
@@ -3220,16 +3225,21 @@ mod tests {
         assert_eq!(list_icon(&mut app), (glyph.to_string(), color));
     }
 
-    /// #297: without colour the three failure outcomes still differ in the list
+    /// #297: with colour off (`--no-color` / `NO_COLOR`) the three failure
+    /// outcomes still differ in the list: glyph only, `render` resets fg/bg
     #[test]
     fn test_list_failure_outcomes_distinguishable_without_color() {
-        let glyphs: Vec<String> = [(false, false), (true, false), (false, true)]
+        let icons: Vec<_> = [(false, false), (true, false), (false, true)]
             .into_iter()
             .map(|(allow, not_run)| {
-                list_icon(&mut app_with_outcome(CheckStatus::Failed, allow, not_run)).0
+                let mut app = app_with_outcome(CheckStatus::Failed, allow, not_run);
+                app.color = false;
+                let cell = list_icon_cell(&mut app, (100, 30), render);
+                (cell.symbol().to_string(), cell.fg, cell.bg)
             })
             .collect();
-        assert_eq!(glyphs, ["✗", "⚠", "⊘"]);
+        let plain = |glyph: &str| (glyph.to_string(), Color::Reset, Color::Reset);
+        assert_eq!(icons, [plain("✗"), plain("⚠"), plain("⊘")]);
     }
 
     /// #297: output panel status line per outcome; hints after it unchanged
