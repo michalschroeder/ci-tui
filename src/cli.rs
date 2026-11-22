@@ -95,8 +95,8 @@ pub struct Cli {
     pub no_color: bool,
 
     /// TUI only: start with the CPU/MEM graph panel open (`m` toggles it;
-    /// the header always shows the figures); no effect with --simple, --fix
-    /// or --list
+    /// the header shows the figures when the row has room); no effect with
+    /// --simple, --fix or --list
     #[arg(long)]
     pub stats: bool,
 

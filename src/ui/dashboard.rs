@@ -492,11 +492,16 @@ const HEADER_DROP_ORDER: [HeaderPart; 4] = [
 /// Terminal columns of the row for `segs`: leading space, separators
 /// between the left parts, and the figures with at least one space before
 fn header_width(segs: &[HeaderSeg]) -> usize {
-    let (stats, left): (Vec<&HeaderSeg>, Vec<&HeaderSeg>) =
-        segs.iter().partition(|s| s.part == HeaderPart::Stats);
-    let text: usize = left.iter().map(|s| s.text.width()).sum();
-    let stats: usize = stats.iter().map(|s| 1 + s.text.width()).sum();
-    1 + text + HEADER_SEP.width() * left.len().saturating_sub(1) + stats
+    let (mut left_cols, mut left_parts, mut stats_cols) = (0, 0usize, 0);
+    for seg in segs {
+        if seg.part == HeaderPart::Stats {
+            stats_cols += 1 + seg.text.width();
+        } else {
+            left_cols += seg.text.width();
+            left_parts += 1;
+        }
+    }
+    1 + left_cols + HEADER_SEP.width() * left_parts.saturating_sub(1) + stats_cols
 }
 
 /// Columns of `segs` beyond `width`

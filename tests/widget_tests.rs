@@ -1079,9 +1079,16 @@ fn has_color(buffer: &Buffer) -> bool {
         .any(|c| c.fg != Color::Reset || c.bg != Color::Reset)
 }
 
-#[test]
-fn test_no_color_renders_no_fg_bg_colors() {
+/// Color off, graph panel open or closed: header figures, and with the panel
+/// its sparkline and MEM gauge (`mark_gauge_fill` path), carry no fg/bg
+#[rstest::rstest]
+#[case::panel_closed(false)]
+#[case::panel_open(true)]
+fn test_no_color_renders_no_fg_bg_colors(#[case] panel: bool) {
     let mut app = make_test_app();
+    if panel {
+        app.toggle_stats();
+    }
     app.update_stats(90.0, 8_000_000_000, 16_000_000_000);
     assert!(has_color(&render_at(&mut app, WIDTH, HEIGHT)), "color on");
 
@@ -1091,6 +1098,10 @@ fn test_no_color_renders_no_fg_bg_colors() {
     assert!(!has_color(&buffer), "every cell fg/bg must be Reset");
     let header = full_row(&buffer, 0);
     assert!(header.contains("CPU 90% · MEM 50%"), "figures: {header}");
+    if panel {
+        assert!(buffer_contains(&buffer, "┌ CPU 90% "), "CPU panel rendered");
+        assert!(buffer_contains(&buffer, "GiB (50%)"), "MEM gauge rendered");
+    }
 }
 
 /// #291: fresh start (graph panel closed) needs 60x13, with the panel 60x19
