@@ -87,6 +87,23 @@ fn invalid_docker_section_exits_2(#[case] docker: &str, #[case] extra: &str, #[c
     assert!(stderr.contains(msg), "{stderr}");
 }
 
+/// An unset variable in the plain-image mount exits 3 naming it, before
+/// any docker command (no daemon needed)
+#[test]
+fn unset_volume_mount_variable_exits_3() {
+    let docker =
+        "docker:\n  image: img\n  shell: sh\n  volume_mount: ${CI_TUI_TEST_E2E_UNSET}:/app\n";
+    let config = format!("{YAML_HEAD}{docker}{}", yaml_check("'true'"));
+    let (_tmp, out) = run_config(&config, &["--simple", "--files", "a.rs"]);
+    assert_code(&out, exit::ENV_ERROR);
+    let stderr = stderr(&out);
+    assert!(
+        stderr.contains("docker.volume_mount uses `${CI_TUI_TEST_E2E_UNSET}`, which is not set"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Docker is not reachable"), "{stderr}");
+}
+
 #[test]
 fn invalid_files_filter_regex_exits_2() {
     let config = docker_yaml("        triggers:\n          files_filter: '[invalid'\n");

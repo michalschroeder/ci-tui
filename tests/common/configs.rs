@@ -250,6 +250,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set compose `service` on the last pre-command added to `group_id`
+    /// (panics if it has none)
+    #[allow(dead_code)]
+    pub fn with_pre_command_service(mut self, group_id: &str, service: &str) -> Self {
+        let pre = self.checks[group_id].pre_commands.last_mut();
+        pre.expect("group has a pre-command").service = Some(service.to_string());
+        self
+    }
+
     /// Build the final CiConfig
     pub fn build(self) -> CiConfig {
         let mut config = CiConfig::new(
