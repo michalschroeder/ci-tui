@@ -583,15 +583,90 @@ impl ImageConfig {
     pub fn working_dir(&self) -> &str {
         self.work_dir.as_deref().unwrap_or("/app")
     }
+
+    /// Unset or empty `${VAR}`s of the `volume_mount` sections (`src:dst:opts`)
+    /// they leave empty, each once, in order of first use. `docker run`
+    /// rejects an empty section (`invalid spec: :/app`) before any command
+    /// starts; a blank var next to text (`/app${OPTS}`) is harmless.
+    pub fn blank_mount_vars(&self) -> Vec<BlankVar> {
+        let mount = self.volume_mount.as_deref().unwrap_or_default();
+        unique_vars(mount.split(':').flat_map(emptying_vars))
+    }
+}
+
+/// `vars` without repeats, in order of first appearance
+fn unique_vars(vars: impl Iterator<Item = BlankVar>) -> Vec<BlankVar> {
+    let mut seen: Vec<BlankVar> = Vec::new();
+    for var in vars {
+        if !seen.contains(&var) {
+            seen.push(var);
+        }
+    }
+    seen
+}
+
+/// A `${NAME}` reference whose value is missing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlankVar {
+    /// Not in the environment
+    Unset(String),
+    /// Set to the empty string
+    Empty(String),
+}
+
+impl BlankVar {
+    /// Variable name (without `${}`)
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Unset(name) | Self::Empty(name) => name,
+        }
+    }
+
+    /// What is wrong with it: "not set" / "empty"
+    pub fn problem(&self) -> &'static str {
+        match self {
+            Self::Unset(_) => "not set",
+            Self::Empty(_) => "empty",
+        }
+    }
 }
 
 /// Default compose service (`docker.service` unset)
 const DEFAULT_SERVICE: &str = "app";
 
+/// `${NAME}` references [`expand_env_vars`] expands. Names only: shell
+/// parameter expansion (`${VAR:-default}`) is left to the shell running the
+/// command.
+fn env_var_re() -> &'static Regex {
+    static ENV_VAR_RE: OnceLock<Regex> = OnceLock::new();
+    ENV_VAR_RE.get_or_init(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("static regex"))
+}
+
+/// The unset / empty `${NAME}`s of `section` (in order, repeats kept) when
+/// they leave it empty: no other text and no set var. Else none. An unset
+/// one [`expand_env_vars`] keeps as text, which the shell running the command
+/// expands to nothing, so it counts as blank too.
+fn emptying_vars(section: &str) -> Vec<BlankVar> {
+    let mut blank = Vec::new();
+    // Each `${NAME}` classified once: blank → recorded and removed, set → kept
+    let rest = env_var_re().replace_all(section, |cap: &regex::Captures| {
+        let name = cap[1].to_string();
+        match std::env::var_os(&name) {
+            None => blank.push(BlankVar::Unset(name)),
+            Some(value) if value.is_empty() => blank.push(BlankVar::Empty(name)),
+            Some(_) => return cap[0].to_string(),
+        }
+        String::new()
+    });
+    match rest.is_empty() {
+        true => blank,
+        false => Vec::new(),
+    }
+}
+
 /// Expand environment variables in format ${VAR_NAME}
 fn expand_env_vars(input: &str) -> String {
-    static ENV_VAR_RE: OnceLock<Regex> = OnceLock::new();
-    let re = ENV_VAR_RE.get_or_init(|| Regex::new(r"\$\{([^}]+)\}").expect("static regex"));
+    let re = env_var_re();
 
     let mut result = input.to_string();
     for cap in re.captures_iter(input) {
@@ -2016,6 +2091,89 @@ checks: {}
                 Some("-v /tmp/ci-tui-vol:/build".to_string())
             );
             std::env::remove_var("CI_TUI_TEST_VOL");
+        }
+
+        /// Plain-image settings mounting `mount`
+        fn mounting(mount: Option<&str>) -> ImageConfig {
+            ImageConfig {
+                image: "img".to_string(),
+                volume_mount: mount.map(String::from),
+                work_dir: None,
+                user: None,
+            }
+        }
+
+        #[test]
+        fn test_blank_mount_vars_names_unset_and_empty_once_in_order() {
+            std::env::remove_var("CI_TUI_TEST_BLANK_UNSET");
+            std::env::set_var("CI_TUI_TEST_BLANK_EMPTY", "");
+            std::env::remove_var("CI_TUI_TEST_BLANK_DST");
+            let mount = "${CI_TUI_TEST_BLANK_EMPTY}${CI_TUI_TEST_BLANK_UNSET}:\
+                         ${CI_TUI_TEST_BLANK_EMPTY}${CI_TUI_TEST_BLANK_DST}";
+
+            let blank = mounting(Some(mount)).blank_mount_vars();
+
+            assert_eq!(
+                blank,
+                [
+                    BlankVar::Empty("CI_TUI_TEST_BLANK_EMPTY".to_string()),
+                    BlankVar::Unset("CI_TUI_TEST_BLANK_UNSET".to_string()),
+                    BlankVar::Unset("CI_TUI_TEST_BLANK_DST".to_string()),
+                ]
+            );
+        }
+
+        // Only a section (source / destination / options) the blank vars
+        // leave empty breaks `docker run`; a blank var next to text is fine
+        #[test]
+        fn test_blank_mount_vars_only_for_emptied_sections() {
+            std::env::remove_var("CI_TUI_TEST_SECT_UNSET");
+            std::env::set_var("CI_TUI_TEST_SECT_EMPTY", "");
+            std::env::set_var("CI_TUI_TEST_SECT_SET", "/src");
+            let unset = || BlankVar::Unset("CI_TUI_TEST_SECT_UNSET".to_string());
+            let cases = [
+                (
+                    "${CI_TUI_TEST_SECT_SET}:/app${CI_TUI_TEST_SECT_UNSET}",
+                    vec![],
+                ),
+                ("/src${CI_TUI_TEST_SECT_UNSET}:/app", vec![]),
+                (
+                    "${CI_TUI_TEST_SECT_EMPTY}${CI_TUI_TEST_SECT_SET}:/app",
+                    vec![],
+                ),
+                ("${CI_TUI_TEST_SECT_UNSET}:/app", vec![unset()]),
+                ("/src:${CI_TUI_TEST_SECT_UNSET}", vec![unset()]),
+                ("/src:/app:${CI_TUI_TEST_SECT_UNSET}", vec![unset()]),
+            ];
+            for (mount, expected) in cases {
+                assert_eq!(
+                    mounting(Some(mount)).blank_mount_vars(),
+                    expected,
+                    "{mount}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_blank_mount_vars_none_without_vars_or_mount() {
+            std::env::set_var("CI_TUI_TEST_BLANK_FINE", "/src");
+            for mount in [None, Some(".:/app"), Some("${CI_TUI_TEST_BLANK_FINE}:/app")] {
+                assert_eq!(mounting(mount).blank_mount_vars(), [], "{mount:?}");
+            }
+        }
+
+        // Shell defaults (`${VAR:-x}`) are not our expansion: the shell
+        // running `docker run` handles them
+        #[test]
+        fn test_blank_mount_vars_ignores_shell_parameter_expansion() {
+            std::env::remove_var("CI_TUI_TEST_BLANK_DEFAULT");
+            let mount = mounting(Some("${CI_TUI_TEST_BLANK_DEFAULT:-.}:/app"));
+
+            assert_eq!(mount.blank_mount_vars(), []);
+            assert_eq!(
+                mount.volume_args().as_deref(),
+                Some("-v ${CI_TUI_TEST_BLANK_DEFAULT:-.}:/app")
+            );
         }
     }
 

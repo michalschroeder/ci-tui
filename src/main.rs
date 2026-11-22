@@ -234,9 +234,11 @@ async fn run() -> Result<i32> {
         mut warnings,
     } = checks::select_checks(&config, &changed_files, &exec_root, cache.keys_checks());
 
-    // Docker preflight, fatal if commands would run in docker mode but it is
-    // down: on-demand checks only run on request, fix mode runs its own
-    // commands, cached checks only in the TUI ('r'). Non-fatal warnings
+    // Docker preflight, fatal (exit 3) if commands would run in docker mode
+    // but no container can start (daemon down, blank `volume_mount` section,
+    // compose probe failed, unknown service): on-demand checks only run on
+    // request, fix mode runs its own commands, cached checks only in the TUI
+    // ('r'). Non-fatal warnings
     // (failed test discovery, then Docker ones): console modes print now,
     // the TUI shows them in-app.
     let runs = |c: &&checks::CheckToRun| !(c.is_on_demand() || simple_mode && cache.is_fresh(c));
@@ -244,8 +246,8 @@ async fn run() -> Result<i32> {
         true => fix::has_fixes(&config, &changed_files),
         false => checks_to_run.iter().any(|c| runs(&c)),
     };
-    let (target, files) = (&config.runner, &changed_files.files);
-    let preflight = preflight::run(target, docker_needed, &exec_root, &checks_to_run, files);
+    let files = &changed_files.files;
+    let preflight = preflight::run(&config, docker_needed, &exec_root, &checks_to_run, files);
     warnings.extend(preflight.await?);
     if cli.fix || simple_mode {
         for warning in &warnings {

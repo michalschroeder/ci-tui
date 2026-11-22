@@ -125,10 +125,12 @@ docker:
 **`project_dir`** (required in compose mode)
 - Path used for `docker compose --project-directory` (compose looks for its compose file there)
 - Absolute, or relative to the directory checks run in
+- Checked at startup (`docker compose config --services`): if it fails (no compose file there, a missing directory, a compose file compose rejects, compose not installed, ...) the run stops before any check (exit 3, with compose's error)
 - Not allowed in plain-image mode
 
 **`service`** (default: `"app"`, compose mode)
 - Default compose service for checks / pre-commands / fixes without their own `service`
+- Every service the selected checks (on-demand ones too) and their groups' pre-commands (not `host: true`) use must be defined in the compose file, else the run stops at startup (exit 3, naming the service). Services behind a compose profile count as defined
 - Not allowed in plain-image mode
 
 **`image`** (optional; switches to plain-image mode)
@@ -139,6 +141,7 @@ docker:
 - Volume mount specification for `docker run`: `"source:destination"`
 - Supports environment variable expansion: `${HOST_PWD}`, `${HOME}`, etc.
 - Example: `"${HOST_PWD}:/build"` expands HOST_PWD to absolute path
+- An unset or empty `${VAR}` that leaves a mount section (source, destination or options) empty stops the run at startup (exit 3, naming the variable, e.g. run `HOST_PWD=$PWD ci-tui` for `"${HOST_PWD}:/app"`): `docker run` would reject the empty section and fail every check. A blank variable next to other text (`"/app${OPTS}"`) is fine
 - In compose mode the compose file supplies volumes: setting it is a config error
 
 **`work_dir`** (optional, default: `"/app"`, plain-image mode only)
