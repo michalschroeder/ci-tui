@@ -164,7 +164,7 @@ fn failed_pre_command_blocks_the_group_and_exits_1() {
     let text = stdout(&out);
     let failed = pos(&text, "  ✗ pre-command setup failed\n    db down\n");
     assert!(pos(&text, "── MAIN ──") < failed);
-    assert!(failed < pos(&text, "    db down\n  ✗ ok not run\n"));
+    assert!(failed < pos(&text, "    db down\n  ⊘ ok not run\n"));
     assert!(pos(&text, "Failed checks:") < pos(&text, SETUP_FAILED));
     assert!(text.contains("0/1 checks passed, 1 failed"), "{text}");
 }

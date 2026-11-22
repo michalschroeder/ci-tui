@@ -440,8 +440,8 @@ pub fn print_result(result: &CheckResult, severity: Severity) {
 /// One colored status line for a check result:
 /// - Passed: green checkmark with duration ("cached" instead when served
 ///   from the result cache)
-/// - Failed: red X with duration ("not run" instead when it never ran:
-///   a failed pre-command blocked it, its task panicked)
+/// - Failed: red X with duration (red slashed circle and "not run" instead
+///   when it never ran: a failed pre-command blocked it, its task panicked)
 /// - TimedOut: magenta hourglass, "timed out" and duration
 /// - Cancelled: gray crossed circle, "cancelled" and duration
 /// - Running: yellow dot with "(running)"
@@ -450,15 +450,19 @@ pub fn print_result(result: &CheckResult, severity: Severity) {
 /// - Skipped: gray slashed circle with "(skipped)"
 /// - OnDemand: cyan diamond with "(on-demand)"
 ///
-/// A [`Severity::Warning`] failure or timeout is yellow and ends in
-/// "allowed failure".
+/// A [`Severity::Warning`] failure or timeout is a yellow warning sign and
+/// ends in "allowed failure".
 pub fn format_result(result: &CheckResult, severity: Severity) -> String {
     let id = &result.check_id;
     let duration = time::format(result.duration_ms);
-    let (failed, timed_out, note) = match severity {
-        Severity::Warning => (33, 33, " \x1b[33mallowed failure\x1b[0m"),
-        _ => (31, 35, ""),
+    let allowed = severity == Severity::Warning;
+    let note = if allowed {
+        " \x1b[33mallowed failure\x1b[0m"
+    } else {
+        ""
     };
+    // An allowed failure / timeout is a yellow ⚠, else the status's own mark
+    let mark = |color: u8, glyph| if allowed { (33, "⚠") } else { (color, glyph) };
 
     match result.status {
         CheckStatus::Passed if result.cached => {
@@ -466,14 +470,18 @@ pub fn format_result(result: &CheckResult, severity: Severity) -> String {
         }
         CheckStatus::Passed => format!("  \x1b[32m✓\x1b[0m {id} \x1b[90m{duration}\x1b[0m"),
         CheckStatus::Failed if result.not_run => {
-            format!("  \x1b[31m✗\x1b[0m {id} \x1b[31mnot run\x1b[0m")
+            format!("  \x1b[31m⊘\x1b[0m {id} \x1b[31mnot run\x1b[0m")
         }
         CheckStatus::Failed => {
-            format!("  \x1b[{failed}m✗\x1b[0m {id} \x1b[90m{duration}\x1b[0m{note}")
+            let (color, glyph) = mark(31, "✗");
+            format!("  \x1b[{color}m{glyph}\x1b[0m {id} \x1b[90m{duration}\x1b[0m{note}")
         }
-        CheckStatus::TimedOut => format!(
-            "  \x1b[{timed_out}m⧗\x1b[0m {id} \x1b[{timed_out}mtimed out\x1b[0m \x1b[90m{duration}\x1b[0m{note}"
-        ),
+        CheckStatus::TimedOut => {
+            let (color, glyph) = mark(35, "⧗");
+            format!(
+                "  \x1b[{color}m{glyph}\x1b[0m {id} \x1b[{color}mtimed out\x1b[0m \x1b[90m{duration}\x1b[0m{note}"
+            )
+        }
         CheckStatus::Cancelled => {
             format!("  \x1b[90m⊗\x1b[0m {id} \x1b[90mcancelled {duration}\x1b[0m")
         }
@@ -651,6 +659,15 @@ mod tests {
         }
     }
 
+    /// Result of check `c` in `status` after 1.2s
+    fn timed_result(status: CheckStatus) -> CheckResult {
+        CheckResult {
+            status,
+            duration_ms: 1234,
+            ..CheckResult::pending("c")
+        }
+    }
+
     fn failed_result() -> CheckResult {
         let mut result = CheckResult::pending("c");
         result.status = CheckStatus::Failed;
@@ -683,19 +700,48 @@ mod tests {
     #[test]
     fn test_not_run_result_line_says_not_run() {
         let line = format_result(&CheckResult::blocked("c", "Not run: x"), Severity::Error);
-        assert_eq!(crate::color::paint(&line, false), "  ✗ c not run");
-        assert!(line.starts_with("  \x1b[31m✗"), "{line:?}");
+        assert_eq!(crate::color::paint(&line, false), "  ⊘ c not run");
+        assert!(line.starts_with("  \x1b[31m⊘"), "{line:?}");
+        assert!(line.contains("\x1b[31mnot run"), "{line:?}");
+    }
+
+    /// `--no-color`: a real failure, an allowed failure / timeout and a
+    /// check that never ran each keep their own glyph
+    #[test]
+    fn test_outcomes_distinguishable_without_color() {
+        let glyph = |r: &CheckResult, severity| {
+            let plain = crate::color::paint(&format_result(r, severity), false).into_owned();
+            plain.trim_start().chars().next()
+        };
+        let glyphs = [
+            glyph(&timed_result(CheckStatus::Failed), Severity::Error),
+            glyph(&timed_result(CheckStatus::Failed), Severity::Warning),
+            glyph(&timed_result(CheckStatus::TimedOut), Severity::Warning),
+            glyph(&CheckResult::blocked("c", "Not run: x"), Severity::Error),
+        ];
+        assert_eq!(glyphs, [Some('✗'), Some('⚠'), Some('⚠'), Some('⊘')]);
+    }
+
+    /// Guard: real failures / timeouts keep their glyph and colour
+    #[rstest::rstest]
+    #[case::failed(CheckStatus::Failed, "  ✗ c 1.2s", "  \x1b[31m✗")]
+    #[case::timed_out(CheckStatus::TimedOut, "  ⧗ c timed out 1.2s", "  \x1b[35m⧗")]
+    fn test_real_failure_line_unchanged(
+        #[case] status: CheckStatus,
+        #[case] plain: &str,
+        #[case] head: &str,
+    ) {
+        let result = timed_result(status);
+        let line = format_result(&result, Severity::Error);
+        assert_eq!(crate::color::paint(&line, false), plain);
+        assert!(line.starts_with(head), "{line:?}");
     }
 
     #[rstest::rstest]
-    #[case::failed(CheckStatus::Failed, "  ✗ c 1.2s allowed failure")]
-    #[case::timed_out(CheckStatus::TimedOut, "  ⧗ c timed out 1.2s allowed failure")]
+    #[case::failed(CheckStatus::Failed, "  ⚠ c 1.2s allowed failure")]
+    #[case::timed_out(CheckStatus::TimedOut, "  ⚠ c timed out 1.2s allowed failure")]
     fn test_allowed_failure_line_is_yellow(#[case] status: CheckStatus, #[case] plain: &str) {
-        let result = CheckResult {
-            status,
-            duration_ms: 1234,
-            ..CheckResult::pending("c")
-        };
+        let result = timed_result(status);
         let line = format_result(&result, Severity::Warning);
         assert_eq!(crate::color::paint(&line, false), plain);
         assert!(line.starts_with("  \x1b[33m"), "{line:?}");

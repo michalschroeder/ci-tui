@@ -1176,8 +1176,28 @@ fn test_allowed_failure_icons_are_yellow() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(find_symbol_color(buffer, '✗'), Some(Color::Yellow));
-    assert_eq!(find_symbol_color(buffer, '⧗'), Some(Color::Yellow));
+    // #297: allowed failure and allowed timeout both a yellow `⚠`
+    let colors = find_all_symbol_colors(buffer, '⚠');
+    assert_eq!(colors, [Color::Yellow, Color::Yellow], "unit and clippy");
+    assert_eq!(find_symbol_color(buffer, '✗'), None);
+    assert_eq!(find_symbol_color(buffer, '⧗'), None);
+}
+
+/// #297: a check a failed pre-command blocked is a red `⊘` in the list and
+/// `⊘ NOT RUN` in the output panel, not a failure's `✗ FAILED`
+#[test]
+fn test_not_run_check_shows_red_slashed_circle() {
+    let mut app = make_test_app(); // clippy selected
+    *app.results.get_mut("clippy").unwrap() =
+        ci_tui::runner::CheckResult::blocked("clippy", "Not run: pre-command failed");
+    let mut terminal = create_terminal();
+    terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert!(buffer_contains(buffer, "⊘ NOT RUN"));
+    assert!(!buffer_contains(buffer, "FAILED"));
+    let colors = find_all_symbol_colors(buffer, '⊘');
+    assert_eq!(colors, [Color::Red, Color::Red], "list and panel");
 }
 
 #[test]
@@ -1193,8 +1213,8 @@ fn test_output_panel_shows_allowed_failure() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    assert!(buffer_contains(buffer, "✗ FAILED (allowed)"));
-    let colors = find_all_symbol_colors(buffer, '✗');
+    assert!(buffer_contains(buffer, "⚠ FAILED (allowed)"));
+    let colors = find_all_symbol_colors(buffer, '⚠');
     assert_eq!(colors, [Color::Yellow, Color::Yellow], "list and panel");
 }
 
@@ -1207,7 +1227,7 @@ fn test_output_panel_shows_allowed_timeout() {
     terminal.draw(|f| dashboard::render(&mut app, f)).unwrap();
     assert!(buffer_contains(
         terminal.backend().buffer(),
-        "⧗ TIMED OUT (allowed)"
+        "⚠ TIMED OUT (allowed)"
     ));
 }
 

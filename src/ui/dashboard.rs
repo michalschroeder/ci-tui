@@ -129,14 +129,17 @@ fn get_usage_color(usage: f32) -> Color {
     }
 }
 
-/// Get status icon and style for a check status; a [`Severity::Warning`]
-/// failure is yellow
-fn get_status_display(status: Option<&CheckStatus>, severity: Severity) -> (&'static str, Style) {
+/// Get status icon and style for a check result: a check that never ran
+/// ([`CheckResult::not_run`]) is a red `⊘`, a [`Severity::Warning`] failure
+/// or timeout a yellow `⚠`, so the three failure outcomes differ without
+/// colour too
+fn get_status_display(result: Option<&CheckResult>, severity: Severity) -> (&'static str, Style) {
     let warning = Style::default().fg(Color::Yellow);
     let allowed = severity == Severity::Warning;
-    match status {
-        Some(CheckStatus::Failed) if allowed => ("✗", warning),
-        Some(CheckStatus::TimedOut) if allowed => ("⧗", warning),
+    let not_run = result.is_some_and(|r| r.not_run);
+    match result.map(|r| &r.status) {
+        Some(CheckStatus::Failed) if not_run => ("⊘", Style::default().fg(Color::Red)),
+        Some(CheckStatus::Failed | CheckStatus::TimedOut) if allowed => ("⚠", warning),
         Some(CheckStatus::Passed) => ("✓", Style::default().fg(Color::Green)),
         Some(CheckStatus::Failed) => ("✗", Style::default().fg(Color::Red)),
         Some(CheckStatus::TimedOut) => ("⧗", Style::default().fg(Color::Magenta)),
@@ -909,7 +912,7 @@ fn check_duration_span(result: &CheckResult, now: Instant) -> Span<'static> {
     }
     if let Some(since) = result.live_since() {
         // Dimmed running icon color: still ticking, not a final duration
-        let live_style = get_status_display(Some(&CheckStatus::Running), Severity::Ok)
+        let live_style = get_status_display(Some(result), Severity::Ok)
             .1
             .add_modifier(Modifier::DIM);
         let elapsed = time::format(now.saturating_duration_since(since).as_millis() as u64);
@@ -932,7 +935,7 @@ fn render_check_item(
 ) -> ListItem<'static> {
     let result = app.results.get(check.id());
     let severity = result.map_or(Severity::Ok, |r| check.severity(r));
-    let (icon, icon_style) = get_status_display(result.map(|r| &r.status), severity);
+    let (icon, icon_style) = get_status_display(result, severity);
 
     let duration = result
         .map(|r| check_duration_span(r, now))
@@ -1949,8 +1952,9 @@ fn build_check_output_text(
     // Status header
     let allowed = check.severity(result) == Severity::Warning;
     let status_line = match result.status {
-        CheckStatus::Failed if allowed => "\x1b[33m✗ FAILED (allowed)\x1b[0m",
-        CheckStatus::TimedOut if allowed => "\x1b[33m⧗ TIMED OUT (allowed)\x1b[0m",
+        CheckStatus::Failed if result.not_run => "\x1b[31m⊘ NOT RUN\x1b[0m",
+        CheckStatus::Failed if allowed => "\x1b[33m⚠ FAILED (allowed)\x1b[0m",
+        CheckStatus::TimedOut if allowed => "\x1b[33m⚠ TIMED OUT (allowed)\x1b[0m",
         CheckStatus::Passed => "\x1b[32m✓ PASSED\x1b[0m",
         CheckStatus::Failed => "\x1b[31m✗ FAILED\x1b[0m",
         CheckStatus::TimedOut => "\x1b[35m⧗ TIMED OUT\x1b[0m",
@@ -3164,6 +3168,96 @@ mod tests {
         let (text, _) = build_check_output_text(&app, &check, &result, 80);
 
         assert!(text.find("out1").unwrap() < text.find("── stderr ──").unwrap());
+    }
+
+    /// Test app whose only check ended as `status`: `allow_failure` set on
+    /// the check, `not_run` on the result (as [`CheckResult::blocked`])
+    fn app_with_outcome(status: CheckStatus, allow_failure: bool, not_run: bool) -> App {
+        let mut app = app_with_output(status, "", "");
+        app.checks[0].definition.allow_failure = allow_failure;
+        app.results.get_mut("php-lint").unwrap().not_run = not_run;
+        app
+    }
+
+    /// Icon cell (glyph, foreground) of the `PHP Lint` row in the checks list
+    fn list_icon(app: &mut App) -> (String, Color) {
+        let (width, height) = (40, 8);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|f| render_checks_list(app, f, Rect::new(0, 0, width, height)))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let y = (0..height)
+            .find(|&y| {
+                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                row.contains("PHP Lint")
+            })
+            .expect("check row");
+        // "│ <icon> PHP Lint": border, space, icon
+        let cell = &buffer[(2, y)];
+        (cell.symbol().to_string(), cell.fg)
+    }
+
+    /// #297: real failure, allowed failure / timeout and not run each get
+    /// their own list glyph (colours as before)
+    #[rstest::rstest]
+    #[case::failed(CheckStatus::Failed, false, false, "✗", Color::Red)]
+    #[case::timed_out(CheckStatus::TimedOut, false, false, "⧗", Color::Magenta)]
+    #[case::allowed_failure(CheckStatus::Failed, true, false, "⚠", Color::Yellow)]
+    #[case::allowed_timeout(CheckStatus::TimedOut, true, false, "⚠", Color::Yellow)]
+    #[case::not_run(CheckStatus::Failed, false, true, "⊘", Color::Red)]
+    #[case::not_run_allowed(CheckStatus::Failed, true, true, "⊘", Color::Red)]
+    #[case::skipped(CheckStatus::Skipped, false, false, "⊘", Color::DarkGray)]
+    #[case::cancelled(CheckStatus::Cancelled, false, false, "⊗", Color::Gray)]
+    fn test_list_icon_per_outcome(
+        #[case] status: CheckStatus,
+        #[case] allow_failure: bool,
+        #[case] not_run: bool,
+        #[case] glyph: &str,
+        #[case] color: Color,
+    ) {
+        let mut app = app_with_outcome(status, allow_failure, not_run);
+        assert_eq!(list_icon(&mut app), (glyph.to_string(), color));
+    }
+
+    /// #297: without colour the three failure outcomes still differ in the list
+    #[test]
+    fn test_list_failure_outcomes_distinguishable_without_color() {
+        let glyphs: Vec<String> = [(false, false), (true, false), (false, true)]
+            .into_iter()
+            .map(|(allow, not_run)| {
+                list_icon(&mut app_with_outcome(CheckStatus::Failed, allow, not_run)).0
+            })
+            .collect();
+        assert_eq!(glyphs, ["✗", "⚠", "⊘"]);
+    }
+
+    /// #297: output panel status line per outcome; hints after it unchanged
+    #[rstest::rstest]
+    #[case::failed(CheckStatus::Failed, false, false, "\x1b[31m✗ FAILED\x1b[0m")]
+    #[case::timed_out(CheckStatus::TimedOut, false, false, "\x1b[35m⧗ TIMED OUT\x1b[0m")]
+    #[case::allowed_failure(CheckStatus::Failed, true, false, "\x1b[33m⚠ FAILED (allowed)\x1b[0m")]
+    #[case::allowed_timeout(
+        CheckStatus::TimedOut,
+        true,
+        false,
+        "\x1b[33m⚠ TIMED OUT (allowed)\x1b[0m"
+    )]
+    #[case::not_run(CheckStatus::Failed, false, true, "\x1b[31m⊘ NOT RUN\x1b[0m")]
+    #[case::not_run_allowed(CheckStatus::Failed, true, true, "\x1b[31m⊘ NOT RUN\x1b[0m")]
+    fn test_output_status_line_per_outcome(
+        #[case] status: CheckStatus,
+        #[case] allow_failure: bool,
+        #[case] not_run: bool,
+        #[case] line: &str,
+    ) {
+        let app = app_with_outcome(status, allow_failure, not_run);
+        let (check, result) = (app.checks[0].clone(), app.results["php-lint"].clone());
+
+        let (text, _) = build_check_output_text(&app, &check, &result, 80);
+
+        let status_line = text.lines().nth(2).expect("status line");
+        assert_eq!(status_line, line, "{text}");
     }
 
     #[test]

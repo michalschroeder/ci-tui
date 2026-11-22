@@ -351,21 +351,27 @@ fn format_unverified(check_id: &str, reason: &str) -> String {
     format!("  \x1b[90m○ {check_id} not verified ({reason})\x1b[0m")
 }
 
-/// Verification result: green "verified", or red "still failing" (yellow
-/// "still failing (allowed)" for a [`Severity::Warning`]) plus the check's
-/// output
+/// Verification result: green "verified", or red `✗` "still failing" (yellow
+/// `⚠` "still failing (allowed)" for a [`Severity::Warning`]), or red `⊘`
+/// "not run" when it never ran, plus the check's output (the reason when
+/// not run)
 fn format_verify_result(result: &CheckResult, severity: Severity) -> String {
     let (id, duration) = (&result.check_id, time::format(result.duration_ms));
     if result.status == CheckStatus::Passed {
         return format!("  \x1b[32m✓\x1b[0m {id} \x1b[90mverified {duration}\x1b[0m\n");
     }
-    let (color, note) = match severity {
-        Severity::Warning => (33, " (allowed)"),
-        _ => (31, ""),
-    };
+    if result.not_run {
+        // Never ran: a real failure whatever `allow_failure`, so a red box
+        let reason = crate::simple::format_failed_check(result, None, Severity::Error);
+        return format!("  \x1b[31m⊘\x1b[0m {id} \x1b[31mnot run\x1b[0m\n{reason}");
+    }
     let failed = crate::simple::format_failed_check(result, None, severity);
+    let (color, glyph, note) = match severity {
+        Severity::Warning => (33, "⚠", " (allowed)"),
+        _ => (31, "✗", ""),
+    };
     format!(
-        "  \x1b[{color}m✗\x1b[0m {id} \x1b[{color}mstill failing{note}\x1b[0m \x1b[90m{duration}\x1b[0m\n{failed}"
+        "  \x1b[{color}m{glyph}\x1b[0m {id} \x1b[{color}mstill failing{note}\x1b[0m \x1b[90m{duration}\x1b[0m\n{failed}"
     )
 }
 
@@ -525,12 +531,44 @@ mod tests {
         assert!(text.contains("diff in src/main.rs"), "output shown: {text}");
         let text = paint(&format_verify_result(&failed, Severity::Warning));
         assert!(
-            text.starts_with("  ✗ fmt still failing (allowed) "),
+            text.starts_with("  ⚠ fmt still failing (allowed) "),
             "{text}"
         );
+        assert!(text.contains("diff in src/main.rs"), "output shown: {text}");
 
         let line = paint(&format_unverified("fmt", "on-demand"));
         assert_eq!(line, "  ○ fmt not verified (on-demand)");
+    }
+
+    /// Colours per outcome: real failure red `✗`, allowed yellow `⚠`
+    #[rstest::rstest]
+    #[case::real(Severity::Error, "  \x1b[31m✗")]
+    #[case::allowed(Severity::Warning, "  \x1b[33m⚠")]
+    fn test_verify_result_failed_glyph(#[case] severity: Severity, #[case] head: &str) {
+        let failed = CheckResult {
+            status: CheckStatus::Failed,
+            ..CheckResult::pending("fmt")
+        };
+        let line = format_verify_result(&failed, severity);
+        assert!(line.starts_with(head), "{line:?}");
+    }
+
+    /// A verification the runner never ran: red `⊘ <id> not run` and the
+    /// reason box, whatever the check's `allow_failure`
+    #[rstest::rstest]
+    #[case::error(Severity::Error)]
+    #[case::allowed_check(Severity::Warning)]
+    fn test_verify_result_not_run(#[case] severity: Severity) {
+        let blocked = CheckResult::blocked("fmt", "Not run: the runner reported no result");
+        let line = format_verify_result(&blocked, severity);
+        let text = crate::color::paint(&line, false).into_owned();
+        assert_eq!(text.lines().next(), Some("  ⊘ fmt not run"), "{text}");
+        assert!(line.starts_with("  \x1b[31m⊘"), "{line:?}");
+        assert!(
+            text.contains("┌─ fmt ─┐\n  Not run: the runner reported no result"),
+            "reason box: {text}"
+        );
+        assert!(line.contains("\x1b[31m┌─ fmt ─┐"), "red box: {line:?}");
     }
 
     #[rstest::rstest]
