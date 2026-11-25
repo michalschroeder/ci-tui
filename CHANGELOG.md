@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0](https://github.com/michalschroeder/ci-tui/compare/v1.1.0...v1.2.0) (2026-11-25)
+
+
+### Features
+
+* **simple:** honest summary when nothing ran ([#356](https://github.com/michalschroeder/ci-tui/issues/356)) ([a3fd715](https://github.com/michalschroeder/ci-tui/commit/a3fd7154059f1d12d9fff067854788e6b8d37ecd))
+* **ui:** CPU/MEM as one header line, graph panel opt-in ([#362](https://github.com/michalschroeder/ci-tui/issues/362)) ([fae28e7](https://github.com/michalschroeder/ci-tui/commit/fae28e7fc7838ced8a2c8b843dc94e7df12d0e78))
+* **ui:** distinct glyphs for allowed failures and not-run checks ([#361](https://github.com/michalschroeder/ci-tui/issues/361)) ([07a0888](https://github.com/michalschroeder/ci-tui/commit/07a088807c591810c6c67f185604f2545696fe2f))
+* **ui:** footer wraps onto two rows; version moves to help overlay ([#355](https://github.com/michalschroeder/ci-tui/issues/355)) ([4d1d8ed](https://github.com/michalschroeder/ci-tui/commit/4d1d8ed152d6ce08ab186689ac2d5877c77574e3))
+* **ui:** one-row header ([#359](https://github.com/michalschroeder/ci-tui/issues/359)) ([60a2773](https://github.com/michalschroeder/ci-tui/commit/60a2773b4c65aa0984a94dc8537eedfedbd8c3a9))
+* **ui:** zoom the output panel to full screen ([#358](https://github.com/michalschroeder/ci-tui/issues/358)) ([e9768a9](https://github.com/michalschroeder/ci-tui/commit/e9768a90d47925096e042f6a25162058d5e60c55))
+
+
+### Bug Fixes
+
+* **init:** detect base_branch from the repo and name it in the exit-3 hint ([#360](https://github.com/michalschroeder/ci-tui/issues/360)) ([41a0288](https://github.com/michalschroeder/ci-tui/commit/41a0288a4ccc34940ab093449880c0712b9769ee))
+
 ## [1.1.0](https://github.com/michalschroeder/ci-tui/compare/v1.0.0...v1.1.0) (2026-11-20)
 
 
